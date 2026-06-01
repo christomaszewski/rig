@@ -1,0 +1,41 @@
+# GigE Vision camera. Brought up by `gige-up` (in the gige-vision-service repo), which reads this rich
+# service-specific schema directly (rig treats everything below `name:` as opaque and just hands gige-up
+# the path). `fake: true` is a dev/synthetic source; production sets a real `camera_id`.
+service: gige-vision
+name: cam_front
+
+camera:
+  fake: true
+  camera_id: Fake_1
+  pixel_format: Mono8
+  frame_rate: 20.0
+  timestamp_source: ptp_chunk
+  ptp_enable: false
+
+recording:
+  enabled: false
+
+transport:
+  plugin_endpoint:
+    enabled: true
+    socket_path: /tmp/gige/frames
+  raw_endpoint:
+    enabled: true
+    socket_path: /tmp/gige/raw
+
+plugins:
+  - name: ros2-bridge
+    enabled: true
+    isolation: container
+    params:
+      topic: image_raw
+      frame_id: cam_front
+  - name: webrtc-bridge
+    enabled: false
+    isolation: container
+    params:
+      width: 512
+      height: 512
+      format: GRAY8
+      fps: 20
+      port: 8443           # host-facing (host networking) — must be unique per camera across the vehicle

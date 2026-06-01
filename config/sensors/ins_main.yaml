@@ -1,0 +1,17 @@
+# SBG INS/IMU over serial. Brought up by `sbg-up` (in the sbg_driver repo). `connection.serial.by_id`
+# is used twice: as the driver's serial port AND as the host --device the launcher passes through
+# (use a stable /dev/serial/by-id/... or udev symlink, NOT /dev/ttyUSB0).
+service: sbg
+name: ins_main
+
+connection:
+  type: serial                    # serial | udp | file (replay)
+  serial: { by_id: /dev/sbg_imu, baud: 921600 }
+
+ros:
+  namespace: ins_main
+
+driver_params:                    # OPAQUE to rig
+  frames: { imu: imu_link, gps: gps_link, base: base_link }
+  convention: { use_enu: true }   # REP-103 ENU for nav2 / robot_localization
+  tf: { broadcast_odom_to_base: true }

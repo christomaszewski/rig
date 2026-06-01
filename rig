@@ -1,0 +1,14 @@
+#!/usr/bin/env python3
+"""rig — vehicle-level sensor-stack orchestrator (entry point).
+
+A thin shim so `./rig ...` works without installing anything; it just puts the repo on sys.path and
+calls the package. Requires Python 3 + PyYAML on the host (every launcher needs PyYAML too).
+"""
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+
+from rig_cli.cli import main  # noqa: E402
+
+raise SystemExit(main())

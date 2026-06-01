@@ -1,0 +1,17 @@
+# NovAtel OEM7 GNSS/INS over Ethernet (ICOM TCP). Brought up by `novatel-up` (in the novatel repo),
+# which renders `driver_params` + this `connection` into the driver's ROS 2 params file.
+service: novatel
+name: gnss_primary
+
+connection:
+  type: tcp                       # tcp | udp | serial | file (replay)
+  tcp: { host: 192.168.1.10, port: 3001 }
+
+ros:
+  namespace: gnss_primary         # topics land under /gnss_primary/... (default: == name)
+
+driver_params:                    # OPAQUE to rig — passed verbatim into the driver's ros__parameters
+  frames: { gnss: gnss_link }
+  rates:  { bestpos_hz: 5.0, bestvel_hz: 5.0, time_hz: 1.0 }
+  convention: { stamp_from_gps: true }
+  configure_device: { enable: true, save_config: false }

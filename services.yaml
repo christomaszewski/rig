@@ -1,0 +1,13 @@
+# services.yaml — vehicle-independent catalog: service routing key -> where that service's repo lives.
+#
+# The key is the SERVICE name (matches `service:` in a sensor config and in the repo's deploy.yaml),
+# which may differ from the repo directory name (service `sbg` lives in repo `sbg_driver`). `path` is
+# resolved relative to this rig repo root.
+#
+# For DEPLOYMENT, make these git submodules under services/<name> (so the launcher + compose are pinned
+# on the robot; the runtime images are pulled from a registry). For LOCAL DEVELOPMENT, point them at
+# sibling checkouts, as below. See docs/HOST_SETUP.md.
+services:
+  gige-vision: { path: ../gige-vision-service }
+  novatel:     { path: ../novatel }
+  sbg:         { path: ../sbg_driver }

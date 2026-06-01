@@ -1,0 +1,171 @@
+"""The `rig` command line: up / down / status / logs / config / doctor."""
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+
+from . import RigError, __version__, doctor as doctor_mod, dispatch, status as status_mod
+from .catalog import ServiceEntry, load_catalog
+from .common import eprint
+from .descriptor import Descriptor, load_descriptor
+from .manifest import Manifest, Sensor, load_manifest
+
+
+def find_root() -> Path:
+    """The rig repo root holds vehicle.yaml/services.yaml; this CLI lives in <root>/rig_cli/."""
+    return Path(__file__).resolve().parent.parent
+
+
+def _load(root: Path) -> tuple[Manifest, dict[str, ServiceEntry], dict[str, Descriptor]]:
+    manifest = load_manifest(root)
+    catalog = load_catalog(root)
+    descriptors: dict[str, Descriptor] = {}
+    for sensor in manifest.sensors:
+        if sensor.service not in catalog:
+            raise RigError(f"sensor '{sensor.name}': service '{sensor.service}' not in services.yaml")
+        if sensor.service not in descriptors:
+            descriptors[sensor.service] = load_descriptor(sensor.service, catalog[sensor.service].path)
+    return manifest, catalog, descriptors
+
+
+def _pairs(
+    manifest: Manifest, descriptors: dict[str, Descriptor], names: list[str], *, reverse: bool = False
+) -> list[tuple[Sensor, Descriptor]]:
+    sensors = manifest.select(names, enabled_only=True)
+    if reverse:
+        sensors = list(reversed(sensors))
+    return [(s, descriptors[s.service]) for s in sensors]
+
+
+def _summarize(outcomes: list[dispatch.Outcome]) -> int:
+    failed = [o for o in outcomes if o.returncode != 0]
+    if failed:
+        eprint(f"rig: {len(failed)}/{len(outcomes)} failed: {', '.join(o.sensor.name for o in failed)}")
+        return 1
+    return 0
+
+
+# --- command handlers -------------------------------------------------------
+
+def cmd_up(args, manifest, catalog, descriptors) -> int:
+    blocking = [i for i in doctor_mod.collect(manifest, catalog, descriptors) if i.level == doctor_mod.ERROR]
+    if blocking and not args.force:
+        eprint("rig: preflight failed (pass --force to override):")
+        for issue in blocking:
+            eprint(f"  [✗] {issue.message}")
+        return 1
+    env = dispatch.fleet_env(manifest)
+    pairs = _pairs(manifest, descriptors, args.names)  # ascending order: producers before consumers
+    if not pairs:
+        eprint("rig: no enabled sensors to bring up")
+        return 0
+    eprint(f"rig up: {manifest.vehicle} — {len(pairs)} sensor(s)")
+    return _summarize(dispatch.run_verb(pairs, env, "up", dry_run=args.dry_run))
+
+
+def cmd_down(args, manifest, catalog, descriptors) -> int:
+    env = dispatch.fleet_env(manifest)
+    pairs = _pairs(manifest, descriptors, args.names, reverse=True)  # reverse: consumers before producers
+    if not pairs:
+        eprint("rig: no enabled sensors to tear down")
+        return 0
+    eprint(f"rig down: {manifest.vehicle} — {len(pairs)} sensor(s)")
+    rc = _summarize(dispatch.run_verb(pairs, env, "down", dry_run=args.dry_run))
+    if args.purge:
+        eprint("rig: purging external volumes (final teardown)")
+        for sensor, desc in pairs:
+            dispatch.purge_external_volumes(sensor, desc, dry_run=args.dry_run)
+    return rc
+
+
+def cmd_config(args, manifest, catalog, descriptors) -> int:
+    env = dispatch.fleet_env(manifest)
+    pairs = _pairs(manifest, descriptors, args.names)
+    return _summarize(dispatch.run_verb(pairs, env, "config", dry_run=args.dry_run))
+
+
+def cmd_status(args, manifest, catalog, descriptors) -> int:
+    env = dispatch.fleet_env(manifest)
+    pairs = _pairs(manifest, descriptors, args.names)
+    rows = status_mod.gather(pairs, env)
+    print(status_mod.render(rows, verbose=args.verbose))  # stdout: the report
+    return 0
+
+
+def cmd_logs(args, manifest, catalog, descriptors) -> int:
+    env = dispatch.fleet_env(manifest)
+    pairs = _pairs(manifest, descriptors, args.names)
+    extra: list[str] = []
+    if args.follow:
+        if len(pairs) != 1:
+            raise RigError("`logs -f` follows a single sensor; name exactly one")
+        extra.append("-f")
+    if args.tail is not None:
+        extra += ["--tail", str(args.tail)]
+    return _summarize(dispatch.run_verb(pairs, env, "logs", extra=extra))
+
+
+def cmd_doctor(args, manifest, catalog, descriptors) -> int:
+    return doctor_mod.run(manifest, catalog, descriptors)
+
+
+_HANDLERS = {
+    "up": cmd_up,
+    "down": cmd_down,
+    "config": cmd_config,
+    "status": cmd_status,
+    "logs": cmd_logs,
+    "doctor": cmd_doctor,
+}
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="rig", description="vehicle-level sensor-stack orchestrator")
+    parser.add_argument("--version", action="version", version=f"rig {__version__}")
+    parser.add_argument("--root", type=Path, default=None, help="rig repo root (default: alongside the CLI)")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    def add(name, help_text):
+        p = sub.add_parser(name, help=help_text)
+        p.add_argument("names", nargs="*", help="sensor name(s); default: all enabled")
+        return p
+
+    up = add("up", "bring sensors up (producers first)")
+    up.add_argument("--dry-run", action="store_true", help="print the exact launcher invocations only")
+    up.add_argument("--force", action="store_true", help="bring up even if preflight reports errors")
+
+    down = add("down", "tear sensors down (reverse order)")
+    down.add_argument("--dry-run", action="store_true")
+    down.add_argument("--purge", action="store_true", help="also remove declared external volumes (FINAL teardown)")
+
+    add("status", "fleet status table").add_argument(
+        "-v", "--verbose", action="store_true", help="expand per-container detail"
+    )
+
+    logs = add("logs", "stream/show a sensor's logs")
+    logs.add_argument("-f", "--follow", action="store_true", help="follow (single sensor only)")
+    logs.add_argument("--tail", type=int, default=None, help="show only the last N lines")
+
+    add("config", "render each sensor's merged compose").add_argument("--dry-run", action="store_true")
+
+    add("doctor", "read-only preflight checks")
+    return parser
+
+
+def main(argv=None) -> int:
+    args = build_parser().parse_args(argv)
+    # Defaults for flags not present on every subcommand.
+    for attr, default in (("verbose", False), ("dry_run", False), ("force", False),
+                          ("purge", False), ("follow", False), ("tail", None)):
+        if not hasattr(args, attr):
+            setattr(args, attr, default)
+    root = (args.root or find_root()).resolve()
+    try:
+        manifest, catalog, descriptors = _load(root)
+        return _HANDLERS[args.cmd](args, manifest, catalog, descriptors)
+    except RigError as exc:
+        eprint(f"rig: {exc}")
+        return 1
+    except KeyboardInterrupt:
+        eprint("rig: interrupted")
+        return 130

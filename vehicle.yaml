@@ -1,0 +1,17 @@
+# vehicle.yaml — which sensors THIS machine runs, plus fleet-wide ROS settings.
+#
+# `rig` loops over `sensors` in `order` (ascending for up = producers first; reversed for down) and
+# delegates each to its service's `<service>-up` launcher. Disable a sensor with `enabled: false`
+# instead of deleting its config. Instance `name` MUST be unique across the vehicle — it keys the
+# compose project, external volumes, and ROS namespace.
+vehicle: orin-dev
+
+ros:
+  domain_id: 0
+  rmw: rmw_fastrtps_cpp        # one RMW + domain across every stack -> one DDS graph
+  distro: lyrical
+
+sensors:
+  - { name: gnss_primary, service: novatel,     config: config/sensors/gnss_primary.yaml, enabled: true, order: 10 }
+  - { name: ins_main,     service: sbg,         config: config/sensors/ins_main.yaml,     enabled: true, order: 20 }
+  - { name: cam_front,    service: gige-vision, config: config/sensors/cam_front.yaml,     enabled: true, order: 30 }
