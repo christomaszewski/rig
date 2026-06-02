@@ -1,0 +1,31 @@
+# A reusable, NAMELESS gige-vision camera profile. Reference it from vehicle.yaml with a per-instance
+# `overrides:` (at minimum the `camera_id`); rig deep-merges the override, stamps in `name`, and renders the
+# result to var/rendered/<name>.yaml before handing it to gige-up. Example:
+#
+#   sensors:
+#     - { name: cam_front, service: gige-vision, config: config/sensors/camera.profile.yaml,
+#         overrides: { camera: { camera_id: "Lucid-2448-AAA" } } }
+#     - { name: cam_rear,  service: gige-vision, config: config/sensors/camera.profile.yaml,
+#         overrides: { camera: { camera_id: "Lucid-2448-BBB" } } }
+service: gige-vision
+
+camera:
+  fake: false
+  pixel_format: Mono8
+  frame_rate: 20.0
+  timestamp_source: ptp_chunk
+  ptp_enable: true
+  # camera_id supplied per-instance via overrides
+
+recording:
+  enabled: true
+
+transport:
+  plugin_endpoint: { enabled: true, socket_path: /tmp/gige/frames }
+  raw_endpoint: { enabled: false, socket_path: /tmp/gige/raw }
+
+plugins:
+  - name: ros2-bridge
+    enabled: true
+    isolation: container
+    params: { topic: image_raw }

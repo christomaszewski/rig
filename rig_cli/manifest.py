@@ -8,7 +8,7 @@ trusts the config), catching drift early.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import RigError
@@ -19,9 +19,10 @@ from .common import load_yaml
 class Sensor:
     name: str
     service: str
-    config: Path  # absolute path
+    config: Path  # absolute path (rewritten to the rendered path once overrides/profile are resolved)
     enabled: bool
     order: int
+    overrides: dict = field(default_factory=dict)  # per-instance patch deep-merged onto the config
 
 
 @dataclass(frozen=True)
@@ -73,17 +74,22 @@ def load_manifest(root: Path) -> Manifest:
         if not cfg_path.exists():
             raise RigError(f"sensor '{name}': config not found: {cfg_path}")
 
-        # The launcher derives identity from the CONFIG's own service/name — keep the manifest honest.
+        # The base config may be a complete named instance config OR a nameless profile (no name, maybe no
+        # service) that the manifest completes. If service/name ARE present they must match — catch drift.
         cdata = load_yaml(cfg_path)
-        if cdata.get("service") != service:
+        if cdata.get("service") is not None and cdata.get("service") != service:
             raise RigError(
                 f"sensor '{name}': vehicle.yaml service '{service}' != config service "
                 f"'{cdata.get('service')}' in {cfg_path}"
             )
-        if cdata.get("name") != name:
+        if cdata.get("name") is not None and cdata.get("name") != name:
             raise RigError(
                 f"sensor '{name}': vehicle.yaml name != config name '{cdata.get('name')}' in {cfg_path}"
             )
+
+        overrides = entry.get("overrides") or {}
+        if not isinstance(overrides, dict):
+            raise RigError(f"sensor '{name}': `overrides` must be a mapping")
 
         # THE top correctness check.
         if name in seen:
@@ -100,6 +106,7 @@ def load_manifest(root: Path) -> Manifest:
                 config=cfg_path,
                 enabled=bool(entry.get("enabled", True)),
                 order=int(entry.get("order", (index + 1) * 10)),
+                overrides=overrides,
             )
         )
 

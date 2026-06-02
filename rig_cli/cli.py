@@ -4,7 +4,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from . import RigError, __version__, doctor as doctor_mod, dispatch, status as status_mod
+from . import RigError, __version__, doctor as doctor_mod, dispatch, resolve, status as status_mod
 from .catalog import ServiceEntry, load_catalog
 from .common import eprint
 from .descriptor import Descriptor, load_descriptor
@@ -18,6 +18,7 @@ def find_root() -> Path:
 
 def _load(root: Path) -> tuple[Manifest, dict[str, ServiceEntry], dict[str, Descriptor]]:
     manifest = load_manifest(root)
+    manifest = resolve.materialize_manifest(manifest, root)  # render profiles/overrides -> per-instance configs
     catalog = load_catalog(root)
     descriptors: dict[str, Descriptor] = {}
     for sensor in manifest.sensors:

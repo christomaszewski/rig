@@ -74,6 +74,11 @@ Thin ROS 2 drivers share a generic schema — `service`, `name`, `connection` (`
 `ros.namespace`, and an **opaque** `driver_params` block the launcher renders into the driver's ROS 2
 params. The rich `gige-vision` camera uses its own service-specific schema (rig hands it to `gige-up` as-is).
 
+A config can instead be a **nameless profile** reused across instances via a per-sensor `overrides:` patch
+in `vehicle.yaml` — rig deep-merges the patch, stamps in `name`, and renders the result to
+`var/rendered/<name>.yaml` before handing it to the launcher (a complete named config with no overrides is
+passed through untouched). See `config/sensors/camera.profile.yaml` and `docs/ROADMAP.md` §1.
+
 ## The contract: `deploy.yaml`
 
 A repo is rig-compatible when its launcher exposes `up/down/status/logs/config` on one config, accepts a

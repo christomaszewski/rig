@@ -1,6 +1,6 @@
 # rig — roadmap
 
-## 1. Config overrides & reusable profiles (next)
+## 1. Config overrides & reusable profiles — ✅ implemented (v0.1.1)
 
 ### Motivation
 Two needs, **one mechanism**:
@@ -63,8 +63,8 @@ it never interprets what `camera_id` (or anything else) means.
   dangerous combinations (e.g. a replay/sim source under a vehicle footprint — see §2).
 
 ### Phasing
-- **v1**: per-sensor `overrides` (dict deep-merge, list-replace, `null`-delete) + nameless profiles +
-  render-to-staging. Rig-only; no launcher changes.
+- **v1 ✅**: per-sensor `overrides` (dict deep-merge, list-replace, `null`-delete) + nameless profiles +
+  render-to-`var/rendered/`. Rig-only; no launcher changes. (`rig_cli/resolve.py`; tests in `tests/`.)
 - **v2**: keyed list-merge; run-level override layers (apply one patch across many sensors, for §2).
 
 ### Open decisions
