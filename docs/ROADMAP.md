@@ -100,10 +100,89 @@ fusion fidelity, needs a coherent clock (`use_sim_time` + paced replay, or a sim
 sources on one clock). Replay (single recorded source, own time) vs sim (generated, can be multi-source
 coherent) is the real fidelity fork.
 
-## 3. Other tracked items
+## 3. Deployment model — launch surfaces, vendoring, bake/unbake
+
+The vehicle holds the **launch surface + configs**, never driver source. Flow: develop drivers (own repos)
+→ push images (registry) + **vendor** launch surfaces into the rig repo → **bake** a tagged artifact →
+ship/**unbake** on the vehicle. No submodules or source on the vehicle. rig's Python is a build/authoring/
+observability tool; the runtime is `docker compose` (see "compose-only" below).
+
+### Launch surface
+The minimal file set rig needs to *launch* a service — never its source. Each service **declares its own**
+in `deploy.yaml`:
+```yaml
+launch_surface:
+  - novatel-up
+  - tools/render_params.py
+  - docker/compose/compose.deploy.yaml
+  - docker/compose/compose.deploy.serial.yaml
+  - deploy.yaml
+```
+(The copier template emits this for thin drivers; gige lists its composes + `plugins/*/compose.yml` +
+`tools/sensor_env.py`.) Typically a few KB of text.
+
+### `rig vendor`
+Copies a service's declared surface into the rig repo's `services/<name>/`, with provenance:
+```
+rig vendor novatel --from ../novatel
+  → services/novatel/{novatel-up, tools/render_params.py, docker/compose/*, deploy.yaml, .vendored.yaml}
+```
+`.vendored.yaml` records `{source, ref(SHA), when}`; `services.yaml` points at the vendored path. The rig
+repo is now self-contained. Source: a local checkout now → a published OCI **launch-surface bundle** later
+(so no machine needs driver source).
+
+### Vehicle deployment tree
+`rig`, `vehicle.yaml`/`services.yaml`, `config/sensors/*`, `services/<name>/` (vendored), `rig.lock`. No git,
+no submodules, no source — editable text + pulled images.
+
+### `rig bake` / `rig unbake` (inverse operations)
+`bake --tag <t>` snapshots the live tree → renders override/profile configs to final, pins image **digests**,
+bundles vendored surfaces + rig itself + metadata `{tag, vehicle, source SHAs, timestamp}` → one
+**content-addressed, tagged artifact** (OCI or tarball). `unbake` restores it to an editable tree. Both run
+**on the vehicle** (bake the tweaked field state; unbake to tweak). One artifact, two run modes: immutable
+(run as-is) or mutable (unbake → tweak → up → re-bake).
+
+### Compose-only resolved output (runs with just Docker — no Python/PyYAML)
+bake also compiles the dynamic orchestration to static, so the artifact degrades gracefully on a host
+lacking Python/PyYAML. Per sensor it captures the launcher's `config` verb output (`docker compose config`
+= a fully-resolved, interpolated, includes-flattened compose) + the rendered params into `compose/<name>/`,
+plus flat `up.sh`/`down.sh`/`status.sh` (order baked into line order). A POSIX-`sh` bootstrap runs `rig` when
+Python+PyYAML are present, else the static scripts. Lost in compose-only mode: only bake-time/observability
+sugar (rolled-up status table, doctor); run-time essentials (ordered up/down, per-project ps/logs, devices,
+digest-pinned images) all work.
+
+bake-time transforms required for the compose-only form:
+- **Relocate + rewrite** rendered-config/params mounts to artifact-relative paths (copy the files in); leave
+  device / `/dev/shm` mounts literal.
+- **Emit `docker volume create`** for `external: true` volumes (gige's `gige_<name>_sock`) — `up` won't self-create them.
+- **Strip `build:` and pin `image:` to `@sha256:` digests** (gige `core-driver` carries a build block beside a local `image:` tag).
+- **Capture `COMPOSE_PROFILES`** into the script env (gige's active plugins).
+
+### Images & offline / local-registry deployment
+Digests are content-addressed → the **same `sha256` is portable across registries**, but the **host in the
+pinned ref must be one the vehicle can reach**:
+- `rig bake --registry <host>` pins as `<reachable-registry>/<repo>@sha256:<digest>` — e.g. a **local
+  registry on the dev box** (`devbox:5000/...`), not public `ghcr.io`.
+- **Mirror** the pinned, arch-correct (arm64/Jetson) images in with **`skopeo copy` / `crane cp`** (they copy
+  blobs+manifest verbatim so the digest is preserved, and can copy the whole multi-arch index — `docker
+  tag`+`push` may re-serialize).
+- **Once pulled, images live in the vehicle's local Docker store**, so after the first pull the vehicle runs
+  fully **offline** — the registry is only needed for initial pull/updates, not at `up` time.
+- One-time vehicle host config: allow the registry (`insecure-registries` for plain-HTTP LAN, or a TLS cert). → HOST_SETUP.
+- **`rig bake --bundle-images`** (true air-gap): `docker save` the pinned images into the artifact; `unbake`
+  `docker load`s them → zero registry at deploy time, at the cost of a much larger artifact.
+
+### Open decisions
+- Artifact format: **OCI** (registry-native, pull-by-digest) vs **tarball** (zero-infra) — likely both.
+- What bake resolves: fully-resolved configs (lean) vs raw+lock.
+- Default image distribution: local-registry pin (the offline case) vs `--bundle-images` for full air-gap.
+- Launch-surface source: local checkout (v1) → published OCI launch bundle (v2).
+
+## 4. Other tracked items
 - **Boot-time bring-up**: a systemd unit running `rig up` (Compose handles per-stack restart thereafter).
 - **ROS `/diagnostics`** as the second health layer in `rig status`.
 - **Host-facing port-clash** extraction for list-structured configs (gige WebRTC port), via the
   `host_ports` path syntax or a launcher `ports` query.
-- **Submodule pinning** of the service repos under `services/` for deployment.
+- **gige image publishing**: push `gige-core`/`gige-dev` to a registry (they're local build tags today) so
+  baked deployments can pin + pull them by digest. (Deployment model itself is now spec'd in §3.)
 - **gige `deploy.yaml`**: add `external_volumes: ["gige_{name}_sock"]` so `rig down --purge` GCs it.
