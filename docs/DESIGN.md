@@ -73,3 +73,7 @@ Open items (see the project plan): host-facing **port-clash** extraction for lis
 `host_ports` path syntax exists; the gige WebRTC port could also be reported by a launcher `ports` query);
 a **dev-vs-prod** affordance (gige's `--dev` vs config-driven replay for thin drivers); ROS `/diagnostics`
 as the second health layer; boot-time bring-up via a systemd unit; and submodule pinning for deployment.
+
+See **`docs/ROADMAP.md`** for the detailed spec of the next item — **config overrides & reusable profiles**
+(one mechanism for multi-instance sharing *and* per-run data-source overrides) — and the **SIL/HIL** model
+(per-sensor source × per-run footprint).
