@@ -4,7 +4,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from . import RigError, __version__, doctor as doctor_mod, dispatch, resolve, status as status_mod
+from . import RigError, __version__, doctor as doctor_mod, dispatch, resolve, status as status_mod, vendor as vendor_mod
 from .catalog import ServiceEntry, load_catalog
 from .common import eprint
 from .descriptor import Descriptor, load_descriptor
@@ -110,6 +110,19 @@ def cmd_doctor(args, manifest, catalog, descriptors) -> int:
     return doctor_mod.run(manifest, catalog, descriptors)
 
 
+def cmd_vendor(args, root: Path) -> int:
+    """Standalone (no manifest load): copy a service's launch surface into services/<service>/."""
+    if args.source:
+        source = Path(args.source)
+    else:
+        entry = load_catalog(root).get(args.service)
+        if entry is None:
+            raise RigError(f"vendor {args.service}: pass --from <path>, or add it to services.yaml")
+        source = entry.path
+    vendor_mod.vendor(args.service, source, root)
+    return 0
+
+
 _HANDLERS = {
     "up": cmd_up,
     "down": cmd_down,
@@ -150,6 +163,11 @@ def build_parser() -> argparse.ArgumentParser:
     add("config", "render each sensor's merged compose").add_argument("--dry-run", action="store_true")
 
     add("doctor", "read-only preflight checks")
+
+    ven = sub.add_parser("vendor", help="copy a service's launch surface into services/<service>/")
+    ven.add_argument("service", help="service name (key in services.yaml / its deploy.yaml)")
+    ven.add_argument("--from", dest="source", default=None,
+                     help="source repo path (default: the service's services.yaml path)")
     return parser
 
 
@@ -162,6 +180,8 @@ def main(argv=None) -> int:
             setattr(args, attr, default)
     root = (args.root or find_root()).resolve()
     try:
+        if args.cmd == "vendor":  # operates on a source repo, not the manifest
+            return cmd_vendor(args, root)
         manifest, catalog, descriptors = _load(root)
         return _HANDLERS[args.cmd](args, manifest, catalog, descriptors)
     except RigError as exc:
