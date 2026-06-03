@@ -4,7 +4,10 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from . import RigError, __version__, doctor as doctor_mod, dispatch, resolve, status as status_mod, vendor as vendor_mod
+from . import (
+    RigError, __version__, bake as bake_mod, doctor as doctor_mod, dispatch, resolve,
+    status as status_mod, vendor as vendor_mod,
+)
 from .catalog import ServiceEntry, load_catalog
 from .common import eprint
 from .descriptor import Descriptor, load_descriptor
@@ -123,6 +126,20 @@ def cmd_vendor(args, root: Path) -> int:
     return 0
 
 
+def cmd_bake(args, root: Path) -> int:
+    manifest, catalog, descriptors = _load(root)
+    env = dispatch.fleet_env(manifest)
+    bake_mod.bake(root, manifest, catalog, descriptors, env, args.tag)
+    return 0
+
+
+def cmd_unbake(args, root: Path) -> int:
+    artifact = Path(args.artifact)
+    into = Path(args.into) if args.into else (root / "var" / "unbaked" / artifact.name.split(".tar")[0])
+    bake_mod.unbake(artifact, into)
+    return 0
+
+
 _HANDLERS = {
     "up": cmd_up,
     "down": cmd_down,
@@ -168,6 +185,13 @@ def build_parser() -> argparse.ArgumentParser:
     ven.add_argument("service", help="service name (key in services.yaml / its deploy.yaml)")
     ven.add_argument("--from", dest="source", default=None,
                      help="source repo path (default: the service's services.yaml path)")
+
+    bk = sub.add_parser("bake", help="freeze the deployment into a tagged, content-addressed artifact")
+    bk.add_argument("--tag", required=True, help="artifact tag (names the .tar.gz)")
+
+    ub = sub.add_parser("unbake", help="extract a baked artifact to an editable tree")
+    ub.add_argument("artifact", help="path to the .tar.gz artifact")
+    ub.add_argument("--into", default=None, help="destination dir (default: var/unbaked/<tag>)")
     return parser
 
 
@@ -182,6 +206,10 @@ def main(argv=None) -> int:
     try:
         if args.cmd == "vendor":  # operates on a source repo, not the manifest
             return cmd_vendor(args, root)
+        if args.cmd == "unbake":  # operates on an artifact, not the manifest
+            return cmd_unbake(args, root)
+        if args.cmd == "bake":
+            return cmd_bake(args, root)
         manifest, catalog, descriptors = _load(root)
         return _HANDLERS[args.cmd](args, manifest, catalog, descriptors)
     except RigError as exc:

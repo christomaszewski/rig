@@ -100,7 +100,15 @@ fusion fidelity, needs a coherent clock (`use_sim_time` + paced replay, or a sim
 sources on one clock). Replay (single recorded source, own time) vs sim (generated, can be multi-source
 coherent) is the real fidelity fork.
 
-## 3. Deployment model — launch surfaces, vendoring, bake/unbake
+## 3. Deployment model — launch surfaces, vendoring, bake/unbake — ✅ core implemented (v0.1.2)
+
+> **Status:** `rig vendor`, `rig bake`, `rig unbake` implemented (`rig_cli/{vendor,bake}.py`). bake produces a
+> tagged, content-addressed `.tar.gz` with the resolved configs + vendored surfaces + rig + the compose-only
+> form (validated self-contained for the nav drivers). **Partial / next:** image digest pinning is local-
+> best-effort only (full `--registry` retag + `skopeo`/`crane` mirror + `--bundle-images` remain); gige's
+> compose-only is skipped until the `gige-up` `SENSORS_DIR` fix lands (see §4); OCI artifact format (vs
+> tarball) deferred.
+
 
 The vehicle holds the **launch surface + configs**, never driver source. Flow: develop drivers (own repos)
 → push images (registry) + **vendor** launch surfaces into the rig repo → **bake** a tagged artifact →
@@ -185,4 +193,9 @@ pinned ref must be one the vehicle can reach**:
   `host_ports` path syntax or a launcher `ports` query.
 - **gige image publishing**: push `gige-core`/`gige-dev` to a registry (they're local build tags today) so
   baked deployments can pin + pull them by digest. (Deployment model itself is now spec'd in §3.)
+- **gige-up `SENSORS_DIR` robustness**: `gige-up` hard-`cd`s into `core-driver/config/sensors` (not in the
+  launch surface), so the *vendored* gige surface can't run standalone (bake skips gige's compose-only).
+  Make that `cd` tolerant of a missing dir → any config is treated as external (correct for deployment).
+- **bake follow-ups**: full digest pinning + `--registry` cross-registry retag (skopeo/crane mirror) +
+  `--bundle-images` (docker save/load for air-gap) + OCI artifact format.
 - **gige `deploy.yaml`**: add `external_volumes: ["gige_{name}_sock"]` so `rig down --purge` GCs it.
