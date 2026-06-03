@@ -7,10 +7,11 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 from rig_cli.bake import (
     _external_volume_names,
+    _localize_binds,
     _pin_images,
-    _relocate_file_binds,
     _service_images,
     _strip_build,
+    _strip_profiles,
 )
 
 
@@ -33,18 +34,31 @@ def test_pin_images_resolved_and_unresolved():
     assert c["services"]["e"]["image"] == "y:tag"  # unresolved -> left as a tag
 
 
-def test_relocate_file_binds_relativizes_files_not_devices():
-    src = pathlib.Path(tempfile.mkdtemp()) / "params.yaml"
-    src.write_text("a: 1\n")
+def test_strip_profiles():
+    c = {"services": {"a": {"profiles": ["x"], "image": "i"}, "b": {"image": "j"}}}
+    _strip_profiles(c)
+    assert "profiles" not in c["services"]["a"]
+
+
+def test_localize_binds_relativizes_staging_paths_only():
+    staging = pathlib.Path(tempfile.mkdtemp())
+    pfile = staging / "sub" / "params.yaml"
+    pfile.parent.mkdir(parents=True)
+    pfile.write_text("a: 1\n")
+    missing_dir = staging / "sub" / "recordings"  # under staging but doesn't exist yet
     dest = pathlib.Path(tempfile.mkdtemp())
     c = {"services": {"driver": {"volumes": [
-        {"type": "bind", "source": str(src), "target": "/etc/p.yaml"},
-        {"type": "bind", "source": "/dev/sbg_imu", "target": "/dev/sbg_imu"},
+        {"type": "bind", "source": str(pfile), "target": "/etc/p.yaml"},        # file under staging -> copied
+        {"type": "bind", "source": str(missing_dir), "target": "/data/rec"},     # missing dir -> placeholder
+        {"type": "bind", "source": "/dev/sbg_imu", "target": "/dev/sbg_imu"},     # host path -> literal
+        {"type": "bind", "source": "/data/host", "target": "/data/host"},         # host path -> literal
     ]}}}
-    _relocate_file_binds(c, dest)
+    _localize_binds(c, dest, staging)
     vols = c["services"]["driver"]["volumes"]
-    assert vols[0]["source"] == "./driver__params.yaml" and (dest / "driver__params.yaml").exists()
-    assert vols[1]["source"] == "/dev/sbg_imu"  # device left literal
+    assert vols[0]["source"] == "./driver__params.yaml" and (dest / "driver__params.yaml").is_file()
+    assert vols[1]["source"] == "./driver__recordings" and (dest / "driver__recordings").is_dir()
+    assert vols[2]["source"] == "/dev/sbg_imu"
+    assert vols[3]["source"] == "/data/host"
 
 
 if __name__ == "__main__":

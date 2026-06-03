@@ -50,18 +50,36 @@ def _external_volume_names(compose: dict) -> list[str]:
     return names
 
 
-def _relocate_file_binds(compose: dict, dest: Path) -> None:
-    """Copy file bind-mount *sources* (rendered params/config) into `dest` and rewrite to a relative path,
-    so the project is self-contained. Device and directory mounts (/dev/*, shm) are left literal."""
+def _strip_profiles(compose: dict) -> None:
+    """`docker compose config` already filtered to the active profile set; drop the `profiles:` markers so a
+    plain `docker compose up` (no COMPOSE_PROFILES) starts exactly those services."""
+    for _, svc in _services(compose):
+        svc.pop("profiles", None)
+
+
+def _localize_binds(compose: dict, dest: Path, staging_root: Path) -> None:
+    """Make the project self-contained: any bind whose source is a path bake CREATED (under the staging root
+    — rendered params, the vendored repo's relative dirs like core-driver/config and recordings) is copied
+    (files) or placeheld (dirs) into the project dir and rewritten relative. Genuine host paths (/dev/*,
+    /tmp/gige, a /data partition) are NOT under the staging root, so they're left literal to resolve on the
+    vehicle."""
     for sname, svc in _services(compose):
         for vol in svc.get("volumes") or []:
             if not (isinstance(vol, dict) and vol.get("type") == "bind"):
                 continue
-            src = str(vol.get("source", ""))
-            if src.startswith("/dev") or not Path(src).is_file():
-                continue
-            relname = f"{sname}__{Path(src).name}"
-            shutil.copy2(src, dest / relname)
+            src = Path(str(vol.get("source", "")))
+            try:
+                under_staging = src.is_relative_to(staging_root)
+            except (ValueError, OSError):
+                under_staging = False
+            if not under_staging:
+                continue  # a real host path on the vehicle — leave literal
+            relname = f"{sname}__{src.name}"
+            target = dest / relname
+            if src.is_file():
+                shutil.copy2(src, target)
+            else:
+                target.mkdir(parents=True, exist_ok=True)  # empty placeholder (config, recordings, …)
             vol["source"] = f"./{relname}"
 
 
@@ -156,13 +174,14 @@ def _compose_only(manifest, descriptors, env, staging: Path, images: dict) -> li
             continue
 
         _strip_build(compose)
+        _strip_profiles(compose)
         for ref in _service_images(compose).values():
             images.setdefault(ref, _resolve_digest(ref))
         _pin_images(compose, images)
         ext = _external_volume_names(compose)
         outdir = staging / "compose" / sensor.name
         outdir.mkdir(parents=True, exist_ok=True)
-        _relocate_file_binds(compose, outdir)
+        _localize_binds(compose, outdir, staging)
         (outdir / "docker-compose.yaml").write_text(yaml.safe_dump(compose, sort_keys=False))
         entries.append({
             "sensor": sensor.name,
