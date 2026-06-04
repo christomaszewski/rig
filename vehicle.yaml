@@ -11,6 +11,12 @@ ros:
   rmw: rmw_fastrtps_cpp        # one RMW + domain across every stack -> one DDS graph
   distro: lyrical
 
+# Where stacks pull images from (fleet-wide). Empty = local images (dev). Set to a registry the machine
+# can reach (e.g. a local registry on the dev box for offline vehicles); rig exports it as
+# RIG_IMAGE_REGISTRY and each service's compose prefixes its own repo:tag. `rig bake` pins digests on top.
+images:
+  registry: ""                 # e.g. devbox:5000
+
 sensors:
   - { name: gnss_primary, service: novatel,     config: config/sensors/gnss_primary.yaml, enabled: true, order: 10 }
   - { name: ins_main,     service: sbg,         config: config/sensors/ins_main.yaml,     enabled: true, order: 20 }

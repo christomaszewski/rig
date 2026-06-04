@@ -37,6 +37,7 @@ class Manifest:
     vehicle: str
     ros: RosSettings
     sensors: list[Sensor]
+    image_registry: str | None = None  # fleet-wide registry stacks pull from (None = local images)
 
     def select(self, names: list[str], enabled_only: bool) -> list[Sensor]:
         """Resolve a name filter into an ordered sensor list. Explicit names override `enabled`."""
@@ -110,4 +111,6 @@ def load_manifest(root: Path) -> Manifest:
             )
         )
 
-    return Manifest(vehicle=str(data.get("vehicle", "vehicle")), ros=ros, sensors=sensors)
+    image_registry = (str((data.get("images") or {}).get("registry") or "").strip()) or None
+    return Manifest(vehicle=str(data.get("vehicle", "vehicle")), ros=ros, sensors=sensors,
+                    image_registry=image_registry)

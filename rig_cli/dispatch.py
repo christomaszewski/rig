@@ -22,6 +22,8 @@ def fleet_env(manifest: Manifest) -> dict[str, str]:
     env = dict(os.environ)
     env["ROS_DOMAIN_ID"] = str(manifest.ros.domain_id)
     env["RMW_IMPLEMENTATION"] = manifest.ros.rmw
+    if manifest.image_registry:
+        env["RIG_IMAGE_REGISTRY"] = manifest.image_registry  # each compose prefixes its repo:tag with this
     return env
 
 
@@ -51,11 +53,12 @@ def run(
 ) -> subprocess.CompletedProcess:
     pretty = " ".join(shlex.quote(part) for part in cmd)
     if dry_run:
+        envline = (f"ROS_DOMAIN_ID={env['ROS_DOMAIN_ID']} "
+                   f"RMW_IMPLEMENTATION={env['RMW_IMPLEMENTATION']}")
+        if env.get("RIG_IMAGE_REGISTRY"):
+            envline += f" RIG_IMAGE_REGISTRY={env['RIG_IMAGE_REGISTRY']}"
         eprint(f"  {sensor.name} [{sensor.service}]  (cwd={desc.repo})")
-        eprint(
-            f"    ROS_DOMAIN_ID={env['ROS_DOMAIN_ID']} "
-            f"RMW_IMPLEMENTATION={env['RMW_IMPLEMENTATION']} \\"
-        )
+        eprint(f"    {envline} \\")
         eprint(f"    {pretty}")
         return subprocess.CompletedProcess(cmd, 0, "", "")
     if not capture:

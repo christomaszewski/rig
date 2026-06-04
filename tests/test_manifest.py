@@ -79,6 +79,24 @@ def test_order_sorts_and_shared_profile():
     assert [s.name for s in sel] == ["a", "c"]
 
 
+def test_image_registry_parsed():
+    root = _root_with({
+        "vehicle.yaml": """
+            vehicle: t
+            images: { registry: devbox:5000 }
+            sensors:
+              - {name: a, service: novatel, config: x.yaml}
+        """,
+        "x.yaml": "service: novatel\nconnection: {type: file}\n",
+    })
+    assert load_manifest(root).image_registry == "devbox:5000"
+    empty = _root_with({
+        "vehicle.yaml": "vehicle: t\nimages: {registry: ''}\nsensors: [{name: a, service: novatel, config: x.yaml}]\n",
+        "x.yaml": "service: novatel\nconnection: {type: file}\n",
+    })
+    assert load_manifest(empty).image_registry is None  # empty -> None (local images)
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):
