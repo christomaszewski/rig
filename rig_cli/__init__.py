@@ -6,7 +6,7 @@ It never reimplements per-stack logic — it owns only the cross-cutting concern
 uniqueness, fleet-wide ROS env, ordering, status/health aggregation, lifecycle/cleanup).
 
 The dependency is strictly one-way: rig depends on the service repos; a service never knows about rig.
-rig learns each service only through its ``deploy.yaml`` descriptor + the launcher CLI.
+rig learns each service only through its ``rigging.yaml`` descriptor + the launcher CLI.
 """
 
 __version__ = "0.1.3"

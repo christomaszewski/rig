@@ -1,9 +1,9 @@
 """``rig vendor`` — copy a service's declared *launch surface* into the rig repo (``services/<service>/``),
 with a provenance stamp, so the rig repo is self-contained: a vehicle gets the few small launch files
-(launcher + compose + render helper + deploy.yaml) and pulls the runtime image — never the driver source,
+(launcher + compose + render helper + rigging.yaml) and pulls the runtime image — never the driver source,
 no submodules.
 
-The source repo declares its own surface in ``deploy.yaml``::
+The source repo declares its own surface in ``rigging.yaml``::
 
     launch_surface:
       - novatel-up
@@ -23,6 +23,7 @@ import yaml
 
 from . import RigError
 from .common import eprint, load_yaml
+from .descriptor import find_descriptor
 
 
 def _git_ref(repo: Path) -> str | None:
@@ -38,9 +39,9 @@ def _git_ref(repo: Path) -> str | None:
 def vendor(service: str, source: Path, root: Path) -> Path:
     """Copy ``service``'s launch surface from ``source`` into ``<root>/services/<service>/``."""
     source = source.resolve()
-    descriptor = source / "deploy.yaml"
-    if not descriptor.exists():
-        raise RigError(f"vendor {service}: no deploy.yaml in {source}")
+    descriptor = find_descriptor(source)
+    if descriptor is None:
+        raise RigError(f"vendor {service}: no rigging.yaml in {source}")
     data = load_yaml(descriptor)
     declared = data.get("service")
     if declared is not None and declared != service:
@@ -52,7 +53,7 @@ def vendor(service: str, source: Path, root: Path) -> Path:
             f"vendor {service}: {descriptor} has no `launch_surface` — the repo isn't vendor-ready "
             f"(add a launch_surface: list of the files rig needs to launch it)"
         )
-    files = list(dict.fromkeys(surface + ["deploy.yaml"]))  # always include the descriptor, dedup, keep order
+    files = list(dict.fromkeys(surface + [descriptor.name]))  # always include the descriptor, dedup, keep order
 
     target = root / "services" / service
     if target.exists() and not (target / ".vendored.yaml").exists():

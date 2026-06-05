@@ -16,7 +16,7 @@ def _make_source(with_surface: bool = True) -> pathlib.Path:
     surface = (
         "launch_surface:\n  - demo-up\n  - docker/compose/compose.deploy.yaml\n" if with_surface else ""
     )
-    (s / "deploy.yaml").write_text("service: demo\nlauncher: demo-up\n" + surface)
+    (s / "rigging.yaml").write_text("service: demo\nlauncher: demo-up\n" + surface)
     (s / "demo-up").write_text("#!/usr/bin/env bash\necho demo\n")
     (s / "docker" / "compose").mkdir(parents=True)
     (s / "docker" / "compose" / "compose.deploy.yaml").write_text("services: {driver: {image: x}}\n")
@@ -31,11 +31,20 @@ def test_vendor_copies_only_the_surface_and_stamps():
     t = root / "services" / "demo"
     assert (t / "demo-up").exists()
     assert (t / "docker" / "compose" / "compose.deploy.yaml").exists()
-    assert (t / "deploy.yaml").exists()        # descriptor always included
+    assert (t / "rigging.yaml").exists()       # descriptor always included
     assert not (t / "src").exists()            # source tree is NOT vendored
     stamp = load_yaml(t / ".vendored.yaml")
     assert stamp["service"] == "demo"
-    assert "demo-up" in stamp["files"] and "deploy.yaml" in stamp["files"]
+    assert "demo-up" in stamp["files"] and "rigging.yaml" in stamp["files"]
+
+
+def test_legacy_deploy_yaml_still_vendors():
+    s = pathlib.Path(tempfile.mkdtemp())
+    (s / "deploy.yaml").write_text("service: demo\nlauncher: demo-up\nlaunch_surface:\n  - demo-up\n")
+    (s / "demo-up").write_text("#!/usr/bin/env bash\n")
+    root = pathlib.Path(tempfile.mkdtemp())
+    vendor("demo", s, root)
+    assert (root / "services" / "demo" / "deploy.yaml").exists()  # legacy descriptor vendored under its name
 
 
 def test_revendor_succeeds_on_unchanged_source():

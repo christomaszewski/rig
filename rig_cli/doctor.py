@@ -78,7 +78,7 @@ def collect(
         elif not lp.stat().st_mode & 0o111:
             issues.append(Issue(WARN, f"{svc}: launcher not executable: {lp}"))
 
-    # Host-facing port clashes (only for services that declare host_ports in deploy.yaml).
+    # Host-facing port clashes (only for services that declare host_ports in their rigging.yaml).
     ports: dict[int, list[str]] = {}
     for sensor in manifest.sensors:
         desc = descriptors.get(sensor.service)

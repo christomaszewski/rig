@@ -1,6 +1,6 @@
 """services.yaml — the vehicle-independent catalog mapping a service name to where its repo lives.
 
-Keys are *service* names (the routing key in each sensor config + each repo's deploy.yaml), which may
+Keys are *service* names (the routing key in each sensor config + each repo's rigging.yaml), which may
 differ from the repo directory name (e.g. service ``sbg`` lives in repo ``sbg_driver``). ``path`` is
 resolved relative to the rig repo root; for deployment these are git submodules under ``services/<name>``,
 for local development they point at sibling checkouts.

@@ -117,15 +117,15 @@ observability tool; the runtime is `docker compose` (see "compose-only" below).
 
 ### Launch surface
 The minimal file set rig needs to *launch* a service — never its source. Each service **declares its own**
-in `deploy.yaml`:
+in `rigging.yaml`:
 ```yaml
 launch_surface:
   - novatel-up
   - tools/render_params.py
   - docker/compose/compose.deploy.yaml
   - docker/compose/compose.deploy.serial.yaml
-  - deploy.yaml
 ```
+(rig always vendors the `rigging.yaml` descriptor itself, so it's not listed.)
 (The copier template emits this for thin drivers; gige lists its composes + `plugins/*/compose.yml` +
 `tools/sensor_env.py`.) Typically a few KB of text.
 
@@ -133,7 +133,7 @@ launch_surface:
 Copies a service's declared surface into the rig repo's `services/<name>/`, with provenance:
 ```
 rig vendor novatel --from ../novatel
-  → services/novatel/{novatel-up, tools/render_params.py, docker/compose/*, deploy.yaml, .vendored.yaml}
+  → services/novatel/{novatel-up, tools/render_params.py, docker/compose/*, rigging.yaml, .vendored.yaml}
 ```
 `.vendored.yaml` records `{source, ref(SHA), when}`; `services.yaml` points at the vendored path. The rig
 repo is now self-contained. Source: a local checkout now → a published OCI **launch-surface bundle** later
@@ -197,4 +197,4 @@ pinned ref must be one the vehicle can reach**:
   vendored gige surface runs standalone and bakes its compose-only form).
 - **bake follow-ups**: full digest pinning + `--registry` cross-registry retag (skopeo/crane mirror) +
   `--bundle-images` (docker save/load for air-gap) + OCI artifact format.
-- **gige `deploy.yaml`**: add `external_volumes: ["gige_{name}_sock"]` so `rig down --purge` GCs it.
+- **gige `rigging.yaml`**: add `external_volumes: ["gige_{name}_sock"]` so `rig down --purge` GCs it.

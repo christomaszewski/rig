@@ -14,11 +14,11 @@ any one sensor type, and without re-implementing per-stack logic.
 lifecycle + params + transport for the nav drivers) already lives in each service's launcher. `rig`:
 
 1. reads `vehicle.yaml` (which sensors, order, fleet ROS env) + `services.yaml` (where each repo lives),
-2. for each sensor, reads the repo's `deploy.yaml` and invokes `<launcher> <config> <verb>`,
+2. for each sensor, reads the repo's `rigging.yaml` and invokes `<launcher> <config> <verb>`,
 3. owns only what is genuinely vehicle-wide (below).
 
 This keeps the one-way dependency clean: **a service never imports or knows about rig.** New services
-(a lidar, an autonomy stack, a ported third-party driver) join by adding a launcher + a `deploy.yaml`,
+(a lidar, an autonomy stack, a ported third-party driver) join by adding a launcher + a `rigging.yaml`,
 not by changing rig.
 
 ## The launcher contract (rig-compatible)
@@ -26,11 +26,11 @@ not by changing rig.
 A launcher must: expose `up/down/status/logs/config` on **one** config; accept a config at an **arbitrary
 host path**; derive **all identity from the config's `name`**; **honor** `ROS_DOMAIN_ID`/`RMW_IMPLEMENTATION`
 from the environment; observe **stdout/stderr discipline** (machine output — `status`→`ps --format json`,
-`config` — on stdout; human lines on stderr, so rig parses clean JSON); and ship a `deploy.yaml`.
+`config` — on stdout; human lines on stderr, so rig parses clean JSON); and ship a `rigging.yaml`.
 
 `gige-up` is the exemplar; the Copier template (`boilerplate`) emits a `<device>-up` that satisfies the
 same contract for every thin driver. rig does **not** reshape services toward one template — it adapts to
-each via `deploy.yaml`'s `verbs` map (e.g. gige-up takes compose subcommands, so `status → ps`).
+each via `rigging.yaml`'s `verbs` map (e.g. gige-up takes compose subcommands, so `status → ps`).
 
 ## What rig owns
 
@@ -47,7 +47,7 @@ each via `deploy.yaml`'s `verbs` map (e.g. gige-up takes compose subcommands, so
   doesn't drag the sensor to "unknown"). ROS `/diagnostics` aggregation is a planned second layer.
 - **Lifecycle/cleanup.** Restart/boot/teardown are the substrate's job (Docker Compose now;
   systemd/Quadlet/k3s later). External volumes survive `down` by design (a consumer may still be attached);
-  `rig down --purge` removes the `deploy.yaml`-declared `external_volumes` on **final** teardown only —
+  `rig down --purge` removes the `rigging.yaml`-declared `external_volumes` on **final** teardown only —
   `docker volume rm` refuses an in-use volume, which is the safety we want.
 - **Resource budgets (advisory).** `rig doctor` warns about `/dev/shm` aggregate and NVENC session budgets;
   it never blocks (rig treats driver configs as opaque).

@@ -182,7 +182,7 @@ def build_parser() -> argparse.ArgumentParser:
     add("doctor", "read-only preflight checks")
 
     ven = sub.add_parser("vendor", help="copy a service's launch surface into services/<service>/")
-    ven.add_argument("service", help="service name (key in services.yaml / its deploy.yaml)")
+    ven.add_argument("service", help="service name (key in services.yaml / its rigging.yaml)")
     ven.add_argument("--from", dest="source", default=None,
                      help="source repo path (default: the service's services.yaml path)")
 

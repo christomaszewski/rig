@@ -1,4 +1,4 @@
-"""deploy.yaml — the per-repo descriptor that tells rig how to drive a service's launcher.
+"""rigging.yaml — the per-repo descriptor that tells rig how to drive a service's launcher.
 
 This is the porting adapter: a repo becomes rig-compatible by shipping a launcher that honors the
 contract (up/down/status/logs/config on one config; arbitrary config path; fleet ROS env; stdout/stderr
@@ -13,7 +13,21 @@ from pathlib import Path
 from . import RigError
 from .common import load_yaml
 
-# Logical verb -> default launcher arg string. Overridable per repo via deploy.yaml `verbs:`.
+# The descriptor filename rig reads from each service repo. `rigging.yaml` is canonical; `deploy.yaml` is
+# accepted as a legacy fallback during the rename.
+DESCRIPTOR_NAMES = ("rigging.yaml", "deploy.yaml")
+
+
+def find_descriptor(repo: Path) -> Path | None:
+    """First existing descriptor in `repo` (rigging.yaml preferred, deploy.yaml legacy), or None."""
+    for name in DESCRIPTOR_NAMES:
+        candidate = repo / name
+        if candidate.exists():
+            return candidate
+    return None
+
+
+# Logical verb -> default launcher arg string. Overridable per repo via the descriptor's `verbs:`.
 DEFAULT_VERBS = {
     "up": "up -d",
     "down": "down",
@@ -46,10 +60,10 @@ class Descriptor:
 
 
 def load_descriptor(service: str, repo: Path) -> Descriptor:
-    path = repo / "deploy.yaml"
-    if not path.exists():
+    path = find_descriptor(repo)
+    if path is None:
         raise RigError(
-            f"{service}: no deploy.yaml in {repo} — is the service repo checked out, and is it "
+            f"{service}: no rigging.yaml in {repo} — is the service repo checked out, and is it "
             f"rig-compatible? (see README)"
         )
     data = load_yaml(path)

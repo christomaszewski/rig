@@ -6,8 +6,8 @@ the bring-up of each sensor to that service's own per-sensor launcher (`<service
 reimplements per-stack logic.
 
 The dependency is strictly one-way: `rig` depends on the service repos; **a service never knows about
-`rig`**. `rig` learns each service only through its `deploy.yaml` descriptor + the launcher CLI, so
-services evolve independently and new ones drop in by adding two files (a launcher + a `deploy.yaml`).
+`rig`**. `rig` learns each service only through its `rigging.yaml` descriptor + the launcher CLI, so
+services evolve independently and new ones drop in by adding two files (a launcher + a `rigging.yaml`).
 
 ```
                  vehicle.yaml (which sensors)          services.yaml (where each repo is)
@@ -79,11 +79,11 @@ in `vehicle.yaml` — rig deep-merges the patch, stamps in `name`, and renders t
 `var/rendered/<name>.yaml` before handing it to the launcher (a complete named config with no overrides is
 passed through untouched). See `config/sensors/camera.profile.yaml` and `docs/ROADMAP.md` §1.
 
-## The contract: `deploy.yaml`
+## The contract: `rigging.yaml`
 
 A repo is rig-compatible when its launcher exposes `up/down/status/logs/config` on one config, accepts a
 config at any host path, honors fleet ROS env, observes **stdout/stderr discipline** (machine output on
-stdout, human lines on stderr), and ships a `deploy.yaml`:
+stdout, human lines on stderr), and ships a `rigging.yaml` (the legacy name `deploy.yaml` is still accepted):
 
 ```yaml
 service: novatel
