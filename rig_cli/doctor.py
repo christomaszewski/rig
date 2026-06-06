@@ -94,7 +94,7 @@ def collect(
             issues.append(Issue(ERROR, f"host port {port} claimed by multiple sensors: {owners}"))
 
     # Coarse resource reminders (rig treats driver configs as opaque, so this is advisory).
-    cameras = [s.name for s in manifest.sensors if s.service == "gige-vision" and s.enabled]
+    cameras = [s.name for s in manifest.sensors if s.service == "camera-service" and s.enabled]
     if len(cameras) >= 2:
         issues.append(
             Issue(

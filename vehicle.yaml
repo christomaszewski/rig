@@ -20,4 +20,4 @@ images:
 sensors:
   - { name: gnss_primary, service: novatel,     config: config/sensors/gnss_primary.yaml, enabled: true, order: 10 }
   - { name: ins_main,     service: sbg,         config: config/sensors/ins_main.yaml,     enabled: true, order: 20 }
-  - { name: cam_front,    service: gige-vision, config: config/sensors/cam_front.yaml,     enabled: true, order: 30 }
+  - { name: cam_front,    service: camera-service, config: config/sensors/cam_front.yaml,     enabled: true, order: 30 }

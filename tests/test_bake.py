@@ -23,8 +23,8 @@ def test_strip_build_keeps_image():
 
 
 def test_external_volume_names():
-    c = {"volumes": {"sock": {"external": True, "name": "gige_cam_sock"}, "data": {}}}
-    assert _external_volume_names(c) == ["gige_cam_sock"]
+    c = {"volumes": {"sock": {"external": True, "name": "cam_cam_sock"}, "data": {}}}
+    assert _external_volume_names(c) == ["cam_cam_sock"]
 
 
 def test_pin_images_resolved_and_unresolved():

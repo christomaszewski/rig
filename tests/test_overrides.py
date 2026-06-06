@@ -37,11 +37,11 @@ def test_profile_shared_across_instances_and_passthrough():
             vehicle: t
             ros: {domain_id: 0}
             sensors:
-              - {name: cam_front, service: gige-vision, config: p.yaml, overrides: {camera: {camera_id: AAA}}}
-              - {name: cam_rear,  service: gige-vision, config: p.yaml, overrides: {camera: {camera_id: BBB}}}
+              - {name: cam_front, service: camera-service, config: p.yaml, overrides: {camera: {camera_id: AAA}}}
+              - {name: cam_rear,  service: camera-service, config: p.yaml, overrides: {camera: {camera_id: BBB}}}
               - {name: gnss,      service: novatel,     config: named.yaml}
         """,
-        "p.yaml": "service: gige-vision\ncamera: {fake: false, frame_rate: 20.0}\n",
+        "p.yaml": "service: camera-service\ncamera: {fake: false, frame_rate: 20.0}\n",
         "named.yaml": "service: novatel\nname: gnss\nconnection: {type: tcp}\n",
     })
     by = {s.name: s for s in materialize_manifest(load_manifest(root), root).sensors}

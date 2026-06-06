@@ -57,9 +57,9 @@ def test_nameless_profile_accepted():
         "vehicle.yaml": """
             vehicle: t
             sensors:
-              - {name: cam, service: gige-vision, config: p.yaml}
+              - {name: cam, service: camera-service, config: p.yaml}
         """,
-        "p.yaml": "service: gige-vision\ncamera: {fake: true}\n",
+        "p.yaml": "service: camera-service\ncamera: {fake: true}\n",
     })
     assert [s.name for s in load_manifest(root).sensors] == ["cam"]
 

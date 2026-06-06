@@ -1,7 +1,7 @@
-# GigE Vision camera. Brought up by `gige-up` (in the gige-vision-service repo), which reads this rich
-# service-specific schema directly (rig treats everything below `name:` as opaque and just hands gige-up
+# GigE Vision camera. Brought up by `cam-up` (in the camera-service repo), which reads this rich
+# service-specific schema directly (rig treats everything below `name:` as opaque and just hands cam-up
 # the path). `fake: true` is a dev/synthetic source; production sets a real `camera_id`.
-service: gige-vision
+service: camera-service
 name: cam_front
 
 camera:
@@ -18,10 +18,10 @@ recording:
 transport:
   plugin_endpoint:
     enabled: true
-    socket_path: /tmp/gige/frames
+    socket_path: /tmp/cam/frames
   raw_endpoint:
     enabled: true
-    socket_path: /tmp/gige/raw
+    socket_path: /tmp/cam/raw
 
 plugins:
   - name: ros2-bridge
