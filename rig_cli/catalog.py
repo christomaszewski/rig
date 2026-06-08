@@ -22,9 +22,7 @@ class ServiceEntry:
 
 def load_catalog(root: Path) -> dict[str, ServiceEntry]:
     data = load_yaml(root / "services.yaml")
-    services = data.get("services") or {}
-    if not services:
-        raise RigError("services.yaml has no `services:` entries")
+    services = data.get("services") or {}  # a fresh `rig init` deployment has none yet — that's fine
     catalog: dict[str, ServiceEntry] = {}
     for name, spec in services.items():
         spec = spec or {}

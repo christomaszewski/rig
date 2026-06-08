@@ -5,8 +5,8 @@ import argparse
 from pathlib import Path
 
 from . import (
-    RigError, __version__, bake as bake_mod, doctor as doctor_mod, dispatch, resolve,
-    status as status_mod, vendor as vendor_mod,
+    RigError, __version__, bake as bake_mod, doctor as doctor_mod, dispatch, init as init_mod,
+    resolve, status as status_mod, vendor as vendor_mod,
 )
 from .catalog import ServiceEntry, load_catalog
 from .common import eprint
@@ -15,7 +15,13 @@ from .manifest import Manifest, Sensor, load_manifest
 
 
 def find_root() -> Path:
-    """The rig repo root holds vehicle.yaml/services.yaml; this CLI lives in <root>/rig_cli/."""
+    """The deployment dir holds vehicle.yaml. Prefer one detected from the cwd (so `cd <deployment> && rig
+    up` works with the tool installed separately); else fall back to the dir alongside this CLI (the classic
+    single-repo layout where the tool and the deployment share a dir)."""
+    cwd = Path.cwd()
+    for d in (cwd, *cwd.parents):
+        if (d / "vehicle.yaml").exists():
+            return d
     return Path(__file__).resolve().parent.parent
 
 
@@ -126,6 +132,11 @@ def cmd_vendor(args, root: Path) -> int:
     return 0
 
 
+def cmd_init(args) -> int:
+    init_mod.init(Path(args.target))
+    return 0
+
+
 def cmd_bake(args, root: Path) -> int:
     manifest, catalog, descriptors = _load(root)
     env = dispatch.fleet_env(manifest)
@@ -181,6 +192,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     add("doctor", "read-only preflight checks")
 
+    ini = sub.add_parser("init", help="scaffold a fresh deployment (vehicle.yaml/services.yaml/config)")
+    ini.add_argument("target", help="directory to create the deployment in")
+
     ven = sub.add_parser("vendor", help="copy a service's launch surface into services/<service>/")
     ven.add_argument("service", help="service name (key in services.yaml / its rigging.yaml)")
     ven.add_argument("--from", dest="source", default=None,
@@ -205,8 +219,10 @@ def main(argv=None) -> int:
                           ("purge", False), ("follow", False), ("tail", None)):
         if not hasattr(args, attr):
             setattr(args, attr, default)
-    root = (args.root or find_root()).resolve()
     try:
+        if args.cmd == "init":  # creates a NEW deployment; doesn't read an existing one
+            return cmd_init(args)
+        root = (args.root or find_root()).resolve()
         if args.cmd == "vendor":  # operates on a source repo, not the manifest
             return cmd_vendor(args, root)
         if args.cmd == "unbake":  # operates on an artifact, not the manifest
