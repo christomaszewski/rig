@@ -1,0 +1,4 @@
+# Drop this into your deployment as config/infra/zenoh-router.yaml and reference it from vehicle.yaml's
+# `infra:` list. The router is shared (one per vehicle), so there's nothing per-sensor to configure.
+service: zenoh-router
+name: zenoh-router

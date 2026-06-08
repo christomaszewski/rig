@@ -22,6 +22,8 @@ def fleet_env(manifest: Manifest) -> dict[str, str]:
     env = dict(os.environ)
     env["ROS_DOMAIN_ID"] = str(manifest.ros.domain_id)
     env["RMW_IMPLEMENTATION"] = manifest.ros.rmw
+    if manifest.vehicle_id is not None:
+        env["VEHICLE_ID"] = str(manifest.vehicle_id)  # vehicle identity for containers that want it
     if manifest.image_registry:
         env["RIG_IMAGE_REGISTRY"] = manifest.image_registry  # each compose prefixes its repo:tag with this
     return env
@@ -55,6 +57,8 @@ def run(
     if dry_run:
         envline = (f"ROS_DOMAIN_ID={env['ROS_DOMAIN_ID']} "
                    f"RMW_IMPLEMENTATION={env['RMW_IMPLEMENTATION']}")
+        if env.get("VEHICLE_ID"):
+            envline += f" VEHICLE_ID={env['VEHICLE_ID']}"
         if env.get("RIG_IMAGE_REGISTRY"):
             envline += f" RIG_IMAGE_REGISTRY={env['RIG_IMAGE_REGISTRY']}"
         eprint(f"  {sensor.name} [{sensor.service}]  (cwd={desc.repo})")

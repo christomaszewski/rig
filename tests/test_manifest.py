@@ -38,7 +38,7 @@ def test_duplicate_name_rejected():
         """,
         "a.yaml": "service: novatel\nname: dup\nconnection: {type: file}\n",
         "b.yaml": "service: novatel\nname: dup\nconnection: {type: file}\n",
-    }), "duplicate sensor name")
+    }), "duplicate name")
 
 
 def test_config_name_mismatch_rejected():
@@ -77,6 +77,48 @@ def test_order_sorts_and_shared_profile():
     })
     sel = load_manifest(root).select([], enabled_only=True)
     assert [s.name for s in sel] == ["a", "c"]
+
+
+def test_vehicle_id_derives_domain():
+    root = _root_with({
+        "vehicle.yaml": "vehicle: v\nvehicle_id: 7\nros: {rmw: rmw_zenoh_cpp}\n"
+                        "sensors: [{name: a, service: novatel, config: x.yaml}]\n",
+        "x.yaml": "service: novatel\nconnection: {type: file}\n",
+    })
+    m = load_manifest(root)
+    assert m.vehicle_id == 7 and m.ros.domain_id == 7
+    explicit = _root_with({
+        "vehicle.yaml": "vehicle: v\nvehicle_id: 7\nros: {domain_id: 0}\n"
+                        "sensors: [{name: a, service: novatel, config: x.yaml}]\n",
+        "x.yaml": "service: novatel\nconnection: {type: file}\n",
+    })
+    assert load_manifest(explicit).ros.domain_id == 0  # explicit ros.domain_id wins
+
+
+def test_infra_comes_before_sensors_regardless_of_order():
+    root = _root_with({
+        "vehicle.yaml": """
+            vehicle: v
+            infra:
+              - {name: router, service: zenoh-router, config: r.yaml, order: 99}
+            sensors:
+              - {name: gnss, service: novatel, config: x.yaml, order: 1}
+        """,
+        "r.yaml": "service: zenoh-router\n",
+        "x.yaml": "service: novatel\nconnection: {type: file}\n",
+    })
+    m = load_manifest(root)
+    assert [s.name for s in m.select([], enabled_only=True)] == ["router", "gnss"]  # tier beats order
+    assert {s.name: s.tier for s in m.sensors} == {"router": "infra", "gnss": "sensor"}
+
+
+def test_name_unique_across_infra_and_sensors():
+    _expect_error(_root_with({
+        "vehicle.yaml": "vehicle: v\ninfra: [{name: x, service: zenoh-router, config: r.yaml}]\n"
+                        "sensors: [{name: x, service: novatel, config: s.yaml}]\n",
+        "r.yaml": "service: zenoh-router\n",
+        "s.yaml": "service: novatel\n",
+    }), "duplicate name")
 
 
 def test_image_registry_parsed():

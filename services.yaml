@@ -8,6 +8,7 @@
 # on the robot; the runtime images are pulled from a registry). For LOCAL DEVELOPMENT, point them at
 # sibling checkouts, as below. See docs/HOST_SETUP.md.
 services:
+  zenoh-router:   { path: templates/zenoh-router }   # shared infra (ships with rig)
   camera-service: { path: ../gige-vision-service }
   novatel:     { path: ../novatel }
   sbg:         { path: ../sbg_driver }

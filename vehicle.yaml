@@ -5,10 +5,11 @@
 # instead of deleting its config. Instance `name` MUST be unique across the vehicle — it keys the
 # compose project, external volumes, and ROS namespace.
 vehicle: orin-dev
+vehicle_id: 1                  # identity; decides the ROS domain (override via ros.domain_id) + exported as VEHICLE_ID
 
 ros:
-  domain_id: 0
-  rmw: rmw_fastrtps_cpp        # one RMW + domain across every stack -> one DDS graph
+  # domain_id: 0               # defaults to vehicle_id; uncomment to override
+  rmw: rmw_zenoh_cpp           # one RMW across every stack; rmw_zenoh needs a zenoh-router in infra: (below)
   distro: lyrical
 
 # Where stacks pull images from (fleet-wide). Empty = local images (dev). Set to a registry the machine
@@ -16,6 +17,11 @@ ros:
 # RIG_IMAGE_REGISTRY and each service's compose prefixes its own repo:tag. `rig bake` pins digests on top.
 images:
   registry: ""                 # e.g. devbox:5000
+
+# infra: shared vehicle-wide services, brought up FIRST (and torn down last). The zenoh router (one per
+# vehicle) lives here for rmw_zenoh; omit it (or enabled: false) for a DDS RMW or a ROS-less vehicle.
+infra:
+  - { name: zenoh-router, service: zenoh-router, config: config/infra/zenoh-router.yaml, enabled: true, order: 0 }
 
 sensors:
   - { name: gnss_primary, service: novatel,     config: config/sensors/gnss_primary.yaml, enabled: true, order: 10 }

@@ -54,6 +54,16 @@ def collect(
 ) -> list[Issue]:
     issues: list[Issue] = []
 
+    vid = f" (id {manifest.vehicle_id})" if manifest.vehicle_id is not None else ""
+    issues.append(Issue(OK, f"vehicle '{manifest.vehicle}'{vid} · ROS domain {manifest.ros.domain_id} · "
+                            f"{manifest.ros.rmw}"))
+
+    # rmw_zenoh needs a shared zenoh router (one per vehicle) in the infra tier.
+    if manifest.ros.rmw in ("rmw_zenoh", "rmw_zenoh_cpp") and manifest.sensors:
+        if not any(s.tier == "infra" and "zenoh" in s.service for s in manifest.sensors):
+            issues.append(Issue(WARN, "ros.rmw is zenoh but no zenoh router in `infra:` — ROS nodes may not "
+                                       "discover each other; add a zenoh-router service (or switch RMW)"))
+
     # One ROS distro across the vehicle (a shared DDS graph needs it).
     distros: dict[str, list[str]] = {}
     for svc, desc in descriptors.items():

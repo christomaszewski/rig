@@ -187,6 +187,19 @@ pinned ref must be one the vehicle can reach**:
 - Default image distribution: local-registry pin (the offline case) vs `--bundle-images` for full air-gap.
 - Launch-surface source: local checkout (v1) → published OCI launch bundle (v2).
 
+## 3b. Shared infra tier + vehicle identity — ✅ implemented (v0.1.6)
+
+- **`infra:` tier** in vehicle.yaml — shared vehicle-wide services (a zenoh router, brokers, time-sync, …)
+  brought up **before** sensors and torn down **after**, on the same delegated model (`rigging.yaml` +
+  launcher). Names are unique across infra + sensors; vendor/bake/status include them. Omit (or
+  `enabled: false`) for a DDS RMW or a ROS-less vehicle.
+- **Vehicle identity**: `vehicle_id` decides the ROS domain (explicit `ros.domain_id` overrides) and is
+  exported to every stack as `VEHICLE_ID` (alongside `ROS_DOMAIN_ID`/`RMW_IMPLEMENTATION`/`RIG_IMAGE_REGISTRY`).
+- **Zenoh guardrail**: `rig doctor` warns if `ros.rmw` is zenoh but no zenoh router is declared in `infra:`.
+- **`templates/zenoh-router/`**: a ready-to-use shared router service (rigging.yaml + launcher + compose,
+  host net :7447). Point `services.yaml` at it + add an `infra:` entry; adjust the image/command for your
+  exact rmw_zenoh router (e.g. `ros2 run rmw_zenoh_cpp rmw_zenohd` on a ROS image).
+
 ## 4. Other tracked items
 - **Boot-time bring-up**: a systemd unit running `rig up` (Compose handles per-stack restart thereafter).
 - **ROS `/diagnostics`** as the second health layer in `rig status`.

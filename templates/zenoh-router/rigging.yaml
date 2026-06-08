@@ -1,0 +1,13 @@
+# rig descriptor for the vehicle's shared Zenoh router (infra tier — rig brings it up FIRST).
+service: zenoh-router
+launcher: zenoh-router-up
+verbs:
+  up: "up -d"
+  down: "down"
+  status: "ps"
+  logs: "logs"
+  config: "config"
+ros_distro: lyrical
+launch_surface:
+  - zenoh-router-up
+  - docker/compose.deploy.yaml

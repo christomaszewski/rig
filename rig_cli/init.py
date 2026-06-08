@@ -9,14 +9,17 @@ from . import RigError
 from .common import eprint
 
 _VEHICLE = """\
-# vehicle.yaml — which sensors THIS machine runs + fleet-wide settings.
+# vehicle.yaml — vehicle identity, fleet-wide settings, shared infra, and sensors.
 vehicle: my-vehicle
+vehicle_id: 1           # identity; decides the ROS domain (override via ros.domain_id) + exported as VEHICLE_ID
 ros:
-  domain_id: 0
-  rmw: rmw_fastrtps_cpp
+  # domain_id: 0        # defaults to vehicle_id
+  rmw: rmw_zenoh_cpp    # rmw_zenoh needs a zenoh-router in infra: (below); use rmw_fastrtps_cpp for DDS
   distro: lyrical
 images:
   registry: ""          # where stacks pull images from (e.g. devbox:5000); empty = local images
+infra: []               # shared services brought up FIRST (e.g. a zenoh router for rmw_zenoh):
+  # - { name: zenoh-router, service: zenoh-router, config: config/infra/zenoh-router.yaml, enabled: true, order: 0 }
 sensors: []
   # - { name: gnss_primary, service: novatel, config: config/sensors/gnss_primary.yaml, enabled: true, order: 10 }
 """

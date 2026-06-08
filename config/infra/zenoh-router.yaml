@@ -1,0 +1,4 @@
+# The vehicle's shared Zenoh router (one per vehicle). Referenced from vehicle.yaml's `infra:` list, so
+# rig brings it up FIRST. Nothing per-sensor to configure. See templates/zenoh-router/.
+service: zenoh-router
+name: zenoh-router

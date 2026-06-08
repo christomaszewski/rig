@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Minimal launcher for the vehicle's shared Zenoh router (infra). rig brings this up FIRST (infra tier),
+# exporting ROS_DOMAIN_ID / RMW_IMPLEMENTATION / VEHICLE_ID, which the compose passes to the router. ROS 2
+# stacks using rmw_zenoh connect to it on localhost:7447 (host networking).
+set -euo pipefail
+REPO="$(cd "$(dirname "$0")" && pwd)"
+PYTHON="${ZENOH_ROUTER_PYTHON:-python3}"
+
+CONFIG="${1:?usage: zenoh-router-up <config.yaml> [up [-d]|down|status|logs|config|...]}"; shift || true
+[ -f "$CONFIG" ] || { echo "zenoh-router-up: config not found: $CONFIG" >&2; exit 1; }
+NAME="$("$PYTHON" -c 'import sys,yaml; print((yaml.safe_load(open(sys.argv[1])) or {}).get("name","zenoh-router"))' "$CONFIG")"
+export ZENOH_ROUTER_NAME="$NAME"
+
+ARGS=("$@"); [ ${#ARGS[@]} -eq 0 ] && ARGS=(up)
+[ "${ARGS[0]}" = "status" ] && ARGS=(ps "${ARGS[@]:1}")
+echo "zenoh-router-up: project=zenoh-router_${NAME} domain=${ROS_DOMAIN_ID:-0} rmw=${RMW_IMPLEMENTATION:-?}" >&2
+exec docker compose -p "zenoh-router_${NAME}" -f "$REPO/docker/compose.deploy.yaml" "${ARGS[@]}"
