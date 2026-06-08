@@ -48,6 +48,44 @@ run `network_mode: host` + `ipc: host`, so they share one DDS graph on the host.
 (Lyrical) across services. At higher sensor counts, partition unrelated stacks onto distinct
 `ROS_DOMAIN_ID`s and/or mount a Fast DDS XML profile (static peers) to tame discovery.
 
+## Deploying a baked artifact (local registry / offline)
+
+The vehicle pulls images from a registry it can reach (e.g. a local registry on your dev box) and runs a
+baked, digest-pinned artifact — no driver source, no internet.
+
+**Dev box:**
+1. Build your stack's images **for arm64** (the Orin) and push them to the local registry — repeat per image:
+   ```
+   docker tag <local-image> devbox:5000/<repo>:<tag> && docker push devbox:5000/<repo>:<tag>
+   ```
+   (For multi-arch, `skopeo copy` / `docker buildx imagetools create` preserve the index so the Orin pulls arm64.)
+2. Bake against that registry (digest-pins every image found in the local registry):
+   ```
+   rig bake --registry devbox:5000 --tag <name>      # -> var/artifacts/<name>.tar.gz
+   ```
+   (Or set `images.registry: devbox:5000` in vehicle.yaml and just `rig bake --tag <name>`.)
+3. `scp var/artifacts/<name>.tar.gz  orin:/tmp/`
+
+**Orin, one-time:**
+- Docker; optionally `sudo apt install python3-yaml` (without it the artifact still runs via its compose-only `up.sh`).
+- Trust the local registry — for a plain-HTTP LAN registry, `/etc/docker/daemon.json`:
+  ```
+  { "insecure-registries": ["devbox:5000"] }
+  ```
+  then `sudo systemctl restart docker`. (Or serve TLS + install the cert.)
+- Plus the per-device host state above (udev serial symlinks, receiver provisioning, camera jumbo frames).
+
+**Orin, deploy:**
+```
+rig unbake /tmp/<name>.tar.gz --into /opt/rig    # or just: tar xzf — it's a plain .tar.gz
+cd /opt/rig/<name>
+./run.sh up        # uses rig if Python+PyYAML present, else the static docker-compose scripts
+./run.sh status
+```
+Images pull from `devbox:5000` by digest on first `up`, then cache locally → the vehicle runs offline
+thereafter. To tweak on the vehicle, edit the unbaked tree and `./run.sh up`; `rig bake` again to capture a
+new tagged artifact.
+
 ## Boot-time bring-up
 
 Until a dedicated unit exists, a single oneshot systemd service can run `rig up` at boot (Compose's

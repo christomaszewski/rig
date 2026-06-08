@@ -49,6 +49,21 @@ python3 -m venv .venv && .venv/bin/pip install pyyaml
 `./rig` uses the system `python3`; on a host where PyYAML lives in a venv, run `.venv/bin/python rig …`
 (and point each launcher's `*_PYTHON` env at that interpreter), or `apt install python3-yaml` on the robot.
 
+## Deploy to a vehicle
+
+Vendor each service's launch surface, bake a tagged artifact (digest-pinned to a registry the vehicle can
+reach), ship it, and unbake — no driver source or internet on the vehicle:
+
+```bash
+rig vendor novatel --from ../novatel        # copy launch surfaces into services/ (text only, no source)
+rig bake --registry devbox:5000 --tag v1    # -> var/artifacts/v1.tar.gz (resolved + digest-pinned)
+scp var/artifacts/v1.tar.gz orin:/tmp/       # on the Orin: `rig unbake … && ./run.sh up`
+```
+
+The artifact bundles the resolved configs + vendored surfaces + rig + a **compose-only** form that runs on
+just Docker (graceful fallback when Python/PyYAML are absent). Full offline / local-registry flow:
+`docs/HOST_SETUP.md`.
+
 ## Layout
 
 ```

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import datetime
 import hashlib
+import json
 import shutil
 import subprocess
 import tarfile
@@ -90,18 +91,36 @@ def _pin_images(compose: dict, digests: dict[str, str | None]) -> None:
             svc["image"] = digests[ref]
 
 
+def _repo_of(ref: str) -> str:
+    """The repo part of an image ref, dropping any :tag or @digest (handles host:port/ refs)."""
+    ref = ref.split("@", 1)[0]
+    colon, slash = ref.rfind(":"), ref.rfind("/")
+    return ref[:colon] if colon > slash else ref
+
+
 def _resolve_digest(ref: str) -> str | None:
-    """Best-effort: a pinned ``repo@sha256:…`` for a locally-present image (real registry mirroring +
-    cross-registry retag is a follow-up; see ROADMAP §3)."""
-    try:
-        proc = subprocess.run(
-            ["docker", "inspect", "--format", "{{index .RepoDigests 0}}", ref],
-            capture_output=True, text=True,
-        )
-        out = proc.stdout.strip()
-        return out if proc.returncode == 0 and "@sha256:" in out else None
+    """A pinned ``repo@sha256:…`` for an image ref. Tries the local image's RepoDigests first, then the
+    registry via ``docker buildx imagetools`` (so a tag pushed to your local/offline registry pins to its
+    content digest). Returns None if neither resolves (then the ref stays a tag)."""
+    repo = _repo_of(ref)
+    try:  # 1. local image's repo digest
+        proc = subprocess.run(["docker", "inspect", "--format", "{{json .RepoDigests}}", ref],
+                              capture_output=True, text=True)
+        if proc.returncode == 0:
+            for rd in json.loads(proc.stdout or "[]"):
+                if rd.startswith(repo + "@sha256:"):
+                    return rd
     except Exception:  # noqa: BLE001
-        return None
+        pass
+    try:  # 2. registry manifest digest (multi-arch index digest -> the vehicle pulls the right arch)
+        proc = subprocess.run(["docker", "buildx", "imagetools", "inspect", ref,
+                               "--format", "{{.Manifest.Digest}}"], capture_output=True, text=True)
+        dig = proc.stdout.strip()
+        if proc.returncode == 0 and dig.startswith("sha256:"):
+            return f"{repo}@{dig}"
+    except Exception:  # noqa: BLE001
+        pass
+    return None
 
 
 # --- bake -------------------------------------------------------------------------------------------
@@ -192,7 +211,9 @@ def _compose_only(manifest, descriptors, env, staging: Path, images: dict) -> li
     return entries
 
 
-def bake(root: Path, manifest, catalog, descriptors, env, tag: str) -> Path:
+def bake(root: Path, manifest, catalog, descriptors, env, tag: str, *, registry: str | None = None) -> Path:
+    if registry:
+        env = {**env, "RIG_IMAGE_REGISTRY": registry}  # override vehicle.yaml images.registry for this bake
     staging = root / "var" / "bake" / tag
     if staging.exists():
         shutil.rmtree(staging)
@@ -243,6 +264,7 @@ def bake(root: Path, manifest, catalog, descriptors, env, tag: str) -> Path:
         "vehicle": manifest.vehicle,
         "created": datetime.datetime.now().isoformat(timespec="seconds"),
         "rig_version": __version__,
+        "registry": registry or manifest.image_registry,
         "sensors": [s.name for s in manifest.sensors],
         "compose_only": [e["sensor"] for e in entries],
         "sources": sources,

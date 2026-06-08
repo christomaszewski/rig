@@ -105,9 +105,10 @@ coherent) is the real fidelity fork.
 > **Status:** `rig vendor`, `rig bake`, `rig unbake` implemented (`rig_cli/{vendor,bake}.py`). bake produces a
 > tagged, content-addressed `.tar.gz` with the resolved configs + vendored surfaces + rig + the compose-only
 > form (validated self-contained for all three services — nav + gige — incl. profile-stripping and
-> staging-bind localization). **Partial / next:** image digest pinning is local-best-effort only (full
-> `--registry` retag + `skopeo`/`crane` mirror + `--bundle-images` remain); OCI artifact format (vs tarball)
-> deferred.
+> staging-bind localization). `rig bake --registry <host>` digest-pins images against a registry (via
+> `docker buildx imagetools`) and the compose-only form references `<host>/<repo>@sha256:…` —
+> validated end-to-end against a real local registry. **Partial / next:** `--bundle-images` (air-gap docker
+> save/load) + OCI artifact format remain.
 
 
 The vehicle holds the **launch surface + configs**, never driver source. Flow: develop drivers (own repos)
@@ -195,6 +196,6 @@ pinned ref must be one the vehicle can reach**:
   baked deployments can pin + pull them by digest. (Deployment model itself is now spec'd in §3.)
 - **gige-up `SENSORS_DIR` robustness** — ✅ done (gige-up makes the `cd` tolerant of a missing dir, so the
   vendored gige surface runs standalone and bakes its compose-only form).
-- **bake follow-ups**: full digest pinning + `--registry` cross-registry retag (skopeo/crane mirror) +
-  `--bundle-images` (docker save/load for air-gap) + OCI artifact format.
+- **bake follow-ups**: `--bundle-images` (docker save/load for full air-gap, no registry) + OCI artifact
+  format. (`--registry` + digest pinning done.)
 - **gige `rigging.yaml`**: add `external_volumes: ["gige_{name}_sock"]` so `rig down --purge` GCs it.

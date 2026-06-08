@@ -129,7 +129,7 @@ def cmd_vendor(args, root: Path) -> int:
 def cmd_bake(args, root: Path) -> int:
     manifest, catalog, descriptors = _load(root)
     env = dispatch.fleet_env(manifest)
-    bake_mod.bake(root, manifest, catalog, descriptors, env, args.tag)
+    bake_mod.bake(root, manifest, catalog, descriptors, env, args.tag, registry=args.registry)
     return 0
 
 
@@ -188,6 +188,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     bk = sub.add_parser("bake", help="freeze the deployment into a tagged, content-addressed artifact")
     bk.add_argument("--tag", required=True, help="artifact tag (names the .tar.gz)")
+    bk.add_argument("--registry", default=None,
+                    help="registry the vehicle pulls from (overrides vehicle.yaml images.registry); "
+                         "images are digest-pinned against it")
 
     ub = sub.add_parser("unbake", help="extract a baked artifact to an editable tree")
     ub.add_argument("artifact", help="path to the .tar.gz artifact")
