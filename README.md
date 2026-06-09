@@ -16,7 +16,7 @@ services evolve independently and new ones drop in by adding two files (a launch
                                           │  per sensor: <launcher> <config> <verb>
               ┌───────────────────────────┼───────────────────────────┐
               ▼                            ▼                           ▼
-          gige-up                     novatel-up                    sbg-up        (each repo's launcher)
+          cam-up                      novatel-up                    sbg-up        (each repo's launcher)
    docker compose (camera)     docker compose (GNSS/INS)     docker compose (INS) ...one project per sensor
 ```
 
@@ -87,7 +87,7 @@ from the repo dir name (service `sbg` → repo `sbg_driver`).
 ### `config/sensors/<name>.yaml`
 Thin ROS 2 drivers share a generic schema — `service`, `name`, `connection` (`tcp`/`udp`/`serial`/`file`),
 `ros.namespace`, and an **opaque** `driver_params` block the launcher renders into the driver's ROS 2
-params. The rich `gige-vision` camera uses its own service-specific schema (rig hands it to `gige-up` as-is).
+params. The rich `camera-service` camera uses its own service-specific schema (rig hands it to `cam-up` as-is).
 
 A config can instead be a **nameless profile** reused across instances via a per-sensor `overrides:` patch
 in `vehicle.yaml` — rig deep-merges the patch, stamps in `name`, and renders the result to
@@ -105,8 +105,8 @@ service: novatel
 launcher: novatel-up                 # default: <service>-up
 verbs: { status: ps }                # adapt logical verbs -> launcher args (defaults shown in descriptor.py)
 ros_distro: lyrical
-external_volumes: ["gige_{name}_sock"]   # optional: GC'd by `rig down --purge` (final teardown only)
+external_volumes: ["cam_{name}_sock"]    # optional: GC'd by `rig down --purge` (final teardown only)
 host_ports: ["plugins[name=webrtc-bridge].params.port"]  # optional: rig validates these don't clash
 ```
 
-`gige-up`, `novatel-up`, and `sbg-up` all satisfy this. See `docs/DESIGN.md` for the full rationale.
+`cam-up`, `novatel-up`, and `sbg-up` all satisfy this. See `docs/DESIGN.md` for the full rationale.

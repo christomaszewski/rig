@@ -18,16 +18,16 @@ config** (today's behavior) OR a **nameless profile** (a config with `service:` 
 
 ```yaml
 # config/sensors/camera.profile.yaml   — reusable profile, NO `name`
-service: gige-vision
+service: camera-service
 camera: { fake: false, pixel_format: Mono8, frame_rate: 20.0, ptp_enable: true }
 recording: { enabled: true }
 ```
 ```yaml
 # vehicle.yaml
 sensors:
-  - { name: cam_front, service: gige-vision, config: config/sensors/camera.profile.yaml,
+  - { name: cam_front, service: camera-service, config: config/sensors/camera.profile.yaml,
       overrides: { camera: { camera_id: "Lucid-2448-AAA" } } }
-  - { name: cam_rear,  service: gige-vision, config: config/sensors/camera.profile.yaml,
+  - { name: cam_rear,  service: camera-service, config: config/sensors/camera.profile.yaml,
       overrides: { camera: { camera_id: "Lucid-2448-BBB" } } }
 ```
 
@@ -82,7 +82,7 @@ No launcher changes; no semantic interpretation of config bodies by rig; no simu
 
 Not modeled as enforced vehicle-wide modes. Two independent axes:
 - **Data source** — per *sensor*: live | replay | sim (a config / override concern, §1).
-- **Footprint** — per *run*: vehicle | bench | laptop (images / runtime / net; gige's existing `--dev`).
+- **Footprint** — per *run*: vehicle | bench | laptop (images / runtime / net; cam-up's existing `--dev`).
 
 "HIL test" = real-hardware footprint with a chosen per-sensor source mix (e.g. **replay GNSS while the
 algorithm stack runs live on the real Jetson** to characterize compute/memory). Replay runs *through the
@@ -104,7 +104,7 @@ coherent) is the real fidelity fork.
 
 > **Status:** `rig vendor`, `rig bake`, `rig unbake` implemented (`rig_cli/{vendor,bake}.py`). bake produces a
 > tagged, content-addressed `.tar.gz` with the resolved configs + vendored surfaces + rig + the compose-only
-> form (validated self-contained for all three services — nav + gige — incl. profile-stripping and
+> form (validated self-contained for all three services — nav + camera — incl. profile-stripping and
 > staging-bind localization). `rig bake --registry <host>` digest-pins images against a registry (via
 > `docker buildx imagetools`) and the compose-only form references `<host>/<repo>@sha256:…` —
 > validated end-to-end against a real local registry. **`rig build [--registry]`** populates the registry by
@@ -130,7 +130,7 @@ launch_surface:
   - docker/compose/compose.deploy.serial.yaml
 ```
 (rig always vendors the `rigging.yaml` descriptor itself, so it's not listed.)
-(The copier template emits this for thin drivers; gige lists its composes + `plugins/*/compose.yml` +
+(The copier template emits this for thin drivers; the camera service lists its composes + `plugins/*/compose.yml` +
 `tools/sensor_env.py`.) Typically a few KB of text.
 
 ### `rig vendor`
@@ -166,9 +166,9 @@ digest-pinned images) all work.
 bake-time transforms required for the compose-only form:
 - **Relocate + rewrite** rendered-config/params mounts to artifact-relative paths (copy the files in); leave
   device / `/dev/shm` mounts literal.
-- **Emit `docker volume create`** for `external: true` volumes (gige's `gige_<name>_sock`) — `up` won't self-create them.
-- **Strip `build:` and pin `image:` to `@sha256:` digests** (gige `core-driver` carries a build block beside a local `image:` tag).
-- **Capture `COMPOSE_PROFILES`** into the script env (gige's active plugins).
+- **Emit `docker volume create`** for `external: true` volumes (the camera's `cam_<name>_sock`) — `up` won't self-create them.
+- **Strip `build:` and pin `image:` to `@sha256:` digests** (the camera's `core-driver` carries a build block beside a local `image:` tag).
+- **Capture `COMPOSE_PROFILES`** into the script env (the camera's active plugins).
 
 ### Images & offline / local-registry deployment
 Digests are content-addressed → the **same `sha256` is portable across registries**, but the **host in the
@@ -206,12 +206,13 @@ pinned ref must be one the vehicle can reach**:
 ## 4. Other tracked items
 - **Boot-time bring-up**: a systemd unit running `rig up` (Compose handles per-stack restart thereafter).
 - **ROS `/diagnostics`** as the second health layer in `rig status`.
-- **Host-facing port-clash** extraction for list-structured configs (gige WebRTC port), via the
+- **Host-facing port-clash** extraction for list-structured configs (the camera's WebRTC port), via the
   `host_ports` path syntax or a launcher `ports` query.
-- **gige image publishing**: push `gige-core`/`gige-dev` to a registry (they're local build tags today) so
-  baked deployments can pin + pull them by digest. (Deployment model itself is now spec'd in §3.)
-- **gige-up `SENSORS_DIR` robustness** — ✅ done (gige-up makes the `cd` tolerant of a missing dir, so the
-  vendored gige surface runs standalone and bakes its compose-only form).
+- **camera image publishing** — ✅ now via `rig build` (the camera's `tools/build-images.sh` pushes
+  `cam-core`/`cam-dev` to the registry; `rig bake --registry` pins them by digest).
+- **cam-up `SENSORS_DIR` robustness** — ✅ done (cam-up makes the `cd` tolerant of a missing dir, so the
+  vendored camera surface runs standalone and bakes its compose-only form).
 - **bake follow-ups**: `--bundle-images` (docker save/load for full air-gap, no registry) + OCI artifact
-  format. (`--registry` + digest pinning done.)
-- **gige `rigging.yaml`**: add `external_volumes: ["gige_{name}_sock"]` so `rig down --purge` GCs it.
+  format. (`--registry` + digest pinning + `rig build` done.)
+- **camera-service `rigging.yaml`** — ✅ done: declares `external_volumes: ["cam_{name}_sock"]` so
+  `rig down --purge` GCs it.

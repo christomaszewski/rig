@@ -3,7 +3,7 @@
 ## Problem
 
 A vehicle computer (Jetson) runs several heterogeneous sensor/autonomy stacks: a rich GigE Vision camera
-service (`gige-vision-service`) and thin in-house ROS 2 nav drivers (`novatel`, `sbg`, and more to come,
+service (`camera-service`) and thin in-house ROS 2 nav drivers (`novatel`, `sbg`, and more to come,
 all scaffolded from a shared Copier template). Each is its own repo with its own image and a per-sensor
 launcher. We need one machine-level tool to bring the whole vehicle up/down/observe — without coupling to
 any one sensor type, and without re-implementing per-stack logic.
@@ -28,9 +28,10 @@ host path**; derive **all identity from the config's `name`**; **honor** `ROS_DO
 from the environment; observe **stdout/stderr discipline** (machine output — `status`→`ps --format json`,
 `config` — on stdout; human lines on stderr, so rig parses clean JSON); and ship a `rigging.yaml`.
 
-`gige-up` is the exemplar; the Copier template (`boilerplate`) emits a `<device>-up` that satisfies the
-same contract for every thin driver. rig does **not** reshape services toward one template — it adapts to
-each via `rigging.yaml`'s `verbs` map (e.g. gige-up takes compose subcommands, so `status → ps`).
+`cam-up` (the camera launcher) is the exemplar; the Copier template (`boilerplate`) emits a `<device>-up`
+that satisfies the same contract for every thin driver. rig does **not** reshape services toward one
+template — it adapts to each via `rigging.yaml`'s `verbs` map (e.g. cam-up takes compose subcommands, so
+`status → ps`).
 
 ## What rig owns
 
@@ -52,12 +53,12 @@ each via `rigging.yaml`'s `verbs` map (e.g. gige-up takes compose subcommands, s
 - **Resource budgets (advisory).** `rig doctor` warns about `/dev/shm` aggregate and NVENC session budgets;
   it never blocks (rig treats driver configs as opaque).
 
-## Decisions carried from gige-vision-service (do not re-litigate)
+## Decisions carried from the camera service (do not re-litigate)
 
 - **Docker Compose per sensor** (one project each); delegate supervision to the substrate. Rejected: a
   Python supervisor driving the Docker socket.
 - **Static compose, selected + parameterized** by each launcher; never generate compose.
-- **shm is host-level**: an external named volume (`gige_<name>_sock`, the socket/*address*) + `--ipc=host`
+- **shm is host-level**: an external named volume (`cam_<name>_sock`, the socket/*address*) + `--ipc=host`
   (the `/dev/shm` frame *data*). A consumer needs both. Rejected: podman/k8s pods (pod-scoped IPC walls shm
   off from other stacks).
 - **Host networking** for sensor discovery; per-instance ports/topics namespaced by `name`.
@@ -67,11 +68,12 @@ each via `rigging.yaml`'s `verbs` map (e.g. gige-up takes compose subcommands, s
 
 Implemented: manifest/catalog/descriptor loaders with validation; dispatch with fleet env + dry-run +
 ordering; `status` roll-up; `doctor`; `up/down/--purge/logs/config`. Validated against the three real
-launchers (gige-up, novatel-up, sbg-up): correct ordering, env propagation, params render, and status.
+launchers (cam-up, novatel-up, sbg-up): correct ordering, env propagation, params render, and status.
 
 Open items (see the project plan): host-facing **port-clash** extraction for list-structured configs (the
-`host_ports` path syntax exists; the gige WebRTC port could also be reported by a launcher `ports` query);
-a **dev-vs-prod** affordance (gige's `--dev` vs config-driven replay for thin drivers); ROS `/diagnostics`
+`host_ports` path syntax exists; the camera's WebRTC port could also be reported by a launcher `ports`
+query); a **dev-vs-prod** affordance (cam-up's `--dev` vs config-driven replay for thin drivers); ROS
+`/diagnostics`
 as the second health layer; boot-time bring-up via a systemd unit; and submodule pinning for deployment.
 
 See **`docs/ROADMAP.md`** for the detailed spec of the next item — **config overrides & reusable profiles**
