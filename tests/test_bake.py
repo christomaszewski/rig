@@ -61,6 +61,34 @@ def test_localize_binds_relativizes_staging_paths_only():
     assert vols[3]["source"] == "/data/host"
 
 
+def test_bake_bundles_tool_from_separated_deployment():
+    # rig init layout: the deployment root has NO rig tool in it (the tool lives in this package's dir).
+    from rig_cli.bake import bake, unbake
+    from rig_cli.catalog import load_catalog
+    from rig_cli.descriptor import load_descriptor
+    from rig_cli.manifest import load_manifest
+
+    svc = pathlib.Path(tempfile.mkdtemp())
+    (svc / "rigging.yaml").write_text("service: demo\nlauncher: demo-up\nlaunch_surface: [demo-up]\n")
+    (svc / "demo-up").write_text("#!/bin/sh\nexit 1\n")  # config verb fails -> compose-only skips (no Docker)
+    (svc / "demo-up").chmod(0o755)
+
+    root = pathlib.Path(tempfile.mkdtemp())
+    (root / "config" / "sensors").mkdir(parents=True)
+    (root / "vehicle.yaml").write_text("vehicle: t\nsensors: [{name: a, service: demo, config: config/sensors/a.yaml}]\n")
+    (root / "services.yaml").write_text(f"services: {{demo: {{path: {svc}}}}}\n")
+    (root / "config" / "sensors" / "a.yaml").write_text("service: demo\nname: a\n")
+    assert not (root / "rig").exists()  # the tool is NOT in the deployment
+
+    m, cat, descs = load_manifest(root), load_catalog(root), {"demo": load_descriptor("demo", svc)}
+    artifact = bake(root, m, cat, descs, {}, "t")
+    assert artifact.exists()
+    into = pathlib.Path(tempfile.mkdtemp())
+    unbake(artifact, into)
+    assert (into / "t" / "rig").is_file()              # tool sourced from the package, not from root
+    assert (into / "t" / "rig_cli" / "cli.py").is_file()
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

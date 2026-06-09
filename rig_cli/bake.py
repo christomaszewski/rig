@@ -24,6 +24,7 @@ import yaml
 
 from . import RigError, __version__
 from .common import eprint, load_yaml
+from .manifest import stack_summary
 from .vendor import vendor
 
 
@@ -221,10 +222,13 @@ def bake(root: Path, manifest, catalog, descriptors, env, tag: str, *, registry:
         shutil.rmtree(staging)
     staging.mkdir(parents=True)
 
-    # 1. rig itself (so the artifact is self-contained for the Python path)
-    shutil.copy2(root / "rig", staging / "rig")
+    # 1. rig itself (so the artifact is self-contained for the Python path). The tool may live in a
+    #    different dir than the deployment root (the `rig init` layout), so source it from THIS package,
+    #    not from `root`. tool_root holds `rig` + `rig_cli/` (== root in the classic single-repo layout).
+    tool_root = Path(__file__).resolve().parent.parent
+    shutil.copy2(tool_root / "rig", staging / "rig")
     (staging / "rig").chmod(0o755)
-    shutil.copytree(root / "rig_cli", staging / "rig_cli",
+    shutil.copytree(tool_root / "rig_cli", staging / "rig_cli",
                     ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
 
     # 2. resolved per-sensor configs + a resolved vehicle.yaml (overrides/profiles already baked in)
@@ -287,7 +291,7 @@ def bake(root: Path, manifest, catalog, descriptors, env, tag: str, *, registry:
     digest = _sha256(tarpath)
     eprint(f"baked '{tag}' -> {tarpath}")
     eprint(f"  sha256:{digest}")
-    eprint(f"  {len(manifest.sensors)} sensors · {len(entries)} compose-only · "
+    eprint(f"  {stack_summary(manifest.sensors)} · {len(entries)} compose-only · "
            f"{pinned}/{len(images)} images digest-pinned")
     return tarpath
 
