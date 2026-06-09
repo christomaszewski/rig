@@ -21,6 +21,7 @@ from .manifest import Manifest
 def build(manifest: Manifest, descriptors: dict[str, Descriptor], *, registry: str | None,
           tag: str | None, dry_run: bool) -> int:
     reg = registry or manifest.image_registry
+    tag = tag or manifest.image_tag  # default the build tag to vehicle.yaml images.tag (e.g. jp7)
     services = list(dict.fromkeys(s.service for s in manifest.sensors))  # manifest order (infra first), deduped
     rc = 0
     did = 0

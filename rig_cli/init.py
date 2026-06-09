@@ -18,6 +18,7 @@ ros:
   distro: lyrical
 images:
   registry: ""          # where stacks pull images from (e.g. devbox:5000); empty = local images
+  tag: ""               # e.g. jp7 (the target's JetPack) -> RIG_IMAGE_TAG for platform-specific composes
 infra: []               # shared services brought up FIRST (e.g. a zenoh router for rmw_zenoh):
   # - { name: zenoh-router, service: zenoh-router, config: config/infra/zenoh-router.yaml, enabled: true, order: 0 }
 sensors: []

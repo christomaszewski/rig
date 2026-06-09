@@ -267,6 +267,7 @@ def bake(root: Path, manifest, catalog, descriptors, env, tag: str, *, registry:
         "created": datetime.datetime.now().isoformat(timespec="seconds"),
         "rig_version": __version__,
         "registry": registry or manifest.image_registry,
+        "image_tag": manifest.image_tag,
         "sensors": [s.name for s in manifest.sensors],
         "compose_only": [e["sensor"] for e in entries],
         "sources": sources,

@@ -198,7 +198,10 @@ pinned ref must be one the vehicle can reach**:
   launcher). Names are unique across infra + sensors; vendor/bake/status include them. Omit (or
   `enabled: false`) for a DDS RMW or a ROS-less vehicle.
 - **Vehicle identity**: `vehicle_id` decides the ROS domain (explicit `ros.domain_id` overrides) and is
-  exported to every stack as `VEHICLE_ID` (alongside `ROS_DOMAIN_ID`/`RMW_IMPLEMENTATION`/`RIG_IMAGE_REGISTRY`).
+  exported to every stack as `VEHICLE_ID` (alongside `ROS_DOMAIN_ID`/`RMW_IMPLEMENTATION`/`RIG_IMAGE_REGISTRY`/`RIG_IMAGE_TAG`).
+- **Fleet image tag**: `images.tag` in vehicle.yaml (e.g. the Orin's JetPack `jp7`) → `RIG_IMAGE_TAG`;
+  platform-specific composes pull `<repo>:<tag>`, and `rig build` defaults its `--tag` to it. Platform-agnostic
+  services (dashboard) just ignore it.
 - **Zenoh guardrail**: `rig doctor` warns if `ros.rmw` is zenoh but no zenoh router is declared in `infra:`.
 - **`templates/zenoh-router/`**: a ready-to-use shared router service (rigging.yaml + launcher + compose,
   host net :7447). Point `services.yaml` at it + add an `infra:` entry; adjust the image/command for your
@@ -207,8 +210,9 @@ pinned ref must be one the vehicle can reach**:
 ## 4. Other tracked items
 - **Boot-time bring-up**: a systemd unit running `rig up` (Compose handles per-stack restart thereafter).
 - **ROS `/diagnostics`** as the second health layer in `rig status`.
-- **Host-facing port-clash** extraction for list-structured configs (the camera's WebRTC port), via the
-  `host_ports` path syntax or a launcher `ports` query.
+- **Host-facing port-clash** extraction for list-structured configs — ✅ done: `host_ports` supports an
+  enabled-aware `plugins[name=webrtc-bridge,enabled=true].params.port` selector, and rig flags clashes
+  across instances. The service must declare `host_ports` (camera-service: add the webrtc port path).
 - **camera image publishing** — ✅ now via `rig build` (the camera's `tools/build-images.sh` pushes
   `cam-core`/`cam-dev` to the registry; `rig bake --registry` pins them by digest).
 - **cam-up `SENSORS_DIR` robustness** — ✅ done (cam-up makes the `cd` tolerant of a missing dir, so the

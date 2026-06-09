@@ -16,7 +16,9 @@ ros:
 # can reach (e.g. a local registry on the dev box for offline vehicles); rig exports it as
 # RIG_IMAGE_REGISTRY and each service's compose prefixes its own repo:tag. `rig bake` pins digests on top.
 images:
-  registry: ""                 # e.g. devbox:5000
+  registry: ""                 # e.g. devbox:5000  -> RIG_IMAGE_REGISTRY (composes prefix their repo)
+  tag: ""                      # e.g. jp7 (the Orin's JetPack) -> RIG_IMAGE_TAG; platform-specific composes
+                               #   pull <repo>:<tag>. rig build defaults its --tag to this.
 
 # infra: shared vehicle-wide services, brought up FIRST (and torn down last). The zenoh router (one per
 # vehicle) lives here for rmw_zenoh; omit it (or enabled: false) for a DDS RMW or a ROS-less vehicle.

@@ -27,22 +27,27 @@ class Issue:
 
 
 def _get_path(data: dict, path: str):
-    """Resolve a dotted config path, supporting a `key[sel=val]` list selector (e.g.
-    `plugins[name=webrtc-bridge].params.port`)."""
+    """Resolve a dotted config path, supporting a `key[k=v,...]` list selector that matches the first list
+    item whose fields all equal the given values (case-insensitively, so `enabled=true` matches the YAML
+    bool). E.g. `plugins[name=webrtc-bridge,enabled=true].params.port` resolves only when that plugin is
+    enabled — so a disabled plugin's port isn't flagged as a clash."""
     cur = data
     for raw in path.split("."):
-        match = re.match(r"^([^\[]+)(?:\[([^=]+)=([^\]]+)\])?$", raw)
+        match = re.match(r"^([^\[]+)(?:\[([^\]]+)\])?$", raw)
         if not match:
             return None
-        key, sel_key, sel_val = match.groups()
+        key, sel = match.groups()
         if not isinstance(cur, dict) or key not in cur:
             return None
         cur = cur[key]
-        if sel_key is not None:
+        if sel is not None:
             if not isinstance(cur, list):
                 return None
+            conds = [c.split("=", 1) for c in sel.split(",") if "=" in c]
             cur = next(
-                (it for it in cur if isinstance(it, dict) and str(it.get(sel_key)) == sel_val), None
+                (it for it in cur if isinstance(it, dict)
+                 and all(str(it.get(k.strip())).lower() == v.strip().lower() for k, v in conds)),
+                None,
             )
             if cur is None:
                 return None

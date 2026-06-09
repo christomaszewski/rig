@@ -40,6 +40,7 @@ class Manifest:
     sensors: list[Sensor]            # infra + sensor entries combined (each carries its `tier`)
     image_registry: str | None = None  # fleet-wide registry stacks pull from (None = local images)
     vehicle_id: object = None        # int|str; decides the ROS domain + exported as VEHICLE_ID
+    image_tag: str | None = None     # fleet-wide image tag (e.g. a JetPack platform jp7); -> RIG_IMAGE_TAG
 
     def select(self, names: list[str], enabled_only: bool) -> list[Sensor]:
         """Resolve a name filter into a tiered, ordered list (infra before sensors). Explicit names win."""
@@ -120,6 +121,8 @@ def load_manifest(root: Path) -> Manifest:
     infra = _parse_entries(data.get("infra"), "infra", root, seen)
     sensors = _parse_entries(data.get("sensors"), "sensor", root, seen)
 
-    image_registry = (str((data.get("images") or {}).get("registry") or "").strip()) or None
+    images = data.get("images") or {}
+    image_registry = (str(images.get("registry") or "").strip()) or None
+    image_tag = (str(images.get("tag") or "").strip()) or None
     return Manifest(vehicle=str(data.get("vehicle", "vehicle")), ros=ros, sensors=infra + sensors,
-                    image_registry=image_registry, vehicle_id=vehicle_id)
+                    image_registry=image_registry, vehicle_id=vehicle_id, image_tag=image_tag)

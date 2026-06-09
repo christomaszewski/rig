@@ -125,18 +125,20 @@ def test_image_registry_parsed():
     root = _root_with({
         "vehicle.yaml": """
             vehicle: t
-            images: { registry: devbox:5000 }
+            images: { registry: devbox:5000, tag: jp7 }
             sensors:
               - {name: a, service: novatel, config: x.yaml}
         """,
         "x.yaml": "service: novatel\nconnection: {type: file}\n",
     })
-    assert load_manifest(root).image_registry == "devbox:5000"
+    m = load_manifest(root)
+    assert m.image_registry == "devbox:5000" and m.image_tag == "jp7"
     empty = _root_with({
         "vehicle.yaml": "vehicle: t\nimages: {registry: ''}\nsensors: [{name: a, service: novatel, config: x.yaml}]\n",
         "x.yaml": "service: novatel\nconnection: {type: file}\n",
     })
-    assert load_manifest(empty).image_registry is None  # empty -> None (local images)
+    e = load_manifest(empty)
+    assert e.image_registry is None and e.image_tag is None  # empty -> None (local images)
 
 
 if __name__ == "__main__":

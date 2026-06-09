@@ -26,6 +26,8 @@ def fleet_env(manifest: Manifest) -> dict[str, str]:
         env["VEHICLE_ID"] = str(manifest.vehicle_id)  # vehicle identity for containers that want it
     if manifest.image_registry:
         env["RIG_IMAGE_REGISTRY"] = manifest.image_registry  # each compose prefixes its repo:tag with this
+    if manifest.image_tag:
+        env["RIG_IMAGE_TAG"] = manifest.image_tag  # platform-specific composes tag with this (e.g. jp7)
     return env
 
 
@@ -61,6 +63,8 @@ def run(
             envline += f" VEHICLE_ID={env['VEHICLE_ID']}"
         if env.get("RIG_IMAGE_REGISTRY"):
             envline += f" RIG_IMAGE_REGISTRY={env['RIG_IMAGE_REGISTRY']}"
+        if env.get("RIG_IMAGE_TAG"):
+            envline += f" RIG_IMAGE_TAG={env['RIG_IMAGE_TAG']}"
         eprint(f"  {sensor.name} [{sensor.service}]  (cwd={desc.repo})")
         eprint(f"    {envline} \\")
         eprint(f"    {pretty}")
