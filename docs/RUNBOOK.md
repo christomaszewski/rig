@@ -144,10 +144,17 @@ ls -lh var/artifacts/test1.tar.gz
 
 ## 7 — Ship + deploy on the Orin
 ```bash
-# one-time host setup (trust the registry; install PyYAML so the rig path runs — see camera note below):
-ssh $ORIN "echo '{ \"insecure-registries\": [\"$REGISTRY\"] }' | sudo tee /etc/docker/daemon.json && sudo systemctl restart docker"
-ssh $ORIN 'sudo apt-get install -y python3-yaml'
-#   ↑ if /etc/docker/daemon.json already has keys, MERGE insecure-registries instead of overwriting.
+# one-time host setup: trust the registry (plain HTTP). MERGE — do NOT overwrite: the Jetson's daemon.json
+# carries the `nvidia` runtime the camera's jp7 containers need. (python3 merge keeps existing keys.)
+ssh $ORIN "sudo python3 - <<'PY'
+import json, pathlib
+p = pathlib.Path('/etc/docker/daemon.json')
+d = json.loads(p.read_text()) if (p.exists() and p.read_text().strip()) else {}
+regs = d.setdefault('insecure-registries', [])
+if '$REGISTRY' not in regs: regs.append('$REGISTRY')
+p.write_text(json.dumps(d, indent=2) + '\n')
+PY
+sudo systemctl restart docker"
 #   Also: plug the USB camera into the Orin; confirm the RTSP stream is reachable from it.
 
 scp var/artifacts/test1.tar.gz $ORIN:/tmp/
