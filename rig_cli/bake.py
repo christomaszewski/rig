@@ -79,8 +79,10 @@ def _localize_binds(compose: dict, dest: Path, staging_root: Path) -> None:
             target = dest / relname
             if src.is_file():
                 shutil.copy2(src, target)
+            elif src.is_dir():
+                shutil.copytree(src, target, dirs_exist_ok=True)  # vendored dir (e.g. a static web bundle)
             else:
-                target.mkdir(parents=True, exist_ok=True)  # empty placeholder (config, recordings, …)
+                target.mkdir(parents=True, exist_ok=True)  # missing -> empty placeholder (config, recordings)
             vol["source"] = f"./{relname}"
 
 

@@ -38,6 +38,17 @@ def test_vendor_copies_only_the_surface_and_stamps():
     assert "demo-up" in stamp["files"] and "rigging.yaml" in stamp["files"]
 
 
+def test_vendor_copies_a_directory_in_the_surface():
+    s = pathlib.Path(tempfile.mkdtemp())
+    (s / "rigging.yaml").write_text("service: demo\nlauncher: demo-up\nlaunch_surface:\n  - demo-up\n  - www\n")
+    (s / "demo-up").write_text("#!/usr/bin/env bash\n")
+    (s / "www").mkdir()
+    (s / "www" / "index.html").write_text("<html></html>")
+    root = pathlib.Path(tempfile.mkdtemp())
+    vendor("demo", s, root)
+    assert (root / "services" / "demo" / "www" / "index.html").is_file()  # whole directory vendored
+
+
 def test_legacy_deploy_yaml_still_vendors():
     s = pathlib.Path(tempfile.mkdtemp())
     (s / "deploy.yaml").write_text("service: demo\nlauncher: demo-up\nlaunch_surface:\n  - demo-up\n")

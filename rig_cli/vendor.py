@@ -65,10 +65,13 @@ def vendor(service: str, source: Path, root: Path) -> Path:
     for rel in files:
         src = source / rel
         if not src.exists():
-            raise RigError(f"vendor {service}: launch_surface file missing in source: {src}")
+            raise RigError(f"vendor {service}: launch_surface entry missing in source: {src}")
         dst = target / rel
         dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src, dst)
+        if src.is_dir():
+            shutil.copytree(src, dst, dirs_exist_ok=True)  # a surface may list a dir (e.g. a static bundle)
+        else:
+            shutil.copy2(src, dst)
 
     stamp = {
         "service": service,
