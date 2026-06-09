@@ -130,9 +130,11 @@ rig up --dry-run    # zenoh-router -> dashboard -> cam_usb -> cam_rtsp; VEHICLE_
 
 ## 5 — Build + push images
 ```bash
-rig build           # builds cam-core:$JETPACK (tag from images.tag) + dashboard images; mirrors eclipse/zenoh
+rig build -j 3      # builds cam-core:$JETPACK (tag from images.tag) + dashboard images; mirrors eclipse/zenoh
 curl -s http://$REGISTRY/v2/_catalog       # expect: cam-core, dashboard-zenoh, dashboard-web, eclipse/zenoh
 ```
+> Work is per unique *service*, so the two camera instances build `camera-service` **once**. `-j N` runs up
+> to N services concurrently (output grouped per service); omit it for sequential, live-streamed output.
 
 ## 6 — Bake
 ```bash

@@ -139,7 +139,8 @@ def cmd_init(args) -> int:
 
 def cmd_build(args, root: Path) -> int:
     manifest, catalog, descriptors = _load(root)
-    return build_mod.build(manifest, descriptors, registry=args.registry, tag=args.tag, dry_run=args.dry_run)
+    return build_mod.build(manifest, descriptors, registry=args.registry, tag=args.tag,
+                           dry_run=args.dry_run, jobs=args.jobs)
 
 
 def cmd_bake(args, root: Path) -> int:
@@ -208,6 +209,8 @@ def build_parser() -> argparse.ArgumentParser:
     bld = sub.add_parser("build", help="build/push or mirror each service's images into the registry")
     bld.add_argument("--registry", default=None, help="target registry (overrides vehicle.yaml images.registry)")
     bld.add_argument("--tag", default=None, help="tag to pass to each service's build command")
+    bld.add_argument("-j", "--jobs", type=int, default=1, metavar="N",
+                     help="build/mirror up to N services concurrently (output grouped per service)")
     bld.add_argument("--dry-run", action="store_true")
 
     bk = sub.add_parser("bake", help="freeze the deployment into a tagged, content-addressed artifact")
