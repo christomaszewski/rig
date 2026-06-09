@@ -23,6 +23,11 @@ DASHBOARD_URL="git@github.com:christomaszewski/dashboard.git"
 docker run -d --restart always -p 5000:5000 -v registry-data:/var/lib/registry --name registry registry:2
 curl -s http://$REGISTRY/v2/_catalog       # -> {"repositories":[]}
 ```
+> **Trust the registry on the dev box too** — it's plain HTTP. Docker Desktop → Settings → Docker Engine →
+> add `"insecure-registries": ["192.168.x.x:5000"]` → Apply & Restart. Without it, `rig build`/`docker push`
+> fail with `server gave HTTP response to HTTPS client`. If a service's `build-images.sh` pushes via
+> `docker buildx build --push` and still errors, BuildKit needs its own insecure config:
+> `printf '[registry."'$REGISTRY'"]\n  http = true\n' > /tmp/bk.toml && docker buildx create --name rig --driver docker-container --config /tmp/bk.toml --use --bootstrap`
 
 ## 2 — Workspace + clones
 ```bash

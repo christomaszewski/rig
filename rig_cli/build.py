@@ -49,8 +49,13 @@ def build(manifest: Manifest, descriptors: dict[str, Descriptor], *, registry: s
                 continue
             target = f"{reg}/{img}"
             eprint(f"mirror {service}: {img} -> {target}")
-            if not dry_run and subprocess.run(
-                ["docker", "buildx", "imagetools", "create", "-t", target, img]).returncode:
+            if dry_run:
+                continue
+            # pull -> tag -> push: honors the docker daemon's insecure-registries (a plain-HTTP local
+            # registry), unlike `buildx imagetools`. Mirrors the dev host's arch — right for a single-arch
+            # (arm64 Jetson) fleet; for a multi-arch index against a TLS registry, use skopeo/crane.
+            steps = [["docker", "pull", img], ["docker", "tag", img, target], ["docker", "push", target]]
+            if any(subprocess.run(s).returncode for s in steps):
                 rc = 1
                 eprint(f"  mirror {img} FAILED")
 
