@@ -135,7 +135,8 @@ def collect(
     return issues
 
 
-def run(manifest: Manifest, catalog: dict[str, ServiceEntry], descriptors: dict[str, Descriptor]) -> int:
+def run(manifest: Manifest, catalog: dict[str, ServiceEntry], descriptors: dict[str, Descriptor],
+        *, deep: bool = False) -> int:
     from .common import eprint
 
     issues = collect(manifest, catalog, descriptors)
@@ -145,4 +146,17 @@ def run(manifest: Manifest, catalog: dict[str, ServiceEntry], descriptors: dict[
         eprint(f"  [{_SYMBOL[issue.level]}] {issue.message}")
     if not issues:
         eprint("  [✓] no issues")
+
+    if deep:  # composition checked above; now certify each launcher (the component-level contract)
+        import os
+
+        from . import certify
+
+        for service, desc in descriptors.items():
+            sensor = next((s for s in manifest.sensors if s.service == service and s.enabled), None)
+            if sensor is None:
+                continue
+            e, _ = certify.report(f"{service} (via {sensor.name})",
+                                  certify.certify_target(desc, sensor.config, dict(os.environ)))
+            errors += e
     return 1 if errors else 0

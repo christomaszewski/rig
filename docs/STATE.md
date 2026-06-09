@@ -7,20 +7,28 @@
 
 ## TL;DR — where things are
 
-A real deployment to a Jetson Orin from a local registry is **partway up**. The rig tooling is solid and
-well-tested; the remaining work is **cross-repo** (camera-service + dashboard need a few changes to be fully
-bake-friendly), captured as ready-to-paste prompts below.
+**The full 4-stack deployment is UP on the Orin** (2026-06-09): all 9 containers healthy, dashboard serving,
+USB camera streaming + recording, zenoh mesh connected. The cross-repo work that was open here is **done and
+landed** (camera-service #25–#33, dashboard image/tag/caddy fixes). What's left: physical-world verification
+(RTSP source was powered off; webrtc video in a real browser) and the small follow-ups listed below.
 
 **The live test:**
-- **Dev box:** this Mac. Local registry at **`192.168.8.149:5000`** (Docker Desktop must trust it via
-  `insecure-registries`). Workspace `~/rig-walkthrough/` (siblings: `rig/`, `camera-service/`, `dashboard/`,
-  `test-vehicle/` = the deployment).
-- **Vehicle (Orin):** `vehicle: orin-test-vehicle`, `vehicle_id: 1`, `rmw_zenoh_cpp`, `images.tag: jp7`,
-  `images.registry: 192.168.8.149:5000`. Artifact unbaked at `~/ws/test1` on the Orin.
+- **Dev box:** this Mac. Local registry at **`192.168.8.149:5000`** (compose-managed container
+  `docker-registry-registry-1`; Docker Desktop trusts it via `insecure-registries`). Workspace
+  `/Users/ckt/ws/rig-walkthrough/` (siblings: `rig/`, `camera-service/`, `dashboard/`, `test-vehicle/` = the
+  deployment).
+- **Vehicle (Orin):** ssh host `orin` (10.160.1.21, user `uxv`). `vehicle: orin-test-vehicle`,
+  `vehicle_id: 1`, `rmw_zenoh_cpp`, `images.tag: jp7`, `images.registry: 192.168.8.149:5000`,
+  `data_dir: /home/uxv/logs`. Artifact `test1` extracted + **running** at `~/ws/test1` (brought up via
+  `./run.sh up`, compose-only form).
 - **Stacks (4):** infra `zenoh-router` (order 0) + `dashboard` (order 5); sensors `cam_usb` + `cam_rtsp`
-  (camera-service, `camera.type: usb`/`rtsp`).
-- **Working:** zenoh-router (up, pulls eclipse/zenoh), the two cameras (USB device passthrough was the last
-  thing being sorted — see open items). **Not deployed:** the dashboard (image gaps, below).
+  (camera-service). Configs enable **both bridges** per camera (ros2-bridge + webrtc-bridge w/ NVENC H.264,
+  signalling ports 8446/8445), recording on (`/data/recordings` → RIG_DATA_DIR), USB at 1080p MJPEG
+  (stable `/dev/v4l/by-id/...NexiGo...` path), RTSP at 4K (ZR30 at `rtsp://10.160.1.80:8554/main.264`).
+- **Verified up (2026-06-09):** all 4 stacks / 9 containers, compose projects `<name>-vehicle-1`; dashboard
+  HTTP 200 on :8080, ws :10000, webrtc signalling :8445/:8446 listening; cam_usb 30fps no drops, recordings
+  growing on the host; router + dashboard-zenoh sidecar connected. cam_rtsp healthy in its designed
+  reconnect loop — the physical camera was **powered off** during the deploy; it self-recovers when on.
 
 ## What rig is (one paragraph)
 
@@ -52,6 +60,11 @@ A launcher's compose opts into each (`${RIG_IMAGE_REGISTRY:+…}`, `:${RIG_IMAGE
   images kept as registry tags** (multi-arch digests are fragile). `run.sh` prefers the compose-only form.
 - `rig init` + cwd deployment detection (tool and deployment can be separate dirs).
 - Templates: `templates/zenoh-router/` (a ready shared-router infra service; honors `COMPOSE_PROJECT_NAME`).
+- `rig certify [name…|--repo R --config C] [--emit F|--diff A B]` + `rig doctor --deep` (v0.1.18): the
+  launcher contract as executable checks (poison env; project-name/registry/tag/ros-env/determinism/
+  identity/discipline/status). `--emit` on two hosts + `--diff` proves `config` output host-independence.
+  On its first live run it caught cam-up + dash-up overriding `COMPOSE_PROJECT_NAME` (masked until then by
+  the baked scripts' explicit `-p`) — both fixed + re-certified, 0 errors.
 
 ## Deploy recipe (current)
 
@@ -65,33 +78,29 @@ scp var/artifacts/testN.tar.gz orin:/tmp/
 #       restart docker; tar xzf; ./run.sh up   (uses the compose-only scripts; pulls by digest/tag)
 ```
 
-## OPEN ITEMS — cross-repo (prompts ready)
+## OPEN ITEMS
 
-These are the remaining gaps; the rig side of each is done. The recurring principle: **a launcher's `config`
-output must be host-independent** so a bake on the dev box (no camera, wrong JetPack) captures a compose
-correct for the *target* — drive everything off the config + rig's env, never probe the bake host.
+The big cross-repo batch from the previous handoff is **all landed** (verified live 2026-06-09). The
+recurring principle held: **a launcher's `config` output must be host-independent** so a dev-box bake is
+correct for the target. For the record — camera-service: `RIG_IMAGE_TAG` as platform (#26), v4l2 device
+mapping (#25) + host-independent config (#29), `RIG_DATA_DIR` recordings (#27), numeric-coerce + fail-fast
+(#28), webrtc H.264 level/profile + NVENC rank (#30–#32), 1080p example (#33). dashboard: built
+`dashboard-web` image (Caddy + bundle baked in), `RIG_IMAGE_TAG`-tagged pulls, `vehicleHost` signalling fix,
+reworked `rigging.yaml` (infra, no "BUILD phase" framing). `COMPOSE_PROJECT_NAME`: genuinely honored as of
+2026-06-09 — `rig certify` caught cam-up (`tools/sensor_env.py`) and dash-up overriding it (the baked
+scripts' explicit `-p` had masked this; an un-baked `rig up` would have made orphan projects); one-line
+fallback fixes in both repos, re-certified clean.
 
-**camera-service (`cam-up`):**
-1. **Platform from `RIG_IMAGE_TAG`, not host detection** — image tag (`cam-core:${RIG_IMAGE_TAG}`) AND the
-   runtime overlay (`docker-compose.<platform>.yml`). (Was resolving `jp6` on the Mac.)
-2. **USB device passthrough host-independent** — always render `devices: ["${usb.device}:${usb.device}"]`
-   from the config (a `/dev/v4l/by-id/...` path mapped to itself, so it exists in the container without
-   udev), regardless of whether the device exists at config time. (Last thing being debugged.)
-3. **Recordings → `${RIG_DATA_DIR:-/data}/recordings/<name>`** (absolute, so bake leaves it literal instead
-   of pulling it into `compose/<name>/core-driver__recordings/`).
-4. **Honor `COMPOSE_PROJECT_NAME`** — drop `-p`, set a standalone fallback.
-
-**dashboard (`dash-up`):**
-1. **`dashboard-web`** isn't built (registry has no such image) — either build it (Caddy + the React `dist/`)
-   or default the web layer to the **mirrored caddy** (`mirror: [caddy:2-alpine]`).
-2. **Tag** — pull with `${RIG_IMAGE_TAG:-arm64}` so build (jp7) and pull agree (was building `:jp7`, pulling
-   `:arm64`).
-3. Honor `COMPOSE_PROJECT_NAME`; confirm infra placement; drop the "rig BUILD phase" framing (rig has one now).
-
-**boilerplate `<device>-up` (novatel/sbg launchers):** honor `COMPOSE_PROJECT_NAME` (drop `-p`).
-
-**rig follow-ups (`ROADMAP.md`):** `bake --bundle-images` (air-gap), OCI artifact format, ROS `/diagnostics`
-as a 2nd health layer, boot-time systemd unit, `rig adopt/verify`.
+Still open:
+1. **Live-deploy verification (physical world):** power the RTSP camera (ZR30 at `10.160.1.80`) and watch
+   cam_rtsp self-recover; open `http://10.160.1.21:8080` in Chrome and confirm both webrtc streams render
+   (NVENC H.264). One startup-time `listConsumers` parse warning in the webrtc signalling log is a known
+   benign dialect probe.
+2. **boilerplate `<device>-up` (novatel/sbg launchers):** honor `COMPOSE_PROJECT_NAME` (drop `-p`, standalone
+   fallback) — same one-liner the other launchers got. Find + prove it with
+   `rig certify --repo ../novatel --config <example.yaml>` (the project-name check fails until fixed).
+3. **rig follow-ups (`ROADMAP.md`):** `bake --bundle-images` (air-gap), OCI artifact format, ROS
+   `/diagnostics` as a 2nd health layer, boot-time systemd unit, `rig adopt/verify`.
 
 ## Gotchas learned the hard way (deployment debugging)
 
@@ -111,7 +120,10 @@ as a 2nd health layer, boot-time systemd unit, `rig adopt/verify`.
 
 ## Resume checklist
 
-1. `cd ~/rig-walkthrough/rig && git pull` (latest rig). Read `RUNBOOK.md`.
-2. Apply the open camera-service + dashboard prompts above (or `git log` those repos to see what's done).
-3. On the Mac: `rig build -j 3` → verify `/v2/_catalog` → `rig bake --tag testN` → ship to the Orin → `./up.sh`.
-4. The cameras are the deliverable; the dashboard bolts on once its image story is fixed.
+1. The vehicle is **already up** — check it first: `ssh orin 'cd ~/ws/test1 && ./run.sh status'` (or
+   `docker ps`). Dashboard: `http://10.160.1.21:8080`.
+2. Finish the physical verification (open item 1): RTSP camera power, webrtc streams in a browser.
+3. To iterate: edit configs/repos in `/Users/ckt/ws/rig-walkthrough/` → `rig build -j 3` (if images changed)
+   → `rig bake --tag testN` → `scp` to the Orin → `tar xzf` → `./run.sh up`. Verify
+   `curl -s http://192.168.8.149:5000/v2/_catalog` between build and bake.
+4. Teardown when done testing: `ssh orin 'cd ~/ws/test1 && ./run.sh down'`; stop the dev-box registry.

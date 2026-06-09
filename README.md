@@ -36,6 +36,8 @@ services evolve independently and new ones drop in by adding two files (a launch
 python3 -m venv .venv && .venv/bin/pip install pyyaml
 
 ./rig doctor              # read-only preflight (unique names, one ROS distro, launchers present, ...)
+./rig doctor --deep       # + certify each service's launcher against the contract (runs `config`)
+./rig certify             # launcher-contract conformance under a poisoned fleet env (see below)
 ./rig up --dry-run        # print the exact launcher invocations + fleet ROS env, run nothing
 ./rig up                  # bring all enabled sensors up (ascending order)
 ./rig status             # one rolled-up row per sensor (state + health from compose ps)
@@ -63,6 +65,23 @@ scp var/artifacts/v1.tar.gz orin:/tmp/       # on the Orin: `rig unbake … && .
 The artifact bundles the resolved configs + vendored surfaces + rig + a **compose-only** form that runs on
 just Docker (graceful fallback when Python/PyYAML are absent). Full offline / local-registry flow:
 `docs/HOST_SETUP.md`.
+
+## Certify a launcher (the contract, executable)
+
+`doctor` checks the *vehicle* (manifest composition); **`certify` checks a *service*** — it runs the
+launcher's `config` verb under poison env values (`certify.invalid:5000`, `certify-tag-x`, instance
+`certifyname0`) and asserts the contract held: project name honored (no `-p`), images pulled from
+`RIG_IMAGE_REGISTRY`, built images pulled as `:RIG_IMAGE_TAG` (build/pull agreement), fleet ROS env
+reaching containers unmangled, deterministic output, identity fully derived from the config `name`, clean
+stdout, parseable `status`. Run it in a deployment (`rig certify [name…]`, or `rig doctor --deep`) or in a
+service repo's CI with no deployment at all:
+
+```bash
+rig certify --repo . --config core-driver/config/usb-real.yaml          # the service's own CI gate
+rig certify cam_front --emit /tmp/mac.yaml                              # then the same on the vehicle...
+rig certify --diff /tmp/mac.yaml /tmp/orin.yaml   # identical = `config` output is host-independent, so a
+                                                  # dev-box bake is provably correct for the target
+```
 
 ## Layout
 

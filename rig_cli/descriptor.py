@@ -47,6 +47,8 @@ class Descriptor:
     external_volumes: list[str]  # name patterns (may contain `{name}`); GC'd only on final teardown
     host_ports: list[str]        # config paths to host-facing ports rig validates for clashes
     build_command: str | None = None             # `rig build` runs this: <command> <registry> [tag]
+    build_images: list[str] = field(default_factory=list)  # image repos the build produces (certify checks
+    #                                              the compose pulls them as :RIG_IMAGE_TAG — build/pull agreement)
     mirror: list[str] = field(default_factory=list)  # third-party images to copy into the registry
 
     @property
@@ -77,11 +79,13 @@ def load_descriptor(service: str, repo: Path) -> Descriptor:
     verbs = dict(DEFAULT_VERBS)
     verbs.update(data.get("verbs") or {})
 
-    build_raw = data.get("build")  # `build: <cmd>` or `build: { command: <cmd> }`
+    build_raw = data.get("build")  # `build: <cmd>` or `build: { command: <cmd>, images: [...] }`
+    build_images: list[str] = []
     if isinstance(build_raw, str):
         build_command = build_raw
     elif isinstance(build_raw, dict):
         build_command = build_raw.get("command")
+        build_images = list(build_raw.get("images") or [])
     else:
         build_command = None
 
@@ -94,5 +98,6 @@ def load_descriptor(service: str, repo: Path) -> Descriptor:
         external_volumes=list(data.get("external_volumes") or []),
         host_ports=list(data.get("host_ports") or []),
         build_command=build_command,
+        build_images=build_images,
         mirror=list(data.get("mirror") or []),
     )

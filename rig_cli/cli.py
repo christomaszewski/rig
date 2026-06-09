@@ -5,8 +5,8 @@ import argparse
 from pathlib import Path
 
 from . import (
-    RigError, __version__, bake as bake_mod, build as build_mod, doctor as doctor_mod, dispatch,
-    init as init_mod, resolve, status as status_mod, vendor as vendor_mod,
+    RigError, __version__, bake as bake_mod, build as build_mod, certify as certify_mod,
+    doctor as doctor_mod, dispatch, init as init_mod, resolve, status as status_mod, vendor as vendor_mod,
 )
 from .catalog import ServiceEntry, load_catalog
 from .common import eprint
@@ -116,7 +116,38 @@ def cmd_logs(args, manifest, catalog, descriptors) -> int:
 
 
 def cmd_doctor(args, manifest, catalog, descriptors) -> int:
-    return doctor_mod.run(manifest, catalog, descriptors)
+    return doctor_mod.run(manifest, catalog, descriptors, deep=args.deep)
+
+
+def cmd_certify(args, root: Path) -> int:
+    """Launcher-contract conformance. Three modes: --diff compares two --emit files; --repo certifies a
+    service repo directly (its CI — no deployment tree needed); default certifies the manifest's entries."""
+    import os
+
+    if args.diff:
+        return certify_mod.diff_emits(Path(args.diff[0]), Path(args.diff[1]))
+    emit = Path(args.emit) if args.emit else None
+    if args.repo:
+        repo = Path(args.repo).resolve()
+        if not args.config:
+            raise RigError("certify --repo needs --config <file> (an example/instance config to drive "
+                           "the launcher with)")
+        from .descriptor import find_descriptor
+        path = find_descriptor(repo)
+        if path is None:
+            raise RigError(f"certify: no rigging.yaml in {repo}")
+        from .common import load_yaml
+        service = load_yaml(path).get("service") or repo.name
+        desc = load_descriptor(service, repo)
+        targets = [(service, desc, Path(args.config).resolve())]
+    else:
+        manifest, catalog, descriptors = _load(root)
+        sensors = manifest.select(args.names, enabled_only=True)
+        if not sensors:
+            eprint("rig certify: no enabled stacks to certify")
+            return 0
+        targets = [(f"{s.service}/{s.name}", descriptors[s.service], s.config) for s in sensors]
+    return certify_mod.run_targets(targets, dict(os.environ), emit=emit)
 
 
 def cmd_vendor(args, root: Path) -> int:
@@ -196,7 +227,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     add("config", "render each sensor's merged compose").add_argument("--dry-run", action="store_true")
 
-    add("doctor", "read-only preflight checks")
+    add("doctor", "read-only preflight checks").add_argument(
+        "--deep", action="store_true", help="also certify each service's launcher (runs `config` per service)"
+    )
+
+    crt = sub.add_parser("certify", help="launcher-contract conformance checks (poison-env)")
+    crt.add_argument("names", nargs="*", help="sensor name(s); default: all enabled")
+    crt.add_argument("--repo", default=None, help="certify a service repo directly (no deployment needed)")
+    crt.add_argument("--config", default=None, help="config to drive the launcher with (required with --repo)")
+    crt.add_argument("--emit", default=None, metavar="FILE",
+                     help="write the normalized resolved compose (run on two hosts, then certify --diff)")
+    crt.add_argument("--diff", nargs=2, default=None, metavar=("A", "B"),
+                     help="compare two --emit files; identical = host-independent config output")
 
     ini = sub.add_parser("init", help="scaffold a fresh deployment (vehicle.yaml/services.yaml/config)")
     ini.add_argument("target", help="directory to create the deployment in")
@@ -244,6 +286,8 @@ def main(argv=None) -> int:
             return cmd_build(args, root)
         if args.cmd == "bake":
             return cmd_bake(args, root)
+        if args.cmd == "certify":  # may run repo-standalone (--repo/--diff) — routes its own manifest load
+            return cmd_certify(args, root)
         manifest, catalog, descriptors = _load(root)
         return _HANDLERS[args.cmd](args, manifest, catalog, descriptors)
     except RigError as exc:
