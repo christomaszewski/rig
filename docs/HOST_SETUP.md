@@ -11,7 +11,7 @@ following are one-time, out-of-band host steps.
   - Robot/Linux: `sudo apt install python3-yaml`.
   - Dev box (PEP 668 / externally-managed): `python3 -m venv .venv && .venv/bin/pip install pyyaml`, then
     run `.venv/bin/python rig …` and export each launcher's interpreter:
-    `export NOVATEL_PYTHON=$PWD/.venv/bin/python SBG_PYTHON=… GIGE_PYTHON=…`.
+    `export NOVATEL_PYTHON=$PWD/.venv/bin/python SBG_PYTHON=… CAM_PYTHON=…` (or just `apt install python3-yaml`).
 
 ## Wiring the service repos
 
@@ -19,7 +19,7 @@ For **deployment**, vendor each service as a git submodule so its launcher + com
 robot (runtime images are pulled from the registry, not built there):
 
 ```bash
-git submodule add <url> services/gige-vision-service
+git submodule add <url> services/camera-service
 git submodule add <url> services/novatel
 git submodule add <url> services/sbg_driver
 # then point services.yaml at services/<name>
