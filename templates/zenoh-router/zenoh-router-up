@@ -11,7 +11,9 @@ CONFIG="${1:?usage: zenoh-router-up <config.yaml> [up [-d]|down|status|logs|conf
 NAME="$("$PYTHON" -c 'import sys,yaml; print((yaml.safe_load(open(sys.argv[1])) or {}).get("name","zenoh-router"))' "$CONFIG")"
 export ZENOH_ROUTER_NAME="$NAME"
 
+# rig sets COMPOSE_PROJECT_NAME=<name>-vehicle-<id>; honor it (fall back to our own for standalone use).
+export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-zenoh-router_${NAME}}"
 ARGS=("$@"); [ ${#ARGS[@]} -eq 0 ] && ARGS=(up)
 [ "${ARGS[0]}" = "status" ] && ARGS=(ps "${ARGS[@]:1}")
-echo "zenoh-router-up: project=zenoh-router_${NAME} domain=${ROS_DOMAIN_ID:-0} rmw=${RMW_IMPLEMENTATION:-?}" >&2
-exec docker compose -p "zenoh-router_${NAME}" -f "$REPO/docker/compose.deploy.yaml" "${ARGS[@]}"
+echo "zenoh-router-up: project=${COMPOSE_PROJECT_NAME} domain=${ROS_DOMAIN_ID:-0} rmw=${RMW_IMPLEMENTATION:-?}" >&2
+exec docker compose -f "$REPO/docker/compose.deploy.yaml" "${ARGS[@]}"
