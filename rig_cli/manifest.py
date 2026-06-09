@@ -41,6 +41,7 @@ class Manifest:
     image_registry: str | None = None  # fleet-wide registry stacks pull from (None = local images)
     vehicle_id: object = None        # int|str; decides the ROS domain + exported as VEHICLE_ID
     image_tag: str | None = None     # fleet-wide image tag (e.g. a JetPack platform jp7); -> RIG_IMAGE_TAG
+    data_dir: str | None = None      # host dir for recordings/logs/outputs; -> RIG_DATA_DIR
 
     def select(self, names: list[str], enabled_only: bool) -> list[Sensor]:
         """Resolve a name filter into a tiered, ordered list (infra before sensors). Explicit names win."""
@@ -93,6 +94,12 @@ def _parse_entries(entries, tier: str, root: Path, seen: dict[str, Path]) -> lis
     return out
 
 
+def project_name(name: str, vehicle_id=None) -> str:
+    """The compose project for an instance: '<name>-vehicle-<id>' (or '<name>' with no vehicle id). rig owns
+    this so containers are named consistently (<project>-<compose-service>-N) across launchers + bake."""
+    return f"{name}-vehicle-{vehicle_id}" if vehicle_id not in (None, "") else name
+
+
 def stack_summary(sensors: list[Sensor]) -> str:
     """A tier-aware count for human output, e.g. '2 sensors + 2 infra' — infra are stacks, not sensors."""
     infra = sum(1 for s in sensors if s.tier == "infra")
@@ -136,5 +143,7 @@ def load_manifest(root: Path) -> Manifest:
     images = data.get("images") or {}
     image_registry = (str(images.get("registry") or "").strip()) or None
     image_tag = (str(images.get("tag") or "").strip()) or None
+    data_dir = (str(data.get("data_dir") or "").strip()) or None
     return Manifest(vehicle=str(data.get("vehicle", "vehicle")), ros=ros, sensors=infra + sensors,
-                    image_registry=image_registry, vehicle_id=vehicle_id, image_tag=image_tag)
+                    image_registry=image_registry, vehicle_id=vehicle_id, image_tag=image_tag,
+                    data_dir=data_dir)

@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from . import RigError
 from .common import eprint
 from .descriptor import Descriptor
-from .manifest import Manifest, Sensor
+from .manifest import Manifest, Sensor, project_name
 
 
 def fleet_env(manifest: Manifest) -> dict[str, str]:
@@ -28,6 +28,8 @@ def fleet_env(manifest: Manifest) -> dict[str, str]:
         env["RIG_IMAGE_REGISTRY"] = manifest.image_registry  # each compose prefixes its repo:tag with this
     if manifest.image_tag:
         env["RIG_IMAGE_TAG"] = manifest.image_tag  # platform-specific composes tag with this (e.g. jp7)
+    if manifest.data_dir:
+        env["RIG_DATA_DIR"] = manifest.data_dir  # recordings/logs/outputs land here (a real host path)
     return env
 
 
@@ -55,16 +57,16 @@ def run(
     dry_run: bool,
     capture: bool = False,
 ) -> subprocess.CompletedProcess:
+    # rig owns the compose project name (containers = <project>-<compose-service>-N). A launcher honors
+    # COMPOSE_PROJECT_NAME unless it overrides with `-p` (see the launcher contract).
+    env = {**env, "COMPOSE_PROJECT_NAME": project_name(sensor.name, env.get("VEHICLE_ID"))}
     pretty = " ".join(shlex.quote(part) for part in cmd)
     if dry_run:
-        envline = (f"ROS_DOMAIN_ID={env['ROS_DOMAIN_ID']} "
-                   f"RMW_IMPLEMENTATION={env['RMW_IMPLEMENTATION']}")
-        if env.get("VEHICLE_ID"):
-            envline += f" VEHICLE_ID={env['VEHICLE_ID']}"
-        if env.get("RIG_IMAGE_REGISTRY"):
-            envline += f" RIG_IMAGE_REGISTRY={env['RIG_IMAGE_REGISTRY']}"
-        if env.get("RIG_IMAGE_TAG"):
-            envline += f" RIG_IMAGE_TAG={env['RIG_IMAGE_TAG']}"
+        envline = (f"COMPOSE_PROJECT_NAME={env['COMPOSE_PROJECT_NAME']} "
+                   f"ROS_DOMAIN_ID={env['ROS_DOMAIN_ID']} RMW_IMPLEMENTATION={env['RMW_IMPLEMENTATION']}")
+        for key in ("VEHICLE_ID", "RIG_IMAGE_REGISTRY", "RIG_IMAGE_TAG", "RIG_DATA_DIR"):
+            if env.get(key):
+                envline += f" {key}={env[key]}"
         eprint(f"  {sensor.name} [{sensor.service}]  (cwd={desc.repo})")
         eprint(f"    {envline} \\")
         eprint(f"    {pretty}")

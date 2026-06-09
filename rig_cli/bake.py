@@ -24,7 +24,7 @@ import yaml
 
 from . import RigError, __version__
 from .common import eprint, load_yaml
-from .manifest import stack_summary
+from .manifest import project_name, stack_summary
 from .vendor import vendor
 
 
@@ -221,7 +221,7 @@ def _compose_only(manifest, descriptors, env, staging: Path, images: dict) -> li
         (outdir / "docker-compose.yaml").write_text(yaml.safe_dump(compose, sort_keys=False))
         entries.append({
             "sensor": sensor.name,
-            "project": f"{sensor.service}_{sensor.name}",
+            "project": project_name(sensor.name, manifest.vehicle_id),
             "compose": f"compose/{sensor.name}/docker-compose.yaml",
             "external_volumes": ext,
         })
@@ -263,6 +263,8 @@ def bake(root: Path, manifest, catalog, descriptors, env, tag: str, *, registry:
     eff_registry = registry or manifest.image_registry
     if eff_registry or manifest.image_tag:
         veh["images"] = {k: v for k, v in (("registry", eff_registry), ("tag", manifest.image_tag)) if v}
+    if manifest.data_dir:
+        veh["data_dir"] = manifest.data_dir
     if infra_rows:
         veh["infra"] = infra_rows
     veh["sensors"] = sensor_rows
@@ -296,6 +298,7 @@ def bake(root: Path, manifest, catalog, descriptors, env, tag: str, *, registry:
         "rig_version": __version__,
         "registry": registry or manifest.image_registry,
         "image_tag": manifest.image_tag,
+        "data_dir": manifest.data_dir,
         "sensors": [s.name for s in manifest.sensors],
         "compose_only": [e["sensor"] for e in entries],
         "sources": sources,

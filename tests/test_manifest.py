@@ -155,6 +155,26 @@ def test_stack_summary_counts_by_tier():
     assert stack_summary([]) == "0 stacks"
 
 
+def test_project_name():
+    from rig_cli.manifest import project_name
+    assert project_name("cam_usb", 1) == "cam_usb-vehicle-1"
+    assert project_name("cam_usb", "7") == "cam_usb-vehicle-7"
+    assert project_name("x", None) == "x"
+    assert project_name("x", "") == "x"
+
+
+def test_data_dir_parsed_and_exported():
+    from rig_cli.dispatch import fleet_env
+    root = _root_with({
+        "vehicle.yaml": "vehicle: v\ndata_dir: /data/rec\nvehicle_id: 3\n"
+                        "sensors: [{name: a, service: novatel, config: x.yaml}]\n",
+        "x.yaml": "service: novatel\nconnection: {type: file}\n",
+    })
+    m = load_manifest(root)
+    assert m.data_dir == "/data/rec"
+    assert fleet_env(m)["RIG_DATA_DIR"] == "/data/rec"
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

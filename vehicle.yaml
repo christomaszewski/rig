@@ -20,6 +20,10 @@ images:
   tag: ""                      # e.g. jp7 (the Orin's JetPack) -> RIG_IMAGE_TAG; platform-specific composes
                                #   pull <repo>:<tag>. rig build defaults its --tag to this.
 
+# Host dir for recordings/logs/outputs, exported as RIG_DATA_DIR; stacks write under it (an absolute host
+# path, so bake leaves it literal instead of relativizing outputs into the artifact). e.g. /data
+data_dir: ""
+
 # infra: shared vehicle-wide services, brought up FIRST (and torn down last). The zenoh router (one per
 # vehicle) lives here for rmw_zenoh; omit it (or enabled: false) for a DDS RMW or a ROS-less vehicle.
 infra:
