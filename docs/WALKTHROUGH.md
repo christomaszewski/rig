@@ -74,6 +74,12 @@ scp var/artifacts/test1.tar.gz orin:/tmp/
 
 ## Gotchas / current state
 
+- **Multiple instances of one service** (e.g. two cameras): each manifest entry needs a **unique `name`** —
+  rig keys the compose project (`<service>_<name>`), ROS namespace (`/<name>`), and shm volume off it, so
+  instances don't collide. Because everything is **host networking**, set any human/consumer-facing port
+  (WebRTC signalling, preview) **distinct per instance**; `rig doctor` flags a clash if the service declares
+  `host_ports`. Author them as two separate configs, or a nameless profile + per-instance `overrides:`. The
+  launcher reads the source/connection per config — rig is source-agnostic (passes the config through).
 - **PyYAML is installed globally on this Mac** (`/opt/homebrew/bin/python3`), so `./rig` and the launchers
   work directly — **no venv, no `*_PYTHON` exports**. On the Orin: `sudo apt install python3-yaml`.
 - **camera service** = `camera-service` / launcher `cam-up` (renamed from gige/gige-up). Descriptor file is
