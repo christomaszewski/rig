@@ -117,6 +117,7 @@ as a second status layer · a boot-time systemd unit · full host-facing-port-cl
 
 ## Detailed docs (in the rig repo)
 
+**`docs/STATE.md` (current project state + open items — READ FIRST to resume)** ·
 `docs/RUNBOOK.md` (the concrete 2-camera + dashboard deploy, step by step) · `README.md` ·
 `docs/DESIGN.md` (decisions/rationale) · `docs/HOST_SETUP.md` (Orin deploy + registry trust + udev) ·
 `docs/ROADMAP.md` (full feature log + open items).
