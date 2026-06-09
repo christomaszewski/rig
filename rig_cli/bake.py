@@ -184,6 +184,10 @@ def _compose_only(manifest, descriptors, env, staging: Path, images: dict) -> li
     portable/offline use, and write compose/<name>/. Best-effort — a sensor whose launcher can't run is
     skipped (the rig-runnable tree still ships)."""
     entries: list[dict] = []
+    # Images declared `mirror:` in a rigging.yaml are kept as their registry TAG, not digest-pinned: a
+    # mirrored multi-arch tag's digest is fragile (index vs per-arch manifest, re-push churn). Built images
+    # (single-arch, stable digest) are still pinned.
+    mirrored = {_repo_of(m) for d in descriptors.values() for m in d.mirror}
     for sensor in manifest.sensors:
         desc = descriptors[sensor.service]
         repo = staging / "services" / sensor.service
@@ -204,7 +208,11 @@ def _compose_only(manifest, descriptors, env, staging: Path, images: dict) -> li
         _strip_build(compose)
         _strip_profiles(compose)
         for ref in _service_images(compose).values():
-            images.setdefault(ref, _resolve_digest(ref))
+            r = _repo_of(ref)
+            if any(r == m or r.endswith("/" + m) for m in mirrored):
+                images.setdefault(ref, None)  # mirrored third-party -> keep the registry tag (pullable, stable)
+            else:
+                images.setdefault(ref, _resolve_digest(ref))
         _pin_images(compose, images)
         ext = _external_volume_names(compose)
         outdir = staging / "compose" / sensor.name
