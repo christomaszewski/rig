@@ -54,11 +54,14 @@ The vehicle pulls images from a registry it can reach (e.g. a local registry on 
 baked, digest-pinned artifact — no driver source, no internet.
 
 **Dev box:**
-1. Build your stack's images **for arm64** (the Orin) and push them to the local registry — repeat per image:
+1. Get every image into the registry (build-from-source + mirror third-party). For services that declare
+   `build:` / `mirror:` in their `rigging.yaml`:
    ```
-   docker tag <local-image> devbox:5000/<repo>:<tag> && docker push devbox:5000/<repo>:<tag>
+   rig build --registry devbox:5000        # runs each service's build+push command + mirrors its 3rd-party images
    ```
-   (For multi-arch, `skopeo copy` / `docker buildx imagetools create` preserve the index so the Orin pulls arm64.)
+   For a service that declares neither, push its (arm64) image yourself:
+   `docker tag <local> devbox:5000/<repo>:<tag> && docker push devbox:5000/<repo>:<tag>`
+   (or `docker buildx imagetools create` to preserve a multi-arch index).
 2. Bake against that registry (digest-pins every image found in the local registry):
    ```
    rig bake --registry devbox:5000 --tag <name>      # -> var/artifacts/<name>.tar.gz

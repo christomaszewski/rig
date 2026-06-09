@@ -5,8 +5,8 @@ import argparse
 from pathlib import Path
 
 from . import (
-    RigError, __version__, bake as bake_mod, doctor as doctor_mod, dispatch, init as init_mod,
-    resolve, status as status_mod, vendor as vendor_mod,
+    RigError, __version__, bake as bake_mod, build as build_mod, doctor as doctor_mod, dispatch,
+    init as init_mod, resolve, status as status_mod, vendor as vendor_mod,
 )
 from .catalog import ServiceEntry, load_catalog
 from .common import eprint
@@ -137,6 +137,11 @@ def cmd_init(args) -> int:
     return 0
 
 
+def cmd_build(args, root: Path) -> int:
+    manifest, catalog, descriptors = _load(root)
+    return build_mod.build(manifest, descriptors, registry=args.registry, tag=args.tag, dry_run=args.dry_run)
+
+
 def cmd_bake(args, root: Path) -> int:
     manifest, catalog, descriptors = _load(root)
     env = dispatch.fleet_env(manifest)
@@ -200,6 +205,11 @@ def build_parser() -> argparse.ArgumentParser:
     ven.add_argument("--from", dest="source", default=None,
                      help="source repo path (default: the service's services.yaml path)")
 
+    bld = sub.add_parser("build", help="build/push or mirror each service's images into the registry")
+    bld.add_argument("--registry", default=None, help="target registry (overrides vehicle.yaml images.registry)")
+    bld.add_argument("--tag", default=None, help="tag to pass to each service's build command")
+    bld.add_argument("--dry-run", action="store_true")
+
     bk = sub.add_parser("bake", help="freeze the deployment into a tagged, content-addressed artifact")
     bk.add_argument("--tag", required=True, help="artifact tag (names the .tar.gz)")
     bk.add_argument("--registry", default=None,
@@ -227,6 +237,8 @@ def main(argv=None) -> int:
             return cmd_vendor(args, root)
         if args.cmd == "unbake":  # operates on an artifact, not the manifest
             return cmd_unbake(args, root)
+        if args.cmd == "build":
+            return cmd_build(args, root)
         if args.cmd == "bake":
             return cmd_bake(args, root)
         manifest, catalog, descriptors = _load(root)

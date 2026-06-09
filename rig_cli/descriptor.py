@@ -7,7 +7,7 @@ logical verbs (e.g. gige-up takes compose subcommands, so status -> "ps").
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import RigError
@@ -46,6 +46,8 @@ class Descriptor:
     ros_distro: str | None
     external_volumes: list[str]  # name patterns (may contain `{name}`); GC'd only on final teardown
     host_ports: list[str]        # config paths to host-facing ports rig validates for clashes
+    build_command: str | None = None             # `rig build` runs this: <command> <registry> [tag]
+    mirror: list[str] = field(default_factory=list)  # third-party images to copy into the registry
 
     @property
     def launcher_path(self) -> Path:
@@ -74,6 +76,15 @@ def load_descriptor(service: str, repo: Path) -> Descriptor:
         )
     verbs = dict(DEFAULT_VERBS)
     verbs.update(data.get("verbs") or {})
+
+    build_raw = data.get("build")  # `build: <cmd>` or `build: { command: <cmd> }`
+    if isinstance(build_raw, str):
+        build_command = build_raw
+    elif isinstance(build_raw, dict):
+        build_command = build_raw.get("command")
+    else:
+        build_command = None
+
     return Descriptor(
         service=service,
         repo=repo,
@@ -82,4 +93,6 @@ def load_descriptor(service: str, repo: Path) -> Descriptor:
         ros_distro=data.get("ros_distro"),
         external_volumes=list(data.get("external_volumes") or []),
         host_ports=list(data.get("host_ports") or []),
+        build_command=build_command,
+        mirror=list(data.get("mirror") or []),
     )

@@ -107,8 +107,11 @@ coherent) is the real fidelity fork.
 > form (validated self-contained for all three services — nav + gige — incl. profile-stripping and
 > staging-bind localization). `rig bake --registry <host>` digest-pins images against a registry (via
 > `docker buildx imagetools`) and the compose-only form references `<host>/<repo>@sha256:…` —
-> validated end-to-end against a real local registry. **Partial / next:** `--bundle-images` (air-gap docker
-> save/load) + OCI artifact format remain.
+> validated end-to-end against a real local registry. **`rig build [--registry]`** populates the registry by
+> running each service's declared `build:` command (build + push its own images) and mirroring its `mirror:`
+> third-party images (`docker buildx imagetools`); specifying a full image ref directly stays the per-service
+> `${<SVC>_IMAGE}` override. **Partial / next:** `--bundle-images` (air-gap docker save/load) + OCI artifact
+> format remain.
 
 
 The vehicle holds the **launch surface + configs**, never driver source. Flow: develop drivers (own repos)
