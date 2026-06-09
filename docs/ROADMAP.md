@@ -19,16 +19,17 @@ config** (today's behavior) OR a **nameless profile** (a config with `service:` 
 ```yaml
 # config/sensors/camera.profile.yaml   — reusable profile, NO `name`
 service: camera-service
-camera: { fake: false, pixel_format: Mono8, frame_rate: 20.0, ptp_enable: true }
+camera: { type: gige, frame_rate: 20.0 }              # general: type selects the source
+gige:   { fake: false, pixel_format: Mono8, ptp_enable: true }
 recording: { enabled: true }
 ```
 ```yaml
 # vehicle.yaml
 sensors:
   - { name: cam_front, service: camera-service, config: config/sensors/camera.profile.yaml,
-      overrides: { camera: { camera_id: "Lucid-2448-AAA" } } }
+      overrides: { gige: { camera_id: "Lucid-2448-AAA" } } }
   - { name: cam_rear,  service: camera-service, config: config/sensors/camera.profile.yaml,
-      overrides: { camera: { camera_id: "Lucid-2448-BBB" } } }
+      overrides: { gige: { camera_id: "Lucid-2448-BBB" } } }
 ```
 
 ### Resolution pipeline (rig-side, per sensor)

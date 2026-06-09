@@ -1,21 +1,24 @@
 # A reusable, NAMELESS camera-service camera profile. Reference it from vehicle.yaml with a per-instance
-# `overrides:` (at minimum the `camera_id`); rig deep-merges the override, stamps in `name`, and renders the
-# result to var/rendered/<name>.yaml before handing it to cam-up. Example:
+# `overrides:` (at minimum the `gige.camera_id`); rig deep-merges the override, stamps in `name`, and renders
+# the result to var/rendered/<name>.yaml before handing it to cam-up. Example:
 #
 #   sensors:
 #     - { name: cam_front, service: camera-service, config: config/sensors/camera.profile.yaml,
-#         overrides: { camera: { camera_id: "Lucid-2448-AAA" } } }
+#         overrides: { gige: { camera_id: "Lucid-2448-AAA" } } }
 #     - { name: cam_rear,  service: camera-service, config: config/sensors/camera.profile.yaml,
-#         overrides: { camera: { camera_id: "Lucid-2448-BBB" } } }
+#         overrides: { gige: { camera_id: "Lucid-2448-BBB" } } }
 service: camera-service
 
 camera:
+  type: gige
+  frame_rate: 20.0
+
+gige:
   fake: false
   pixel_format: Mono8
-  frame_rate: 20.0
   timestamp_source: ptp_chunk
   ptp_enable: true
-  # camera_id supplied per-instance via overrides
+  # camera_id supplied per-instance via overrides: { gige: { camera_id: ... } }
 
 recording:
   enabled: true

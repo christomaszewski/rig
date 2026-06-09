@@ -37,19 +37,19 @@ def test_profile_shared_across_instances_and_passthrough():
             vehicle: t
             ros: {domain_id: 0}
             sensors:
-              - {name: cam_front, service: camera-service, config: p.yaml, overrides: {camera: {camera_id: AAA}}}
-              - {name: cam_rear,  service: camera-service, config: p.yaml, overrides: {camera: {camera_id: BBB}}}
+              - {name: cam_front, service: camera-service, config: p.yaml, overrides: {gige: {camera_id: AAA}}}
+              - {name: cam_rear,  service: camera-service, config: p.yaml, overrides: {gige: {camera_id: BBB}}}
               - {name: gnss,      service: novatel,     config: named.yaml}
         """,
-        "p.yaml": "service: camera-service\ncamera: {fake: false, frame_rate: 20.0}\n",
+        "p.yaml": "service: camera-service\ncamera: {type: gige, frame_rate: 20.0}\ngige: {fake: false}\n",
         "named.yaml": "service: novatel\nname: gnss\nconnection: {type: tcp}\n",
     })
     by = {s.name: s for s in materialize_manifest(load_manifest(root), root).sensors}
 
     # two instances share ONE profile, differ only by id; each rendered with its own injected name
     a, b = load_yaml(by["cam_front"].config), load_yaml(by["cam_rear"].config)
-    assert a["name"] == "cam_front" and a["camera"]["camera_id"] == "AAA" and a["camera"]["frame_rate"] == 20.0
-    assert b["name"] == "cam_rear" and b["camera"]["camera_id"] == "BBB"
+    assert a["name"] == "cam_front" and a["gige"]["camera_id"] == "AAA" and a["camera"]["frame_rate"] == 20.0
+    assert b["name"] == "cam_rear" and b["gige"]["camera_id"] == "BBB"
     assert by["cam_front"].config != by["cam_rear"].config  # distinct rendered files
 
     # a complete named config with no overrides is passed through untouched (no render)

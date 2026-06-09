@@ -1,14 +1,17 @@
 # GigE Vision camera. Brought up by `cam-up` (in the camera-service repo), which reads this rich
 # service-specific schema directly (rig treats everything below `name:` as opaque and just hands cam-up
-# the path). `fake: true` is a dev/synthetic source; production sets a real `camera_id`.
+# the path). `gige.fake: true` is a dev/synthetic source; production sets a real `gige.camera_id`.
 service: camera-service
 name: cam_front
 
 camera:
+  type: gige              # gige (GVSP/Aravis) | usb | rtsp -- selects the source; frame_rate is general
+  frame_rate: 20.0
+
+gige:
   fake: true
   camera_id: Fake_1
   pixel_format: Mono8
-  frame_rate: 20.0
   timestamp_source: ptp_chunk
   ptp_enable: false
 
