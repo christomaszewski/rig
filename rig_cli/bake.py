@@ -159,16 +159,22 @@ def _write_bootstrap(staging: Path) -> None:
     boot = staging / "run.sh"
     boot.write_text(
         "#!/usr/bin/env sh\n"
-        "# Bring the vehicle up: use rig if Python+PyYAML are present, else the static compose scripts.\n"
+        "# Run the baked deployment. The compose-only scripts are registry-pinned + build-stripped (they\n"
+        "# PULL images, never build) -> prefer them for up/down/status. rig (the vendored launchers, which\n"
+        "# may build from source) is the fallback for other verbs / a missing compose-only form, and the\n"
+        "# mutable path: after editing a config, run `rig up` directly to re-render.\n"
         'cd "$(dirname "$0")"\n'
-        "verb=\"${1:-up}\"\n"
+        'verb="${1:-up}"\n'
+        'case "$verb" in\n'
+        "  up)     [ -f ./up.sh ]     && exec ./up.sh ;;\n"
+        "  down)   [ -f ./down.sh ]   && exec ./down.sh ;;\n"
+        "  status) [ -f ./status.sh ] && exec ./status.sh ;;\n"
+        "esac\n"
         "if command -v python3 >/dev/null 2>&1 && python3 -c 'import yaml' >/dev/null 2>&1; then\n"
         '  exec python3 ./rig "$verb"\n'
         "fi\n"
-        'case "$verb" in\n'
-        "  up) exec ./up.sh ;; down) exec ./down.sh ;; status) exec ./status.sh ;;\n"
-        '  *) echo "rig (python) unavailable; use ./up.sh | ./down.sh | ./status.sh" >&2; exit 1 ;;\n'
-        "esac\n"
+        'echo "run.sh: $verb needs the compose-only scripts or rig (python3 + pyyaml)" >&2\n'
+        "exit 1\n"
     )
     boot.chmod(0o755)
 
@@ -231,18 +237,28 @@ def bake(root: Path, manifest, catalog, descriptors, env, tag: str, *, registry:
     shutil.copytree(tool_root / "rig_cli", staging / "rig_cli",
                     ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
 
-    # 2. resolved per-sensor configs + a resolved vehicle.yaml (overrides/profiles already baked in)
+    # 2. resolved per-sensor configs + a COMPLETE resolved vehicle.yaml (overrides/profiles already baked
+    #    in; images / vehicle_id / infra+sensor tiers preserved so a `rig up` on the unbaked tree exports
+    #    the same fleet env — RIG_IMAGE_REGISTRY/RIG_IMAGE_TAG/VEHICLE_ID/ROS_DOMAIN_ID).
     cfg_dir = staging / "config" / "sensors"
     cfg_dir.mkdir(parents=True)
-    rows = []
+    infra_rows, sensor_rows = [], []
     for s in manifest.sensors:
         shutil.copy2(s.config, cfg_dir / f"{s.name}.yaml")
-        rows.append({"name": s.name, "service": s.service,
-                     "config": f"config/sensors/{s.name}.yaml", "enabled": s.enabled, "order": s.order})
-    (staging / "vehicle.yaml").write_text(yaml.safe_dump(
-        {"vehicle": manifest.vehicle,
-         "ros": {"domain_id": manifest.ros.domain_id, "rmw": manifest.ros.rmw, "distro": manifest.ros.distro},
-         "sensors": rows}, sort_keys=False))
+        row = {"name": s.name, "service": s.service,
+               "config": f"config/sensors/{s.name}.yaml", "enabled": s.enabled, "order": s.order}
+        (infra_rows if s.tier == "infra" else sensor_rows).append(row)
+    veh: dict = {"vehicle": manifest.vehicle}
+    if manifest.vehicle_id is not None:
+        veh["vehicle_id"] = manifest.vehicle_id
+    veh["ros"] = {"domain_id": manifest.ros.domain_id, "rmw": manifest.ros.rmw, "distro": manifest.ros.distro}
+    eff_registry = registry or manifest.image_registry
+    if eff_registry or manifest.image_tag:
+        veh["images"] = {k: v for k, v in (("registry", eff_registry), ("tag", manifest.image_tag)) if v}
+    if infra_rows:
+        veh["infra"] = infra_rows
+    veh["sensors"] = sensor_rows
+    (staging / "vehicle.yaml").write_text(yaml.safe_dump(veh, sort_keys=False))
 
     # 3. vendor each service's launch surface in + a catalog that points at them
     catalog_out = {}
