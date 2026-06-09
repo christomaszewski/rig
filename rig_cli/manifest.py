@@ -93,6 +93,18 @@ def _parse_entries(entries, tier: str, root: Path, seen: dict[str, Path]) -> lis
     return out
 
 
+def stack_summary(sensors: list[Sensor]) -> str:
+    """A tier-aware count for human output, e.g. '2 sensors + 2 infra' — infra are stacks, not sensors."""
+    infra = sum(1 for s in sensors if s.tier == "infra")
+    sens = len(sensors) - infra
+    parts = []
+    if sens:
+        parts.append(f"{sens} sensor{'' if sens == 1 else 's'}")
+    if infra:
+        parts.append(f"{infra} infra")
+    return " + ".join(parts) or "0 stacks"
+
+
 def _derive_domain(vehicle_id, ros_raw: dict) -> int:
     """Explicit `ros.domain_id` wins; else a numeric vehicle id IS the domain (so one knob picks both);
     else 0."""

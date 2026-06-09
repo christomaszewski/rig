@@ -14,7 +14,7 @@ from pathlib import Path
 from .catalog import ServiceEntry
 from .common import load_yaml
 from .descriptor import Descriptor
-from .manifest import Manifest
+from .manifest import Manifest, stack_summary
 
 ERROR, WARN, INFO, OK = "ERROR", "WARN", "INFO", "OK"
 _SYMBOL = {ERROR: "✗", WARN: "!", INFO: "·", OK: "✓"}
@@ -106,7 +106,7 @@ def collect(
                 ports.setdefault(value, []).append(sensor.name)
     for port, owners in sorted(ports.items()):
         if len(owners) > 1:
-            issues.append(Issue(ERROR, f"host port {port} claimed by multiple sensors: {owners}"))
+            issues.append(Issue(ERROR, f"host port {port} claimed by multiple stacks: {owners}"))
 
     # Coarse resource reminders (rig treats driver configs as opaque, so this is advisory).
     cameras = [s.name for s in manifest.sensors if s.service == "camera-service" and s.enabled]
@@ -130,7 +130,7 @@ def run(manifest: Manifest, catalog: dict[str, ServiceEntry], descriptors: dict[
 
     issues = collect(manifest, catalog, descriptors)
     errors = sum(1 for i in issues if i.level == ERROR)
-    eprint(f"rig doctor: {manifest.vehicle} — {len(manifest.sensors)} sensors, {errors} error(s)")
+    eprint(f"rig doctor: {manifest.vehicle} — {stack_summary(manifest.sensors)}, {errors} error(s)")
     for issue in issues:
         eprint(f"  [{_SYMBOL[issue.level]}] {issue.message}")
     if not issues:

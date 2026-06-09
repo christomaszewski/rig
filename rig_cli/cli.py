@@ -11,7 +11,7 @@ from . import (
 from .catalog import ServiceEntry, load_catalog
 from .common import eprint
 from .descriptor import Descriptor, load_descriptor
-from .manifest import Manifest, Sensor, load_manifest
+from .manifest import Manifest, Sensor, load_manifest, stack_summary
 
 
 def find_root() -> Path:
@@ -67,9 +67,9 @@ def cmd_up(args, manifest, catalog, descriptors) -> int:
     env = dispatch.fleet_env(manifest)
     pairs = _pairs(manifest, descriptors, args.names)  # ascending order: producers before consumers
     if not pairs:
-        eprint("rig: no enabled sensors to bring up")
+        eprint("rig: no enabled stacks to bring up")
         return 0
-    eprint(f"rig up: {manifest.vehicle} — {len(pairs)} sensor(s)")
+    eprint(f"rig up: {manifest.vehicle} — {stack_summary([p[0] for p in pairs])}")
     return _summarize(dispatch.run_verb(pairs, env, "up", dry_run=args.dry_run))
 
 
@@ -77,9 +77,9 @@ def cmd_down(args, manifest, catalog, descriptors) -> int:
     env = dispatch.fleet_env(manifest)
     pairs = _pairs(manifest, descriptors, args.names, reverse=True)  # reverse: consumers before producers
     if not pairs:
-        eprint("rig: no enabled sensors to tear down")
+        eprint("rig: no enabled stacks to tear down")
         return 0
-    eprint(f"rig down: {manifest.vehicle} — {len(pairs)} sensor(s)")
+    eprint(f"rig down: {manifest.vehicle} — {stack_summary([p[0] for p in pairs])}")
     rc = _summarize(dispatch.run_verb(pairs, env, "down", dry_run=args.dry_run))
     if args.purge:
         eprint("rig: purging external volumes (final teardown)")

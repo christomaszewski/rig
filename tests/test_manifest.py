@@ -141,6 +141,20 @@ def test_image_registry_parsed():
     assert e.image_registry is None and e.image_tag is None  # empty -> None (local images)
 
 
+def test_stack_summary_counts_by_tier():
+    from pathlib import Path
+
+    from rig_cli.manifest import Sensor, stack_summary
+
+    def mk(name, tier):
+        return Sensor(name=name, service="s", config=Path("/x"), enabled=True, order=0, tier=tier)
+
+    assert stack_summary([mk("a", "infra"), mk("b", "infra"), mk("c", "sensor"), mk("d", "sensor")]) == "2 sensors + 2 infra"
+    assert stack_summary([mk("c", "sensor")]) == "1 sensor"
+    assert stack_summary([mk("a", "infra")]) == "1 infra"
+    assert stack_summary([]) == "0 stacks"
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):
