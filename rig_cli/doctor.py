@@ -93,6 +93,16 @@ def collect(
         elif not lp.stat().st_mode & 0o111:
             issues.append(Issue(WARN, f"{svc}: launcher not executable: {lp}"))
 
+    # ROS sensors namespace a node by the instance name, and ROS 2 names allow only [A-Za-z_][A-Za-z0-9_]*
+    # (no hyphens, no leading digit). Flag a per-instance ROS stack whose name would be an invalid namespace.
+    _ros_name = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+    for sensor in manifest.sensors:
+        desc = descriptors.get(sensor.service)
+        if sensor.tier == "sensor" and desc and desc.ros_distro and not _ros_name.match(sensor.name):
+            issues.append(Issue(WARN, f"'{sensor.name}' ({sensor.service}) isn't a valid ROS 2 name (only "
+                                       f"letters/digits/underscores, no hyphens) — the ROS node namespaced by "
+                                       f"it will fail; rename to e.g. '{sensor.name.replace('-', '_')}'"))
+
     # Host-facing port clashes (only for services that declare host_ports in their rigging.yaml).
     ports: dict[int, list[str]] = {}
     for sensor in manifest.sensors:

@@ -27,6 +27,33 @@ def test_selector_is_enabled_aware():
     assert _get_path(on, "plugins[name=webrtc-bridge,enabled=true].params.port") == 8443
 
 
+def test_warns_on_non_ros_safe_sensor_name():
+    import tempfile
+
+    from rig_cli.catalog import load_catalog
+    from rig_cli.descriptor import load_descriptor
+    from rig_cli.doctor import collect
+    from rig_cli.manifest import load_manifest
+
+    svc = pathlib.Path(tempfile.mkdtemp())
+    (svc / "rigging.yaml").write_text("service: cam\nlauncher: cam-up\nros_distro: lyrical\n")
+    (svc / "cam-up").write_text("#!/bin/sh\n")
+    (svc / "cam-up").chmod(0o755)
+
+    def manifest_with(name):
+        d = pathlib.Path(tempfile.mkdtemp())
+        (d / "config").mkdir()
+        (d / "vehicle.yaml").write_text(f"vehicle: t\nsensors: [{{name: {name}, service: cam, config: config/c.yaml}}]\n")
+        (d / "services.yaml").write_text(f"services: {{cam: {{path: {svc}}}}}\n")
+        (d / "config" / "c.yaml").write_text(f"service: cam\nname: {name}\n")
+        return load_manifest(d), load_catalog(d), {"cam": load_descriptor("cam", svc)}
+
+    m, cat, descs = manifest_with("cam-usb")     # hyphen -> invalid ROS name -> WARN
+    assert any(i.level == "WARN" and "cam-usb" in i.message and "ROS 2 name" in i.message for i in collect(m, cat, descs))
+    m2, cat2, descs2 = manifest_with("cam_usb")  # underscore -> no such warning
+    assert not any("ROS 2 name" in i.message for i in collect(m2, cat2, descs2))
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):
