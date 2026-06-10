@@ -4,6 +4,10 @@
 > `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.1.18**, branch
 > **`main`** (the `config-schema-symmetric` work is merged; feature branches deleted), 46 tests passing
 > (`python3 tests/test_*.py`). Tool at `/Users/ckt/ws/bringup`; run-from-source `./rig <verb>`.
+> **Remote: https://github.com/christomaszewski/rig (public)** — Actions runs the test suite on push/PR.
+> camera-service has a `rig certify` CI gate (launcher-contract) via PR #36 (+ the cam-up verbatim-pull-tag
+> fix); the walkthrough's camera-service checkout sits on that PR branch until it merges. dashboard has NO
+> GitHub remote (origin = local /Users/ckt/ws/dashboard) — no CI gate possible there yet.
 
 ## TL;DR — where things are
 
