@@ -94,6 +94,18 @@ def cmd_config(args, manifest, catalog, descriptors) -> int:
     return _summarize(dispatch.run_verb(pairs, env, "config", dry_run=args.dry_run))
 
 
+def cmd_pull(args, manifest, catalog, descriptors) -> int:
+    """Pre-pull every stack's images — no containers created/restarted. The field-ops primer: pull while
+    the registry is reachable, then `up` (now or later) starts from the local cache."""
+    env = dispatch.fleet_env(manifest)
+    pairs = _pairs(manifest, descriptors, args.names)
+    if not pairs:
+        eprint("rig: no enabled stacks to pull for")
+        return 0
+    eprint(f"rig pull: {manifest.vehicle} — {stack_summary([p[0] for p in pairs])}")
+    return _summarize(dispatch.run_verb(pairs, env, "pull", dry_run=args.dry_run))
+
+
 def cmd_status(args, manifest, catalog, descriptors) -> int:
     env = dispatch.fleet_env(manifest)
     pairs = _pairs(manifest, descriptors, args.names)
@@ -192,6 +204,7 @@ _HANDLERS = {
     "up": cmd_up,
     "down": cmd_down,
     "config": cmd_config,
+    "pull": cmd_pull,
     "status": cmd_status,
     "logs": cmd_logs,
     "doctor": cmd_doctor,
@@ -226,6 +239,10 @@ def build_parser() -> argparse.ArgumentParser:
     logs.add_argument("--tail", type=int, default=None, help="show only the last N lines")
 
     add("config", "render each sensor's merged compose").add_argument("--dry-run", action="store_true")
+
+    add("pull", "pre-pull each stack's images (no container changes)").add_argument(
+        "--dry-run", action="store_true"
+    )
 
     add("doctor", "read-only preflight checks").add_argument(
         "--deep", action="store_true", help="also certify each service's launcher (runs `config` per service)"

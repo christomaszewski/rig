@@ -34,6 +34,9 @@ DEFAULT_VERBS = {
     "status": "ps",
     "logs": "logs",
     "config": "config",
+    # Optional: pre-pull images with NO container changes (prime a vehicle's cache while the registry is
+    # reachable, then run offline). Launchers that pass compose subcommands through get it for free.
+    "pull": "pull",
 }
 
 

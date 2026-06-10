@@ -84,6 +84,7 @@ form (build-stripped; built images digest-pinned, mirrored images by tag). It ru
 ```bash
 scp var/artifacts/v1.tar.gz $VEHICLE:~/ws/
 ssh $VEHICLE 'cd ~/ws && tar xzf v1.tar.gz'
+ssh $VEHICLE 'cd ~/ws/v1 && ./run.sh pull'    # optional: pre-warm the image cache — touches NO containers
 ssh $VEHICLE 'cd ~/ws/v1 && ./run.sh up'      # pulls from $REGISTRY; infra first, then sensors
 ssh $VEHICLE 'cd ~/ws/v1 && ./run.sh status'  # or: ./run.sh logs <name> · ./run.sh down
 ```

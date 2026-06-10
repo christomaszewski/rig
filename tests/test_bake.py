@@ -61,6 +61,39 @@ def test_localize_binds_relativizes_staging_paths_only():
     assert vols[3]["source"] == "/data/host"
 
 
+def test_write_scripts_emits_pull_beside_up_down_status():
+    from rig_cli.bake import _write_bootstrap, _write_scripts
+
+    staging = pathlib.Path(tempfile.mkdtemp())
+    entries = [
+        {"sensor": "a", "project": "a-vehicle-1", "compose": "compose/a/docker-compose.yaml",
+         "external_volumes": []},
+        {"sensor": "b", "project": "b-vehicle-1", "compose": "compose/b/docker-compose.yaml",
+         "external_volumes": []},
+    ]
+    _write_scripts(staging, entries)
+    _write_bootstrap(staging)
+    pull = (staging / "pull.sh").read_text()
+    assert 'docker compose -p "a-vehicle-1" -f "compose/a/docker-compose.yaml" pull' in pull
+    assert 'docker compose -p "b-vehicle-1" -f "compose/b/docker-compose.yaml" pull' in pull
+    assert "up -d" not in pull and "down" not in pull  # pull touches NO containers
+    assert (staging / "pull.sh").stat().st_mode & 0o111
+    assert "pull)" in (staging / "run.sh").read_text()  # run.sh routes the verb
+
+
+def test_pull_is_a_default_verb():
+    import tempfile as _tf
+
+    from rig_cli.descriptor import load_descriptor
+
+    svc = pathlib.Path(_tf.mkdtemp())
+    (svc / "rigging.yaml").write_text("service: demo\nlauncher: demo-up\n")
+    desc = load_descriptor("demo", svc)
+    assert desc.verb_args("pull") == ["pull"]  # compose-passthrough launchers get it for free
+    (svc / "rigging.yaml").write_text("service: demo\nlauncher: demo-up\nverbs: {pull: 'fetch --all'}\n")
+    assert load_descriptor("demo", svc).verb_args("pull") == ["fetch", "--all"]  # and it's overridable
+
+
 def test_bake_bundles_tool_from_separated_deployment():
     # rig init layout: the deployment root has NO rig tool in it (the tool lives in this package's dir).
     from rig_cli.bake import bake, unbake

@@ -40,6 +40,7 @@ python3 -m venv .venv && .venv/bin/pip install pyyaml
 ./rig certify             # launcher-contract conformance under a poisoned fleet env (see below)
 ./rig up --dry-run        # print the exact launcher invocations + fleet ROS env, run nothing
 ./rig up                  # bring all enabled sensors up (ascending order)
+./rig pull                # pre-pull every stack's images, NO container changes (prime a cache, then run offline)
 ./rig status             # one rolled-up row per sensor (state + health from compose ps)
 ./rig status -v           # expand per-container detail
 ./rig logs cam_front -f   # follow one sensor's logs

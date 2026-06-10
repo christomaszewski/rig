@@ -149,7 +149,12 @@ def _write_scripts(staging: Path, entries: list[dict]) -> None:
     for e in entries:
         status.append(f'echo "== {e["sensor"]} ({e["project"]}) =="')
         status.append(f'docker compose -p "{e["project"]}" -f "{e["compose"]}" ps')
-    for fname, lines in (("up.sh", up), ("down.sh", down), ("status.sh", status)):
+    # pull: prime the vehicle's image cache while the registry is reachable — touches NO containers,
+    # so it's safe against a running deployment (unlike `up`, which recreates changed services).
+    pull = ["#!/usr/bin/env sh", "set -e", "cd \"$(dirname \"$0\")\""]
+    for e in entries:
+        pull.append(f'docker compose -p "{e["project"]}" -f "{e["compose"]}" pull')
+    for fname, lines in (("up.sh", up), ("down.sh", down), ("status.sh", status), ("pull.sh", pull)):
         path = staging / fname
         path.write_text("\n".join(lines) + "\n")
         path.chmod(0o755)
@@ -169,6 +174,7 @@ def _write_bootstrap(staging: Path) -> None:
         "  up)     [ -f ./up.sh ]     && exec ./up.sh ;;\n"
         "  down)   [ -f ./down.sh ]   && exec ./down.sh ;;\n"
         "  status) [ -f ./status.sh ] && exec ./status.sh ;;\n"
+        "  pull)   [ -f ./pull.sh ]   && exec ./pull.sh ;;\n"
         "esac\n"
         "if command -v python3 >/dev/null 2>&1 && python3 -c 'import yaml' >/dev/null 2>&1; then\n"
         '  exec python3 ./rig "$verb"\n'
