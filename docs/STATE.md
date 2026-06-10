@@ -1,9 +1,9 @@
 # rig — project state & handoff (resume here)
 
-> Snapshot for picking the project up cold in a new session. Read this first, then `RUNBOOK.md` (the deploy
-> steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.1.17**, branch
-> **`config-schema-symmetric`**, ~33 tests passing (`python3 tests/test_*.py`). Tool at
-> `/Users/ckt/ws/bringup`; run-from-source `./rig <verb>`.
+> Snapshot for picking the project up cold in a new session. Read this first, then `CHEATSHEET.md` /
+> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.1.18**, branch
+> **`main`** (the `config-schema-symmetric` work is merged; feature branches deleted), 46 tests passing
+> (`python3 tests/test_*.py`). Tool at `/Users/ckt/ws/bringup`; run-from-source `./rig <verb>`.
 
 ## TL;DR — where things are
 
