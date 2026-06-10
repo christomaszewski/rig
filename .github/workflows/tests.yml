@@ -17,3 +17,11 @@ jobs:
             python3 "$t" || rc=1
           done
           exit $rc
+      # The bundled zenoh-router template is the reference implementation of the launcher contract —
+      # hold it to the contract it exemplifies, on both paths (default, and inline router_config).
+      - name: certify the zenoh-router template
+        run: ./rig certify --repo templates/zenoh-router --config templates/zenoh-router/config/zenoh-router.example.yaml
+      - name: certify the template's router_config path
+        run: |
+          printf 'service: zenoh-router\nname: zr\nrouter_config:\n  scouting: {multicast: {enabled: false}}\n' > /tmp/zr.yaml
+          ./rig certify --repo templates/zenoh-router --config /tmp/zr.yaml

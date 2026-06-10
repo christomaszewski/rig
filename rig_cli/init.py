@@ -41,7 +41,8 @@ The manifest + per-sensor configs for one vehicle/fleet (no driver source lives 
 
 1. Edit `services.yaml` (where each service repo is) and `vehicle.yaml` (which sensors, fleet ROS env,
    image registry).
-2. Add a config per sensor under `config/sensors/` (or reference a nameless profile + per-sensor overrides).
+2. Add a config per sensor under `config/sensors/` (or reference a nameless profile + per-sensor
+   overrides), and per shared infra service under `config/infra/`.
 3. Validate + run: `rig doctor` · `rig up --dry-run` · `rig up` · `rig status`.
 4. Deploy: `rig vendor <svc> --from <repo>` · `rig bake --registry <host> --tag <t>` · ship the artifact ·
    on the vehicle `rig unbake <artifact> && ./run.sh up`.
@@ -56,13 +57,15 @@ def init(target: Path) -> Path:
     if (target / "vehicle.yaml").exists():
         raise RigError(f"init: {target} already has a vehicle.yaml (refusing to overwrite)")
     (target / "config" / "sensors").mkdir(parents=True, exist_ok=True)
+    (target / "config" / "infra").mkdir(parents=True, exist_ok=True)  # shared services (zenoh router, ...)
     (target / "services").mkdir(parents=True, exist_ok=True)
     (target / "vehicle.yaml").write_text(_VEHICLE)
     (target / "services.yaml").write_text(_SERVICES)
     (target / "README.md").write_text(_README.format(name=target.name))
     (target / ".gitignore").write_text("var/\n.venv/\n__pycache__/\n*.pyc\n.DS_Store\n")
     (target / "config" / "sensors" / ".gitkeep").write_text("")
+    (target / "config" / "infra" / ".gitkeep").write_text("")
     (target / "services" / ".gitkeep").write_text("")
     eprint(f"initialized rig deployment at {target}")
-    eprint("  next: edit services.yaml + vehicle.yaml, add config/sensors/*, then `rig doctor`")
+    eprint("  next: edit services.yaml + vehicle.yaml, add config/{infra,sensors}/*, then `rig doctor`")
     return target

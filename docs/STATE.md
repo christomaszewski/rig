@@ -66,6 +66,11 @@ A launcher's compose opts into each (`${RIG_IMAGE_REGISTRY:+…}`, `:${RIG_IMAGE
 - Templates: `templates/zenoh-router/` (a ready shared-router infra service; honors `COMPOSE_PROJECT_NAME`).
 - `rig pull` + baked `pull.sh` (v0.1.19): pre-pull every stack's images with NO container changes — prime
   the vehicle's cache while the registry is reachable, then run offline; safe against a live deployment.
+- v0.1.20: `rig init` scaffolds `config/infra/` alongside sensors; the zenoh-router template takes an
+  **inline `router_config:` mapping** (instance YAML → rendered `var/run/<name>/zenohd.json5` → `-c` +
+  `ZENOH_ROUTER_CONFIG_URI`; bake captures it like any rendered file — inline only, paths don't bake);
+  rig's CI certifies the template (reference launcher) on both config paths. Also validated: **re-bake
+  inside an extracted artifact works** (field-state capture) — provenance stamping still a follow-up.
 - `rig certify [name…|--repo R --config C] [--emit F|--diff A B]` + `rig doctor --deep` (v0.1.18): the
   launcher contract as executable checks (poison env; project-name/registry/tag/ros-env/determinism/
   identity/discipline/status). `--emit` on two hosts + `--diff` proves `config` output host-independence.

@@ -15,3 +15,4 @@ mirror:
 launch_surface:
   - zenoh-router-up
   - docker/compose.deploy.yaml
+  - docker/compose.config.yaml   # applied only when the instance config has an inline `router_config:`

@@ -41,8 +41,7 @@ rig --version                              # -> rig 0.1.9
 
 ## 3 — Scaffold the deployment
 ```bash
-rig init my-vehicle && cd my-vehicle
-mkdir -p config/infra config/sensors
+rig init my-vehicle && cd my-vehicle      # scaffolds config/{infra,sensors}/ + the manifest files
 
 cat > services.yaml <<'EOF'
 services:
