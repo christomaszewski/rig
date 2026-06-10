@@ -74,10 +74,14 @@ same — build/pull agreement is enforced, not hoped.
 
 ```bash
 rig bake --tag v1                             # -> var/artifacts/v1.tar.gz  (sha256 printed)
+rig bake --tag v1 --bundle-images             # + docker-saves the image set INTO the artifact (multi-GB):
+                                              #   zero registry at deploy time; up.sh self-loads on first run
 ```
 
 The artifact = resolved configs + complete vehicle.yaml + vendored launch surfaces + rig + a **compose-only**
 form (build-stripped; built images digest-pinned, mirrored images by tag). It runs on bare Docker.
+Bundled artifacts keep **tag** refs (loaded images can't carry registry digests) — integrity is the
+artifact's own sha256; digests are still recorded in `metadata.yaml`/`rig.lock` for audit.
 
 ## 5 — ship + run on the vehicle
 
@@ -100,6 +104,7 @@ under `data_dir`, camera log shows `health: frames=N, no drops`. After the first
 | sensor config only      | edit → `rig bake --tag v2` → scp/extract → `./run.sh up`          |
 | service code/images     | `rig build` → `rig bake --tag v2` → ship → `./run.sh up`          |
 | field tweak on-vehicle  | edit the extracted tree's config → `./rig up` (re-renders live)   |
+| save a field state      | on the vehicle: `./rig bake --tag day3-final [--bundle-images]` — re-bakes the extracted tree (local edits included) and stamps its parent artifact (lineage) |
 | new service             | add launcher+`rigging.yaml` in its repo → `rig certify --repo` until green → add to services.yaml/vehicle.yaml |
 
 Teardown: `./run.sh down` (volumes survive); final removal `rig down --purge`. Dev registry off:

@@ -64,8 +64,10 @@ scp var/artifacts/v1.tar.gz orin:/tmp/       # on the Orin: `rig unbake … && .
 ```
 
 The artifact bundles the resolved configs + vendored surfaces + rig + a **compose-only** form that runs on
-just Docker (graceful fallback when Python/PyYAML are absent). Full offline / local-registry flow:
-`docs/HOST_SETUP.md`.
+just Docker (graceful fallback when Python/PyYAML are absent). `--bundle-images` additionally docker-saves
+the image set into the artifact (multi-GB) for **zero-registry deploys** — `up.sh` self-loads on first run.
+Re-baking *inside an extracted artifact* (on the vehicle, after field edits) records the parent artifact in
+`metadata.yaml`, so save-points form a lineage. Full offline / local-registry flow: `docs/HOST_SETUP.md`.
 
 ## Certify a launcher (the contract, executable)
 

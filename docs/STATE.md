@@ -66,6 +66,11 @@ A launcher's compose opts into each (`${RIG_IMAGE_REGISTRY:+…}`, `:${RIG_IMAGE
 - Templates: `templates/zenoh-router/` (a ready shared-router infra service; honors `COMPOSE_PROJECT_NAME`).
 - `rig pull` + baked `pull.sh` (v0.1.19): pre-pull every stack's images with NO container changes — prime
   the vehicle's cache while the registry is reachable, then run offline; safe against a live deployment.
+- v0.1.21: `rig bake --bundle-images` — docker-saves the image set INTO the artifact (tag refs + artifact
+  sha256 as integrity; digests recorded as audit metadata; `up.sh` self-loads when refs are missing,
+  `run.sh load` forces it). Plus **parent provenance**: a re-bake inside an extracted artifact stamps
+  `parent:` (tag/created/rig_version/sources) into metadata — field-day chains (`test2` → `day3-final`).
+  Validated live: a bundled bake of the running deployment succeeded with the registry UNREACHABLE.
 - v0.1.20: `rig init` scaffolds `config/infra/` alongside sensors; the zenoh-router template takes an
   **inline `router_config:` mapping** (instance YAML → rendered `var/run/<name>/zenohd.json5` → `-c` +
   `ZENOH_ROUTER_CONFIG_URI`; bake captures it like any rendered file — inline only, paths don't bake);

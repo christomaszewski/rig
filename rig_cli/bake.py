@@ -15,6 +15,7 @@ from __future__ import annotations
 import datetime
 import hashlib
 import json
+import shlex
 import shutil
 import subprocess
 import tarfile
@@ -101,10 +102,12 @@ def _repo_of(ref: str) -> str:
     return ref[:colon] if colon > slash else ref
 
 
-def _resolve_digest(ref: str) -> str | None:
+def _resolve_digest(ref: str, *, local_only: bool = False) -> str | None:
     """A pinned ``repo@sha256:…`` for an image ref. Tries the local image's RepoDigests first, then the
     registry via ``docker buildx imagetools`` (so a tag pushed to your local/offline registry pins to its
-    content digest). Returns None if neither resolves (then the ref stays a tag)."""
+    content digest). Returns None if neither resolves (then the ref stays a tag). ``local_only`` skips the
+    registry round-trip — bundle mode records digests as audit metadata only, and must not stall on an
+    unreachable registry (the whole point of bundling)."""
     repo = _repo_of(ref)
     try:  # 1. local image's repo digest
         proc = subprocess.run(["docker", "inspect", "--format", "{{json .RepoDigests}}", ref],
@@ -115,6 +118,8 @@ def _resolve_digest(ref: str) -> str | None:
                     return rd
     except Exception:  # noqa: BLE001
         pass
+    if local_only:
+        return None
     try:  # 2. registry manifest digest (multi-arch index digest -> the vehicle pulls the right arch)
         proc = subprocess.run(["docker", "buildx", "imagetools", "inspect", ref,
                                "--format", "{{.Manifest.Digest}}"], capture_output=True, text=True)
@@ -124,6 +129,35 @@ def _resolve_digest(ref: str) -> str | None:
     except Exception:  # noqa: BLE001
         pass
     return None
+
+
+def _bundle_images(staging: Path, refs: list[str]) -> dict:
+    """``docker save`` the resolved image set into staging/images.tar (one multi-ref save, so shared base
+    layers are stored once). Missing images are pulled first; still-missing is a HARD error — a silently
+    incomplete bundle would betray the air-gap promise. Returns the metadata block."""
+    def _have(ref: str) -> bool:
+        return subprocess.run(["docker", "image", "inspect", ref], capture_output=True).returncode == 0
+
+    missing = [r for r in refs if not _have(r)]
+    for ref in missing:
+        eprint(f"  bundle: image not in the local store, pulling {ref}")
+        subprocess.run(["docker", "pull", ref], capture_output=True, text=True)
+    still = [r for r in missing if not _have(r)]
+    if still:
+        raise RigError(f"bake --bundle-images: not in the local store and not pullable: {still} "
+                       f"(run `rig build` / `rig pull` first, or check the registry)")
+    tar = staging / "images.tar"
+    eprint(f"  bundle: docker save {len(refs)} image(s) -> images.tar (can take minutes)")
+    proc = subprocess.run(["docker", "save", "-o", str(tar), *refs], capture_output=True, text=True)
+    if proc.returncode != 0 or not tar.exists():
+        raise RigError(f"bake --bundle-images: docker save failed: {(proc.stderr or '').strip()[:200]}")
+    ids = {}
+    for ref in refs:
+        p = subprocess.run(["docker", "image", "inspect", "--format", "{{.Id}}", ref],
+                           capture_output=True, text=True)
+        if p.returncode == 0:
+            ids[ref] = p.stdout.strip()
+    return {"file": "images.tar", "size_bytes": tar.stat().st_size, "image_ids": ids}
 
 
 # --- bake -------------------------------------------------------------------------------------------
@@ -136,8 +170,25 @@ def _sha256(path: Path) -> str:
     return h.hexdigest()
 
 
-def _write_scripts(staging: Path, entries: list[dict]) -> None:
+def _load_guard(refs: list[str]) -> list[str]:
+    """sh block: load the bundled images.tar iff any bundled ref is absent from the local store —
+    so the first `up` on an air-gapped vehicle self-loads, and every later run skips the (slow) load."""
+    quoted = " ".join(shlex.quote(r) for r in refs)
+    return [
+        "if [ -f ./images.tar ]; then",
+        "  need=0",
+        f"  for img in {quoted}; do",
+        '    docker image inspect "$img" >/dev/null 2>&1 || { need=1; break; }',
+        "  done",
+        '  [ "$need" = 1 ] && { echo "loading bundled images (one-time) ..." >&2; docker load -i ./images.tar; }',
+        "fi",
+    ]
+
+
+def _write_scripts(staging: Path, entries: list[dict], *, bundle_refs: list[str] | None = None) -> None:
     up = ["#!/usr/bin/env sh", "set -e", "cd \"$(dirname \"$0\")\""]
+    if bundle_refs:
+        up += _load_guard(bundle_refs)
     for e in entries:
         for vol in e["external_volumes"]:
             up.append(f'docker volume create "{vol}" >/dev/null')
@@ -154,7 +205,11 @@ def _write_scripts(staging: Path, entries: list[dict]) -> None:
     pull = ["#!/usr/bin/env sh", "set -e", "cd \"$(dirname \"$0\")\""]
     for e in entries:
         pull.append(f'docker compose -p "{e["project"]}" -f "{e["compose"]}" pull')
-    for fname, lines in (("up.sh", up), ("down.sh", down), ("status.sh", status), ("pull.sh", pull)):
+    scripts = [("up.sh", up), ("down.sh", down), ("status.sh", status), ("pull.sh", pull)]
+    if bundle_refs:  # explicit/forced load (up.sh already self-loads when refs are missing)
+        scripts.append(("load.sh", ["#!/usr/bin/env sh", "set -e", "cd \"$(dirname \"$0\")\"",
+                                    "exec docker load -i ./images.tar"]))
+    for fname, lines in scripts:
         path = staging / fname
         path.write_text("\n".join(lines) + "\n")
         path.chmod(0o755)
@@ -175,6 +230,7 @@ def _write_bootstrap(staging: Path) -> None:
         "  down)   [ -f ./down.sh ]   && exec ./down.sh ;;\n"
         "  status) [ -f ./status.sh ] && exec ./status.sh ;;\n"
         "  pull)   [ -f ./pull.sh ]   && exec ./pull.sh ;;\n"
+        "  load)   [ -f ./load.sh ]   && exec ./load.sh ;;\n"
         "esac\n"
         "if command -v python3 >/dev/null 2>&1 && python3 -c 'import yaml' >/dev/null 2>&1; then\n"
         '  exec python3 ./rig "$verb"\n'
@@ -185,10 +241,12 @@ def _write_bootstrap(staging: Path) -> None:
     boot.chmod(0o755)
 
 
-def _compose_only(manifest, descriptors, env, staging: Path, images: dict) -> list[dict]:
+def _compose_only(manifest, descriptors, env, staging: Path, images: dict, *, pin: bool = True) -> list[dict]:
     """Per sensor: run the VENDORED launcher's `config` verb, capture the resolved compose, transform it for
     portable/offline use, and write compose/<name>/. Best-effort — a sensor whose launcher can't run is
-    skipped (the rig-runnable tree still ships)."""
+    skipped (the rig-runnable tree still ships). ``pin=False`` (bundle mode) keeps tag refs: ``docker load``
+    can't restore registry digests, so a bundled artifact's integrity is its own sha256, not @sha256 pins —
+    digests are still collected (local-only) as audit metadata."""
     entries: list[dict] = []
     # Images declared `mirror:` in a rigging.yaml are kept as their registry TAG, not digest-pinned: a
     # mirrored multi-arch tag's digest is fragile (index vs per-arch manifest, re-push churn). Built images
@@ -218,8 +276,9 @@ def _compose_only(manifest, descriptors, env, staging: Path, images: dict) -> li
             if any(r == m or r.endswith("/" + m) for m in mirrored):
                 images.setdefault(ref, None)  # mirrored third-party -> keep the registry tag (pullable, stable)
             else:
-                images.setdefault(ref, _resolve_digest(ref))
-        _pin_images(compose, images)
+                images.setdefault(ref, _resolve_digest(ref, local_only=not pin))
+        if pin:
+            _pin_images(compose, images)
         ext = _external_volume_names(compose)
         outdir = staging / "compose" / sensor.name
         outdir.mkdir(parents=True, exist_ok=True)
@@ -234,7 +293,8 @@ def _compose_only(manifest, descriptors, env, staging: Path, images: dict) -> li
     return entries
 
 
-def bake(root: Path, manifest, catalog, descriptors, env, tag: str, *, registry: str | None = None) -> Path:
+def bake(root: Path, manifest, catalog, descriptors, env, tag: str, *, registry: str | None = None,
+         bundle_images: bool = False) -> Path:
     if registry:
         env = {**env, "RIG_IMAGE_REGISTRY": registry}  # override vehicle.yaml images.registry for this bake
     staging = root / "var" / "bake" / tag
@@ -283,14 +343,30 @@ def bake(root: Path, manifest, catalog, descriptors, env, tag: str, *, registry:
         catalog_out[service] = {"path": f"services/{service}"}
     (staging / "services.yaml").write_text(yaml.safe_dump({"services": catalog_out}, sort_keys=False))
 
-    # 4. compose-only resolved form (best-effort) + scripts + bootstrap
+    # 4. compose-only resolved form (best-effort) + scripts + bootstrap. Bundle mode also `docker save`s
+    #    the image set into the artifact: zero registry at deploy time, integrity = the artifact's sha256.
     images: dict[str, str | None] = {}
-    entries = _compose_only(manifest, descriptors, env, staging, images)
+    entries = _compose_only(manifest, descriptors, env, staging, images, pin=not bundle_images)
+    bundle = None
+    if bundle_images:
+        if not images:
+            raise RigError("bake --bundle-images: no images captured — the compose-only rendering must "
+                           "succeed for every stack you want bundled (see the skip messages above)")
+        bundle = _bundle_images(staging, sorted(images))
     if entries:
-        _write_scripts(staging, entries)
+        _write_scripts(staging, entries, bundle_refs=sorted(images) if bundle else None)
     _write_bootstrap(staging)
 
-    # 5. metadata + lock
+    # 5. metadata + lock. A re-bake INSIDE an extracted artifact (field edits on the vehicle) records its
+    #    parent, so save-points chain: test2 -> test2+edits -> day3-final.
+    parent = None
+    if (root / "metadata.yaml").exists():
+        pmeta = load_yaml(root / "metadata.yaml")
+        parent = {k: pmeta[k] for k in ("tag", "vehicle", "created", "rig_version") if pmeta.get(k)}
+        if pmeta.get("parent"):  # keep one hop only; the full chain lives across the artifacts themselves
+            parent["parent_tag"] = (pmeta["parent"] or {}).get("tag")
+        if pmeta.get("sources"):
+            parent["sources"] = pmeta["sources"]
     sources = {}
     for svc_dir in sorted((staging / "services").glob("*")):
         stamp = svc_dir / ".vendored.yaml"
@@ -305,11 +381,16 @@ def bake(root: Path, manifest, catalog, descriptors, env, tag: str, *, registry:
         "registry": registry or manifest.image_registry,
         "image_tag": manifest.image_tag,
         "data_dir": manifest.data_dir,
+        "pinning": "tag+bundle" if bundle else "digest",
         "sensors": [s.name for s in manifest.sensors],
         "compose_only": [e["sensor"] for e in entries],
         "sources": sources,
         "images": {ref: dig for ref, dig in images.items()},
     }
+    if bundle:
+        meta["bundle"] = bundle
+    if parent:
+        meta["parent"] = parent
     (staging / "metadata.yaml").write_text(yaml.safe_dump(meta, sort_keys=False))
     pinned = sum(1 for d in images.values() if d)
     (staging / "rig.lock").write_text(yaml.safe_dump(
@@ -324,8 +405,11 @@ def bake(root: Path, manifest, catalog, descriptors, env, tag: str, *, registry:
     digest = _sha256(tarpath)
     eprint(f"baked '{tag}' -> {tarpath}")
     eprint(f"  sha256:{digest}")
-    eprint(f"  {stack_summary(manifest.sensors)} · {len(entries)} compose-only · "
-           f"{pinned}/{len(images)} images digest-pinned")
+    pin_note = (f"{len(images)} images BUNDLED ({bundle['size_bytes'] / 1e9:.1f} GB tar; tag-pinned, "
+                f"integrity = the artifact sha256)" if bundle
+                else f"{pinned}/{len(images)} images digest-pinned")
+    lineage = f" · parent: {parent['tag']}" if parent else ""
+    eprint(f"  {stack_summary(manifest.sensors)} · {len(entries)} compose-only · {pin_note}{lineage}")
     return tarpath
 
 

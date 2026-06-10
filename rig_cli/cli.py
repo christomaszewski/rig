@@ -189,7 +189,8 @@ def cmd_build(args, root: Path) -> int:
 def cmd_bake(args, root: Path) -> int:
     manifest, catalog, descriptors = _load(root)
     env = dispatch.fleet_env(manifest)
-    bake_mod.bake(root, manifest, catalog, descriptors, env, args.tag, registry=args.registry)
+    bake_mod.bake(root, manifest, catalog, descriptors, env, args.tag, registry=args.registry,
+                  bundle_images=args.bundle_images)
     return 0
 
 
@@ -277,6 +278,9 @@ def build_parser() -> argparse.ArgumentParser:
     bk.add_argument("--registry", default=None,
                     help="registry the vehicle pulls from (overrides vehicle.yaml images.registry); "
                          "images are digest-pinned against it")
+    bk.add_argument("--bundle-images", action="store_true",
+                    help="docker-save the image set INTO the artifact (multi-GB): zero registry at deploy "
+                         "time; refs stay tags and integrity is the artifact's sha256")
 
     ub = sub.add_parser("unbake", help="extract a baked artifact to an editable tree")
     ub.add_argument("artifact", help="path to the .tar.gz artifact")
