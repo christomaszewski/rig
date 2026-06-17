@@ -54,13 +54,15 @@ python3 -m venv .venv && .venv/bin/pip install pyyaml
 
 ## Deploy to a vehicle
 
-Vendor each service's launch surface, bake a tagged artifact (digest-pinned to a registry the vehicle can
-reach), ship it, and unbake — no driver source or internet on the vehicle:
+Build images into a registry the vehicle can reach, bake a tagged artifact, ship it, run it — no driver
+source or internet on the vehicle. `bake` **auto-vendors** each service's launch surface (no manual `rig
+vendor` step) and digest-pins images against the registry from `vehicle.yaml` (`images.registry`) — pass
+`--registry <ip:5000>` only to override it:
 
 ```bash
-rig vendor novatel --from ../novatel        # copy launch surfaces into services/ (text only, no source)
-rig bake --registry devbox:5000 --tag v1    # -> var/artifacts/v1.tar.gz (resolved + digest-pinned)
-scp var/artifacts/v1.tar.gz orin:/tmp/       # on the Orin: `rig unbake … && ./run.sh up`
+rig build                                   # build/push + mirror images into the registry
+rig bake --tag v1                           # -> var/artifacts/v1.tar.gz (auto-vendored + digest-pinned)
+scp var/artifacts/v1.tar.gz vehicle:~/      # on the vehicle: `tar xzf v1.tar.gz && cd v1 && ./run.sh up`
 ```
 
 The artifact bundles the resolved configs + vendored surfaces + rig + a **compose-only** form that runs on
@@ -92,9 +94,11 @@ rig certify --diff /tmp/mac.yaml /tmp/orin.yaml   # identical = `config` output 
 vehicle.yaml            # which sensors THIS machine runs + fleet-wide ROS settings
 services.yaml           # catalog: service routing key -> where its repo lives
 config/sensors/*.yaml   # one config per sensor (the single source of truth for that stack)
+config/infra/*.yaml     # one config per shared infra service (zenoh router, bag logger, …)
 services/               # service repos as git submodules (deployment); or point services.yaml at sibling checkouts
-rig, rig_cli/           # the CLI (thin shim + package: manifest/catalog/descriptor/dispatch/status/doctor)
-docs/                   # DESIGN.md (decisions), HOST_SETUP.md (udev, provisioning, submodules)
+templates/              # ready-to-use infra services (zenoh-router, ros2-bag-logger, ros1-bag-logger)
+rig, rig_cli/           # the CLI (thin shim + package: manifest/catalog/dispatch/status/doctor/certify/build/bake/…)
+docs/                   # CHEATSHEET (1-page flow) · RUNBOOK (worked example) · DESIGN/ROADMAP · STATE · HOST_SETUP
 ```
 
 ### `vehicle.yaml` (per machine)
@@ -142,8 +146,8 @@ service: novatel
 launcher: novatel-up                 # default: <service>-up
 verbs: { status: ps }                # adapt logical verbs -> launcher args (defaults shown in descriptor.py)
 ros_distro: lyrical
-external_volumes: ["cam_{name}_sock"]    # optional: GC'd by `rig down --purge` (final teardown only)
-host_ports: ["plugins[name=webrtc-bridge].params.port"]  # optional: rig validates these don't clash
+external_volumes: ["novatel_{name}_data"]    # optional: GC'd by `rig down --purge` (final teardown only)
+host_ports: ["plugins[name=webrtc-bridge,enabled=true].params.port"]  # optional: rig validates these don't clash
 ```
 
 `cam-up`, `novatel-up`, and `sbg-up` all satisfy this. See `docs/DESIGN.md` for the full rationale.

@@ -1,6 +1,6 @@
 # rig — deployment cheat sheet
 
-> The whole workflow on one page (rig ≥ v0.1.18). Long-form: `RUNBOOK.md` (worked Orin example),
+> The whole workflow on one page (rig ≥ v0.1.22). Long-form: `RUNBOOK.md` (worked Orin example),
 > `README.md` (concepts), `STATE.md` (current live state). Mental model: **services own their bring-up**
 > (launcher + `rigging.yaml`); **rig owns the vehicle** (manifest, env, ordering, artifacts). The vehicle
 > runs the baked compose-only form — no source, no internet.
@@ -15,11 +15,16 @@ author configs ──▶ validate ──▶ build images ──▶ bake ──�
 ```bash
 # DEV BOX: a persistent local registry (MUST keep its volume until the vehicle has pulled)
 docker run -d --restart always -p 5000:5000 -v registry-data:/var/lib/registry --name registry registry:2
-export REGISTRY="<dev-box-LAN-IP>:5000"        # the IP the VEHICLE can reach — always WITH the port
 # Docker Desktop → Settings → Docker Engine → "insecure-registries": ["<dev-box-LAN-IP>:5000"] → Restart
+# Use the dev-box LAN IP the VEHICLE can reach, always WITH the :5000 port.
+#
+# rig learns this registry from vehicle.yaml `images.registry` (step 1), or `rig build/bake --registry
+# <ip:5000>` to override — there is NO $REGISTRY env var. (`VEHICLE=<user@orin-ip>` below is just an ssh
+# alias for the scp/ssh lines, your convenience — also not read by rig.)
 
 # VEHICLE (Jetson): trust the registry — MERGE into /etc/docker/daemon.json (NEVER overwrite: it carries
 # the `nvidia` runtime). See RUNBOOK §7 for the python3 merge one-liner. Then: sudo systemctl restart docker
+# (skip this entirely if you deploy with `rig bake --bundle-images` — no registry needed on the vehicle.)
 # Optional but recommended: sudo apt install python3-yaml   (enables rig verbs + per-host overlays on-vehicle)
 ```
 
@@ -64,7 +69,8 @@ vehicle, then `rig certify --diff /tmp/dev.yaml /tmp/orin.yaml` — identical = 
 
 ```bash
 rig build -j 3                                # per unique service: build+push (build:) / mirror (mirror:)
-curl -s http://$REGISTRY/v2/_catalog          # expect every repo the composes will pull
+                                              #   registry comes from vehicle.yaml; --registry <ip:5000> overrides
+curl -s http://<dev-box-ip>:5000/v2/_catalog  # expect every repo the composes will pull
 ```
 
 Tags: `rig build` tags with `images.tag` (jp7) and certify's tag check guarantees the composes pull the
@@ -89,7 +95,7 @@ artifact's own sha256; digests are still recorded in `metadata.yaml`/`rig.lock` 
 scp var/artifacts/v1.tar.gz $VEHICLE:~/ws/
 ssh $VEHICLE 'cd ~/ws && tar xzf v1.tar.gz'
 ssh $VEHICLE 'cd ~/ws/v1 && ./run.sh pull'    # optional: pre-warm the image cache — touches NO containers
-ssh $VEHICLE 'cd ~/ws/v1 && ./run.sh up'      # pulls from $REGISTRY; infra first, then sensors
+ssh $VEHICLE 'cd ~/ws/v1 && ./run.sh up'      # pulls from the registry in vehicle.yaml; infra first, then sensors
 ssh $VEHICLE 'cd ~/ws/v1 && ./run.sh status'  # or: ./run.sh logs <name> · ./run.sh down
 ```
 
@@ -112,6 +118,9 @@ Teardown: `./run.sh down` (volumes survive); final removal `rig down --purge`. D
 
 ## Gotchas (each learned the hard way)
 
+- The registry rig uses is `vehicle.yaml: images.registry` (or `rig build/bake --registry`) — **there is no
+  `$REGISTRY` env var.** Exporting one does nothing; if `rig build` pushes to the "wrong" IP, it's the one
+  in vehicle.yaml. A baked artifact also pins that host, so fix vehicle.yaml *before* you bake.
 - Registry trust is needed on **both** machines, **with the port** — a bare IP doesn't match `IP:5000`.
 - **MERGE** the Jetson's `daemon.json` — overwriting drops the `nvidia` runtime the camera needs.
 - One `images.tag` per vehicle: platform-agnostic services must still *pull* that tag (certify enforces).

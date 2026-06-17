@@ -11,11 +11,13 @@ sensors: cam_usb (camera.type usb) +  cam_rtsp (camera.type rtsp)
 
 ## Placeholders — set once (this shell)
 ```bash
-export REGISTRY="192.168.1.50:5000"     # dev box LAN IP:5000 — must be reachable from the Orin
+export REGISTRY="192.168.1.50:5000"     # dev box LAN IP:5000 (reachable from the Orin). Substituted into
+                                        #   vehicle.yaml below — rig reads the registry from THERE (or a
+                                        #   `--registry` flag), never from this shell var.
 export ORIN="orin"                       # ssh target (e.g. user@192.168.1.60)
 export JETPACK="jp7"                     # the Orin's JetPack: jp7 or jp6
-CAMERA_URL="git@github.com:christomaszewski/camera-service.git"
-DASHBOARD_URL="git@github.com:christomaszewski/dashboard.git"
+CAMERA_URL="https://github.com/christomaszewski/camera-service.git"   # public
+DASHBOARD_URL="git@github.com:christomaszewski/dashboard.git"         # NOT yet published — see §2
 ```
 
 ## 1 — Dev box: local registry
@@ -32,11 +34,11 @@ curl -s http://$REGISTRY/v2/_catalog       # -> {"repositories":[]}
 ## 2 — Workspace + clones
 ```bash
 mkdir -p ~/rig-walkthrough && cd ~/rig-walkthrough
+git clone https://github.com/christomaszewski/rig.git rig    # rig is public
 git clone "$CAMERA_URL"    camera-service
-git clone "$DASHBOARD_URL" dashboard
-git clone /Users/ckt/ws/bringup rig
+git clone "$DASHBOARD_URL" dashboard       # dashboard has no public remote yet — get it from its maintainer
 alias rig="$HOME/rig-walkthrough/rig/rig"
-rig --version                              # -> rig 0.1.9
+rig --version                              # -> rig 0.1.22
 ```
 
 ## 3 — Scaffold the deployment
@@ -124,6 +126,7 @@ EOF
 ## 4 — Validate (dev box)
 ```bash
 rig doctor          # vehicle 'orin-test' (id 7) · domain 7 · rmw_zenoh_cpp · 4 sensors · 0 errors, no zenoh warning
+rig certify         # each launcher honors the contract: project name, registry/tag, ROS env, determinism, identity
 rig up --dry-run    # zenoh-router -> dashboard -> cam_usb -> cam_rtsp; VEHICLE_ID=7, RIG_IMAGE_TAG=jp7 on each
 ```
 
@@ -138,6 +141,8 @@ curl -s http://$REGISTRY/v2/_catalog       # expect: cam-core, dashboard-zenoh, 
 ## 6 — Bake
 ```bash
 rig bake --tag test1                       # auto-vendors surfaces + compose-only + digest-pins (cam-core:$JETPACK@sha256)
+# rig bake --tag test1 --bundle-images     # OR: docker-save the images INTO the artifact (multi-GB) for an
+#                                          #   air-gapped / zero-registry deploy — up.sh self-loads on first run
 ls -lh var/artifacts/test1.tar.gz
 ```
 
@@ -158,7 +163,8 @@ sudo systemctl restart docker"
 
 scp var/artifacts/test1.tar.gz $ORIN:/tmp/
 ssh $ORIN 'sudo mkdir -p /opt/rig && sudo chown $USER /opt/rig && cd /opt/rig && tar xzf /tmp/test1.tar.gz'
-ssh $ORIN 'cd /opt/rig/test1 && ./run.sh up'      # pulls digest-pinned images from $REGISTRY, infra -> sensors
+ssh $ORIN 'cd /opt/rig/test1 && ./run.sh pull'    # optional: pre-warm the image cache (touches no containers)
+ssh $ORIN 'cd /opt/rig/test1 && ./run.sh up'      # pulls digest-pinned images, infra -> sensors
 ssh $ORIN 'cd /opt/rig/test1 && ./run.sh status'
 ```
 Open `http://<ORIN-IP>:8080` from a laptop on the mesh.
@@ -195,10 +201,14 @@ you enable `webrtc-bridge` on both cameras**, give each a distinct signalling po
 declare `host_ports: ["plugins[name=webrtc-bridge,enabled=true].params.port"]` — then `rig doctor` validates
 the ports across instances (and against the dashboard's 8080/10000).
 
+**Optional infra** (beyond this 4-stack example): rig ships ready-to-use `templates/ros2-bag-logger/` and
+`templates/ros1-bag-logger/` — add one to `services.yaml` + an `infra:` entry (order ~1, just after the
+router) to record the ROS telemetry graph to `${RIG_DATA_DIR}/bags/`. See the templates' example configs.
+
 **External prerequisites** (outside rig):
-- **camera-service** supports `camera.type: usb | rtsp | gige` (PR #21) — confirm via the `usb-real.yaml` /
-  `rtsp-real.yaml` examples; copy their source keys into your configs.
-- **dashboard** `tools/build-images.sh` must accept `<registry> [tag]` positionally for `rig build`; its
-  `rigging.yaml` should place it in `infra:` and drop the "rig BUILD phase" framing (rig now *has* one).
-- Images must be **arm64** (the Orin) and pushed to `$REGISTRY`; the Orin caches them after the first pull, so
-  it runs offline thereafter.
+- **camera-service** supports `camera.type: usb | rtsp | gige` — copy the real source keys from its
+  `core-driver/config/usb-real.yaml` / `rtsp-real.yaml` examples into your configs.
+- **dashboard** ships `tools/build-images.sh <registry> [tag]` and an `infra:`-tier `rigging.yaml` (both
+  done). It has no public git remote yet — get the repo from its maintainer.
+- Images must be **arm64** (the Orin) and reachable in the registry; the Orin caches them after the first
+  pull, so it runs offline thereafter — or use `rig bake --bundle-images` to skip the registry entirely.
