@@ -66,6 +66,17 @@ A launcher's compose opts into each (`${RIG_IMAGE_REGISTRY:+…}`, `:${RIG_IMAGE
 - Templates: `templates/zenoh-router/` (a ready shared-router infra service; honors `COMPOSE_PROJECT_NAME`).
 - `rig pull` + baked `pull.sh` (v0.1.19): pre-pull every stack's images with NO container changes — prime
   the vehicle's cache while the registry is reachable, then run offline; safe against a live deployment.
+- v0.1.22: **bag-logger templates** (`templates/ros2-bag-logger/`, `templates/ros1-bag-logger/`) — shared
+  infra services that record the ROS telemetry graph to `${RIG_DATA_DIR}/bags/<name>`. Config schema:
+  `record.mode: all|allow|exclude` (+ `exclude_images`, default true — the cameras' raw `image_raw` is huge
+  over ROS and already recorded compressed at source), `output` storage/compression/split. A testable
+  `tools/bag_cmd.py` maps config → `ros2 bag record`/`rosbag record` argv, rendered to `var/run/<name>/
+  record.sh` (bake-captured, restart-safe via runtime stamp). Default image reuses a driver image (has
+  rmw_zenoh + rosbag2). Both certified in CI. ROS1 is for ROS-1 fleets (needs a roscore; rig's fleet env is
+  ROS2-shaped) — **structurally complete but unrun against a live ROS1 master.** `services:` (service-call
+  recording) is a documented FUTURE knob, ignored for now. Place in `infra:` at order ~1 (just after the
+  router) so it records from startup. NOT YET run live on the Orin (would add a 5th stack; gated on the
+  registry re-point).
 - v0.1.21: `rig bake --bundle-images` — docker-saves the image set INTO the artifact (tag refs + artifact
   sha256 as integrity; digests recorded as audit metadata; `up.sh` self-loads when refs are missing,
   `run.sh load` forces it). Plus **parent provenance**: a re-bake inside an extracted artifact stamps

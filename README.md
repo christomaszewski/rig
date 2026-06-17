@@ -116,6 +116,21 @@ in `vehicle.yaml` — rig deep-merges the patch, stamps in `name`, and renders t
 `var/rendered/<name>.yaml` before handing it to the launcher (a complete named config with no overrides is
 passed through untouched). See `config/sensors/camera.profile.yaml` and `docs/ROADMAP.md` §1.
 
+## Bundled infra templates (`templates/`)
+
+Ready-to-use shared (`infra:`) services — point `services.yaml` at one and add an `infra:` entry:
+
+- **`zenoh-router/`** — the vehicle's shared `rmw_zenoh` router (order 0). Optional inline `router_config:`
+  in its config renders to a `zenohd.json5` the launcher mounts.
+- **`ros2-bag-logger/`** / **`ros1-bag-logger/`** — record the ROS telemetry graph to
+  `${RIG_DATA_DIR}/bags/<name>`. Config: `record.mode: all|allow|exclude` (+ `exclude_images`, default
+  true — image streams are huge over ROS and already recorded compressed at the camera source) and an
+  `output` block (storage/compression/split). Place at order ~1 so it records from startup. The image must
+  carry the bag tooling + `rmw_zenoh` (your driver images do); defaults to a driver image.
+
+Each is just a launcher + compose around a stock tool — the same contract any service meets. rig's own CI
+runs `rig certify` against them.
+
 ## The contract: `rigging.yaml`
 
 A repo is rig-compatible when its launcher exposes `up/down/status/logs/config` on one config, accepts a

@@ -25,3 +25,7 @@ jobs:
         run: |
           printf 'service: zenoh-router\nname: zr\nrouter_config:\n  scouting: {multicast: {enabled: false}}\n' > /tmp/zr.yaml
           ./rig certify --repo templates/zenoh-router --config /tmp/zr.yaml
+      - name: certify the ros2-bag-logger template
+        run: ./rig certify --repo templates/ros2-bag-logger --config templates/ros2-bag-logger/config/ros2-bag-logger.example.yaml
+      - name: certify the ros1-bag-logger template
+        run: ./rig certify --repo templates/ros1-bag-logger --config templates/ros1-bag-logger/config/ros1-bag-logger.example.yaml
