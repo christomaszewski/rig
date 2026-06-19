@@ -12,3 +12,4 @@ services:
   camera-service: { path: ../gige-vision-service }
   novatel:     { path: ../novatel }
   sbg:         { path: ../sbg_driver }
+  ouster:      { path: ../ouster }

@@ -75,6 +75,7 @@ def test_ros2_render_is_restart_safe_and_sources_ros():
     name, path = ros2.render({"name": "bl", "record": {"mode": "exclude"}}, repo)
     body = pathlib.Path(path).read_text()
     assert name == "bl"
+    assert body.startswith("#!/usr/bin/env bash")        # bash, not sh — ROS setup.bash is bash-only
     assert "date -u" in body and "-o " in body          # runtime-stamped output dir (no clobber on restart)
     assert "/opt/ros/$ROS_DISTRO/setup.bash" in body     # sources ROS
     assert "exec ros2 bag record" in body
@@ -112,6 +113,7 @@ def test_ros1_render_uses_rosbag_prefix_native_stamp():
     repo = pathlib.Path(tempfile.mkdtemp())
     name, path = ros1.render({"name": "bl", "record": {"mode": "all", "exclude_images": False}}, repo)
     body = pathlib.Path(path).read_text()
+    assert body.startswith("#!/usr/bin/env bash")                   # bash, not sh — ROS setup.bash is bash-only
     assert "exec rosbag record" in body and '-o "$base/bl"' in body  # rosbag appends _<date>.bag itself
 
 

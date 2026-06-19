@@ -90,7 +90,7 @@ def render(cfg: dict, repo: pathlib.Path) -> tuple[str, str]:
     run_dir.mkdir(parents=True, exist_ok=True)
     script = run_dir / "record.sh"
     script.write_text(
-        "#!/usr/bin/env sh\n"
+        "#!/usr/bin/env bash\n"   # bash: ROS `setup.bash` is bash-only (sourcing it under sh/dash errors)
         "set -e\n"
         "# Source ROS if the image's entrypoint didn't (we run as `command:`, so usually it did).\n"
         '[ -n "${ROS_DISTRO:-}" ] && [ -f "/opt/ros/$ROS_DISTRO/setup.bash" ] && '

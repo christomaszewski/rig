@@ -20,4 +20,4 @@ services:
     volumes:
       - ${RIG_DATA_DIR:-/data}/bags:/data/bags                      # bags land on the host, off-repo
       - ${BAG_RECORD_SCRIPT:?set by ros2-bag-logger-up}:/record.sh:ro
-    command: ["/bin/sh", "/record.sh"]
+    command: ["/bin/bash", "/record.sh"]   # bash, not sh: record.sh sources ROS `setup.bash` (bash-only)
