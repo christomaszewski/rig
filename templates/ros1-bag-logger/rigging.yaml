@@ -10,6 +10,8 @@ verbs:
   logs: "logs"
   config: "config"
 ros_distro: noetic
+tier: infra
+examples: [config/ros1-bag-logger.example.yaml]   # default config for `rig certify --repo`; copied by `rig init`
 # Defaults to a ros1-bridge image (has rosbag). Point BAG_LOGGER_IMAGE at a stock ROS 1 image instead and
 # mirror it so an offline vehicle can pull it:
 # mirror:

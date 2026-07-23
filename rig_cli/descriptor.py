@@ -53,6 +53,9 @@ class Descriptor:
     build_images: list[str] = field(default_factory=list)  # image repos the build produces (certify checks
     #                                              the compose pulls them as :RIG_IMAGE_TAG — build/pull agreement)
     mirror: list[str] = field(default_factory=list)  # third-party images to copy into the registry
+    tier: str = "sensor"         # optional hint: "infra" = shared, up-first (dashboard, routers, loggers)
+    examples: list[str] = field(default_factory=list)  # optional repo-relative example configs — copied by
+    #                                              `rig init --discover`; default --config for `certify --repo`
 
     @property
     def launcher_path(self) -> Path:
@@ -82,6 +85,13 @@ def load_descriptor(service: str, repo: Path) -> Descriptor:
     verbs = dict(DEFAULT_VERBS)
     verbs.update(data.get("verbs") or {})
 
+    examples_raw = data.get("examples")  # a single path or a list of them
+    examples = [examples_raw] if isinstance(examples_raw, str) else list(examples_raw or [])
+
+    tier = str(data.get("tier") or "sensor")
+    if tier not in ("sensor", "infra"):  # a typo must not silently demote an infra service to sensor
+        raise RigError(f"{path}: tier must be 'infra' or 'sensor', not '{tier}'")
+
     build_raw = data.get("build")  # `build: <cmd>` or `build: { command: <cmd>, images: [...] }`
     build_images: list[str] = []
     if isinstance(build_raw, str):
@@ -103,4 +113,6 @@ def load_descriptor(service: str, repo: Path) -> Descriptor:
         build_command=build_command,
         build_images=build_images,
         mirror=list(data.get("mirror") or []),
+        tier=tier,
+        examples=examples,
     )

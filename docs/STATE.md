@@ -66,6 +66,15 @@ A launcher's compose opts into each (`${RIG_IMAGE_REGISTRY:+…}`, `:${RIG_IMAGE
 - Templates: `templates/zenoh-router/` (a ready shared-router infra service; honors `COMPOSE_PROJECT_NAME`).
 - `rig pull` + baked `pull.sh` (v0.1.19): pre-pull every stack's images with NO container changes — prime
   the vehicle's cache while the registry is reachable, then run offline; safe against a live deployment.
+- v0.1.24: **`rig init` accelerators** — the target dirname seeds `vehicle:`; `--vehicle-id N`;
+  `--infra <template>` (repeatable) fully wires a bundled template (config + catalog + ENABLED entry,
+  router pinned order 0); `--discover [DIR]` scans a workspace for repos with a `rigging.yaml` and
+  populates services.yaml (routing name from the DESCRIPTOR — catches `sbg_driver`→`sbg`) + copies
+  examples as **nameless profiles** (top-level `name:` commented; the manifest entry stamps it) + writes
+  a commented-out vehicle.yaml MENU (never auto-enabled: repo presence ≠ hardware presence). New optional
+  rigging.yaml fields: `tier: infra|sensor`, `examples: [...]` (also the default `--config` for
+  `certify --repo`). Acceptance (tested): `init --infra ...` → `rig doctor` green with zero edits;
+  uncomment a menu line → still green.
 - v0.1.22: **bag-logger templates** (`templates/ros2-bag-logger/`, `templates/ros1-bag-logger/`) — shared
   infra services that record the ROS telemetry graph to `${RIG_DATA_DIR}/bags/<name>`. Config schema:
   `record.mode: all|allow|exclude` (+ `exclude_images`, default true — the cameras' raw `image_raw` is huge

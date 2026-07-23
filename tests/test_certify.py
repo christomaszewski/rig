@@ -162,6 +162,18 @@ def test_repo_dir_bind_warns():
     assert not {c.name for c in checks if c.level == "ERROR"}
 
 
+def test_repo_mode_defaults_to_the_declared_example():
+    from rig_cli import cli
+
+    repo = make_service()
+    (repo / "instance.yaml").write_text("service: fak\ncamera: {}\n")
+    rigging = repo / "rigging.yaml"
+    rigging.write_text(rigging.read_text() + "examples: [instance.yaml]\n")
+    assert cli.main(["certify", "--repo", str(repo)]) == 0          # no --config needed
+    rigging.write_text(RIGGING)                                      # examples removed again
+    assert cli.main(["certify", "--repo", str(repo)]) == 1          # ...now it must be passed
+
+
 def test_emit_normalizes_host_paths_and_diff():
     repo = make_service()
     out_a = repo / "emit-a.yaml"

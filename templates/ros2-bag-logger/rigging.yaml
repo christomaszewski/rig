@@ -9,6 +9,8 @@ verbs:
   logs: "logs"
   config: "config"
 ros_distro: lyrical
+tier: infra
+examples: [config/ros2-bag-logger.example.yaml]   # default config for `rig certify --repo`; copied by `rig init`
 # Defaults to a driver image (rmw_zenoh + rosbag2). If you point BAG_LOGGER_IMAGE at a stock ROS image
 # instead, mirror it into the registry so an offline vehicle can pull it:
 # mirror:

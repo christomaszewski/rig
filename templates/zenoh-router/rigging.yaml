@@ -8,6 +8,8 @@ verbs:
   logs: "logs"
   config: "config"
 ros_distro: lyrical
+tier: infra
+examples: [config/zenoh-router.example.yaml]   # default config for `rig certify --repo`; copied by `rig init`
 # The router uses a third-party image (no build) — `rig build --registry <host>` mirrors it into the
 # registry so an offline vehicle can pull it. Change this if you point ZENOH_ROUTER_IMAGE at a ROS image.
 mirror:

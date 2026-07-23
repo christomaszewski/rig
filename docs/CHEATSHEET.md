@@ -1,6 +1,6 @@
 # rig — deployment cheat sheet
 
-> The whole workflow on one page (rig ≥ v0.1.22). Long-form: `RUNBOOK.md` (worked Orin example),
+> The whole workflow on one page (rig ≥ v0.1.24). Long-form: `RUNBOOK.md` (worked Orin example),
 > `README.md` (concepts), `STATE.md` (current live state). Mental model: **services own their bring-up**
 > (launcher + `rigging.yaml`); **rig owns the vehicle** (manifest, env, ordering, artifacts). The vehicle
 > runs the baked compose-only form — no source, no internet.
@@ -35,7 +35,13 @@ mkdir -p ~/ws && cd ~/ws                      # service repos + rig as siblings
 git clone <camera-service> <dashboard> <rig>...
 alias rig="$PWD/rig/rig"
 
-rig init my-vehicle && cd my-vehicle
+# --infra: bundled templates, wired + ENABLED (router pinned to order 0)
+# --discover: scan sibling repos (rigging.yaml) -> services.yaml populated + examples copied + commented MENU
+rig init my-vehicle --vehicle-id 7 --infra zenoh-router --infra ros2-bag-logger --discover
+cd my-vehicle
+# --discover never enables anything: a repo in the workspace ≠ hardware on this vehicle. Uncomment the
+# vehicle.yaml menu entries this vehicle actually runs (copied examples are nameless profiles — the entry
+# supplies the instance name), then `rig doctor`. Or author everything by hand:
 # services.yaml — route each service name to its repo:
 #   services: { zenoh-router: {path: ../rig/templates/zenoh-router}, camera-service: {path: ../camera-service}, ... }
 # vehicle.yaml — identity + fleet env + the stacks:

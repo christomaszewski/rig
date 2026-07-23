@@ -38,12 +38,15 @@ git clone https://github.com/christomaszewski/rig.git rig    # rig is public
 git clone "$CAMERA_URL"    camera-service
 git clone "$DASHBOARD_URL" dashboard       # dashboard has no public remote yet — get it from its maintainer
 alias rig="$HOME/rig-walkthrough/rig/rig"
-rig --version                              # -> rig 0.1.22
+rig --version                              # -> rig 0.1.24 (or newer)
 ```
 
 ## 3 — Scaffold the deployment
 ```bash
 rig init my-vehicle && cd my-vehicle      # scaffolds config/{infra,sensors}/ + the manifest files
+# Shortcut: `rig init my-vehicle --vehicle-id 7 --infra zenoh-router --discover` pre-wires the router
+# (enabled, order 0) and catalogs every sibling service repo with a commented vehicle.yaml menu — the
+# heredocs below then shrink to uncommenting entries + authoring the camera configs.
 
 cat > services.yaml <<'EOF'
 services:

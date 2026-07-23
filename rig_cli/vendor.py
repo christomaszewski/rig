@@ -53,7 +53,13 @@ def vendor(service: str, source: Path, root: Path) -> Path:
             f"vendor {service}: {descriptor} has no `launch_surface` — the repo isn't vendor-ready "
             f"(add a launch_surface: list of the files rig needs to launch it)"
         )
-    files = list(dict.fromkeys(surface + [descriptor.name]))  # always include the descriptor, dedup, keep order
+    # Declared example configs ride along (best-effort): the vendored rigging.yaml keeps its `examples:`
+    # declaration, so without the files `rig certify --repo <vendored-dir>` would dangle. They're small
+    # config texts — part of the launch surface in spirit.
+    examples_raw = data.get("examples")
+    examples = [examples_raw] if isinstance(examples_raw, str) else list(examples_raw or [])
+    examples = [e for e in examples if (source / e).exists()]  # missing declared -> launch_surface rules don't apply
+    files = list(dict.fromkeys(surface + examples + [descriptor.name]))  # always include the descriptor, dedup
 
     target = root / "services" / service
     if target.exists() and not (target / ".vendored.yaml").exists():

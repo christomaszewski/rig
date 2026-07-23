@@ -141,9 +141,6 @@ def cmd_certify(args, root: Path) -> int:
     emit = Path(args.emit) if args.emit else None
     if args.repo:
         repo = Path(args.repo).resolve()
-        if not args.config:
-            raise RigError("certify --repo needs --config <file> (an example/instance config to drive "
-                           "the launcher with)")
         from .descriptor import find_descriptor
         path = find_descriptor(repo)
         if path is None:
@@ -151,7 +148,18 @@ def cmd_certify(args, root: Path) -> int:
         from .common import load_yaml
         service = load_yaml(path).get("service") or repo.name
         desc = load_descriptor(service, repo)
-        targets = [(service, desc, Path(args.config).resolve())]
+        if args.config:
+            config = Path(args.config).resolve()
+        elif desc.examples:  # the declared example is the natural default config to certify with
+            config = (repo / desc.examples[0]).resolve()
+            if not config.is_file():
+                raise RigError(f"certify: rigging.yaml declares example '{desc.examples[0]}' but it "
+                               f"doesn't exist — fix the declaration or pass --config")
+            eprint(f"rig certify: using the declared example {desc.examples[0]}")
+        else:
+            raise RigError("certify --repo needs --config <file>, or an `examples:` list in rigging.yaml "
+                           "(an example/instance config to drive the launcher with)")
+        targets = [(service, desc, config)]
     else:
         manifest, catalog, descriptors = _load(root)
         sensors = manifest.select(args.names, enabled_only=True)
@@ -176,7 +184,11 @@ def cmd_vendor(args, root: Path) -> int:
 
 
 def cmd_init(args) -> int:
-    init_mod.init(Path(args.target))
+    discover = None
+    if args.discover is not None:  # flag given; "" = no dir supplied -> scan the target's parent
+        discover = Path(args.discover).resolve() if args.discover else Path(args.target).resolve().parent
+    init_mod.init(Path(args.target), vehicle_id=args.vehicle_id, infra=args.infra or [],
+                  discover=discover)
     return 0
 
 
@@ -259,7 +271,15 @@ def build_parser() -> argparse.ArgumentParser:
                      help="compare two --emit files; identical = host-independent config output")
 
     ini = sub.add_parser("init", help="scaffold a fresh deployment (vehicle.yaml/services.yaml/config)")
-    ini.add_argument("target", help="directory to create the deployment in")
+    ini.add_argument("target", help="directory to create the deployment in (its name seeds `vehicle:`)")
+    ini.add_argument("--vehicle-id", type=int, default=1, metavar="N",
+                     help="vehicle identity (ROS domain + VEHICLE_ID); default 1")
+    ini.add_argument("--infra", action="append", default=[], metavar="TEMPLATE",
+                     help="fully wire a bundled templates/ service (repeatable), e.g. "
+                          "--infra zenoh-router --infra ros2-bag-logger")
+    ini.add_argument("--discover", nargs="?", const="", default=None, metavar="DIR",
+                     help="scan DIR (default: the target's parent) for service repos (rigging.yaml): "
+                          "populate services.yaml + copy examples + a commented vehicle.yaml menu")
 
     ven = sub.add_parser("vendor", help="copy a service's launch surface into services/<service>/")
     ven.add_argument("service", help="service name (key in services.yaml / its rigging.yaml)")

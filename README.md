@@ -146,6 +146,9 @@ service: novatel
 launcher: novatel-up                 # default: <service>-up
 verbs: { status: ps }                # adapt logical verbs -> launcher args (defaults shown in descriptor.py)
 ros_distro: lyrical
+tier: sensor                         # optional: "infra" = shared, up-first (routers, loggers, dashboards)
+examples: [sensors/novatel.example.yaml]     # optional: example configs — `rig init --discover` copies
+                                             #   them; `rig certify --repo` uses the first as its default --config
 external_volumes: ["novatel_{name}_data"]    # optional: GC'd by `rig down --purge` (final teardown only)
 host_ports: ["plugins[name=webrtc-bridge,enabled=true].params.port"]  # optional: rig validates these don't clash
 ```
