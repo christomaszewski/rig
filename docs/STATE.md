@@ -1,9 +1,10 @@
 # rig — project state & handoff (resume here)
 
 > Snapshot for picking the project up cold in a new session. Read this first, then `CHEATSHEET.md` /
-> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.1.18**, branch
-> **`main`** (the `config-schema-symmetric` work is merged; feature branches deleted), 46 tests passing
-> (`python3 tests/test_*.py`). Tool at `/Users/ckt/ws/bringup`; run-from-source `./rig <verb>`.
+> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.1.24**, branch
+> **`main`** (the `config-schema-symmetric` work is merged; feature branches deleted), 76 tests passing
+> (`for t in tests/test_*.py; do python3 $t; done`). Tool at `/Users/ckt/ws/bringup`; run-from-source
+> `./rig <verb>`.
 > **Remote: https://github.com/christomaszewski/rig (public)** — Actions runs the test suite on push/PR.
 > camera-service has a `rig certify` CI gate (launcher-contract) via PR #36 (+ the cam-up verbatim-pull-tag
 > fix); the walkthrough's camera-service checkout sits on that PR branch until it merges. dashboard has NO
@@ -48,7 +49,7 @@ deployment artifacts. See `DESIGN.md`.
 A launcher's compose opts into each (`${RIG_IMAGE_REGISTRY:+…}`, `:${RIG_IMAGE_TAG:-latest}`,
 `${RIG_DATA_DIR}/…`), and a launcher honors `COMPOSE_PROJECT_NAME` by **not** passing `-p`.
 
-## rig capabilities (v0.1.17 — all built/tested)
+## rig capabilities (all built/tested — bullets carry their own version tags)
 
 - Lifecycle `up/down(--purge)/status/logs/config/doctor`; tiered ordering (infra before sensors); tier-aware
   output ("2 sensors + 2 infra").
@@ -95,7 +96,7 @@ A launcher's compose opts into each (`${RIG_IMAGE_REGISTRY:+…}`, `:${RIG_IMAGE
   **inline `router_config:` mapping** (instance YAML → rendered `var/run/<name>/zenohd.json5` → `-c` +
   `ZENOH_ROUTER_CONFIG_URI`; bake captures it like any rendered file — inline only, paths don't bake);
   rig's CI certifies the template (reference launcher) on both config paths. Also validated: **re-bake
-  inside an extracted artifact works** (field-state capture) — provenance stamping still a follow-up.
+  inside an extracted artifact works** (field-state capture) — provenance stamping landed in v0.1.21.
 - `rig certify [name…|--repo R --config C] [--emit F|--diff A B]` + `rig doctor --deep` (v0.1.18): the
   launcher contract as executable checks (poison env; project-name/registry/tag/ros-env/determinism/
   identity/discipline/status). `--emit` on two hosts + `--diff` proves `config` output host-independence.
@@ -135,8 +136,8 @@ Still open:
 2. **boilerplate `<device>-up` (novatel/sbg launchers):** honor `COMPOSE_PROJECT_NAME` (drop `-p`, standalone
    fallback) — same one-liner the other launchers got. Find + prove it with
    `rig certify --repo ../novatel --config <example.yaml>` (the project-name check fails until fixed).
-3. **rig follow-ups (`ROADMAP.md`):** `bake --bundle-images` (air-gap), OCI artifact format, ROS
-   `/diagnostics` as a 2nd health layer, boot-time systemd unit, `rig adopt/verify`.
+3. **rig follow-ups (`ROADMAP.md`):** OCI artifact format, ROS `/diagnostics` as a 2nd health layer,
+   boot-time systemd unit, `rig adopt/verify`. (`bake --bundle-images` shipped in v0.1.21.)
 
 ## Gotchas learned the hard way (deployment debugging)
 

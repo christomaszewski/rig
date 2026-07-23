@@ -1,4 +1,5 @@
-"""rig build — descriptor build/mirror parsing + dry-run. Run: `.venv/bin/python tests/test_build.py`."""
+"""rig build — descriptor build/mirror parsing, dry-run, once-per-service dedupe, and the concurrent
+-j path. Run: `.venv/bin/python tests/test_build.py`."""
 import pathlib
 import sys
 import tempfile

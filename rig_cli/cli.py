@@ -1,4 +1,5 @@
-"""The `rig` command line: up / down / status / logs / config / doctor."""
+"""The `rig` command line — lifecycle (up/down/status/logs/config/pull), checks (doctor/certify),
+authoring (init/vendor), and deployment (build/bake/unbake)."""
 from __future__ import annotations
 
 import argparse
@@ -227,7 +228,9 @@ _HANDLERS = {
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="rig", description="vehicle-level sensor-stack orchestrator")
     parser.add_argument("--version", action="version", version=f"rig {__version__}")
-    parser.add_argument("--root", type=Path, default=None, help="rig repo root (default: alongside the CLI)")
+    parser.add_argument("--root", type=Path, default=None,
+                        help="deployment root holding vehicle.yaml (default: detected from the cwd, "
+                             "else alongside the CLI)")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     def add(name, help_text):
@@ -264,7 +267,9 @@ def build_parser() -> argparse.ArgumentParser:
     crt = sub.add_parser("certify", help="launcher-contract conformance checks (poison-env)")
     crt.add_argument("names", nargs="*", help="sensor name(s); default: all enabled")
     crt.add_argument("--repo", default=None, help="certify a service repo directly (no deployment needed)")
-    crt.add_argument("--config", default=None, help="config to drive the launcher with (required with --repo)")
+    crt.add_argument("--config", default=None,
+                     help="config to drive the launcher with (with --repo: defaults to the first "
+                          "`examples:` entry in rigging.yaml)")
     crt.add_argument("--emit", default=None, metavar="FILE",
                      help="write the normalized resolved compose (run on two hosts, then certify --diff)")
     crt.add_argument("--diff", nargs=2, default=None, metavar=("A", "B"),

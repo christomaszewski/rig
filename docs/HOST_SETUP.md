@@ -44,9 +44,12 @@ For **local development**, point `services.yaml` at sibling checkouts (`../novat
 ## ROS 2 graph
 
 `rig` exports `ROS_DOMAIN_ID` + `RMW_IMPLEMENTATION` (from `vehicle.yaml`) to every launcher; all stacks
-run `network_mode: host` + `ipc: host`, so they share one DDS graph on the host. Keep the distro aligned
-(Lyrical) across services. At higher sensor counts, partition unrelated stacks onto distinct
-`ROS_DOMAIN_ID`s and/or mount a Fast DDS XML profile (static peers) to tame discovery.
+run `network_mode: host` + `ipc: host`, so they share one ROS graph on the host. With the default
+`rmw_zenoh_cpp`, discovery runs through the **shared zenoh router** infra stack (rig ships
+`templates/zenoh-router/`; `rig doctor` warns when the rmw is zenoh and no router is declared). Keep the
+distro aligned (Lyrical) across services. Under a DDS rmw instead (`rmw_fastrtps_cpp`), the one-graph
+model is multicast discovery — at higher sensor counts, partition unrelated stacks onto distinct
+`ROS_DOMAIN_ID`s and/or mount a Fast DDS XML profile (static peers) to tame it.
 
 ## Deploying a baked artifact (local registry / offline)
 

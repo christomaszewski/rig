@@ -69,7 +69,7 @@ it never interprets what `camera_id` (or anything else) means.
 - **v2**: keyed list-merge; run-level override layers (apply one patch across many sensors, for §2).
 
 ### Open decisions
-- Confirm **list = replace** for v1 (vs keyed-merge now).
+- ~~Confirm **list = replace** for v1~~ — confirmed and shipped in v1 (keyed-merge stays a v2 item).
 - **Layering**: single per-entry override (v1) vs a profile + shared + per-entry override stack (later).
 - Keep **both styles** (named instance files AND profiles+overrides) indefinitely? (Recommended: yes —
   named files stay valid and are simplest for one-offs.)
@@ -111,8 +111,8 @@ coherent) is the real fidelity fork.
 > validated end-to-end against a real local registry. **`rig build [--registry]`** populates the registry by
 > running each service's declared `build:` command (build + push its own images) and mirroring its `mirror:`
 > third-party images (`docker buildx imagetools`); specifying a full image ref directly stays the per-service
-> `${<SVC>_IMAGE}` override. **Partial / next:** `--bundle-images` (air-gap docker save/load) + OCI artifact
-> format remain.
+> `${<SVC>_IMAGE}` override. **Partial / next:** `--bundle-images` ✅ done (v0.1.21 — docker save into the
+> artifact, up.sh self-load + load.sh); OCI artifact format remains.
 
 
 The vehicle holds the **launch surface + configs**, never driver source. Flow: develop drivers (own repos)
@@ -212,12 +212,12 @@ pinned ref must be one the vehicle can reach**:
 - **ROS `/diagnostics`** as the second health layer in `rig status`.
 - **Host-facing port-clash** extraction for list-structured configs — ✅ done: `host_ports` supports an
   enabled-aware `plugins[name=webrtc-bridge,enabled=true].params.port` selector, and rig flags clashes
-  across instances. The service must declare `host_ports` (camera-service: add the webrtc port path).
+  across instances. The service must declare `host_ports` (camera-service: ✅ declares the webrtc port path).
 - **camera image publishing** — ✅ now via `rig build` (the camera's `tools/build-images.sh` pushes
   `cam-core`/`cam-dev` to the registry; `rig bake --registry` pins them by digest).
 - **cam-up `SENSORS_DIR` robustness** — ✅ done (cam-up makes the `cd` tolerant of a missing dir, so the
   vendored camera surface runs standalone and bakes its compose-only form).
-- **bake follow-ups**: `--bundle-images` (docker save/load for full air-gap, no registry) + OCI artifact
-  format. (`--registry` + digest pinning + `rig build` done.)
+- **bake follow-ups**: OCI artifact format. (`--registry` + digest pinning + `rig build` +
+  `--bundle-images` (v0.1.21, docker save/load for full air-gap) done.)
 - **camera-service `rigging.yaml`** — ✅ done: declares `external_volumes: ["cam_{name}_sock"]` so
   `rig down --purge` GCs it.

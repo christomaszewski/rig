@@ -84,7 +84,7 @@ def run_verb(
     extra: list[str] | None = None,
     dry_run: bool = False,
 ) -> list[Outcome]:
-    """Run a streaming verb (up/down/config/logs) across sensors in the given order."""
+    """Run a streaming verb (up/down/config/logs/pull) across sensors in the given order."""
     outcomes: list[Outcome] = []
     for sensor, desc in pairs:
         cmd = launcher_cmd(sensor, desc, verb, extra)

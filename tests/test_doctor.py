@@ -1,4 +1,5 @@
-"""doctor — config-path resolution incl. the enabled-aware list selector. Run: python3 tests/test_doctor.py"""
+"""doctor — config-path resolution (incl. the enabled-aware list selector) + the non-ROS-safe
+instance-name warning. Run: python3 tests/test_doctor.py"""
 import pathlib
 import sys
 

@@ -66,16 +66,20 @@ template — it adapts to each via `rigging.yaml`'s `verbs` map (e.g. cam-up tak
 
 ## Status & roadmap
 
-Implemented: manifest/catalog/descriptor loaders with validation; dispatch with fleet env + dry-run +
-ordering; `status` roll-up; `doctor`; `up/down/--purge/logs/config`. Validated against the three real
-launchers (cam-up, novatel-up, sbg-up): correct ordering, env propagation, params render, and status.
+Implemented (see `ROADMAP.md` for the per-version log): manifest/catalog/descriptor loaders with
+validation; overrides + nameless profiles; dispatch with fleet env + dry-run + ordering; the `infra:`
+tier; `status` roll-up; `doctor` (incl. enabled-aware host-port clash checks) + `doctor --deep`;
+`up/down/--purge/logs/config/pull`; `certify` (the launcher contract as executable checks, `--repo` CI
+mode, `--emit/--diff` host-independence proof); `build` (per-service build + mirror); `vendor` (with
+provenance) and `bake/unbake` (digest pinning, compose-only form, `--bundle-images` air-gap bundles,
+parent provenance on re-bake); `init` (name seed, `--infra` templates, `--discover` workspace scan).
+Validated against the real launchers (cam-up, dash-up, novatel-up, sbg-up, vectornav-up, the bundled
+templates) — and continuously, by `rig certify` in each repo's CI.
 
-Open items (see the project plan): host-facing **port-clash** extraction for list-structured configs (the
-`host_ports` path syntax exists; the camera's WebRTC port could also be reported by a launcher `ports`
-query); a **dev-vs-prod** affordance (cam-up's `--dev` vs config-driven replay for thin drivers); ROS
-`/diagnostics`
-as the second health layer; boot-time bring-up via a systemd unit; and submodule pinning for deployment.
+Open items: a **dev-vs-prod** affordance (cam-up's `--dev` vs config-driven replay for thin drivers); a
+service-defined **`health` verb** (supersedes the ROS-`/diagnostics`-only idea — covers non-ROS stacks);
+boot-time bring-up via a systemd unit + a `rig verify --fix` reconciler; fleet mode (one artifact, N
+vehicles, id resolved on-vehicle); OCI artifact format.
 
-See **`docs/ROADMAP.md`** for the detailed spec of the next item — **config overrides & reusable profiles**
-(one mechanism for multi-instance sharing *and* per-run data-source overrides) — and the **SIL/HIL** model
-(per-sensor source × per-run footprint).
+See **`docs/ROADMAP.md`** for config overrides & reusable profiles (✅ implemented, §1) and the **SIL/HIL**
+model (per-sensor source × per-run footprint — still open, §2).

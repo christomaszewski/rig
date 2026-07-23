@@ -22,11 +22,13 @@ services evolve independently and new ones drop in by adding two files (a launch
 
 ## What rig owns vs. what the launcher owns
 
-- **Launcher (`<service>-up`)** owns everything per-stack: parse the config, derive instance identity
-  (compose project `<service>_<name>`, ROS namespace `/<name>`), render driver params, select/parameterize
-  its static compose, wire devices/network, run `docker compose`.
+- **Launcher (`<service>-up`)** owns everything per-stack: parse the config, derive the ROS namespace
+  (`/<name>`), render driver params, select/parameterize its static compose, wire devices/network, run
+  `docker compose`. It **honors** the rig-provided `COMPOSE_PROJECT_NAME` (never passes `-p`), falling
+  back to its own `<service>_<name>` only when run standalone.
 - **rig** owns the cross-cutting concerns: which sensors run (the manifest), **globally-unique instance
-  names**, bring-up order (producers→consumers), fleet-wide ROS env (`ROS_DOMAIN_ID`/`RMW_IMPLEMENTATION`),
+  names**, the compose project name (`<name>-vehicle-<vehicle_id>`), bring-up order (producers→consumers),
+  fleet-wide ROS env (`ROS_DOMAIN_ID`/`RMW_IMPLEMENTATION`),
   status/health aggregation, and lifecycle/cleanup (external-volume GC on final teardown).
 
 ## Quick start

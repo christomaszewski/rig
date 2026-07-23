@@ -3,9 +3,11 @@ restore it.
 
 bake snapshots the *resolved* deployment tree (rig itself + resolved per-sensor configs + vendored launch
 surfaces + metadata) AND compiles a **compose-only** resolved form (each sensor's ``docker compose config``
-output + flat ``up.sh``/``down.sh``/``status.sh``) so the artifact runs with just Docker when Python/PyYAML
-are absent. A ``run.sh`` bootstrap uses rig when present, else the static scripts. unbake extracts an
-artifact back to an editable tree.
+output + flat ``up.sh``/``down.sh``/``status.sh``/``pull.sh``, plus ``load.sh`` and an up.sh self-load
+guard when ``--bundle-images`` is used) so the artifact runs with just Docker when Python/PyYAML are
+absent. The ``run.sh`` bootstrap prefers the compose-only scripts (registry-pinned, never build) and falls
+back to rig for other verbs or a missing compose-only form. unbake extracts an artifact back to an
+editable tree.
 
 Best-effort, host-dependent steps degrade gracefully: if a launcher's ``config`` verb can't run (no Docker)
 the artifact still ships the rig-runnable tree; image digests are pinned where resolvable, else left as tags.
@@ -224,7 +226,8 @@ def _write_bootstrap(staging: Path) -> None:
         "# may build from source) is the fallback for other verbs / a missing compose-only form, and the\n"
         "# mutable path: after editing a config, run `rig up` directly to re-render.\n"
         'cd "$(dirname "$0")"\n'
-        'verb="${1:-up}"\n'
+        '[ $# -eq 0 ] && set -- up\n'
+        'verb="$1"\n'
         'case "$verb" in\n'
         "  up)     [ -f ./up.sh ]     && exec ./up.sh ;;\n"
         "  down)   [ -f ./down.sh ]   && exec ./down.sh ;;\n"
@@ -233,7 +236,7 @@ def _write_bootstrap(staging: Path) -> None:
         "  load)   [ -f ./load.sh ]   && exec ./load.sh ;;\n"
         "esac\n"
         "if command -v python3 >/dev/null 2>&1 && python3 -c 'import yaml' >/dev/null 2>&1; then\n"
-        '  exec python3 ./rig "$verb"\n'
+        '  exec python3 ./rig "$@"\n'
         "fi\n"
         'echo "run.sh: $verb needs the compose-only scripts or rig (python3 + pyyaml)" >&2\n'
         "exit 1\n"

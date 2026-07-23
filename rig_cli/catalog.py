@@ -2,8 +2,9 @@
 
 Keys are *service* names (the routing key in each sensor config + each repo's rigging.yaml), which may
 differ from the repo directory name (e.g. service ``sbg`` lives in repo ``sbg_driver``). ``path`` is
-resolved relative to the rig repo root; for deployment these are git submodules under ``services/<name>``,
-for local development they point at sibling checkouts.
+resolved relative to the deployment root (the dir holding vehicle.yaml); for deployment these are
+``rig vendor``-ed launch surfaces under ``services/<name>``, for local development they point at sibling
+checkouts.
 """
 from __future__ import annotations
 

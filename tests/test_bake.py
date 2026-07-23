@@ -1,4 +1,6 @@
-"""bake compose-transforms. Run: `.venv/bin/python tests/test_bake.py`."""
+"""bake — compose transforms, baked script/bootstrap emission (incl. pull.sh + bundle load guard),
+end-to-end bake (tool bundling, --bundle-images tag refs), and re-bake parent provenance.
+Run: `.venv/bin/python tests/test_bake.py`."""
 import pathlib
 import sys
 import tempfile
