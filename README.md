@@ -129,7 +129,7 @@ Ready-to-use shared (`infra:`) services — point `services.yaml` at one and add
 - **`zenoh-router/`** — the vehicle's shared `rmw_zenoh` router (order 0). Optional inline `router_config:`
   in its config renders to a `zenohd.json5` the launcher mounts.
 - **`ros2-bag-logger/`** / **`ros1-bag-logger/`** — record the ROS telemetry graph to
-  `${RIG_DATA_DIR}/bags/<name>`. Config: `record.mode: all|allow|exclude` (+ `exclude_images`, default
+  `${RIG_DATA_DIR}/current/bags/<name>` (the open run — ROADMAP §3c; flat `bags/<name>` without a registry). Config: `record.mode: all|allow|exclude` (+ `exclude_images`, default
   true — image streams are huge over ROS and already recorded compressed at the camera source) and an
   `output` block (storage/compression/split). Place at order ~1 so it records from startup. The image must
   carry the bag tooling + `rmw_zenoh` (your driver images do); defaults to a driver image.

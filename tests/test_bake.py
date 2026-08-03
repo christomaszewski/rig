@@ -96,6 +96,40 @@ def test_pull_is_a_default_verb():
     assert load_descriptor("demo", svc).verb_args("pull") == ["fetch", "--all"]  # and it's overridable
 
 
+def test_bake_emits_run_scripts_when_data_dir_set():
+    import subprocess
+
+    from rig_cli.bake import _write_bootstrap, _write_run_scripts, _write_scripts
+
+    staging = pathlib.Path(tempfile.mkdtemp())
+    ctx = {"data_dir": "/home/uxv/logs", "vehicle": "t", "vehicle_id": 1, "tag": "v9",
+           "projects": ["cam-vehicle-1", "bag_logger-vehicle-1"]}
+    entries = [{"sensor": "cam", "project": "cam-vehicle-1",
+                "compose": "compose/cam/docker-compose.yaml", "external_volumes": []}]
+    _write_run_scripts(staging, ctx)
+    _write_scripts(staging, entries, run_ctx=ctx)
+    _write_bootstrap(staging)
+    for f in ("new-run.sh", "end-run.sh", "runs.sh", "up.sh", "status.sh", "run.sh"):
+        assert (staging / f).exists()
+        proc = subprocess.run(["sh", "-n", str(staging / f)], capture_output=True, text=True)
+        assert proc.returncode == 0, f"{f} has a sh syntax error: {proc.stderr}"   # every script parses
+    up = (staging / "up.sh").read_text()
+    assert "_auto" in up and 'ln -sfn "runs/$id"' in up             # ensure-guard, RELATIVE symlink
+    assert up.index("_auto") < up.index("compose")                   # run exists BEFORE stacks start
+    assert 'rm -f "$D/current"' in up                                # dangling `current` self-heals
+    assert "rig_version:" in up and "artifact: v9" in up             # auto-manifest carries the contract
+    nr = (staging / "new-run.sh").read_text()
+    assert "artifact: v9" in nr and "cam-vehicle-1" in nr            # provenance + inlined guard list
+    assert "A-Za-z0-9_-" in nr                                       # label validated (dir/traversal safety)
+    assert "while [ -e" in nr                                        # same-second collision suffix
+    er = (staging / "end-run.sh").read_text()
+    assert "ended:" in er and "tail -c1" in er                       # newline-safe seal append
+    st = (staging / "status.sh").read_text()
+    assert "run:" in st and '[ -e "$D/current" ]' in st              # dangling != open
+    boot = (staging / "run.sh").read_text()
+    assert "new-run)" in boot and '[ $# -eq 1 ]' in boot             # flagged forms fall through to rig
+
+
 def test_bake_bundles_tool_from_separated_deployment():
     # rig init layout: the deployment root has NO rig tool in it (the tool lives in this package's dir).
     from rig_cli.bake import bake, unbake

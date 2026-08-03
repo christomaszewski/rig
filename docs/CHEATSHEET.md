@@ -109,6 +109,18 @@ Quick verification: containers up (`docker ps`), dashboard at `http://<vehicle>:
 under `data_dir`, camera log shows `health: frames=N, no drops`. After the first pull the vehicle runs
 **offline** — the registry is only needed for updates.
 
+**Run directories** (needs `data_dir`; ROADMAP §3c): one session = one folder under
+`data_dir/runs/<stamp>_<label>/`, with a provenance manifest (`ended:` present = sealed = safe to sync).
+`up` auto-opens an `_auto` run if none is open — it NEVER rotates; rotation/sealing are explicit and
+refuse while stacks run:
+```bash
+ssh $VEHICLE 'cd ~/ws/v1 && ./run.sh up --run dock-test'   # open a labeled session + up (idempotent)
+ssh $VEHICLE 'cd ~/ws/v1 && ./run.sh runs'                 # registry: OPEN / sealed / interrupted
+ssh $VEHICLE 'cd ~/ws/v1 && ./run.sh down --end-run'       # stop everything, then seal the session
+scp -r $VEHICLE:<data_dir>/runs/<stamp>_dock-test .        # the whole session, data + manifest
+```
+(bare-Docker hosts: `./new-run.sh dock-test && ./up.sh` — the flagged forms need the bundled rig.)
+
 ## 6 — iterate
 
 | change                  | loop                                                              |

@@ -22,14 +22,17 @@ def fleet_env(manifest: Manifest) -> dict[str, str]:
     env = dict(os.environ)
     env["ROS_DOMAIN_ID"] = str(manifest.ros.domain_id)
     env["RMW_IMPLEMENTATION"] = manifest.ros.rmw
-    if manifest.vehicle_id is not None:
-        env["VEHICLE_ID"] = str(manifest.vehicle_id)  # vehicle identity for containers that want it
-    if manifest.image_registry:
-        env["RIG_IMAGE_REGISTRY"] = manifest.image_registry  # each compose prefixes its repo:tag with this
-    if manifest.image_tag:
-        env["RIG_IMAGE_TAG"] = manifest.image_tag  # platform-specific composes tag with this (e.g. jp7)
-    if manifest.data_dir:
-        env["RIG_DATA_DIR"] = manifest.data_dir  # recordings/logs/outputs land here (a real host path)
+    # rig OWNS these vars: when the manifest doesn't define one, POP any inherited value — a leaked
+    # VEHICLE_ID from the shell would rename compose projects out from under the run/verify machinery,
+    # and leaked registry/tag/data values would silently redirect pulls or outputs.
+    for key, value in (("VEHICLE_ID", manifest.vehicle_id),
+                       ("RIG_IMAGE_REGISTRY", manifest.image_registry),
+                       ("RIG_IMAGE_TAG", manifest.image_tag),
+                       ("RIG_DATA_DIR", manifest.data_dir)):
+        if value not in (None, ""):
+            env[key] = str(value)
+        else:
+            env.pop(key, None)
     return env
 
 

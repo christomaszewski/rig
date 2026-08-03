@@ -207,6 +207,69 @@ pinned ref must be one the vehicle can reach**:
   host net :7447). Point `services.yaml` at it + add an `infra:` entry; adjust the image/command for your
   exact rmw_zenoh router (e.g. `ros2 run rmw_zenoh_cpp rmw_zenohd` on a ROS image).
 
+## 3c. Run directories — one session, one folder — ✅ v1 implemented (v0.1.25)
+
+### Motivation
+Consolidate every service's data output (bags, camera recordings, future sensors) under **one directory
+per session**, so a field test is a single `scp -r`-able folder that also records *what software produced
+it*. Today the tree is service-first (`data_dir/recordings/<name>/…`, `data_dir/bags/<name>/…`) with
+independent per-service timestamps; runs make it session-first.
+
+### The two traps (why the obvious designs are wrong)
+1. **"A run = a `rig up`" splits data.** `up` is imperative and partial (`rig up cam_usb` after a config
+   tweak; compose restarting a crashed stack at 3am with no rig involved). Implicit rotation forks one
+   stack's data into a new run while the rest keep writing to the old — split-brain trees. **Rotation is
+   an operator decision, never a lifecycle side effect.**
+2. **`RIG_RUN_ID` as env poisons the bake model.** A run id interpolated into compose bind paths would be
+   FROZEN into the baked artifact (`bake` captures `docker compose config` under the fleet env) and would
+   break the determinism `certify` enforces. **The run id lives in the filesystem, not the env** —
+   composes stay static.
+
+### Design
+A tiny registry on the host, owned by rig, under `data_dir` (so it survives redeployments):
+```
+<data_dir>/runs/<UTCstamp>_<label|auto>/   # one dir per run; manifest.yaml inside
+<data_dir>/current -> runs/<id>            # THE pointer; at most one run is ever open
+```
+Services write via the pointer: `<data_dir>/current/<kind>/<name>/…`. **Writers pin the run at process
+start** (resolve `current` once, e.g. `readlink -f`, falling back to the flat layout when no `current`
+exists — standalone compatibility). Pin-at-start is load-bearing: a live symlink flip would ENOENT a
+recorder's next segment/split creation, so a running recording belongs to the run it started in, and
+rotation therefore **refuses while this manifest's stacks are running** (`--force` = "I accept late
+writes landing in the sealed run").
+
+### State machine (complete)
+- `up` **ensures**: no `current` → create `runs/<stamp>_auto/` + manifest + pointer, then start. Never
+  rotates. (`_auto` in your registry = data collected outside a planned session — the safety net for the
+  6am bring-up, reboots, systemd.)
+- `new-run [label]` **rotates**: seal current (if open) + open new + repoint. Guarded while running.
+- `end-run [--force]` **seals**: stamp `ended:` + snapshot (`rig status` output, disk usage) into the
+  manifest, remove `current`. Guarded while running; idempotent (no open run → warn, rc 0).
+- `up --run <label>` names at entry: label matches the open run → join (idempotent, never mints `X_2`);
+  else rotate-then-up (same guard). `down --end-run` seals after a successful full down — a partial or
+  failed down leaves stacks running, so the guard refuses: you cannot seal out from under live writers.
+- `runs` lists the registry (STATE: OPEN = current+no `ended:`; sealed = `ended:`; interrupted = neither —
+  surfaced, not hidden). `status` shows `run: <label> (open …)` / `no active run` in its header.
+
+### Manifest = the machine contract
+`runs/<id>/manifest.yaml`: run id, label, vehicle, `vehicle_id`, rig version, artifact tag (when running
+in an extracted artifact — bake's provenance chain plugs in), `started:`, enabled stacks; `end-run` adds
+`ended:` + the snapshot. **`ended:` present ⇔ sealed ⇔ safe for sync tooling** — scripts read manifests,
+never parse the human table.
+Power loss mid-session: the symlink survives reboot; the run stays open and correctly continues.
+
+### Compose-only parity
+bake emits `new-run.sh` / `end-run.sh` / `runs.sh` (pure sh; manifest fields are grep-able flat keys),
+an ensure-guard in `up.sh`, and the run header in `status.sh` — all with `data_dir` and the project-name
+guard list inlined at bake time. Flagged forms (`up --run`, `down --end-run`) route through the bundled
+rig (pyyaml hosts); bare-Docker hosts compose the primitives (`./new-run.sh X && ./up.sh`).
+
+### Adoption (incremental, no flag day)
+`data_dir` unset ⇒ the feature is inert (verbs error clearly; `up` skips the ensure). Services adopt with
+a one-line path change to write via `current/`: the bundled bag-logger templates ship adopted (v0.1.25);
+camera-service (`output_dir`/recordings default) is a small cross-repo PR; dashboard writes nothing.
+Un-adopted services keep the flat layout — both coexist under `data_dir`.
+
 ## 4. Other tracked items
 - **Boot-time bring-up**: a systemd unit running `rig up` (Compose handles per-stack restart thereafter).
 - **ROS `/diagnostics`** as the second health layer in `rig status`.

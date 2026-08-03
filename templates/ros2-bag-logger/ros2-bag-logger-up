@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Launcher for the vehicle's shared ROS 2 bag logger (infra). rig brings it up just AFTER the zenoh router
 # (order ~1) so it records the graph from the start, exporting ROS_DOMAIN_ID / RMW_IMPLEMENTATION /
-# RIG_DATA_DIR. It records the telemetry graph to ${RIG_DATA_DIR}/bags/<name>; image topics are excluded
+# RIG_DATA_DIR. It records the telemetry graph to ${RIG_DATA_DIR}/current/bags/<name> (run-aware; flat without a registry); image topics are excluded
 # by default (camera-service records compressed video at the source). SELECTS + PARAMETERIZES `ros2 bag
 # record` — it does not generate compose.
 set -euo pipefail

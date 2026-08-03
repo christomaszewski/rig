@@ -187,8 +187,110 @@ def _load_guard(refs: list[str]) -> list[str]:
     ]
 
 
-def _write_scripts(staging: Path, entries: list[dict], *, bundle_refs: list[str] | None = None) -> None:
+def _manifest_echo_lines(ctx: dict, indent: str = "  ") -> list[str]:
+    """The provenance fields as sh echo lines (values shell-quoted — a vehicle name is data, not code).
+    Mirrors runs.py's manifest so auto and labeled runs carry the same machine contract."""
+    lines = [f'{indent}echo {shlex.quote("vehicle: " + str(ctx["vehicle"]))}']
+    if ctx.get("vehicle_id") is not None:
+        lines.append(f'{indent}echo {shlex.quote("vehicle_id: " + str(ctx["vehicle_id"]))}')
+    lines.append(f'{indent}echo {shlex.quote("artifact: " + str(ctx["tag"]))}')
+    lines.append(f'{indent}echo {shlex.quote("rig_version: " + __version__)}')
+    lines.append(f'{indent}echo "started: $(date -u +%Y-%m-%dT%H:%M:%S+00:00)"')
+    return lines
+
+
+def _run_ensure_guard(ctx: dict) -> list[str]:
+    """sh block for up.sh: make sure an open run exists (create `_auto` if absent). NEVER rotates —
+    the safety net for reboots/systemd; deliberate sessions use new-run.sh / `rig up --run`.
+    A DANGLING current (run dir deleted by hand) is healed here, matching runs.py's ensure."""
+    d = shlex.quote(ctx["data_dir"])
+    return [
+        f'D={d}',
+        'if [ -L "$D/current" ] && [ ! -e "$D/current" ]; then rm -f "$D/current"; fi',
+        'if [ ! -e "$D/current" ]; then',
+        '  id="$(date -u +%Y%m%dT%H%M%SZ)_auto"',
+        '  n=2; while [ -e "$D/runs/$id" ]; do id="$(date -u +%Y%m%dT%H%M%SZ)_auto-$n"; n=$((n+1)); done',
+        '  mkdir -p "$D/runs/$id"',
+        '  {',
+        '    echo "run: $id"',
+        *_manifest_echo_lines(ctx, "    "),
+        '  } > "$D/runs/$id/manifest.yaml"',
+        '  ln -sfn "runs/$id" "$D/current"',
+        '  echo "opened run $id (auto — label one with ./new-run.sh <label>)" >&2',
+        'fi',
+    ]
+
+
+def _write_run_scripts(staging: Path, ctx: dict) -> None:
+    """new-run.sh / end-run.sh / runs.sh — the run registry in pure sh (bare-Docker parity). data_dir and
+    the guard's project list are inlined at bake time; manifest fields stay grep-able flat keys."""
+    d = shlex.quote(ctx["data_dir"])
+    projects = " ".join(shlex.quote(p) for p in ctx["projects"])
+    guard = [
+        'if [ "$FORCE" = 0 ]; then',
+        f'  for p in {projects}; do',
+        '    if docker compose -p "$p" ps -q 2>/dev/null | grep -q .; then',
+        '      echo "$0: $p is running — ./down.sh first, or --force (late writes land in the sealed run)" >&2',
+        '      exit 1',
+        '    fi',
+        '  done',
+        'fi',
+    ] if projects else []
+    seal = [  # append ended: (+ size) to the open run's manifest — newline-safe (>> onto a file whose
+        'if [ -L "$D/current" ] && [ -e "$D/current" ]; then',  # last line lacks \n would glue the stamp)
+        '  old="$D/$(readlink "$D/current")"',
+        '  if [ -f "$old/manifest.yaml" ]; then',
+        '    if [ -n "$(tail -c1 "$old/manifest.yaml")" ]; then echo >> "$old/manifest.yaml"; fi',
+        '    echo "ended: $(date -u +%Y-%m-%dT%H:%M:%S+00:00)" >> "$old/manifest.yaml"',
+        '    kb=$(du -sk "$old" 2>/dev/null | cut -f1)',
+        '    if [ -n "$kb" ]; then echo "disk_kb: $kb" >> "$old/manifest.yaml"; fi',
+        '    echo "sealed run $(basename "$old")" >&2',
+        '  fi',
+        'fi',
+    ]
+    label_check = [  # mirror runs.py's _LABEL_RE — the label becomes a directory name
+        'case "$LABEL" in',
+        '  ""|*[!A-Za-z0-9_-]*|-*|_*) echo "invalid label \'$LABEL\' (use [A-Za-z0-9][A-Za-z0-9_-]*)" >&2; exit 2 ;;',
+        'esac',
+    ]
+    new_run = (["#!/usr/bin/env sh", "set -e", f'D={d}',
+                'FORCE=0; if [ "$1" = "--force" ]; then FORCE=1; shift; fi',
+                'LABEL="${1:-auto}"']
+               + label_check + guard + seal +
+               ['id="$(date -u +%Y%m%dT%H%M%SZ)_$LABEL"',
+                'n=2; while [ -e "$D/runs/$id" ]; do id="$(date -u +%Y%m%dT%H%M%SZ)_$LABEL-$n"; n=$((n+1)); done',
+                'mkdir -p "$D/runs/$id"',
+                '{',
+                '  echo "run: $id"',
+                '  if [ "$LABEL" != auto ]; then echo "label: \\"$LABEL\\""; fi',  # quoted: 123 stays a string
+                *_manifest_echo_lines(ctx),
+                '} > "$D/runs/$id/manifest.yaml"',
+                'ln -sfn "runs/$id" "$D/current"',
+                'echo "opened run $id" >&2'])
+    end_run = (["#!/usr/bin/env sh", "set -e", f'D={d}',
+                'FORCE=0; if [ "$1" = "--force" ]; then FORCE=1; shift; fi',
+                'if [ ! -L "$D/current" ] || [ ! -e "$D/current" ]; then echo "no active run" >&2; exit 0; fi']
+               + guard + seal + ['rm -f "$D/current"'])
+    runs_sh = ["#!/usr/bin/env sh", f'D={d}',
+               'cur=""; if [ -L "$D/current" ]; then cur="$(basename "$(readlink "$D/current")")"; fi',
+               'for dir in "$D"/runs/*/; do',
+               '  [ -d "$dir" ] || continue',
+               '  id="$(basename "$dir")"',
+               '  ended="$(sed -n \'s/^ended: //p\' "$dir/manifest.yaml" 2>/dev/null | head -1)"',
+               '  state=sealed; [ -z "$ended" ] && state=interrupted; [ "$id" = "$cur" ] && state=OPEN',
+               '  printf \'%s\\t%s\\t%s\\n\' "$id" "$state" "${ended:--}"',
+               'done']
+    for fname, lines in (("new-run.sh", new_run), ("end-run.sh", end_run), ("runs.sh", runs_sh)):
+        path = staging / fname
+        path.write_text("\n".join(lines) + "\n")
+        path.chmod(0o755)
+
+
+def _write_scripts(staging: Path, entries: list[dict], *, bundle_refs: list[str] | None = None,
+                   run_ctx: dict | None = None) -> None:
     up = ["#!/usr/bin/env sh", "set -e", "cd \"$(dirname \"$0\")\""]
+    if run_ctx:
+        up += _run_ensure_guard(run_ctx)
     if bundle_refs:
         up += _load_guard(bundle_refs)
     for e in entries:
@@ -207,6 +309,12 @@ def _write_scripts(staging: Path, entries: list[dict], *, bundle_refs: list[str]
     pull = ["#!/usr/bin/env sh", "set -e", "cd \"$(dirname \"$0\")\""]
     for e in entries:
         pull.append(f'docker compose -p "{e["project"]}" -f "{e["compose"]}" pull')
+    if run_ctx:  # status header: the open run, in pure sh (after shebang+cd, before the stack tables)
+        d = shlex.quote(run_ctx["data_dir"])
+        status[2:2] = [f'D={d}',
+                       'if [ -L "$D/current" ] && [ -e "$D/current" ]; then',  # dangling != open
+                       '  echo "run: $(basename "$(readlink "$D/current")") (open)"',
+                       'else echo "run: none active"; fi']
     scripts = [("up.sh", up), ("down.sh", down), ("status.sh", status), ("pull.sh", pull)]
     if bundle_refs:  # explicit/forced load (up.sh already self-loads when refs are missing)
         scripts.append(("load.sh", ["#!/usr/bin/env sh", "set -e", "cd \"$(dirname \"$0\")\"",
@@ -228,12 +336,17 @@ def _write_bootstrap(staging: Path) -> None:
         'cd "$(dirname "$0")"\n'
         '[ $# -eq 0 ] && set -- up\n'
         'verb="$1"\n'
+        '# bare verbs run the static scripts; FLAGGED forms (up --run X, down --end-run) fall through to\n'
+        '# the bundled rig, which owns those semantics.\n'
         'case "$verb" in\n'
-        "  up)     [ -f ./up.sh ]     && exec ./up.sh ;;\n"
-        "  down)   [ -f ./down.sh ]   && exec ./down.sh ;;\n"
-        "  status) [ -f ./status.sh ] && exec ./status.sh ;;\n"
-        "  pull)   [ -f ./pull.sh ]   && exec ./pull.sh ;;\n"
+        "  up)     [ $# -eq 1 ] && [ -f ./up.sh ]     && exec ./up.sh ;;\n"
+        "  down)   [ $# -eq 1 ] && [ -f ./down.sh ]   && exec ./down.sh ;;\n"
+        "  status) [ $# -eq 1 ] && [ -f ./status.sh ] && exec ./status.sh ;;\n"
+        "  pull)   [ $# -eq 1 ] && [ -f ./pull.sh ]   && exec ./pull.sh ;;\n"
         "  load)   [ -f ./load.sh ]   && exec ./load.sh ;;\n"
+        '  new-run) if [ -f ./new-run.sh ]; then shift; exec ./new-run.sh "$@"; fi ;;\n'
+        '  end-run) if [ -f ./end-run.sh ]; then shift; exec ./end-run.sh "$@"; fi ;;\n'
+        "  runs)   [ -f ./runs.sh ]   && exec ./runs.sh ;;\n"
         "esac\n"
         "if command -v python3 >/dev/null 2>&1 && python3 -c 'import yaml' >/dev/null 2>&1; then\n"
         '  exec python3 ./rig "$@"\n'
@@ -356,8 +469,15 @@ def bake(root: Path, manifest, catalog, descriptors, env, tag: str, *, registry:
             raise RigError("bake --bundle-images: no images captured — the compose-only rendering must "
                            "succeed for every stack you want bundled (see the skip messages above)")
         bundle = _bundle_images(staging, sorted(images))
+    run_ctx = None
+    if manifest.data_dir:  # runs feature: inert without data_dir
+        run_ctx = {"data_dir": manifest.data_dir, "vehicle": manifest.vehicle,
+                   "vehicle_id": manifest.vehicle_id, "tag": tag,
+                   "projects": [project_name(s.name, manifest.vehicle_id)
+                                for s in manifest.sensors if s.enabled]}
+        _write_run_scripts(staging, run_ctx)
     if entries:
-        _write_scripts(staging, entries, bundle_refs=sorted(images) if bundle else None)
+        _write_scripts(staging, entries, bundle_refs=sorted(images) if bundle else None, run_ctx=run_ctx)
     _write_bootstrap(staging)
 
     # 5. metadata + lock. A re-bake INSIDE an extracted artifact (field edits on the vehicle) records its

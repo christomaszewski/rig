@@ -67,6 +67,14 @@ A launcher's compose opts into each (`${RIG_IMAGE_REGISTRY:+…}`, `:${RIG_IMAGE
 - Templates: `templates/zenoh-router/` (a ready shared-router infra service; honors `COMPOSE_PROJECT_NAME`).
 - `rig pull` + baked `pull.sh` (v0.1.19): pre-pull every stack's images with NO container changes — prime
   the vehicle's cache while the registry is reachable, then run offline; safe against a live deployment.
+- v0.1.25: **run directories** (ROADMAP §3c) — one session, one folder under `data_dir/runs/`, `current`
+  symlink (RELATIVE target, resolvable in-container), provenance manifest (`ended:` ⇔ sealed ⇔ safe to
+  sync). Verbs: `new-run [label]` / `end-run [--force]` / `runs` / `up --run L` / `down --end-run`; run
+  header in `status`. `up` ensures (`_auto` safety net), never rotates; rotation/seal refuse while this
+  manifest's stacks run (writers pin their run at process start). bake emits sh parity
+  (new-run/end-run/runs.sh, up.sh ensure-guard, status header); bag-logger templates adopted
+  (`current/bags/<name>`, flat fallback). camera-service adoption = pending cross-repo PR (recordings →
+  `current/recordings/<name>`). Validated live end-to-end incl. the running-stack guard refusal.
 - v0.1.24: **`rig init` accelerators** — the target dirname seeds `vehicle:`; `--vehicle-id N`;
   `--infra <template>` (repeatable) fully wires a bundled template (config + catalog + ENABLED entry,
   router pinned order 0); `--discover [DIR]` scans a workspace for repos with a `rigging.yaml` and

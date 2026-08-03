@@ -95,7 +95,11 @@ def render(cfg: dict, repo: pathlib.Path) -> tuple[str, str]:
         "# Source ROS if the image's entrypoint didn't (we run as `command:`, so usually it did).\n"
         '[ -n "${ROS_DISTRO:-}" ] && [ -f "/opt/ros/$ROS_DISTRO/setup.bash" ] && '
         '. "/opt/ros/$ROS_DISTRO/setup.bash"\n'
-        f'base="${{RIG_BAG_BASE:-/data/bags}}/{shlex.quote(name)}"\n'
+        # Run-aware output (ROADMAP §3c): pin the OPEN run at process start — resolve `current` ONCE
+        # (a live symlink flip would ENOENT the recorder's next split). No run registry -> flat layout.
+        'root="${RIG_BAG_ROOT:-/data}"\n'
+        'if [ -e "$root/current" ]; then bags="$(readlink -f "$root/current")/bags"; else bags="$root/bags"; fi\n'
+        f'base="$bags/{shlex.quote(name)}"\n'
         f'out="$base/{shlex.quote(name)}_$(date -u +%Y%m%dT%H%M%SZ)"\n'
         'mkdir -p "$base"\n'
         f'echo "ros2-bag-logger: recording ({shlex.quote(subdir)}) -> $out" >&2\n'

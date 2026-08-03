@@ -79,6 +79,8 @@ def test_ros2_render_is_restart_safe_and_sources_ros():
     assert "date -u" in body and "-o " in body          # runtime-stamped output dir (no clobber on restart)
     assert "/opt/ros/$ROS_DISTRO/setup.bash" in body     # sources ROS
     assert "exec ros2 bag record" in body
+    assert 'readlink -f "$root/current"' in body         # run-aware: pin the OPEN run at process start
+    assert 'else bags="$root/bags"' in body              # ...with the flat fallback (no registry)
 
 
 def test_ros2_services_key_warns_not_implemented():

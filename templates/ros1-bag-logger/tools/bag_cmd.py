@@ -98,7 +98,10 @@ def render(cfg: dict, repo: pathlib.Path) -> tuple[str, str]:
         "set -e\n"
         '[ -n "${ROS_DISTRO:-}" ] && [ -f "/opt/ros/$ROS_DISTRO/setup.bash" ] && '
         '. "/opt/ros/$ROS_DISTRO/setup.bash"\n'
-        f'base="${{RIG_BAG_BASE:-/data/bags}}/{shlex.quote(name)}"\n'
+        # Run-aware output (ROADMAP §3c): pin the OPEN run at process start; flat layout when no registry.
+        'root="${RIG_BAG_ROOT:-/data}"\n'
+        'if [ -e "$root/current" ]; then bags="$(readlink -f "$root/current")/bags"; else bags="$root/bags"; fi\n'
+        f'base="$bags/{shlex.quote(name)}"\n'
         'mkdir -p "$base"\n'
         # rosbag -o <prefix> appends _<date>.bag -> a restart writes a new file (no clobber).
         f'echo "ros1-bag-logger: recording ({shlex.quote(subdir)}) -> $base/{shlex.quote(name)}_*.bag" >&2\n'

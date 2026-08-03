@@ -208,7 +208,7 @@ automatically.
 
 **Optional infra** (beyond this 4-stack example): rig ships ready-to-use `templates/ros2-bag-logger/` and
 `templates/ros1-bag-logger/` — add one to `services.yaml` + an `infra:` entry (order ~1, just after the
-router) to record the ROS telemetry graph to `${RIG_DATA_DIR}/bags/`. See the templates' example configs.
+router) to record the ROS telemetry graph to `${RIG_DATA_DIR}/current/bags/` (the open run; flat `bags/` without a run registry). See the templates' example configs.
 
 **External prerequisites** (outside rig):
 - **camera-service** supports `camera.type: usb | rtsp | gige` — copy the real source keys from its

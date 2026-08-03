@@ -7,7 +7,8 @@ from pathlib import Path
 
 from . import (
     RigError, __version__, bake as bake_mod, build as build_mod, certify as certify_mod,
-    doctor as doctor_mod, dispatch, init as init_mod, resolve, status as status_mod, vendor as vendor_mod,
+    doctor as doctor_mod, dispatch, init as init_mod, resolve, runs as runs_mod, status as status_mod,
+    vendor as vendor_mod,
 )
 from .catalog import ServiceEntry, load_catalog
 from .common import eprint
@@ -66,10 +67,17 @@ def cmd_up(args, manifest, catalog, descriptors) -> int:
             eprint(f"  [✗] {issue.message}")
         return 1
     env = dispatch.fleet_env(manifest)
+    if args.run and not manifest.data_dir:  # an EXPLICIT --run must never be silently dropped
+        raise RigError("up --run needs `data_dir` in vehicle.yaml (the run registry lives under it)")
     pairs = _pairs(manifest, descriptors, args.names)  # ascending order: producers before consumers
     if not pairs:
         eprint("rig: no enabled stacks to bring up")
         return 0
+    if not args.dry_run and manifest.data_dir:  # runs: --run names/rotates; bare up only ENSURES
+        if args.run:
+            runs_mod.up_run(manifest, args.rig_root, args.run, force=args.force)
+        else:
+            runs_mod.ensure(manifest, args.rig_root)
     eprint(f"rig up: {manifest.vehicle} — {stack_summary([p[0] for p in pairs])}")
     return _summarize(dispatch.run_verb(pairs, env, "up", dry_run=args.dry_run))
 
@@ -86,6 +94,12 @@ def cmd_down(args, manifest, catalog, descriptors) -> int:
         eprint("rig: purging external volumes (final teardown)")
         for sensor, desc in pairs:
             dispatch.purge_external_volumes(sensor, desc, dry_run=args.dry_run)
+    if args.end_run and not args.dry_run:
+        if rc != 0:
+            eprint("rig: down failed — leaving the run open (cannot seal with stacks possibly live)")
+            return rc
+        # end_run's own guard re-checks: a PARTIAL down leaves other stacks running -> it refuses.
+        runs_mod.end_run(manifest)
     return rc
 
 
@@ -111,7 +125,45 @@ def cmd_status(args, manifest, catalog, descriptors) -> int:
     env = dispatch.fleet_env(manifest)
     pairs = _pairs(manifest, descriptors, args.names)
     rows = status_mod.gather(pairs, env)
+    if (run_line := runs_mod.status_line(manifest)) is not None:
+        print(run_line)
     print(status_mod.render(rows, verbose=args.verbose))  # stdout: the report
+    return 0
+
+
+def cmd_new_run(args, manifest, catalog, descriptors) -> int:
+    runs_mod.new_run(manifest, args.rig_root, args.label, force=args.force)
+    return 0
+
+
+def cmd_end_run(args, manifest, catalog, descriptors) -> int:
+    # Snapshot the fleet state into the manifest as part of sealing (best-effort).
+    env = dispatch.fleet_env(manifest)
+    rows = status_mod.gather(_pairs(manifest, descriptors, []), env)
+    runs_mod.end_run(manifest, force=args.force, status_text=status_mod.render(rows))
+    return 0
+
+
+def cmd_runs(args, manifest, catalog, descriptors) -> int:
+    rows = runs_mod.list_runs(manifest)
+    if not rows:
+        print("no runs recorded")
+        return 0
+    def _size(kb):
+        if kb is None:
+            return "—"
+        if kb < 1024:
+            return f"{kb}K"
+        return f"{kb / 1024:.0f}M" if kb < 1024 * 1024 else f"{kb / (1024 * 1024):.1f}G"
+
+    headers = ("RUN", "LABEL", "STATE", "STARTED", "ENDED", "SIZE")
+    table = [headers] + [
+        (r.run, r.label, r.state, r.started, r.ended, _size(r.disk_kb))
+        for r in rows
+    ]
+    widths = [max(len(row[i]) for row in table) for i in range(len(headers))]
+    for row in table:
+        print("  ".join(cell.ljust(widths[i]) for i, cell in enumerate(row)))
     return 0
 
 
@@ -222,6 +274,9 @@ _HANDLERS = {
     "status": cmd_status,
     "logs": cmd_logs,
     "doctor": cmd_doctor,
+    "new-run": cmd_new_run,
+    "end-run": cmd_end_run,
+    "runs": cmd_runs,
 }
 
 
@@ -241,10 +296,27 @@ def build_parser() -> argparse.ArgumentParser:
     up = add("up", "bring sensors up (producers first)")
     up.add_argument("--dry-run", action="store_true", help="print the exact launcher invocations only")
     up.add_argument("--force", action="store_true", help="bring up even if preflight reports errors")
+    up.add_argument("--run", default=None, metavar="LABEL",
+                    help="join the open run with this label, or rotate to a new one (bare up never rotates)")
 
     down = add("down", "tear sensors down (reverse order)")
     down.add_argument("--dry-run", action="store_true")
     down.add_argument("--purge", action="store_true", help="also remove declared external volumes (FINAL teardown)")
+    down.add_argument("--end-run", action="store_true", dest="end_run",
+                      help="after a successful FULL down, seal the open run (stamps ended: + snapshot)")
+
+    nr = sub.add_parser("new-run", help="rotate: seal the open run (if any) and open a new one")
+    nr.add_argument("label", nargs="?", default=None, help="session label (dir becomes <stamp>_<label>)")
+    nr.add_argument("--force", action="store_true",
+                    help="rotate even while stacks run (late writes land in the sealed run)")
+    nr.add_argument("names", nargs="*", default=[], help=argparse.SUPPRESS)
+
+    er = sub.add_parser("end-run", help="seal the open run: stamp ended + snapshot, remove `current`")
+    er.add_argument("--force", action="store_true", help="seal even while stacks run")
+    er.add_argument("names", nargs="*", default=[], help=argparse.SUPPRESS)
+
+    rn = sub.add_parser("runs", help="list the run registry (OPEN / sealed / interrupted)")
+    rn.add_argument("names", nargs="*", default=[], help=argparse.SUPPRESS)
 
     add("status", "fleet status table").add_argument(
         "-v", "--verbose", action="store_true", help="expand per-container detail"
@@ -334,6 +406,7 @@ def main(argv=None) -> int:
             return cmd_bake(args, root)
         if args.cmd == "certify":  # may run repo-standalone (--repo/--diff) — routes its own manifest load
             return cmd_certify(args, root)
+        args.rig_root = root  # handlers that touch the run registry need the deployment root (provenance)
         manifest, catalog, descriptors = _load(root)
         return _HANDLERS[args.cmd](args, manifest, catalog, descriptors)
     except RigError as exc:

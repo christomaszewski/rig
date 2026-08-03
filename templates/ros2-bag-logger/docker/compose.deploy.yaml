@@ -16,8 +16,11 @@ services:
       ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-0}
       RMW_IMPLEMENTATION: ${RMW_IMPLEMENTATION:-rmw_zenoh_cpp}
       VEHICLE_ID: ${VEHICLE_ID:-}
-      RIG_BAG_BASE: /data/bags
+      RIG_BAG_ROOT: /data
     volumes:
-      - ${RIG_DATA_DIR:-/data}/bags:/data/bags                      # bags land on the host, off-repo
+      # The DATA ROOT is mounted (not just bags/) so the recorder can resolve the run registry's
+      # `current` symlink (relative target `runs/<id>` -> stays inside the mount). Run-aware output:
+      # <data>/current/bags/<name>; flat <data>/bags/<name> when no registry exists.
+      - ${RIG_DATA_DIR:-/data}:/data
       - ${BAG_RECORD_SCRIPT:?set by ros2-bag-logger-up}:/record.sh:ro
     command: ["/bin/bash", "/record.sh"]   # bash, not sh: record.sh sources ROS `setup.bash` (bash-only)
