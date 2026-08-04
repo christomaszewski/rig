@@ -73,6 +73,19 @@ class Descriptor:
 def load_descriptor(service: str, repo: Path) -> Descriptor:
     path = find_descriptor(repo)
     if path is None:
+        # The bundled templates/ are a deprecation stub (moved to rig-infra); once deleted, an old
+        # services.yaml path must fail with the pointer, not a mystery.
+        bundled = Path(__file__).resolve().parent.parent / "templates"
+        try:
+            in_bundled = repo.resolve().is_relative_to(bundled)
+        except (OSError, ValueError):
+            in_bundled = False
+        if in_bundled:
+            raise RigError(
+                f"{service}: rig's bundled templates/ moved to rig-infra "
+                f"(https://github.com/christomaszewski/rig-infra) — clone it beside your deployment "
+                f"and point services.yaml at ../rig-infra/{repo.name}"
+            )
         raise RigError(
             f"{service}: no rigging.yaml in {repo} — is the service repo checked out, and is it "
             f"rig-compatible? (see README)"

@@ -351,12 +351,14 @@ def build_parser() -> argparse.ArgumentParser:
     ini.add_argument("target", help="directory to create the deployment in (its name seeds `vehicle:`)")
     ini.add_argument("--vehicle-id", type=int, default=1, metavar="N",
                      help="vehicle identity (ROS domain + VEHICLE_ID); default 1")
-    ini.add_argument("--infra", action="append", default=[], metavar="TEMPLATE",
-                     help="fully wire a bundled templates/ service (repeatable), e.g. "
-                          "--infra zenoh-router --infra ros2-bag-logger")
+    ini.add_argument("--infra", action="append", default=[], metavar="NAME|PATH",
+                     help="fully wire a shared-infra service (repeatable): a service-dir path, or a bare "
+                          "name resolved from the workspace (e.g. --infra zenoh-router finds "
+                          "../rig-infra/zenoh-router)")
     ini.add_argument("--discover", nargs="?", const="", default=None, metavar="DIR",
-                     help="scan DIR (default: the target's parent) for service repos (rigging.yaml): "
-                          "populate services.yaml + copy examples + a commented vehicle.yaml menu")
+                     help="scan DIR (default: the target's parent) for service repos (rigging.yaml; one "
+                          "level into collection repos like rig-infra): populate services.yaml + copy "
+                          "examples + a commented vehicle.yaml menu")
 
     ven = sub.add_parser("vendor", help="copy a service's launch surface into services/<service>/")
     ven.add_argument("service", help="service name (key in services.yaml / its rigging.yaml)")

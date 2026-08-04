@@ -4,12 +4,17 @@ once); a deployment is just config that `rig --root <dir>` — or `cd <dir> && r
 
 Two optional accelerators, with a principled asymmetry between them:
 
-``--infra <template>`` (repeatable) fully wires a bundled ``templates/`` service — example config copied,
+``--infra <name|path>`` (repeatable) fully wires a shared-infra service — example config copied,
 ``services.yaml`` routed, an ENABLED ``vehicle.yaml`` entry (zenoh-router pinned to order 0) — because
-shared infra is decidable: a zenoh-rmw vehicle wants its router, period.
+shared infra is decidable: a zenoh-rmw vehicle wants its router, period. A value containing ``/`` is a
+service-dir path; a bare name scans the workspace (the target's parent's siblings, descending ONE level
+into repos whose subdirs carry a ``rigging.yaml`` — so ``zenoh-router`` finds
+``../rig-infra/zenoh-router``), falling back to rig's bundled ``templates/`` (deprecated — moving to
+https://github.com/christomaszewski/rig-infra) while those still exist.
 
 ``--discover [DIR]`` scans a workspace (default: the target's parent) for rig-compatible service repos
-(a ``rigging.yaml``) and populates the CATALOG — but only a commented-out MENU in ``vehicle.yaml``. A repo
+(a ``rigging.yaml``), descending ONE level into collection repos whose subdirs are the service dirs
+(rig-infra), and populates the CATALOG — but only a commented-out MENU in ``vehicle.yaml``. A repo
 in the workspace proves the code exists, not that the hardware is on this vehicle; instance names, counts,
 and order are the operator's call. Discovered example configs (declared ``examples:`` in rigging.yaml
 first, ``sensors/*.example.yaml`` / ``config/*.example.yaml`` glob as fallback) are copied in as starting
@@ -93,28 +98,61 @@ def _entry(name: str, service: str, config: str, order: int) -> str:
     return f"- {{ name: {name}, service: {service}, config: {config}, enabled: true, order: {order} }}"
 
 
-def _plan_templates(tokens: list[str]) -> list[tuple[str, Path, Path, str]]:
-    """--infra pre-flight: resolve + validate EVERY requested template before anything is written, so a
+def _resolve_infra_dir(raw: str, parent: Path) -> Path:
+    """Resolve one --infra token to a service dir. A token containing `/` is a repo path (cwd-relative,
+    like the target argument itself). A bare name scans the workspace — the target's parent's siblings,
+    descending ONE level into repos whose subdirs carry a rigging.yaml (so `zenoh-router` finds a
+    sibling checkout OR `../rig-infra/zenoh-router`) — falling back to rig's bundled `templates/`
+    (deprecated) while those still exist. Ambiguity is an error: the operator disambiguates with a path."""
+    token = raw.strip().rstrip("/")  # tab-completion slash must not fork the service key / order-0 pin
+    if "/" in token:
+        tdir = Path(token).expanduser().resolve()
+        if not tdir.is_dir() or find_descriptor(tdir) is None:
+            raise RigError(f"init --infra: not a service dir (no rigging.yaml): {raw}")
+        return tdir
+    hits: list[Path] = []
+    if parent.is_dir():
+        for repo in sorted(p for p in parent.iterdir() if p.is_dir() and not p.name.startswith(".")):
+            cand = repo if repo.name == token else repo / token  # direct sibling OR one-level descent
+            if cand.is_dir() and find_descriptor(cand) is not None:
+                hits.append(cand.resolve())
+    hits = list(dict.fromkeys(hits))
+    if len(hits) > 1:
+        raise RigError(f"init --infra: '{token}' is ambiguous in the workspace: "
+                       f"{', '.join(str(h) for h in hits)} — pass a path instead")
+    if hits:
+        return hits[0]
+    tdir = _tool_templates() / token
+    if tdir.is_dir():
+        eprint(f"  infra: '{token}' resolved from rig's bundled templates/ — DEPRECATED (one more "
+               f"version); clone https://github.com/christomaszewski/rig-infra beside your deployment")
+        return tdir
+    avail = sorted(p.name for p in _tool_templates().iterdir() if p.is_dir())
+    raise RigError(f"init --infra: unknown service '{raw}' — no service dir under {parent} "
+                   f"(one level deep), and not a bundled template ({', '.join(avail)})")
+
+
+def _plan_templates(tokens: list[str], parent: Path) -> list[tuple[str, Path, Path, str]]:
+    """--infra pre-flight: resolve + validate EVERY requested service before anything is written, so a
     bad flag can't leave a half-wired target that misdiagnoses the retry. Returns
-    (template, template-dir, example-src, instance) per request; raises on unknown names and
-    instance-name collisions (e.g. both bag loggers declare `bag_logger` — and they mix distros anyway)."""
+    (service, service-dir, example-src, instance) per request; raises on unknown names and
+    instance-name collisions (e.g. both bag loggers declare `bag_logger` — and they mix distros anyway).
+    The catalog key is the DESCRIPTOR's `service` (matches --discover routing), not the token."""
     plan: list[tuple[str, Path, Path, str]] = []
     seen: dict[str, str] = {}
     for raw in dict.fromkeys(tokens):  # de-dup, keep order
-        t = raw.strip().strip("/")  # tab-completion slash must not fork the service key / order-0 pin
-        tdir = _tool_templates() / t
-        if not tdir.is_dir():
-            avail = sorted(p.name for p in _tool_templates().iterdir() if p.is_dir())
-            raise RigError(f"init --infra: unknown template '{raw}' — available: {', '.join(avail)}")
+        tdir = _resolve_infra_dir(raw, parent)
+        desc = find_descriptor(tdir)  # may be absent only on the bundled-template fallback path
+        svc = str(load_yaml(desc).get("service") or tdir.name) if desc else tdir.name
         examples = sorted(tdir.glob("config/*.example.yaml"))
         if not examples:
-            raise RigError(f"init --infra: template '{t}' ships no config/*.example.yaml")
-        instance = str(load_yaml(examples[0]).get("name") or t)
+            raise RigError(f"init --infra: '{svc}' ({tdir}) ships no config/*.example.yaml")
+        instance = str(load_yaml(examples[0]).get("name") or svc)
         if instance in seen:
-            raise RigError(f"init --infra: '{t}' and '{seen[instance]}' collide on instance name "
+            raise RigError(f"init --infra: '{svc}' and '{seen[instance]}' collide on instance name "
                            f"'{instance}' — pick one")
-        seen[instance] = t
-        plan.append((t, tdir, examples[0], instance))
+        seen[instance] = svc
+        plan.append((svc, tdir, examples[0], instance))
     return plan
 
 
@@ -183,11 +221,25 @@ def _discover(scan: Path, target: Path, services: dict[str, str],
         raise RigError(f"init --discover: not a directory: {scan}")
     count = 0
     order = {"infra": 5, "sensor": 10, "autonomy": 10}
-    candidates = sorted(p.resolve() for p in scan.iterdir() if p.is_dir() and not p.name.startswith("."))
+    children = sorted(p.resolve() for p in scan.iterdir() if p.is_dir() and not p.name.startswith("."))
     if find_descriptor(scan) is not None:  # --discover pointed AT a repo, not a workspace — take it
-        candidates.insert(0, scan)
+        children.insert(0, scan)
+    candidates: list[Path] = []
+    for child in children:
+        if child == target:
+            continue
+        if find_descriptor(child) is not None:
+            candidates.append(child)
+            continue
+        # One-level descent: a collection repo whose SUBDIRS are the service dirs (rig-infra). Bounded
+        # depth by design; skip hidden dirs and `var/` (launcher-rendered state, never a service).
+        candidates += sorted(
+            sub.resolve() for sub in child.iterdir()
+            if sub.is_dir() and not sub.name.startswith(".") and sub.name != "var"
+            and find_descriptor(sub) is not None
+        )
     for child in candidates:
-        if child == target or find_descriptor(child) is None:
+        if find_descriptor(child) is None:
             continue
         try:
             svc = str(load_yaml(find_descriptor(child)).get("service") or child.name)
@@ -269,7 +321,7 @@ def init(target: Path, *, vehicle_id: int = 1, infra: list[str] | None = None,
         raise RigError(f"init: {target} already has a vehicle.yaml (refusing to overwrite)")
     # Validate EVERYTHING that can fail BEFORE the first write — a failed init must leave no partial
     # target whose leftovers wedge or misdiagnose the corrected retry.
-    plan = _plan_templates(infra or [])
+    plan = _plan_templates(infra or [], target.parent)
     if discover is not None and not discover.resolve().is_dir():
         raise RigError(f"init --discover: not a directory: {discover}")
     for sub in ("config/sensors", "config/infra", "config/autonomy", "services"):

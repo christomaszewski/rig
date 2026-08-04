@@ -31,11 +31,11 @@ docker run -d --restart always -p 5000:5000 -v registry-data:/var/lib/registry -
 ## 1 — workspace + deployment scaffold
 
 ```bash
-mkdir -p ~/ws && cd ~/ws                      # service repos + rig as siblings
-git clone <camera-service> <dashboard> <rig>...
+mkdir -p ~/ws && cd ~/ws                      # service repos + rig + rig-infra as siblings
+git clone <camera-service> <dashboard> <rig> https://github.com/christomaszewski/rig-infra ...
 alias rig="$PWD/rig/rig"
 
-# --infra: bundled templates, wired + ENABLED (router pinned to order 0)
+# --infra: shared services from the workspace (rig-infra), wired + ENABLED (router pinned to order 0)
 # --discover: scan sibling repos (rigging.yaml) -> services.yaml populated + examples copied + commented MENU
 rig init my-vehicle --vehicle-id 7 --infra zenoh-router --infra ros2-bag-logger --discover
 cd my-vehicle
@@ -43,7 +43,7 @@ cd my-vehicle
 # vehicle.yaml menu entries this vehicle actually runs (copied examples are nameless profiles — the entry
 # supplies the instance name), then `rig doctor`. Or author everything by hand:
 # services.yaml — route each service name to its repo:
-#   services: { zenoh-router: {path: ../rig/templates/zenoh-router}, camera-service: {path: ../camera-service}, ... }
+#   services: { zenoh-router: {path: ../rig-infra/zenoh-router}, camera-service: {path: ../camera-service}, ... }
 # vehicle.yaml — identity + fleet env + the stacks:
 #   vehicle: my-vehicle        vehicle_id: 7            # -> ROS domain 7, VEHICLE_ID=7
 #   ros:    { rmw: rmw_zenoh_cpp, distro: lyrical }     # zenoh rmw ⇒ declare a zenoh-router in infra:

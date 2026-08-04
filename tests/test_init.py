@@ -187,6 +187,89 @@ def test_init_discover_odd_name_spelling_falls_back_verbatim():
     assert "front" in [s.name for s in load_manifest(target).sensors]  # cross-check happy
 
 
+def _infra_collection_ws() -> pathlib.Path:
+    """A workspace holding a rig-infra-style COLLECTION repo: service dirs one level down."""
+    ws = pathlib.Path(tempfile.mkdtemp())
+    coll = ws / "my-infra"
+    for svc, inst in (("zenoh-router", "zr"), ("widget", "wid")):
+        d = coll / svc
+        (d / "config").mkdir(parents=True)
+        (d / "rigging.yaml").write_text(f"service: {svc}\nlauncher: {svc}-up\ntier: infra\n")
+        (d / f"{svc}-up").write_text("#!/bin/sh\n")
+        (d / f"{svc}-up").chmod(0o755)
+        (d / "config" / f"{svc}.example.yaml").write_text(f"service: {svc}\nname: {inst}\n")
+    return ws
+
+
+def test_init_infra_bare_name_resolves_from_workspace_not_templates():
+    from rig_cli import doctor
+    from rig_cli.catalog import load_catalog
+    from rig_cli.descriptor import load_descriptor
+    from rig_cli.manifest import load_manifest
+
+    ws = _infra_collection_ws()
+    target = ws / "veh"
+    init(target, infra=["zenoh-router"])          # bare name -> one-level workspace scan wins
+    services = (target / "services.yaml").read_text()
+    assert "../my-infra/zenoh-router" in services and "templates" not in services
+    body = (target / "vehicle.yaml").read_text()
+    assert "- { name: zr, service: zenoh-router, config: config/infra/zr.yaml, enabled: true, order: 0 }" in body
+    manifest, catalog = load_manifest(target), load_catalog(target)   # pin survives; doctor green
+    descs = {s.service: load_descriptor(s.service, catalog[s.service].path) for s in manifest.sensors}
+    assert not [i for i in doctor.collect(manifest, catalog, descs) if i.level == "ERROR"]
+
+
+def test_init_infra_path_token_wires_by_descriptor_service():
+    ws = _infra_collection_ws()
+    target = ws / "veh"
+    init(target, infra=[str(ws / "my-infra" / "widget")])   # contains '/' -> path form
+    services = (target / "services.yaml").read_text()
+    assert "widget:" in services and "../my-infra/widget" in services  # catalog key = descriptor service
+    assert (target / "config" / "infra" / "wid.yaml").is_file()
+
+
+def test_init_infra_bare_name_ambiguity_is_an_error():
+    ws = _infra_collection_ws()
+    other = ws / "other-infra" / "zenoh-router"
+    (other / "config").mkdir(parents=True)
+    (other / "rigging.yaml").write_text("service: zenoh-router\nlauncher: zenoh-router-up\ntier: infra\n")
+    (other / "config" / "z.example.yaml").write_text("service: zenoh-router\nname: zr2\n")
+    try:
+        init(ws / "veh", infra=["zenoh-router"])
+        raise AssertionError("expected RigError for ambiguous bare name")
+    except RigError as exc:
+        assert "ambiguous" in str(exc) and "my-infra" in str(exc) and "other-infra" in str(exc)
+    assert not (ws / "veh" / "vehicle.yaml").exists()        # pre-flight: nothing written
+
+
+def test_init_discover_descends_one_level_and_skips_var():
+    ws = _infra_collection_ws()
+    trap = ws / "my-infra" / "var"                            # rendered state, never a service
+    trap.mkdir()
+    (trap / "rigging.yaml").write_text("service: trap\nlauncher: trap-up\n")
+    target = ws / "veh"
+    init(target, discover=ws)
+    services = (target / "services.yaml").read_text()
+    assert "zenoh-router:" in services and "widget:" in services   # found one level down
+    assert "../my-infra/zenoh-router" in services
+    assert "trap" not in services                                  # var/ skipped
+    vehicle = (target / "vehicle.yaml").read_text()  # nameless-profile copy -> stub named from the stem
+    assert "# - { name: zenoh_router, service: zenoh-router, config: config/infra/zenoh-router.yaml" in vehicle
+
+
+def test_missing_bundled_template_errors_with_rig_infra_pointer():
+    # The templates/ stub is deleted a version after v0.1.28 — an old services.yaml path must then fail
+    # WITH the pointer, not a generic "no rigging.yaml" mystery.
+    from rig_cli.descriptor import load_descriptor
+    from rig_cli.init import _tool_templates
+
+    try:
+        load_descriptor("zenoh-router", _tool_templates() / "no-such-service")
+        raise AssertionError("expected RigError")
+    except RigError as exc:
+        assert "rig-infra" in str(exc) and "../rig-infra/no-such-service" in str(exc)
+
+
 def test_descriptor_accepts_autonomy_tier():
     from rig_cli.descriptor import load_descriptor
 

@@ -99,7 +99,7 @@ config/sensors/*.yaml   # one config per sensor (the single source of truth for 
 config/infra/*.yaml     # one config per shared infra service (zenoh router, bag logger, …)
 config/autonomy/*.yaml  # one config per autonomy stack (planner, SLAM, perception, …)
 services/               # service repos as git submodules (deployment); or point services.yaml at sibling checkouts
-templates/              # ready-to-use infra services (zenoh-router, ros2-bag-logger, ros1-bag-logger)
+templates/              # DEPRECATED stub — the infra services moved to the rig-infra repo (see below)
 rig, rig_cli/           # the CLI (thin shim + package: manifest/catalog/dispatch/status/doctor/certify/build/bake/…)
 docs/                   # CHEATSHEET (1-page flow) · RUNBOOK (worked example) · DESIGN/ROADMAP · STATE · HOST_SETUP
 ```
@@ -127,20 +127,27 @@ in `vehicle.yaml` — rig deep-merges the patch, stamps in `name`, and renders t
 `var/rendered/<name>.yaml` before handing it to the launcher (a complete named config with no overrides is
 passed through untouched). See `config/sensors/camera.profile.yaml` and `docs/ROADMAP.md` §1.
 
-## Bundled infra templates (`templates/`)
+## Shared infra services ([rig-infra](https://github.com/christomaszewski/rig-infra))
 
-Ready-to-use shared (`infra:`) services — point `services.yaml` at one and add an `infra:` entry:
+Ready-to-use shared (`infra:`) services live in their own repo — clone it beside your deployment,
+point `services.yaml` at a service dir (`../rig-infra/zenoh-router`) and add an `infra:` entry, or let
+`rig init --infra zenoh-router` (bare name — the workspace scan finds it) wire it for you:
 
-- **`zenoh-router/`** — the vehicle's shared `rmw_zenoh` router (order 0). Optional inline `router_config:`
-  in its config renders to a `zenohd.json5` the launcher mounts.
+- **`zenoh-router/`** — the vehicle's shared `rmw_zenoh` router (order 0). Default: the `fleet-ros`
+  base image running `rmw_zenohd`, so the router and the ROS sessions share one distro's zenoh packages
+  by construction. Optional inline `router_config:` renders to a mounted `zenohd.json5`.
 - **`ros2-bag-logger/`** / **`ros1-bag-logger/`** — record the ROS telemetry graph to
   `${RIG_DATA_DIR}/current/bags/<name>` (the open run — ROADMAP §3c; flat `bags/<name>` without a registry). Config: `record.mode: all|allow|exclude` (+ `exclude_images`, default
   true — image streams are huge over ROS and already recorded compressed at the camera source) and an
-  `output` block (storage/compression/split). Place at order ~1 so it records from startup. The image must
-  carry the bag tooling + `rmw_zenoh` (your driver images do); defaults to a driver image.
+  `output` block (storage/compression/split). Place at order ~1 so it records from startup. The ros2
+  logger defaults to `fleet-ros` (rosbag2 + mcap + rmw_zenoh, ~1 GB — no camera image on camera-less
+  vehicles).
+- **`base/`** — the `fleet-ros` image; `rig build` builds + pushes it via the riggings' `build:`
+  declaration, and certify enforces the composes pull the same tag.
 
-Each is just a launcher + compose around a stock tool — the same contract any service meets. rig's own CI
-runs `rig certify` against them.
+Each is just a launcher + compose around a stock tool — the same contract any service meets; rig-infra's
+CI runs `rig certify` against every one. rig's bundled `templates/` copy is a deprecation stub for one
+more version.
 
 ## The contract: `rigging.yaml`
 

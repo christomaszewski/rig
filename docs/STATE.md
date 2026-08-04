@@ -65,9 +65,22 @@ A launcher's compose opts into each (`${RIG_IMAGE_REGISTRY:+…}`, `:${RIG_IMAGE
   form (build-stripped, registry-pinned, runs on just Docker). Built images digest-pinned; **mirrored
   images kept as registry tags** (multi-arch digests are fragile). `run.sh` prefers the compose-only form.
 - `rig init` + cwd deployment detection (tool and deployment can be separate dirs).
-- Templates: `templates/zenoh-router/` (a ready shared-router infra service; honors `COMPOSE_PROJECT_NAME`).
+- Shared infra services: moved to **rig-infra** (https://github.com/christomaszewski/rig-infra) —
+  zenoh-router / ros2-bag-logger / ros1-bag-logger + the `fleet-ros` base image; rig's `templates/` is a
+  deprecation stub for one version (v0.1.28).
 - `rig pull` + baked `pull.sh` (v0.1.19): pre-pull every stack's images with NO container changes — prime
   the vehicle's cache while the registry is reachable, then run offline; safe against a live deployment.
+- v0.1.28: **infra spin-out** (ROADMAP §3e) — the bundled templates moved to the sibling **rig-infra**
+  repo with an added `base/` **fleet-ros image** (`ros:<distro>-ros-base` + rmw-zenoh-cpp +
+  rosbag2+mcap; `base/build.sh` follows the rig build contract). Opinionated defaults: router =
+  `fleet-ros:${RIG_IMAGE_TAG}` running `rmw_zenohd` (rmw-family version-match by construction), ros2
+  bag logger = `fleet-ros` (decoupled from ros2-bridge; ~1 GB on camera-less vehicles); both declare
+  `build: {command: ../base/build.sh, images: [fleet-ros]}` so certify enforces build/pull agreement.
+  rig side: `init --infra` takes a path or a bare name resolved by a one-level workspace scan
+  (ambiguity errors; bundled fallback warns DEPRECATED); `--discover` descends one level into
+  collection repos (skips `var/`/hidden); `templates/` is a stub for THIS version only (README pointer;
+  after deletion, old services.yaml paths fail with a rig-infra pointer via load_descriptor); rig CI
+  dropped the live-template certify steps (rig-infra CI certifies 3/3 + the router_config path).
 - v0.1.27: **`autonomy:` tier** (ROADMAP §3d) — third manifest tier for graph CONSUMERS (planners, SLAM,
   perception). Hard ordering partition infra=0 → sensors=1 → autonomy=2 regardless of per-entry `order`;
   `down` reverses, so the decider dies before its eyes. `rigging.yaml` accepts `tier: autonomy`;
@@ -157,11 +170,13 @@ Still open:
 2. **boilerplate `<device>-up` (novatel/sbg launchers):** honor `COMPOSE_PROJECT_NAME` (drop `-p`, standalone
    fallback) — same one-liner the other launchers got. Find + prove it with
    `rig certify --repo ../novatel --config <example.yaml>` (the project-name check fails until fixed).
-3. **PLANNED NEXT SLICE — spec settled 2026-08-03, ready to kick off cold (`ROADMAP.md`):**
-   **§3e infra spin-out to `rig-infra`** (templates + fleet-ros base image repo, opinionated rmw-family
-   router default, `--infra`/`--discover` generalization, deprecation stub). (§3d `autonomy:` tier
-   shipped in v0.1.27; the small descriptor-`tier:`/discover overlap §3e's spec mentions is now merged —
-   just extend, don't re-plan.)
+3. **§3e infra spin-out — repo + rig side DONE (v0.1.28); migration steps 3–4 remain:** update the
+   live deployments' services.yaml (test-vehicle + walkthrough clones: `../rig-infra/<svc>`), rebuild
+   the registry with `fleet-ros` (`rig build`) before the next bake, **batch the standing chore: put
+   dashboard on GitHub** while doing repo work, and NEXT version delete the `templates/` stub (its
+   pointer error in `load_descriptor` is already in place; move `tests/test_bag_logger.py`'s
+   `templates/` import to a rig-infra checkout or drop it then). (§3d `autonomy:` tier shipped in
+   v0.1.27.)
 4. **rig follow-ups (`ROADMAP.md`):** health verb + reconciler/systemd (top open items), OCI artifact
    format, fleet mode (one artifact, N vehicles). (`bake --bundle-images` shipped in v0.1.21.)
 
