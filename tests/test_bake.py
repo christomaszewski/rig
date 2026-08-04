@@ -130,6 +130,30 @@ def test_bake_emits_run_scripts_when_data_dir_set():
     assert "new-run)" in boot and '[ $# -eq 1 ]' in boot             # flagged forms fall through to rig
 
 
+def test_scripts_alias_digest_pins_back_to_tags():
+    # A digest pull doesn't create the tag name locally, so the launcher path (tag refs) would miss a
+    # digest-primed cache — re-pulling online, failing offline. pull.sh/up.sh must alias pins back.
+    import subprocess
+
+    from rig_cli.bake import _write_scripts
+
+    staging = pathlib.Path(tempfile.mkdtemp())
+    entries = [{"sensor": "ouster", "project": "ouster-vehicle-1",
+                "compose": "compose/ouster/docker-compose.yaml", "external_volumes": []}]
+    aliases = {"reg:5000/ouster_driver:jp6": "reg:5000/ouster_driver@sha256:abc"}
+    _write_scripts(staging, entries, aliases=aliases)
+    for script in ("pull.sh", "up.sh"):
+        body = (staging / script).read_text()
+        line = "docker tag reg:5000/ouster_driver@sha256:abc reg:5000/ouster_driver:jp6 2>/dev/null || true"
+        assert line in body, f"{script} missing the alias line"
+        assert body.index("docker compose") < body.index("docker tag")   # alias AFTER the pull/up
+        assert subprocess.run(["sh", "-n", str(staging / script)]).returncode == 0
+    # bundle mode keeps tag refs everywhere — no split namespace, no aliases:
+    staging2 = pathlib.Path(tempfile.mkdtemp())
+    _write_scripts(staging2, entries, bundle_refs=["reg:5000/ouster_driver:jp6"], aliases={})
+    assert "docker tag" not in (staging2 / "pull.sh").read_text()
+
+
 def test_bake_bundles_tool_from_separated_deployment():
     # rig init layout: the deployment root has NO rig tool in it (the tool lives in this package's dir).
     from rig_cli.bake import bake, unbake

@@ -67,6 +67,10 @@ A launcher's compose opts into each (`${RIG_IMAGE_REGISTRY:+…}`, `:${RIG_IMAGE
 - Templates: `templates/zenoh-router/` (a ready shared-router infra service; honors `COMPOSE_PROJECT_NAME`).
 - `rig pull` + baked `pull.sh` (v0.1.19): pre-pull every stack's images with NO container changes — prime
   the vehicle's cache while the registry is reachable, then run offline; safe against a live deployment.
+- v0.1.26: baked `pull.sh`/`up.sh` **alias digest-pinned images back to their tags** (`docker tag <@sha>
+  <:tag>`, best-effort) — a digest pull doesn't create the tag name, so the launcher path (tag refs:
+  `up --run`, field `./rig up`) used to re-pull online and FAIL offline on a digest-primed cache.
+  Registry mode only (bundle mode keeps tags throughout).
 - v0.1.25: **run directories** (ROADMAP §3c) — one session, one folder under `data_dir/runs/`, `current`
   symlink (RELATIVE target, resolvable in-container), provenance manifest (`ended:` ⇔ sealed ⇔ safe to
   sync). Verbs: `new-run [label]` / `end-run [--force]` / `runs` / `up --run L` / `down --end-run`; run

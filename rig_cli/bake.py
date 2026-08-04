@@ -286,8 +286,20 @@ def _write_run_scripts(staging: Path, ctx: dict) -> None:
         path.chmod(0o755)
 
 
+def _alias_lines(aliases: dict[str, str]) -> list[str]:
+    """sh block: alias each digest-pinned image back to its ORIGINAL TAG in the local store. A digest
+    pull doesn't create the tag name, so without this the launcher path (tag refs: `rig up --run`, field
+    `./rig up`) misses a digest-primed cache — re-pulling online, FAILING offline. `docker tag` from a
+    digest ref to a tag is legal (it's digest TARGETS docker refuses); best-effort by design."""
+    lines = ["# unify the image namespace: digest pulls don't create tag names — alias them so the",
+             "# launcher path (tag refs) hits the same local images, including fully offline."]
+    for tag_ref, digest_ref in sorted(aliases.items()):
+        lines.append(f"docker tag {shlex.quote(digest_ref)} {shlex.quote(tag_ref)} 2>/dev/null || true")
+    return lines
+
+
 def _write_scripts(staging: Path, entries: list[dict], *, bundle_refs: list[str] | None = None,
-                   run_ctx: dict | None = None) -> None:
+                   run_ctx: dict | None = None, aliases: dict[str, str] | None = None) -> None:
     up = ["#!/usr/bin/env sh", "set -e", "cd \"$(dirname \"$0\")\""]
     if run_ctx:
         up += _run_ensure_guard(run_ctx)
@@ -297,6 +309,8 @@ def _write_scripts(staging: Path, entries: list[dict], *, bundle_refs: list[str]
         for vol in e["external_volumes"]:
             up.append(f'docker volume create "{vol}" >/dev/null')
         up.append(f'docker compose -p "{e["project"]}" -f "{e["compose"]}" up -d')
+    if aliases:  # after up: everything referenced is now local — leave the namespace unified
+        up += _alias_lines(aliases)
     down = ["#!/usr/bin/env sh", "cd \"$(dirname \"$0\")\""]
     for e in reversed(entries):
         down.append(f'docker compose -p "{e["project"]}" -f "{e["compose"]}" down')
@@ -309,6 +323,8 @@ def _write_scripts(staging: Path, entries: list[dict], *, bundle_refs: list[str]
     pull = ["#!/usr/bin/env sh", "set -e", "cd \"$(dirname \"$0\")\""]
     for e in entries:
         pull.append(f'docker compose -p "{e["project"]}" -f "{e["compose"]}" pull')
+    if aliases:
+        pull += _alias_lines(aliases)
     if run_ctx:  # status header: the open run, in pure sh (after shebang+cd, before the stack tables)
         d = shlex.quote(run_ctx["data_dir"])
         status[2:2] = [f'D={d}',
@@ -477,7 +493,11 @@ def bake(root: Path, manifest, catalog, descriptors, env, tag: str, *, registry:
                                 for s in manifest.sensors if s.enabled]}
         _write_run_scripts(staging, run_ctx)
     if entries:
-        _write_scripts(staging, entries, bundle_refs=sorted(images) if bundle else None, run_ctx=run_ctx)
+        # Registry mode: alias every digest-pinned image back to its tag post-pull/up (bundle mode keeps
+        # tag refs throughout, so there is no split namespace to unify).
+        aliases = {} if bundle else {ref: dig for ref, dig in images.items() if dig}
+        _write_scripts(staging, entries, bundle_refs=sorted(images) if bundle else None,
+                       run_ctx=run_ctx, aliases=aliases)
     _write_bootstrap(staging)
 
     # 5. metadata + lock. A re-bake INSIDE an extracted artifact (field edits on the vehicle) records its
