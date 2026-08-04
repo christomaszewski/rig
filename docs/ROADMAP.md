@@ -270,6 +270,108 @@ a one-line path change to write via `current/`: the bundled bag-logger templates
 camera-service (`output_dir`/recordings default) is a small cross-repo PR; dashboard writes nothing.
 Un-adopted services keep the flat layout — both coexist under `data_dir`.
 
+## 3d. Third tier: `autonomy:` — PLANNED (spec settled 2026-08-03; build when kicking off)
+
+### Decision & naming
+A third manifest tier for graph CONSUMERS — autonomy/algorithm stacks (planners, controllers, SLAM,
+perception pipelines). Named **`autonomy`** (a role in the vehicle graph, like `infra`=substrate and
+`sensors`=producers — not an implementation genre; "algos" describes code and breaks summary grammar).
+Scope reading: anything that consumes the graph and starts last / stops first belongs here, including
+non-"autonomous" perception/estimation stacks.
+
+### Semantics
+- **Hard ordering partition**: tier rank infra=0 → sensors=1 → autonomy=2 in `Manifest.select`
+  (all autonomy after ALL sensors regardless of per-entry `order`; `down` reverses ⇒ **autonomy stops
+  FIRST** — the decider dies before its eyes, a safety default even for retry-tolerant stacks).
+- Ordering stays a courtesy, not correctness: consumers must still retry (zenoh discovery is dynamic).
+- **The future payoff this tier structure enables**: when the `health` verb lands, `up --wait-healthy`
+  gates between TIER BOUNDARIES — and sensors→autonomy is the boundary that matters (no planner arming
+  before GNSS has a fix). Do not build the gating in this slice; build the structure it attaches to.
+
+### Changes (≈ half day)
+1. `manifest.py`: parse a top-level `autonomy:` list (same row schema); `tier="autonomy"`; rank map in
+   `select()`; `stack_summary` counts ("2 sensors + 2 infra + 1 autonomy").
+2. `descriptor.py`: `tier:` validation set grows to `{sensor, infra, autonomy}` (typo still errors).
+3. `doctor.py`: ROS-name warning extends to autonomy-tier names (they namespace nodes too); new WARN —
+   enabled autonomy with zero enabled sensors ("brain with no eyes").
+4. `init.py`: scaffold `config/autonomy/` (+ .gitkeep); `--discover` routes `tier: autonomy` repos to an
+   `autonomy:` menu section (bare header, uncommentable — same rules as sensors: MENU only, never
+   auto-enabled; autonomy arrives from real repos, so there is NO `--autonomy` wiring flag).
+5. bake/runs/certify: no changes expected — entries flow through `select()` order (verify up.sh line
+   order puts autonomy last, down.sh first; runs manifests list them via `stacks:`).
+6. Tests: partition guarantee (autonomy after sensors regardless of order numbers; down reversed),
+   doctor warnings, summary, discover routing fixture, init scaffold. Docs: README (vehicle.yaml +
+   rigging `tier:` row), CHEATSHEET, STATE. Version bump.
+
+### Acceptance
+A three-tier manifest: `up --dry-run` shows infra → sensors → autonomy; `down --dry-run` the reverse;
+doctor green; a `tier: autonomy` fixture repo lands in the right menu section with its config under
+`config/autonomy/`.
+
+## 3e. Infra spin-out: `rig-infra` repo — PLANNED (spec settled 2026-08-03; build when kicking off)
+
+### Why now (reversal of two earlier "keep in rig" calls — the triggers fired)
+Three templates exist, roscore/mavlink queued; certify-in-CI now enforces the launcher contract
+mechanically (co-location was a substitute for the gate); and the **fleet-ros base image** is the forcing
+function — inside rig it needs a new image-authoring subsystem (`build --base`, generator, doctor
+wiring); in a separate repo it is an ordinary `build:` declaration using machinery that already exists.
+When avoiding a repo split requires growing the tool a subsystem, the split is cheaper.
+
+### Target layout — `christomaszewski/rig-infra` (public, like rig)
+```
+zenoh-router/       ros2-bag-logger/       ros1-bag-logger/      # moved verbatim (rigging/launcher/
+                                                                 #   tools/examples per service dir)
+base/Dockerfile     base/build.sh                                # fleet-ros: FROM ros:<distro>-ros-base
+                                                                 #   + rmw-zenoh-cpp + rosbag2(+mcap)
+.github/workflows/certify.yml                                    # camera-service pattern: checkout rig,
+                                                                 #   certify each service dir (declared
+                                                                 #   examples = default --config)
+```
+- `base/build.sh <registry> [tag]` follows the rig build contract; zenoh-router + ros2-bag-logger
+  riggings declare `build: { command: ../base/build.sh, images: [fleet-ros] }` (cwd = service dir; the
+  double invocation when both are in one manifest is a docker-cache no-op — or guard in the script).
+- **Defaults become opinionated — this closes two open issues at once**: router default =
+  `fleet-ros:${RIG_IMAGE_TAG}` running `ros2 run rmw_zenoh_cpp rmw_zenohd` (**the rmw-family/router
+  version-match fix** — same distro packages as the sessions, by construction), bag-logger default =
+  `fleet-ros:${RIG_IMAGE_TAG}` (**decouples from ros2-bridge** — camera-less vehicles carry a ~1 GB
+  base instead of a 3.4 GB camera image). Build/pull agreement holds by construction (fleet-ros is in
+  `build.images`; certify's tag check enforces). Env overrides (`ZENOH_ROUTER_IMAGE`,
+  `BAG_LOGGER_IMAGE`) stay; pinned `eclipse/zenoh:x.y.z` stays as the documented standalone
+  alternative (never `:latest` — mirrored tags can silently drift on re-mirror).
+
+### rig-side changes
+1. `init --infra` generalization: a value containing `/` = a repo path; a bare name resolves by scanning
+   the workspace (target's parent siblings, descending ONE level into repos whose subdirs carry
+   rigging.yaml), falling back to rig's `templates/` while the deprecation stub exists. Same enabled
+   wiring + relpath into services.yaml as today.
+2. `--discover` gains the same one-level descent (finds rig-infra's service dirs; their `tier:` hints
+   route the menu). Bounded depth; skip `var/`/hidden.
+3. `templates/` → deprecation stub for ONE version (README pointing at rig-infra; old services.yaml
+   paths fail loudly with a pointer, not a mystery), then delete. rig CI drops the live-template certify
+   steps (infra CI owns them); the sh-fixture certify tests remain rig's contract reference.
+4. Note: both this and §3d touch descriptor `tier:` + discover routing — either order works; small
+   merge overlap if done in parallel sessions.
+
+### Migration sequence
+1. Create rig-infra (plain copy of templates/, provenance note in the first commit — history stays in
+   rig), add `base/`, flip the defaults, CI green (certify all three).
+2. rig: `--infra`/`--discover` generalization + deprecation stub + tests + docs sweep of every
+   `templates/` reference (README/CHEATSHEET/RUNBOOK/STATE/init hints). Version bump.
+3. Update deployments (test-vehicle + any new: services.yaml paths → `../rig-infra/<svc>`), sync
+   walkthrough clones; **batch the standing chore: put dashboard on GitHub** while doing repo work.
+4. Next version: delete the stub.
+
+### Acceptance
+Fresh workspace with rig + rig-infra as siblings: `rig init x --infra zenoh-router --infra
+ros2-bag-logger` (bare names) → doctor green, zero edits; `rig build` in that deployment builds + pushes
+`fleet-ros:<tag>`; a camera-less manifest (router + bag logger + a GNSS driver) pulls no camera images;
+infra repo CI certifies 3/3; old bundled-template `--infra` still works during the deprecation version.
+
+### Estimate
+~1–1.5 days total (repo + base + CI ≈ half day; rig generalization + deprecation + docs ≈ half day;
+deployment updates + validation ≈ the rest). Requires creating the GitHub repo (public, to keep the
+CI checkout secret-free like rig/camera-service).
+
 ## 4. Other tracked items
 - **Boot-time bring-up**: a systemd unit running `rig up` (Compose handles per-stack restart thereafter).
 - **ROS `/diagnostics`** as the second health layer in `rig status`.

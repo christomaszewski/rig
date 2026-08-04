@@ -148,8 +148,13 @@ Still open:
 2. **boilerplate `<device>-up` (novatel/sbg launchers):** honor `COMPOSE_PROJECT_NAME` (drop `-p`, standalone
    fallback) — same one-liner the other launchers got. Find + prove it with
    `rig certify --repo ../novatel --config <example.yaml>` (the project-name check fails until fixed).
-3. **rig follow-ups (`ROADMAP.md`):** OCI artifact format, ROS `/diagnostics` as a 2nd health layer,
-   boot-time systemd unit, `rig adopt/verify`. (`bake --bundle-images` shipped in v0.1.21.)
+3. **PLANNED NEXT SLICES — specs settled 2026-08-03, ready to kick off cold (`ROADMAP.md`):**
+   **§3d `autonomy:` tier** (third tier, rank 2, up-last/down-first, doctor + discover routing — user has
+   services incoming for it) and **§3e infra spin-out to `rig-infra`** (templates + fleet-ros base image
+   repo, opinionated rmw-family router default, `--infra`/`--discover` generalization, deprecation stub).
+   Read both specs before starting; they overlap slightly on descriptor `tier:` + discover routing.
+4. **rig follow-ups (`ROADMAP.md`):** health verb + reconciler/systemd (top open items), OCI artifact
+   format, fleet mode (one artifact, N vehicles). (`bake --bundle-images` shipped in v0.1.21.)
 
 ## Gotchas learned the hard way (deployment debugging)
 
