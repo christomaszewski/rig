@@ -257,6 +257,42 @@ def test_init_discover_descends_one_level_and_skips_var():
     assert "# - { name: zenoh_router, service: zenoh-router, config: config/infra/zenoh-router.yaml" in vehicle
 
 
+def test_init_infra_plus_discover_overlap_is_quiet():
+    # THE recommended invocation (--infra + --discover over one workspace) rediscovers the very dirs
+    # --infra just wired — that must not print "duplicate service" noise about its own designed behavior.
+    import contextlib
+    import io
+
+    ws = _infra_collection_ws()
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        init(ws / "veh", infra=["zenoh-router"], discover=ws)
+    assert "duplicate" not in err.getvalue()
+    services = (ws / "veh" / "services.yaml").read_text()
+    assert services.count("zenoh-router:") == 1          # routed once, by --infra
+    assert "widget:" in services                          # the rest of the collection still discovered
+    vehicle = (ws / "veh" / "vehicle.yaml").read_text()
+    assert vehicle.count("service: zenoh-router") == 1    # enabled row only — no duplicate menu stub
+
+
+def test_init_discover_conflicting_checkouts_still_warn():
+    # Two DIFFERENT dirs claiming one service key is a real decision — the warning stays, naming both.
+    import contextlib
+    import io
+
+    ws = _infra_collection_ws()
+    other = ws / "other-infra" / "zenoh-router"
+    (other / "config").mkdir(parents=True)
+    (other / "rigging.yaml").write_text("service: zenoh-router\nlauncher: zenoh-router-up\ntier: infra\n")
+    (other / "config" / "z.example.yaml").write_text("service: zenoh-router\nname: zr2\n")
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        init(ws / "veh", discover=ws)
+    out = err.getvalue()
+    assert "duplicate service 'zenoh-router'" in out and "keeping" in out
+    assert (ws / "veh" / "services.yaml").read_text().count("zenoh-router:") == 1
+
+
 def test_missing_bundled_template_errors_with_rig_infra_pointer():
     # The templates/ stub is deleted a version after v0.1.28 — an old services.yaml path must then fail
     # WITH the pointer, not a generic "no rigging.yaml" mystery.

@@ -248,7 +248,13 @@ def _discover(scan: Path, target: Path, services: dict[str, str],
             eprint(f"  discover: skipping {child.name} (bad rigging.yaml: {exc})")
             continue
         if svc in services:
-            eprint(f"  discover: duplicate service '{svc}' in {child.name} — keeping the first")
+            # The same dir arriving twice is the DESIGNED --infra ∩ --discover overlap (both resolve
+            # from the workspace since v0.1.28) — already routed and reported, so stay quiet. The loud
+            # warning is reserved for a genuine conflict: two different dirs claiming one service key.
+            if (target / services[svc]).resolve() == child:
+                continue
+            eprint(f"  discover: duplicate service '{svc}' at {os.path.relpath(child, target)} — "
+                   f"keeping {services[svc]}")
             continue
         services[svc] = os.path.relpath(child, target)
         tier = desc.tier if desc.tier in ("infra", "autonomy") else "sensor"

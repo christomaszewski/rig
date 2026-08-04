@@ -1,8 +1,8 @@
 # rig — project state & handoff (resume here)
 
 > Snapshot for picking the project up cold in a new session. Read this first, then `CHEATSHEET.md` /
-> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.1.29**, branch
-> **`main`** (the `config-schema-symmetric` work is merged; feature branches deleted), 110 tests passing
+> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.1.30**, branch
+> **`main`** (the `config-schema-symmetric` work is merged; feature branches deleted), 112 tests passing
 > (`for t in tests/test_*.py; do python3 $t; done`). Tool at `/Users/ckt/ws/bringup`; run-from-source
 > `./rig <verb>`.
 > **Remote: https://github.com/christomaszewski/rig (public)** — Actions runs the test suite on push/PR.
@@ -70,6 +70,9 @@ A launcher's compose opts into each (`${RIG_IMAGE_REGISTRY:+…}`, `:${RIG_IMAGE
   deprecation stub for one version (v0.1.28).
 - `rig pull` + baked `pull.sh` (v0.1.19): pre-pull every stack's images with NO container changes — prime
   the vehicle's cache while the registry is reachable, then run offline; safe against a live deployment.
+- v0.1.30: `--infra` + `--discover` over one workspace no longer prints "duplicate service" for the dirs
+  --infra just wired (same-path rediscovery = the designed overlap, quiet skip); the warning is reserved
+  for two DIFFERENT dirs claiming one service key, and now names both paths.
 - v0.1.29: **`ros.distro` → `ROS_DISTRO` at build time** — `rig build` exports vehicle.yaml's
   `ros.distro` into every `build:` command's env (shown in the build/dry-run lines), so rig-infra's
   fleet-ros bakes the fleet's distro without the operator remembering an env var. The
