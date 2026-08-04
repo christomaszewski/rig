@@ -75,7 +75,10 @@ def collect(
         issues.append(Issue(WARN, f"autonomy enabled ({', '.join(autonomy_on)}) but no enabled sensors — "
                                    f"a brain with no eyes; enable the sensor stacks it consumes"))
 
-    # One ROS distro across the vehicle (a shared DDS graph needs it).
+    # One ROS distro across the vehicle (a shared DDS graph needs it). Vehicle-vs-services disagreement
+    # is an ERROR, not a nitpick: `rig build` exports vehicle.yaml's ros.distro as ROS_DISTRO to build
+    # commands, so a mismatch means the next `rig build` bakes images (rig-infra's fleet-ros) for a
+    # distro the services don't target — the router/session version-match silently broken.
     distros: dict[str, list[str]] = {}
     for svc, desc in descriptors.items():
         if desc.ros_distro:
@@ -86,7 +89,9 @@ def collect(
         only = next(iter(distros))
         if manifest.ros.distro and only != manifest.ros.distro:
             issues.append(
-                Issue(WARN, f"vehicle ros.distro={manifest.ros.distro} but services target '{only}'")
+                Issue(ERROR, f"vehicle ros.distro={manifest.ros.distro} but the services target '{only}' "
+                             f"— `rig build` bakes ROS_DISTRO={manifest.ros.distro} into built images "
+                             f"(fleet-ros); align vehicle.yaml with the riggings (or vice versa)")
             )
         else:
             issues.append(Issue(OK, f"single ROS distro: {only}"))

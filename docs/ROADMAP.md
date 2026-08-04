@@ -320,8 +320,11 @@ doctor green; a `tier: autonomy` fixture repo lands in the right menu section wi
 > **Status:** rig-infra repo created (services moved verbatim, provenance in the first commit; `base/`
 > fleet-ros image; defaults flipped; CI certifies 3/3 + the router_config path). rig side shipped:
 > `--infra` path/bare-name resolution with one-level workspace scan, `--discover` descent, deprecation
-> stub + pointer error, CI template-certify steps dropped, docs swept. Remaining: migration steps 3–4
-> below (live deployments, dashboard-on-GitHub chore, then delete the stub next version).
+> stub + pointer error, CI template-certify steps dropped, docs swept. v0.1.29 closed the distro loop:
+> `rig build` exports vehicle.yaml `ros.distro` as ROS_DISTRO to build commands (fleet-ros bakes the
+> fleet's distro), and doctor raises vehicle-vs-services distro disagreement as an ERROR. Remaining:
+> migration steps 3–4 below (live deployments, dashboard-on-GitHub chore, then delete the stub next
+> version).
 
 ### Why now (reversal of two earlier "keep in rig" calls — the triggers fired)
 Three templates exist, roscore/mavlink queued; certify-in-CI now enforces the launcher contract

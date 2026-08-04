@@ -1,8 +1,8 @@
 # rig — project state & handoff (resume here)
 
 > Snapshot for picking the project up cold in a new session. Read this first, then `CHEATSHEET.md` /
-> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.1.27**, branch
-> **`main`** (the `config-schema-symmetric` work is merged; feature branches deleted), 102 tests passing
+> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.1.29**, branch
+> **`main`** (the `config-schema-symmetric` work is merged; feature branches deleted), 110 tests passing
 > (`for t in tests/test_*.py; do python3 $t; done`). Tool at `/Users/ckt/ws/bringup`; run-from-source
 > `./rig <verb>`.
 > **Remote: https://github.com/christomaszewski/rig (public)** — Actions runs the test suite on push/PR.
@@ -70,6 +70,12 @@ A launcher's compose opts into each (`${RIG_IMAGE_REGISTRY:+…}`, `:${RIG_IMAGE
   deprecation stub for one version (v0.1.28).
 - `rig pull` + baked `pull.sh` (v0.1.19): pre-pull every stack's images with NO container changes — prime
   the vehicle's cache while the registry is reachable, then run offline; safe against a live deployment.
+- v0.1.29: **`ros.distro` → `ROS_DISTRO` at build time** — `rig build` exports vehicle.yaml's
+  `ros.distro` into every `build:` command's env (shown in the build/dry-run lines), so rig-infra's
+  fleet-ros bakes the fleet's distro without the operator remembering an env var. The
+  vehicle-vs-services distro disagreement in doctor is upgraded WARN → **ERROR** (ros.distro is now
+  load-bearing: a mismatch means the next build bakes images the services don't target), and
+  `rig build` prints an inline WARNING per mismatched service at the moment it bakes.
 - v0.1.28: **infra spin-out** (ROADMAP §3e) — the bundled templates moved to the sibling **rig-infra**
   repo with an added `base/` **fleet-ros image** (`ros:<distro>-ros-base` + rmw-zenoh-cpp +
   rosbag2+mcap; `base/build.sh` follows the rig build contract). Opinionated defaults: router =

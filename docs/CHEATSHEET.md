@@ -77,6 +77,7 @@ vehicle, then `rig certify --diff /tmp/dev.yaml /tmp/orin.yaml` — identical = 
 ```bash
 rig build -j 3                                # per unique service: build+push (build:) / mirror (mirror:)
                                               #   registry comes from vehicle.yaml; --registry <ip:5000> overrides
+                                              #   exports ROS_DISTRO from ros.distro (fleet-ros bakes YOUR distro)
 curl -s http://<dev-box-ip>:5000/v2/_catalog  # expect every repo the composes will pull
 ```
 

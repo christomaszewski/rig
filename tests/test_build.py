@@ -64,6 +64,45 @@ def test_build_runs_a_service_once_for_multiple_instances():
     assert log.read_text().count("built") == 1  # 2 instances -> the service builds ONCE
 
 
+def test_build_exports_ros_distro_from_vehicle_yaml():
+    # vehicle.yaml ros.distro rides into build commands as ROS_DISTRO (fleet-ros bakes the right distro
+    # without the operator remembering an env var); absent distro -> env untouched.
+    import os
+    os.environ.pop("ROS_DISTRO", None)
+    svc = _service_with_build("base", 'echo "${ROS_DISTRO:-UNSET}" > "$(dirname "$0")/seen"\n')
+
+    def run_with(vehicle_yaml: str) -> str:
+        root = pathlib.Path(tempfile.mkdtemp())
+        (root / "config").mkdir()
+        (root / "vehicle.yaml").write_text(vehicle_yaml)
+        (root / "services.yaml").write_text(f"services: {{base: {{path: {svc}}}}}\n")
+        (root / "config" / "a.yaml").write_text("service: base\nname: a\n")
+        m = load_manifest(root)
+        assert build(m, {"base": load_descriptor("base", svc)}, registry=None, tag=None, dry_run=False) == 0
+        return (svc / "seen").read_text().strip()
+
+    assert run_with("vehicle: t\nros: {distro: lyrical}\n"
+                    "sensors: [{name: a, service: base, config: config/a.yaml}]\n") == "lyrical"
+    assert run_with("vehicle: t\nsensors: [{name: a, service: base, config: config/a.yaml}]\n") == "UNSET"
+
+
+def test_build_warns_when_rigging_distro_disagrees():
+    import contextlib
+    import io
+
+    svc = _repo("service: s\nlauncher: s-up\nros_distro: noetic\nbuild: b.sh\n")
+    root = pathlib.Path(tempfile.mkdtemp())
+    (root / "config").mkdir()
+    (root / "vehicle.yaml").write_text("vehicle: t\nros: {distro: lyrical}\n"
+                                       "sensors: [{name: a, service: s, config: config/a.yaml}]\n")
+    (root / "config" / "a.yaml").write_text("service: s\nname: a\n")
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        build(load_manifest(root), {"s": load_descriptor("s", svc)}, registry=None, tag=None, dry_run=True)
+    out = err.getvalue()
+    assert "WARNING" in out and "ros_distro 'noetic'" in out and "ROS_DISTRO=lyrical" in out
+
+
 def test_build_concurrent_runs_every_service():
     s1 = _service_with_build("svc1", 'touch "$(dirname "$0")/done"\n')
     s2 = _service_with_build("svc2", 'touch "$(dirname "$0")/done"\n')

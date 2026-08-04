@@ -55,6 +55,38 @@ def test_warns_on_non_ros_safe_sensor_name():
     assert not any("ROS 2 name" in i.message for i in collect(m2, cat2, descs2))
 
 
+def test_errors_on_vehicle_vs_service_distro_mismatch():
+    # ros.distro is load-bearing since `rig build` bakes it into built images (ROS_DISTRO) — a vehicle
+    # that pins a distro the services don't target must be a prominent ERROR, not a shrug.
+    import tempfile
+
+    from rig_cli.catalog import load_catalog
+    from rig_cli.descriptor import load_descriptor
+    from rig_cli.doctor import collect
+    from rig_cli.manifest import load_manifest
+
+    svc = pathlib.Path(tempfile.mkdtemp())
+    (svc / "rigging.yaml").write_text("service: s\nlauncher: s-up\nros_distro: lyrical\n")
+    (svc / "s-up").write_text("#!/bin/sh\n")
+    (svc / "s-up").chmod(0o755)
+
+    def issues_with(ros_line: str):
+        d = pathlib.Path(tempfile.mkdtemp())
+        (d / "config").mkdir()
+        (d / "vehicle.yaml").write_text(f"vehicle: t\n{ros_line}\n"
+                                        "sensors: [{name: a, service: s, config: config/c.yaml}]\n")
+        (d / "services.yaml").write_text(f"services: {{s: {{path: {svc}}}}}\n")
+        (d / "config" / "c.yaml").write_text("service: s\nname: a\n")
+        return collect(load_manifest(d), load_catalog(d), {"s": load_descriptor("s", svc)})
+
+    mismatch = issues_with("ros: {distro: mismatched}")
+    assert any(i.level == "ERROR" and "ros.distro=mismatched" in i.message and "ROS_DISTRO" in i.message
+               for i in mismatch)
+    agree = issues_with("ros: {distro: lyrical}")
+    assert not any("ros.distro" in i.message and i.level == "ERROR" for i in agree)
+    assert any(i.level == "OK" and "single ROS distro: lyrical" in i.message for i in agree)
+
+
 def _three_tier_fixture(sensor_enabled: bool, autonomy_name: str = "planner"):
     import tempfile
 
