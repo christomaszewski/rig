@@ -61,7 +61,8 @@ The manifest + per-sensor configs for one vehicle/fleet (no driver source lives 
 1. Edit `services.yaml` (where each service repo is) and `vehicle.yaml` (which sensors, fleet ROS env,
    image registry).
 2. Add a config per sensor under `config/sensors/` (or reference a nameless profile + per-sensor
-   overrides), and per shared infra service under `config/infra/`.
+   overrides), per shared infra service under `config/infra/`, and per autonomy stack (planners, SLAM,
+   perception — up last, down first) under `config/autonomy/`.
 3. Validate + run: `rig doctor` · `rig up --dry-run` · `rig up` · `rig status`.
 4. Deploy: `rig vendor <svc> --from <repo>` · `rig bake --registry <host> --tag <t>` · ship the artifact ·
    on the vehicle `rig unbake <artifact> && ./run.sh up`.
@@ -181,7 +182,7 @@ def _discover(scan: Path, target: Path, services: dict[str, str],
     if not scan.is_dir():  # unresolved side makes relpath walk to / instead of `../<repo>`
         raise RigError(f"init --discover: not a directory: {scan}")
     count = 0
-    order = {"infra": 5, "sensor": 10}
+    order = {"infra": 5, "sensor": 10, "autonomy": 10}
     candidates = sorted(p.resolve() for p in scan.iterdir() if p.is_dir() and not p.name.startswith("."))
     if find_descriptor(scan) is not None:  # --discover pointed AT a repo, not a workspace — take it
         candidates.insert(0, scan)
@@ -198,8 +199,8 @@ def _discover(scan: Path, target: Path, services: dict[str, str],
             eprint(f"  discover: duplicate service '{svc}' in {child.name} — keeping the first")
             continue
         services[svc] = os.path.relpath(child, target)
-        tier = "infra" if desc.tier == "infra" else "sensor"
-        sub = "infra" if tier == "infra" else "sensors"
+        tier = desc.tier if desc.tier in ("infra", "autonomy") else "sensor"
+        sub = {"infra": "infra", "sensor": "sensors", "autonomy": "autonomy"}[tier]
         copied = []
         for src in _repo_examples(child, desc.examples):
             stem = src.name[: -len(".example.yaml")] if src.name.endswith(".example.yaml") else src.stem
@@ -242,6 +243,11 @@ def _vehicle_yaml(name: str, vehicle_id: int, infra_rows: list[str], menu: dict[
     else:
         lines.append("sensors:")
         lines.append("  # - { name: gnss_primary, service: novatel, config: config/sensors/gnss_primary.yaml, enabled: true, order: 10 }")
+    lines.append(f"{'autonomy:':<22}# graph consumers (planners, SLAM, perception) — up LAST, down FIRST:")
+    if menu["autonomy"]:
+        lines += [f"  {row}" for row in menu["autonomy"]]
+    else:
+        lines.append("  # - { name: planner, service: my-planner, config: config/autonomy/planner.yaml, enabled: true, order: 10 }")
     return "\n".join(lines) + "\n"
 
 
@@ -266,12 +272,12 @@ def init(target: Path, *, vehicle_id: int = 1, infra: list[str] | None = None,
     plan = _plan_templates(infra or [])
     if discover is not None and not discover.resolve().is_dir():
         raise RigError(f"init --discover: not a directory: {discover}")
-    for sub in ("config/sensors", "config/infra", "services"):
+    for sub in ("config/sensors", "config/infra", "config/autonomy", "services"):
         (target / sub).mkdir(parents=True, exist_ok=True)
 
     services: dict[str, str] = {}
     infra_rows: list[str] = []
-    menu: dict[str, list[str]] = {"infra": [], "sensor": []}
+    menu: dict[str, list[str]] = {"infra": [], "sensor": [], "autonomy": []}
     used_orders: list[int] = []
     for t, tdir, example, instance in plan:
         _wire_template(t, tdir, example, instance, target, services, infra_rows, used_orders)
@@ -283,6 +289,7 @@ def init(target: Path, *, vehicle_id: int = 1, infra: list[str] | None = None,
     (target / ".gitignore").write_text("var/\n.venv/\n__pycache__/\n*.pyc\n.DS_Store\n")
     (target / "config" / "sensors" / ".gitkeep").write_text("")
     (target / "config" / "infra" / ".gitkeep").write_text("")
+    (target / "config" / "autonomy" / ".gitkeep").write_text("")
     (target / "services" / ".gitkeep").write_text("")
 
     eprint(f"initialized rig deployment '{target.name}' at {target}")

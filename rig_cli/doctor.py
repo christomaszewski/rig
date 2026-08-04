@@ -69,6 +69,12 @@ def collect(
             issues.append(Issue(WARN, "ros.rmw is zenoh but no zenoh router in `infra:` — ROS nodes may not "
                                        "discover each other; add a zenoh-router service (or switch RMW)"))
 
+    # Autonomy consumes the sensor graph — enabled autonomy with zero enabled sensors is a brain with no eyes.
+    autonomy_on = [s.name for s in manifest.sensors if s.tier == "autonomy" and s.enabled]
+    if autonomy_on and not any(s.tier == "sensor" and s.enabled for s in manifest.sensors):
+        issues.append(Issue(WARN, f"autonomy enabled ({', '.join(autonomy_on)}) but no enabled sensors — "
+                                   f"a brain with no eyes; enable the sensor stacks it consumes"))
+
     # One ROS distro across the vehicle (a shared DDS graph needs it).
     distros: dict[str, list[str]] = {}
     for svc, desc in descriptors.items():
@@ -93,12 +99,12 @@ def collect(
         elif not lp.stat().st_mode & 0o111:
             issues.append(Issue(WARN, f"{svc}: launcher not executable: {lp}"))
 
-    # ROS sensors namespace a node by the instance name, and ROS 2 names allow only [A-Za-z_][A-Za-z0-9_]*
-    # (no hyphens, no leading digit). Flag a per-instance ROS stack whose name would be an invalid namespace.
+    # ROS stacks (sensor AND autonomy tiers) namespace a node by the instance name, and ROS 2 names allow
+    # only [A-Za-z_][A-Za-z0-9_]* (no hyphens, no leading digit). Flag a name that would be an invalid namespace.
     _ros_name = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
     for sensor in manifest.sensors:
         desc = descriptors.get(sensor.service)
-        if sensor.tier == "sensor" and desc and desc.ros_distro and not _ros_name.match(sensor.name):
+        if sensor.tier in ("sensor", "autonomy") and desc and desc.ros_distro and not _ros_name.match(sensor.name):
             issues.append(Issue(WARN, f"'{sensor.name}' ({sensor.service}) isn't a valid ROS 2 name (only "
                                        f"letters/digits/underscores, no hyphens) — the ROS node namespaced by "
                                        f"it will fail; rename to e.g. '{sensor.name.replace('-', '_')}'"))

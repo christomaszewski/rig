@@ -93,10 +93,11 @@ rig certify --diff /tmp/mac.yaml /tmp/orin.yaml   # identical = `config` output 
 ## Layout
 
 ```
-vehicle.yaml            # which sensors THIS machine runs + fleet-wide ROS settings
+vehicle.yaml            # which stacks THIS machine runs + fleet-wide ROS settings
 services.yaml           # catalog: service routing key -> where its repo lives
 config/sensors/*.yaml   # one config per sensor (the single source of truth for that stack)
 config/infra/*.yaml     # one config per shared infra service (zenoh router, bag logger, …)
+config/autonomy/*.yaml  # one config per autonomy stack (planner, SLAM, perception, …)
 services/               # service repos as git submodules (deployment); or point services.yaml at sibling checkouts
 templates/              # ready-to-use infra services (zenoh-router, ros2-bag-logger, ros1-bag-logger)
 rig, rig_cli/           # the CLI (thin shim + package: manifest/catalog/dispatch/status/doctor/certify/build/bake/…)
@@ -104,8 +105,12 @@ docs/                   # CHEATSHEET (1-page flow) · RUNBOOK (worked example) �
 ```
 
 ### `vehicle.yaml` (per machine)
-Lists active sensors (`name`, `service`, `config`, `enabled`, `order`) and the fleet ROS settings. Disable
-a sensor with `enabled: false` rather than deleting its config. `name` must be unique across the vehicle —
+Lists active stacks (`name`, `service`, `config`, `enabled`, `order`) and the fleet ROS settings, in three
+tiers: `infra:` (substrate — routers, loggers, dashboards; up FIRST, down last), `sensors:` (producers),
+and `autonomy:` (graph consumers — planners, SLAM, perception; up after ALL sensors, down FIRST, so the
+decider dies before its eyes). The tier partition is hard; per-entry `order` sorts within a tier only —
+and ordering is a courtesy, not correctness: consumers must still retry (discovery is dynamic). Disable
+a stack with `enabled: false` rather than deleting its config. `name` must be unique across the vehicle —
 it keys the compose project, external volumes, and ROS namespace.
 
 ### `services.yaml` (catalog)
@@ -148,7 +153,8 @@ service: novatel
 launcher: novatel-up                 # default: <service>-up
 verbs: { status: ps }                # adapt logical verbs -> launcher args (defaults shown in descriptor.py)
 ros_distro: lyrical
-tier: sensor                         # optional: "infra" = shared, up-first (routers, loggers, dashboards)
+tier: sensor                         # optional: "infra" = shared, up-first (routers, loggers, dashboards);
+                                     #   "autonomy" = graph consumer, up-last / down-first (planners, SLAM)
 examples: [sensors/novatel.example.yaml]     # optional: example configs — `rig init --discover` copies
                                              #   them; `rig certify --repo` uses the first as its default --config
 external_volumes: ["novatel_{name}_data"]    # optional: GC'd by `rig down --purge` (final teardown only)

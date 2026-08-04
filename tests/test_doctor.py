@@ -55,6 +55,49 @@ def test_warns_on_non_ros_safe_sensor_name():
     assert not any("ROS 2 name" in i.message for i in collect(m2, cat2, descs2))
 
 
+def _three_tier_fixture(sensor_enabled: bool, autonomy_name: str = "planner"):
+    import tempfile
+
+    from rig_cli.catalog import load_catalog
+    from rig_cli.descriptor import load_descriptor
+    from rig_cli.doctor import collect
+    from rig_cli.manifest import load_manifest
+
+    repos = {}
+    for svc in ("cam", "nav"):
+        r = pathlib.Path(tempfile.mkdtemp())
+        tier = "\ntier: autonomy" if svc == "nav" else ""
+        (r / "rigging.yaml").write_text(f"service: {svc}\nlauncher: {svc}-up\nros_distro: lyrical{tier}\n")
+        (r / f"{svc}-up").write_text("#!/bin/sh\n")
+        (r / f"{svc}-up").chmod(0o755)
+        repos[svc] = r
+    d = pathlib.Path(tempfile.mkdtemp())
+    (d / "config").mkdir()
+    (d / "vehicle.yaml").write_text(
+        f"vehicle: t\n"
+        f"sensors: [{{name: cam0, service: cam, config: config/c.yaml, enabled: {str(sensor_enabled).lower()}}}]\n"
+        f"autonomy: [{{name: {autonomy_name}, service: nav, config: config/n.yaml}}]\n")
+    (d / "services.yaml").write_text(f"services: {{cam: {{path: {repos['cam']}}}, nav: {{path: {repos['nav']}}}}}\n")
+    (d / "config" / "c.yaml").write_text("service: cam\nname: cam0\n")
+    (d / "config" / "n.yaml").write_text(f"service: nav\nname: {autonomy_name}\n")
+    m = load_manifest(d)
+    descs = {svc: load_descriptor(svc, r) for svc, r in repos.items()}
+    return collect(m, load_catalog(d), descs)
+
+
+def test_warns_autonomy_with_no_enabled_sensors():
+    # a brain with no eyes: enabled autonomy + zero enabled sensors -> WARN; with a sensor on, silent
+    issues = _three_tier_fixture(sensor_enabled=False)
+    assert any(i.level == "WARN" and "no eyes" in i.message and "planner" in i.message for i in issues)
+    assert not any("no eyes" in i.message for i in _three_tier_fixture(sensor_enabled=True))
+
+
+def test_ros_name_warning_covers_autonomy_tier():
+    # autonomy stacks namespace ROS nodes too — a hyphenated instance name gets the same WARN as a sensor
+    issues = _three_tier_fixture(sensor_enabled=True, autonomy_name="nav-stack")
+    assert any(i.level == "WARN" and "nav-stack" in i.message and "ROS 2 name" in i.message for i in issues)
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

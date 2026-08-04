@@ -1,8 +1,8 @@
 # rig — project state & handoff (resume here)
 
 > Snapshot for picking the project up cold in a new session. Read this first, then `CHEATSHEET.md` /
-> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.1.24**, branch
-> **`main`** (the `config-schema-symmetric` work is merged; feature branches deleted), 76 tests passing
+> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.1.27**, branch
+> **`main`** (the `config-schema-symmetric` work is merged; feature branches deleted), 102 tests passing
 > (`for t in tests/test_*.py; do python3 $t; done`). Tool at `/Users/ckt/ws/bringup`; run-from-source
 > `./rig <verb>`.
 > **Remote: https://github.com/christomaszewski/rig (public)** — Actions runs the test suite on push/PR.
@@ -51,12 +51,13 @@ A launcher's compose opts into each (`${RIG_IMAGE_REGISTRY:+…}`, `:${RIG_IMAGE
 
 ## rig capabilities (all built/tested — bullets carry their own version tags)
 
-- Lifecycle `up/down(--purge)/status/logs/config/doctor`; tiered ordering (infra before sensors); tier-aware
-  output ("2 sensors + 2 infra").
+- Lifecycle `up/down(--purge)/status/logs/config/doctor`; tiered ordering (infra → sensors → autonomy;
+  down reversed, so autonomy stops FIRST); tier-aware output ("2 sensors + 2 infra + 1 autonomy").
 - `vehicle.yaml`: `vehicle_id` (→ ROS domain + `VEHICLE_ID`), `ros{rmw,distro}`, `images{registry,tag}`,
-  `data_dir`, `infra:`, `sensors:`. Config overrides + nameless profiles (deep-merge).
+  `data_dir`, `infra:`, `sensors:`, `autonomy:`. Config overrides + nameless profiles (deep-merge).
 - `doctor`: one-distro check, launcher-present, host-port clash (enabled-aware `plugins[name=x,enabled=true].params.port`
-  selector), **non-ROS-safe name warning** (hyphens → invalid ROS namespace), zenoh-router guardrail.
+  selector), **non-ROS-safe name warning** (hyphens → invalid ROS namespace; sensor + autonomy tiers),
+  zenoh-router guardrail, autonomy-with-no-enabled-sensors warning ("a brain with no eyes").
 - `rig build [-j N] [--registry] [--tag]`: per-unique-service **build** (`rigging.yaml build:`) + **mirror**
   (`mirror:`, via `docker pull/tag/push` so a plain-HTTP registry works). Concurrent with `-j`.
 - `rig vendor` (copy launch surface, files **and dirs**), `rig bake [--registry] --tag` / `rig unbake`:
@@ -67,6 +68,14 @@ A launcher's compose opts into each (`${RIG_IMAGE_REGISTRY:+…}`, `:${RIG_IMAGE
 - Templates: `templates/zenoh-router/` (a ready shared-router infra service; honors `COMPOSE_PROJECT_NAME`).
 - `rig pull` + baked `pull.sh` (v0.1.19): pre-pull every stack's images with NO container changes — prime
   the vehicle's cache while the registry is reachable, then run offline; safe against a live deployment.
+- v0.1.27: **`autonomy:` tier** (ROADMAP §3d) — third manifest tier for graph CONSUMERS (planners, SLAM,
+  perception). Hard ordering partition infra=0 → sensors=1 → autonomy=2 regardless of per-entry `order`;
+  `down` reverses, so the decider dies before its eyes. `rigging.yaml` accepts `tier: autonomy`;
+  `init` scaffolds `config/autonomy/` and `--discover` routes autonomy repos to an `autonomy:` menu
+  section (MENU only, never auto-enabled — no `--autonomy` wiring flag by design: autonomy arrives from
+  real repos). Baked vehicle.yaml preserves all three tiers; compose-only up.sh/down.sh hold the
+  partition. Ordering stays a courtesy — consumers must retry; tier gating (`up --wait-healthy`) is the
+  future health-verb payoff this structure attaches to.
 - v0.1.26: baked `pull.sh`/`up.sh` **alias digest-pinned images back to their tags** (`docker tag <@sha>
   <:tag>`, best-effort) — a digest pull doesn't create the tag name, so the launcher path (tag refs:
   `up --run`, field `./rig up`) used to re-pull online and FAIL offline on a digest-primed cache.
@@ -148,11 +157,11 @@ Still open:
 2. **boilerplate `<device>-up` (novatel/sbg launchers):** honor `COMPOSE_PROJECT_NAME` (drop `-p`, standalone
    fallback) — same one-liner the other launchers got. Find + prove it with
    `rig certify --repo ../novatel --config <example.yaml>` (the project-name check fails until fixed).
-3. **PLANNED NEXT SLICES — specs settled 2026-08-03, ready to kick off cold (`ROADMAP.md`):**
-   **§3d `autonomy:` tier** (third tier, rank 2, up-last/down-first, doctor + discover routing — user has
-   services incoming for it) and **§3e infra spin-out to `rig-infra`** (templates + fleet-ros base image
-   repo, opinionated rmw-family router default, `--infra`/`--discover` generalization, deprecation stub).
-   Read both specs before starting; they overlap slightly on descriptor `tier:` + discover routing.
+3. **PLANNED NEXT SLICE — spec settled 2026-08-03, ready to kick off cold (`ROADMAP.md`):**
+   **§3e infra spin-out to `rig-infra`** (templates + fleet-ros base image repo, opinionated rmw-family
+   router default, `--infra`/`--discover` generalization, deprecation stub). (§3d `autonomy:` tier
+   shipped in v0.1.27; the small descriptor-`tier:`/discover overlap §3e's spec mentions is now merged —
+   just extend, don't re-plan.)
 4. **rig follow-ups (`ROADMAP.md`):** health verb + reconciler/systemd (top open items), OCI artifact
    format, fleet mode (one artifact, N vehicles). (`bake --bundle-images` shipped in v0.1.21.)
 

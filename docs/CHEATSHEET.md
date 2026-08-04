@@ -1,6 +1,6 @@
 # rig — deployment cheat sheet
 
-> The whole workflow on one page (rig ≥ v0.1.24). Long-form: `RUNBOOK.md` (worked Orin example),
+> The whole workflow on one page (rig ≥ v0.1.27). Long-form: `RUNBOOK.md` (worked Orin example),
 > `README.md` (concepts), `STATE.md` (current live state). Mental model: **services own their bring-up**
 > (launcher + `rigging.yaml`); **rig owns the vehicle** (manifest, env, ordering, artifacts). The vehicle
 > runs the baked compose-only form — no source, no internet.
@@ -49,9 +49,10 @@ cd my-vehicle
 #   ros:    { rmw: rmw_zenoh_cpp, distro: lyrical }     # zenoh rmw ⇒ declare a zenoh-router in infra:
 #   images: { registry: "<IP>:5000", tag: "jp7" }       # ONE tag per vehicle (the platform, e.g. JetPack)
 #   data_dir: /home/<user>/logs                          # recordings/logs land here (RIG_DATA_DIR)
-#   infra:   [ {name: zenoh-router, ...order: 0}, {name: dashboard, ...order: 5} ]
+#   infra:   [ {name: zenoh-router, ...order: 0}, {name: dashboard, ...order: 5} ]     # up FIRST
 #   sensors: [ {name: cam_usb, ...order: 10}, {name: cam_rtsp, ...order: 20} ]
-# config/sensors/<name>.yaml — one per instance (copy keys from the service's example configs)
+#   autonomy: [ {name: planner, ...order: 10} ]      # graph consumers: up after ALL sensors, down FIRST
+# config/{infra,sensors,autonomy}/<name>.yaml — one per instance (copy keys from the service's examples)
 ```
 
 Naming rules: instance `name` is unique vehicle-wide and keys *everything* (compose project, volumes,
@@ -101,7 +102,7 @@ artifact's own sha256; digests are still recorded in `metadata.yaml`/`rig.lock` 
 scp var/artifacts/v1.tar.gz $VEHICLE:~/ws/
 ssh $VEHICLE 'cd ~/ws && tar xzf v1.tar.gz'
 ssh $VEHICLE 'cd ~/ws/v1 && ./run.sh pull'    # optional: pre-warm the image cache — touches NO containers
-ssh $VEHICLE 'cd ~/ws/v1 && ./run.sh up'      # pulls from the registry in vehicle.yaml; infra first, then sensors
+ssh $VEHICLE 'cd ~/ws/v1 && ./run.sh up'      # pulls from the registry in vehicle.yaml; infra → sensors → autonomy
 ssh $VEHICLE 'cd ~/ws/v1 && ./run.sh status'  # or: ./run.sh logs <name> · ./run.sh down
 ```
 

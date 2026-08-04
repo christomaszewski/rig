@@ -1,10 +1,13 @@
-"""vehicle.yaml — the vehicle's identity, fleet-wide ROS settings, shared `infra:` services, and `sensors:`.
+"""vehicle.yaml — the vehicle's identity, fleet-wide ROS settings, and the three stack tiers:
+`infra:` (substrate), `sensors:` (producers), `autonomy:` (graph consumers).
 
 Loading enforces the single most important correctness invariant rig owns: **globally-unique instance
 `name`** across the whole vehicle (every identity a launcher derives — compose project, external volumes,
 ROS namespace — comes from `name`). It also cross-checks each entry's `service`/`name` against the config's
-own (the launcher trusts the config), derives the ROS domain from the vehicle id, and keeps shared
-infrastructure (`infra:`, e.g. a zenoh router) in a tier that comes up before sensors and tears down after.
+own (the launcher trusts the config), derives the ROS domain from the vehicle id, and orders the tiers:
+infra comes up first and tears down last; autonomy (planners, SLAM, perception — anything consuming the
+graph) comes up after ALL sensors and stops FIRST, so the decider dies before its eyes. Ordering is a
+courtesy, not correctness — consumers must still retry (discovery is dynamic).
 """
 from __future__ import annotations
 
@@ -23,7 +26,7 @@ class Sensor:
     enabled: bool
     order: int
     overrides: dict = field(default_factory=dict)  # per-instance patch deep-merged onto the config
-    tier: str = "sensor"  # "infra" (shared, up first / down last) | "sensor"
+    tier: str = "sensor"  # "infra" (up first / down last) | "sensor" | "autonomy" (up last / down FIRST)
 
 
 @dataclass(frozen=True)
@@ -33,18 +36,23 @@ class RosSettings:
     distro: str | None
 
 
+# The hard ordering partition: every infra stack before every sensor before every autonomy stack,
+# regardless of per-entry `order` (which only sorts within a tier). `down` reverses the whole list.
+TIER_RANK = {"infra": 0, "sensor": 1, "autonomy": 2}
+
+
 @dataclass
 class Manifest:
     vehicle: str
     ros: RosSettings
-    sensors: list[Sensor]            # infra + sensor entries combined (each carries its `tier`)
+    sensors: list[Sensor]            # infra + sensor + autonomy entries combined (each carries its `tier`)
     image_registry: str | None = None  # fleet-wide registry stacks pull from (None = local images)
     vehicle_id: object = None        # int|str; decides the ROS domain + exported as VEHICLE_ID
     image_tag: str | None = None     # fleet-wide image tag (e.g. a JetPack platform jp7); -> RIG_IMAGE_TAG
     data_dir: str | None = None      # host dir for recordings/logs/outputs; -> RIG_DATA_DIR
 
     def select(self, names: list[str], enabled_only: bool) -> list[Sensor]:
-        """Resolve a name filter into a tiered, ordered list (infra before sensors). Explicit names win."""
+        """Resolve a name filter into a tiered, ordered list (infra → sensors → autonomy). Explicit names win."""
         if names:
             by_name = {s.name: s for s in self.sensors}
             missing = [n for n in names if n not in by_name]
@@ -53,7 +61,7 @@ class Manifest:
             chosen = [by_name[n] for n in names]
         else:
             chosen = [s for s in self.sensors if s.enabled or not enabled_only]
-        return sorted(chosen, key=lambda s: (0 if s.tier == "infra" else 1, s.order))
+        return sorted(chosen, key=lambda s: (TIER_RANK[s.tier], s.order))
 
 
 def _parse_entries(entries, tier: str, root: Path, seen: dict[str, Path]) -> list[Sensor]:
@@ -101,14 +109,18 @@ def project_name(name: str, vehicle_id=None) -> str:
 
 
 def stack_summary(sensors: list[Sensor]) -> str:
-    """A tier-aware count for human output, e.g. '2 sensors + 2 infra' — infra are stacks, not sensors."""
+    """A tier-aware count for human output, e.g. '2 sensors + 2 infra + 1 autonomy' — infra and autonomy
+    are stacks, not sensors."""
     infra = sum(1 for s in sensors if s.tier == "infra")
-    sens = len(sensors) - infra
+    autonomy = sum(1 for s in sensors if s.tier == "autonomy")
+    sens = len(sensors) - infra - autonomy
     parts = []
     if sens:
         parts.append(f"{sens} sensor{'' if sens == 1 else 's'}")
     if infra:
         parts.append(f"{infra} infra")
+    if autonomy:
+        parts.append(f"{autonomy} autonomy")
     return " + ".join(parts) or "0 stacks"
 
 
@@ -139,11 +151,15 @@ def load_manifest(root: Path) -> Manifest:
     seen: dict[str, Path] = {}
     infra = _parse_entries(data.get("infra"), "infra", root, seen)
     sensors = _parse_entries(data.get("sensors"), "sensor", root, seen)
+    autonomy = _parse_entries(data.get("autonomy"), "autonomy", root, seen)
 
     images = data.get("images") or {}
     image_registry = (str(images.get("registry") or "").strip()) or None
     image_tag = (str(images.get("tag") or "").strip()) or None
     data_dir = (str(data.get("data_dir") or "").strip()) or None
-    return Manifest(vehicle=str(data.get("vehicle", "vehicle")), ros=ros, sensors=infra + sensors,
+    # Concatenation order matters beyond select(): bake iterates `manifest.sensors` as-is, so the tier
+    # partition must already hold here for up.sh line order (autonomy last) and down.sh (reversed).
+    return Manifest(vehicle=str(data.get("vehicle", "vehicle")), ros=ros,
+                    sensors=infra + sensors + autonomy,
                     image_registry=image_registry, vehicle_id=vehicle_id, image_tag=image_tag,
                     data_dir=data_dir)

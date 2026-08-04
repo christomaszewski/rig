@@ -444,16 +444,17 @@ def bake(root: Path, manifest, catalog, descriptors, env, tag: str, *, registry:
                     ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
 
     # 2. resolved per-sensor configs + a COMPLETE resolved vehicle.yaml (overrides/profiles already baked
-    #    in; images / vehicle_id / infra+sensor tiers preserved so a `rig up` on the unbaked tree exports
-    #    the same fleet env — RIG_IMAGE_REGISTRY/RIG_IMAGE_TAG/VEHICLE_ID/ROS_DOMAIN_ID).
+    #    in; images / vehicle_id / all three tiers preserved so a `rig up` on the unbaked tree exports
+    #    the same fleet env — RIG_IMAGE_REGISTRY/RIG_IMAGE_TAG/VEHICLE_ID/ROS_DOMAIN_ID — and keeps the
+    #    tier ordering (infra first, autonomy last / down-first)).
     cfg_dir = staging / "config" / "sensors"
     cfg_dir.mkdir(parents=True)
-    infra_rows, sensor_rows = [], []
+    tier_rows: dict[str, list] = {"infra": [], "sensor": [], "autonomy": []}
     for s in manifest.sensors:
         shutil.copy2(s.config, cfg_dir / f"{s.name}.yaml")
-        row = {"name": s.name, "service": s.service,
-               "config": f"config/sensors/{s.name}.yaml", "enabled": s.enabled, "order": s.order}
-        (infra_rows if s.tier == "infra" else sensor_rows).append(row)
+        tier_rows[s.tier].append({"name": s.name, "service": s.service,
+                                  "config": f"config/sensors/{s.name}.yaml",
+                                  "enabled": s.enabled, "order": s.order})
     veh: dict = {"vehicle": manifest.vehicle}
     if manifest.vehicle_id is not None:
         veh["vehicle_id"] = manifest.vehicle_id
@@ -463,9 +464,11 @@ def bake(root: Path, manifest, catalog, descriptors, env, tag: str, *, registry:
         veh["images"] = {k: v for k, v in (("registry", eff_registry), ("tag", manifest.image_tag)) if v}
     if manifest.data_dir:
         veh["data_dir"] = manifest.data_dir
-    if infra_rows:
-        veh["infra"] = infra_rows
-    veh["sensors"] = sensor_rows
+    if tier_rows["infra"]:
+        veh["infra"] = tier_rows["infra"]
+    veh["sensors"] = tier_rows["sensor"]
+    if tier_rows["autonomy"]:
+        veh["autonomy"] = tier_rows["autonomy"]
     (staging / "vehicle.yaml").write_text(yaml.safe_dump(veh, sort_keys=False))
 
     # 3. vendor each service's launch surface in + a catalog that points at them

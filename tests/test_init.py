@@ -14,8 +14,10 @@ def test_init_scaffolds_infra_and_sensors_config_dirs():
     init(target)
     assert (target / "config" / "sensors" / ".gitkeep").is_file()
     assert (target / "config" / "infra" / ".gitkeep").is_file()  # infra tier scaffolded alongside sensors
+    assert (target / "config" / "autonomy" / ".gitkeep").is_file()  # autonomy tier too (§3d)
     assert (target / "services").is_dir()
     assert (target / "vehicle.yaml").is_file() and (target / "services.yaml").is_file()
+    assert "autonomy:" in (target / "vehicle.yaml").read_text()  # bare header, uncommentable menu section
 
 
 def test_init_refuses_an_existing_deployment():
@@ -114,6 +116,10 @@ def _fake_workspace() -> pathlib.Path:
     bar = ws / "bar"                              # infra-tier, no example
     bar.mkdir()
     (bar / "rigging.yaml").write_text("service: bar\nlauncher: bar-up\ntier: infra\n")
+    nav = ws / "nav_repo"                         # autonomy-tier, example via the config/ glob fallback
+    (nav / "config").mkdir(parents=True)
+    (nav / "rigging.yaml").write_text("service: nav\nlauncher: nav-up\ntier: autonomy\n")
+    (nav / "config" / "nav.example.yaml").write_text("service: nav\nname: brain\nplanner: {rate: 10}\n")
     (ws / "plain").mkdir()                        # not a service repo -> ignored
     broken = ws / "broken"
     broken.mkdir()
@@ -133,6 +139,10 @@ def test_init_discover_catalogs_menus_and_profiles():
     vehicle = (target / "vehicle.yaml").read_text()
     assert "# - { name: foo, service: foo, config: config/sensors/foo.yaml" in vehicle  # commented MENU
     assert "# - { name: bar, service: bar, config: config/infra/bar.yaml" in vehicle    # tier: infra hint
+    assert "# - { name: nav, service: nav, config: config/autonomy/nav.yaml" in vehicle  # tier: autonomy hint
+    assert vehicle.index("autonomy:") > vehicle.index("sensors:")  # menu section lands under `autonomy:`
+    nav_cfg = (target / "config" / "autonomy" / "nav.yaml").read_text()  # example copied to the autonomy dir
+    assert "# name: brain" in nav_cfg                                     # as a nameless profile
     copied = (target / "config" / "sensors" / "foo.yaml").read_text()
     assert "# name: front" in copied and "\nname:" not in copied  # nameless profile: manifest stamps the name
     assert not load_manifest(target).sensors                       # menu = nothing enabled
@@ -175,6 +185,14 @@ def test_init_discover_odd_name_spelling_falls_back_verbatim():
     v = target / "vehicle.yaml"
     v.write_text(vehicle.replace("# - { name: front,", "- { name: front,"))
     assert "front" in [s.name for s in load_manifest(target).sensors]  # cross-check happy
+
+
+def test_descriptor_accepts_autonomy_tier():
+    from rig_cli.descriptor import load_descriptor
+
+    repo = pathlib.Path(tempfile.mkdtemp())
+    (repo / "rigging.yaml").write_text("service: nav\nlauncher: nav-up\ntier: autonomy\n")
+    assert load_descriptor("nav", repo).tier == "autonomy"
 
 
 def test_descriptor_rejects_a_tier_typo():

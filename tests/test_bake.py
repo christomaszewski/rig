@@ -253,6 +253,53 @@ def test_bundle_images_saves_tar_and_keeps_tag_refs():
     assert "reg.test/foo@sha256:deadbeef" in meta                     # digest kept as metadata, not as ref
 
 
+def test_bake_preserves_all_three_tiers_and_script_order():
+    # §3d: the baked vehicle.yaml must keep autonomy entries under `autonomy:` (not demote them to
+    # sensors), and the compose-only up.sh must run infra -> sensor -> autonomy (down.sh reversed).
+    import os
+
+    from rig_cli.bake import bake, unbake
+    from rig_cli.catalog import load_catalog
+    from rig_cli.descriptor import load_descriptor
+    from rig_cli.manifest import load_manifest
+
+    svc = pathlib.Path(tempfile.mkdtemp())
+    (svc / "rigging.yaml").write_text("service: demo\nlauncher: demo-up\nlaunch_surface: [demo-up]\n")
+    (svc / "demo-up").write_text(_COMPOSE_LAUNCHER)
+    (svc / "demo-up").chmod(0o755)
+    root = pathlib.Path(tempfile.mkdtemp())
+    (root / "config" / "sensors").mkdir(parents=True)
+    (root / "vehicle.yaml").write_text(
+        "vehicle: t\n"
+        "autonomy: [{name: planner, service: demo, config: config/sensors/planner.yaml, order: 1}]\n"
+        "infra: [{name: router, service: demo, config: config/sensors/router.yaml, order: 99}]\n"
+        "sensors: [{name: gnss, service: demo, config: config/sensors/gnss.yaml, order: 50}]\n")
+    (root / "services.yaml").write_text(f"services: {{demo: {{path: {svc}}}}}\n")
+    for n in ("planner", "router", "gnss"):
+        (root / "config" / "sensors" / f"{n}.yaml").write_text(f"service: demo\nname: {n}\n")
+    m, cat = load_manifest(root), load_catalog(root)
+    descs = {"demo": load_descriptor("demo", svc)}
+
+    shim = pathlib.Path(tempfile.mkdtemp())     # digest resolution shells out to docker — fake it
+    (shim / "docker").write_text(_DOCKER_SHIM)
+    (shim / "docker").chmod(0o755)
+    old_path = os.environ["PATH"]
+    os.environ["PATH"] = f"{shim}:{old_path}"
+    try:
+        artifact = bake(root, m, cat, descs, {"PATH": f"{shim}:/usr/bin:/bin"}, "t")
+    finally:
+        os.environ["PATH"] = old_path
+
+    tree = unbake(artifact, pathlib.Path(tempfile.mkdtemp()))
+    m2 = load_manifest(tree)
+    assert {s.name: s.tier for s in m2.sensors} == {"router": "infra", "gnss": "sensor",
+                                                    "planner": "autonomy"}  # round-trip keeps the tiers
+    up = (tree / "up.sh").read_text()
+    down = (tree / "down.sh").read_text()
+    assert up.index('"router"') < up.index('"gnss"') < up.index('"planner"')       # autonomy up LAST
+    assert down.index('"planner"') < down.index('"gnss"') < down.index('"router"')  # autonomy down FIRST
+
+
 def test_rebake_inside_extracted_artifact_stamps_parent():
     from rig_cli.bake import bake, unbake
     from rig_cli.catalog import load_catalog

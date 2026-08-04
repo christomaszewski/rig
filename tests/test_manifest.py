@@ -121,6 +121,41 @@ def test_name_unique_across_infra_and_sensors():
     }), "duplicate name")
 
 
+def test_autonomy_partition_beats_order_and_down_reverses():
+    # THE §3d guarantee: every autonomy stack after ALL sensors (and infra before both), regardless of
+    # per-entry `order`; `down` reverses the list, so autonomy stops FIRST.
+    root = _root_with({
+        "vehicle.yaml": """
+            vehicle: v
+            autonomy:
+              - {name: planner, service: nav-stack, config: p.yaml, order: 1}
+            infra:
+              - {name: router, service: zenoh-router, config: r.yaml, order: 99}
+            sensors:
+              - {name: gnss, service: novatel, config: x.yaml, order: 50}
+        """,
+        "p.yaml": "service: nav-stack\n",
+        "r.yaml": "service: zenoh-router\n",
+        "x.yaml": "service: novatel\nconnection: {type: file}\n",
+    })
+    m = load_manifest(root)
+    up = [s.name for s in m.select([], enabled_only=True)]
+    assert up == ["router", "gnss", "planner"]            # tier rank beats order numbers
+    assert list(reversed(up))[0] == "planner"             # down: the decider dies before its eyes
+    assert {s.name: s.tier for s in m.sensors}["planner"] == "autonomy"
+    # bake iterates manifest.sensors directly — the raw list must already hold the partition
+    assert [s.tier for s in m.sensors] == ["infra", "sensor", "autonomy"]
+
+
+def test_name_unique_across_autonomy_too():
+    _expect_error(_root_with({
+        "vehicle.yaml": "vehicle: v\nsensors: [{name: x, service: novatel, config: s.yaml}]\n"
+                        "autonomy: [{name: x, service: nav-stack, config: a.yaml}]\n",
+        "s.yaml": "service: novatel\n",
+        "a.yaml": "service: nav-stack\n",
+    }), "duplicate name")
+
+
 def test_image_registry_parsed():
     root = _root_with({
         "vehicle.yaml": """
@@ -152,6 +187,8 @@ def test_stack_summary_counts_by_tier():
     assert stack_summary([mk("a", "infra"), mk("b", "infra"), mk("c", "sensor"), mk("d", "sensor")]) == "2 sensors + 2 infra"
     assert stack_summary([mk("c", "sensor")]) == "1 sensor"
     assert stack_summary([mk("a", "infra")]) == "1 infra"
+    assert stack_summary([mk("a", "infra"), mk("c", "sensor"), mk("e", "autonomy")]) == "1 sensor + 1 infra + 1 autonomy"
+    assert stack_summary([mk("e", "autonomy")]) == "1 autonomy"
     assert stack_summary([]) == "0 stacks"
 
 

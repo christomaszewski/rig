@@ -270,7 +270,14 @@ a one-line path change to write via `current/`: the bundled bag-logger templates
 camera-service (`output_dir`/recordings default) is a small cross-repo PR; dashboard writes nothing.
 Un-adopted services keep the flat layout — both coexist under `data_dir`.
 
-## 3d. Third tier: `autonomy:` — PLANNED (spec settled 2026-08-03; build when kicking off)
+## 3d. Third tier: `autonomy:` — ✅ implemented (v0.1.27)
+
+> **Status:** shipped as specced (manifest rank map, descriptor `tier: autonomy`, doctor warnings, init
+> scaffold + discover routing, tests, docs). One deviation from the "no changes expected" prediction in
+> item 5: bake's vehicle.yaml re-emission split rows into only infra/sensor, so an autonomy entry was
+> demoted to `sensors:` on round-trip — fixed (tier-keyed rows) and covered by a bake round-trip test
+> that also asserts up.sh/down.sh line order. The compose-only partition otherwise held for free because
+> `load_manifest` concatenates infra + sensors + autonomy and bake iterates that list as-is.
 
 ### Decision & naming
 A third manifest tier for graph CONSUMERS — autonomy/algorithm stacks (planners, controllers, SLAM,
@@ -349,8 +356,8 @@ base/Dockerfile     base/build.sh                                # fleet-ros: FR
 3. `templates/` → deprecation stub for ONE version (README pointing at rig-infra; old services.yaml
    paths fail loudly with a pointer, not a mystery), then delete. rig CI drops the live-template certify
    steps (infra CI owns them); the sh-fixture certify tests remain rig's contract reference.
-4. Note: both this and §3d touch descriptor `tier:` + discover routing — either order works; small
-   merge overlap if done in parallel sessions.
+4. Note: §3d (shipped v0.1.27) already grew descriptor `tier:` + discover routing to three tiers —
+   extend those, don't re-plan them.
 
 ### Migration sequence
 1. Create rig-infra (plain copy of templates/, provenance note in the first commit — history stays in
