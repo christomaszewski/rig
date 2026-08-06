@@ -1,8 +1,8 @@
 # rig — project state & handoff (resume here)
 
 > Snapshot for picking the project up cold in a new session. Read this first, then `CHEATSHEET.md` /
-> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.1.30**, branch
-> **`main`** (the `config-schema-symmetric` work is merged; feature branches deleted), 112 tests passing
+> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.1.31**, branch
+> **`main`** (the `config-schema-symmetric` work is merged; feature branches deleted), 119 tests passing
 > (`for t in tests/test_*.py; do python3 $t; done`). Tool at `/Users/ckt/ws/bringup`; run-from-source
 > `./rig <verb>`.
 > **Remote: https://github.com/christomaszewski/rig (public)** — Actions runs the test suite on push/PR.
@@ -70,6 +70,13 @@ A launcher's compose opts into each (`${RIG_IMAGE_REGISTRY:+…}`, `:${RIG_IMAGE
   deprecation stub for one version (v0.1.28).
 - `rig pull` + baked `pull.sh` (v0.1.19): pre-pull every stack's images with NO container changes — prime
   the vehicle's cache while the registry is reachable, then run offline; safe against a live deployment.
+- v0.1.31: **`rig add <name|path>`** — wire one more service into an EXISTING deployment (init's
+  accelerators are init-time only). Same resolution as `--infra` (path, or bare-name one-level
+  workspace scan), same asymmetry (infra = ENABLED row, zenoh-router pinned order 0; sensor/autonomy =
+  commented menu row + nameless-profile config copy). The ONE place rig edits operator-owned files —
+  guarded: parse-first duplicate refusal, line-append only into generated block shapes, re-parse +
+  manifest reload after writing with restore-on-failure, and a paste-ready snippet fallback for
+  hand-authored flow-style files (never a mangled manifest).
 - v0.1.30: `--infra` + `--discover` over one workspace no longer prints "duplicate service" for the dirs
   --infra just wired (same-path rediscovery = the designed overlap, quiet skip); the warning is reserved
   for two DIFFERENT dirs claiming one service key, and now names both paths.

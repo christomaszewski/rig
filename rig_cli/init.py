@@ -12,6 +12,10 @@ into repos whose subdirs carry a ``rigging.yaml`` — so ``zenoh-router`` finds
 ``../rig-infra/zenoh-router``), falling back to rig's bundled ``templates/`` (deprecated — moving to
 https://github.com/christomaszewski/rig-infra) while those still exist.
 
+Both accelerators are init-time only (init refuses an existing deployment); ``rig add <name|path>``
+(`add_service`, below) is their post-init sibling — same resolution, same asymmetry, one service at a
+time, appended to the EXISTING files.
+
 ``--discover [DIR]`` scans a workspace (default: the target's parent) for rig-compatible service repos
 (a ``rigging.yaml``), descending ONE level into collection repos whose subdirs are the service dirs
 (rig-infra), and populates the CATALOG — but only a commented-out MENU in ``vehicle.yaml``. A repo
@@ -98,17 +102,18 @@ def _entry(name: str, service: str, config: str, order: int) -> str:
     return f"- {{ name: {name}, service: {service}, config: {config}, enabled: true, order: {order} }}"
 
 
-def _resolve_infra_dir(raw: str, parent: Path) -> Path:
-    """Resolve one --infra token to a service dir. A token containing `/` is a repo path (cwd-relative,
-    like the target argument itself). A bare name scans the workspace — the target's parent's siblings,
-    descending ONE level into repos whose subdirs carry a rigging.yaml (so `zenoh-router` finds a
-    sibling checkout OR `../rig-infra/zenoh-router`) — falling back to rig's bundled `templates/`
-    (deprecated) while those still exist. Ambiguity is an error: the operator disambiguates with a path."""
+def _resolve_service_dir(raw: str, parent: Path, *, label: str = "init --infra") -> Path:
+    """Resolve one --infra / `rig add` token to a service dir. A token containing `/` is a repo path
+    (cwd-relative, like the target argument itself). A bare name scans the workspace — the parent's
+    siblings, descending ONE level into repos whose subdirs carry a rigging.yaml (so `zenoh-router`
+    finds a sibling checkout OR `../rig-infra/zenoh-router`) — falling back to rig's bundled
+    `templates/` (deprecated) while those still exist. Ambiguity is an error: the operator
+    disambiguates with a path."""
     token = raw.strip().rstrip("/")  # tab-completion slash must not fork the service key / order-0 pin
     if "/" in token:
         tdir = Path(token).expanduser().resolve()
         if not tdir.is_dir() or find_descriptor(tdir) is None:
-            raise RigError(f"init --infra: not a service dir (no rigging.yaml): {raw}")
+            raise RigError(f"{label}: not a service dir (no rigging.yaml): {raw}")
         return tdir
     hits: list[Path] = []
     if parent.is_dir():
@@ -118,17 +123,17 @@ def _resolve_infra_dir(raw: str, parent: Path) -> Path:
                 hits.append(cand.resolve())
     hits = list(dict.fromkeys(hits))
     if len(hits) > 1:
-        raise RigError(f"init --infra: '{token}' is ambiguous in the workspace: "
+        raise RigError(f"{label}: '{token}' is ambiguous in the workspace: "
                        f"{', '.join(str(h) for h in hits)} — pass a path instead")
     if hits:
         return hits[0]
     tdir = _tool_templates() / token
     if tdir.is_dir():
-        eprint(f"  infra: '{token}' resolved from rig's bundled templates/ — DEPRECATED (one more "
+        eprint(f"  {label}: '{token}' resolved from rig's bundled templates/ — DEPRECATED (one more "
                f"version); clone https://github.com/christomaszewski/rig-infra beside your deployment")
         return tdir
     avail = sorted(p.name for p in _tool_templates().iterdir() if p.is_dir())
-    raise RigError(f"init --infra: unknown service '{raw}' — no service dir under {parent} "
+    raise RigError(f"{label}: unknown service '{raw}' — no service dir under {parent} "
                    f"(one level deep), and not a bundled template ({', '.join(avail)})")
 
 
@@ -141,7 +146,7 @@ def _plan_templates(tokens: list[str], parent: Path) -> list[tuple[str, Path, Pa
     plan: list[tuple[str, Path, Path, str]] = []
     seen: dict[str, str] = {}
     for raw in dict.fromkeys(tokens):  # de-dup, keep order
-        tdir = _resolve_infra_dir(raw, parent)
+        tdir = _resolve_service_dir(raw, parent)
         desc = find_descriptor(tdir)  # may be absent only on the bundled-template fallback path
         svc = str(load_yaml(desc).get("service") or tdir.name) if desc else tdir.name
         examples = sorted(tdir.glob("config/*.example.yaml"))
@@ -358,3 +363,146 @@ def init(target: Path, *, vehicle_id: int = 1, infra: list[str] | None = None,
         eprint("  tip: rmw_zenoh needs a shared router — `rig init ... --infra zenoh-router` wires one")
     eprint("  next: edit services.yaml + vehicle.yaml, add config/{infra,sensors}/*, then `rig doctor`")
     return target
+
+
+# --- rig add: wire ONE more service into an EXISTING deployment ------------------------------------
+
+def _append_services_line(text: str, line: str) -> str | None:
+    """Insert a route line into services.yaml's block-form `services:` mapping (handling the generated
+    empty `services: {}` spelling by opening it). None = the file isn't in a shape rig can line-append
+    to safely (e.g. hand-authored flow style `services: { ... }`)."""
+    lines = text.splitlines()
+    for i, ln in enumerate(lines):
+        if re.match(r"^services:\s*(#.*)?$", ln):
+            return "\n".join(lines[: i + 1] + [line] + lines[i + 1 :]) + "\n"
+        if re.match(r"^services:\s*\{\}\s*(#.*)?$", ln):  # generated empty catalog — open the mapping
+            return "\n".join(lines[:i] + ["services:", line] + lines[i + 1 :]) + "\n"
+        if re.match(r"^services:", ln):
+            return None
+    return None
+
+
+def _append_tier_row(text: str, section: str, row: str) -> str | None:
+    """Insert a manifest row at the END of a tier section (`infra:`/`sensors:`/`autonomy:`) in
+    vehicle.yaml. A missing section is appended as a new top-level block (older deployments predate
+    `autonomy:`). None = the section exists but in a flow shape (`sensors: [...]`) rig won't edit."""
+    lines = text.splitlines()
+    for i, ln in enumerate(lines):
+        if re.match(rf"^{section}:\s*(#.*)?$", ln):
+            j = i + 1  # walk to the end of the section: its content is indented (rows, comments, blanks)
+            while j < len(lines) and (not lines[j].strip() or lines[j].startswith(" ")):
+                j += 1
+            while j > i + 1 and not lines[j - 1].strip():  # keep trailing blanks below the new row
+                j -= 1
+            return "\n".join(lines[:j] + [f"  {row}"] + lines[j:]) + "\n"
+        if re.match(rf"^{section}:", ln):
+            return None
+    return "\n".join(lines + ["", f"{section}:", f"  {row}"]) + "\n"
+
+
+def add_service(root: Path, token: str) -> int:
+    """`rig add <name|path>` — the post-init sibling of --infra/--discover, for a deployment that
+    already exists (init refuses those). Resolves the token exactly like --infra (path form, or a
+    bare name via the one-level workspace scan), copies the example config, routes services.yaml, and
+    adds the vehicle.yaml row with init's own asymmetry: an infra-tier service gets an ENABLED row
+    (shared infra is decidable), a sensor/autonomy-tier service gets a COMMENTED menu row (repo
+    presence != hardware presence — enabling stays the operator's call).
+
+    This is the ONE place rig edits operator-owned files, so it is belt-and-braces: parse first and
+    refuse duplicates; append line-oriented entries only where the file has the generated block shape;
+    re-parse and re-load the manifest after writing, restoring both files if that fails; and when a
+    file is hand-authored in a shape rig can't safely append to (flow style), print the exact
+    paste-ready lines instead of editing. The worst case is never a mangled manifest — just a snippet."""
+    from .catalog import load_catalog
+    from .manifest import load_manifest
+
+    root = root.resolve()  # BOTH relpath ends must be resolved — /tmp and /var are symlinks on macOS,
+    #                        and an unresolved side makes relpath walk to / instead of `../<repo>`
+    veh_path, svc_path = root / "vehicle.yaml", root / "services.yaml"
+    if not veh_path.exists():
+        raise RigError(f"add: {root} is not a rig deployment (no vehicle.yaml) — `rig init` creates one")
+    tdir = _resolve_service_dir(token, root.parent, label="add")
+    desc_path = find_descriptor(tdir)
+    svc = str(load_yaml(desc_path).get("service") or tdir.name) if desc_path else tdir.name
+    desc = load_descriptor(svc, tdir)  # full validation — a tier typo errors here, not in the manifest
+    tier = desc.tier if desc.tier in ("infra", "autonomy") else "sensor"
+    sub = {"infra": "infra", "sensor": "sensors", "autonomy": "autonomy"}[tier]
+
+    routes = ((load_yaml(svc_path) or {}).get("services") or {}) if svc_path.exists() else {}
+    if svc in routes:
+        raise RigError(f"add: '{svc}' is already routed at {(routes[svc] or {}).get('path')} — a second "
+                       f"INSTANCE is a vehicle.yaml row (unique name, per-entry overrides), not a "
+                       f"second route")
+    manifest = load_manifest(root)  # add needs a loadable deployment; also names/orders below
+    rel = os.path.relpath(tdir, root)
+    (root / "config" / sub).mkdir(parents=True, exist_ok=True)
+    examples = _repo_examples(tdir, desc.examples)
+
+    enabled_row = menu_row = None
+    if tier == "infra" and examples:
+        instance = str(load_yaml(examples[0]).get("name") or svc)
+        if any(s.name == instance for s in manifest.sensors):
+            raise RigError(f"add: instance name '{instance}' (from {examples[0].name}) already exists "
+                           f"in vehicle.yaml — wire this one manually with a unique name")
+        dest = root / "config" / "infra" / f"{instance}.yaml"
+        if dest.exists():
+            eprint(f"  add: config/infra/{instance}.yaml already exists — keeping it")
+        else:
+            shutil.copy2(examples[0], dest)
+        orders = [s.order for s in manifest.sensors if s.tier == "infra"]
+        order = 0 if svc == "zenoh-router" else max(orders, default=0) + 5  # router FIRST, always
+        enabled_row = _entry(instance, svc, f"config/infra/{instance}.yaml", order)
+    else:  # sensor/autonomy (and an example-less infra service): MENU only, never auto-enabled
+        orders = [s.order for s in manifest.sensors if s.tier == tier]
+        order = max(orders, default=0) + (5 if tier == "infra" else 10)
+        if examples:
+            src = examples[0]
+            stem = src.name[: -len(".example.yaml")] if src.name.endswith(".example.yaml") else src.stem
+            dest = root / "config" / sub / f"{stem}.yaml"
+            if dest.exists():
+                eprint(f"  add: config/{sub}/{stem}.yaml already exists — keeping it")
+                kept = (load_yaml(dest) or {}).get("name")  # stub must match, or uncommenting cross-errors
+            else:
+                kept = _copy_as_profile(src, dest)
+            stub = str(kept) if kept else _safe_name(stem)
+            menu_row = f"# {_entry(stub, svc, f'config/{sub}/{stem}.yaml', order)}"
+        else:
+            n = _safe_name(svc)
+            menu_row = f"# {_entry(n, svc, f'config/{sub}/{n}.yaml', order)}   # TODO: author this config"
+
+    svc_line = f"  {svc}: {{ path: {rel} }}"
+    veh_row = enabled_row or menu_row
+    snippet = (f"    services.yaml, under `services:`:\n    {svc_line}\n"
+               f"    vehicle.yaml, under `{sub}:`:\n      {veh_row}")
+    orig_svc, orig_veh = svc_path.read_text() if svc_path.exists() else "services:\n", veh_path.read_text()
+    new_svc = _append_services_line(orig_svc, svc_line)
+    new_veh = _append_tier_row(orig_veh, sub, veh_row)
+    if new_svc is None or new_veh is None:
+        which = "services.yaml" if new_svc is None else "vehicle.yaml"
+        eprint(f"add: {which} isn't in the generated block form — leaving BOTH files untouched "
+               f"(config material copied); paste this yourself:\n{snippet}")
+        return 0
+    for text, name in ((new_svc, "services.yaml"), (new_veh, "vehicle.yaml")):
+        try:
+            yaml.safe_load(text)
+        except yaml.YAMLError as exc:  # belt: never write a file that will not parse
+            raise RigError(f"add: refusing to write {name} — the edited result would not parse ({exc}); "
+                           f"wire it manually:\n{snippet}")
+    svc_path.write_text(new_svc)
+    veh_path.write_text(new_veh)
+    try:  # braces: the real gates (name uniqueness, config cross-checks, route resolution) — undo on any failure
+        load_catalog(root)
+        load_manifest(root)
+    except Exception as exc:
+        svc_path.write_text(orig_svc)
+        veh_path.write_text(orig_veh)
+        raise RigError(f"add: verification failed after edit ({exc}) — both files restored; "
+                       f"wire it manually:\n{snippet}")
+
+    if enabled_row:
+        eprint(f"add: {svc} -> {rel} · config/infra/{instance}.yaml · ENABLED, order {order}")
+    else:
+        eprint(f"add: {svc} -> {rel} · commented menu row under `{sub}:` — uncomment it when this "
+               f"vehicle actually runs the stack")
+    eprint("  next: `rig doctor`")
+    return 0

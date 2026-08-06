@@ -245,6 +245,10 @@ def cmd_init(args) -> int:
     return 0
 
 
+def cmd_add(args, root: Path) -> int:
+    return init_mod.add_service(root, args.service)
+
+
 def cmd_build(args, root: Path) -> int:
     manifest, catalog, descriptors = _load(root)
     return build_mod.build(manifest, descriptors, registry=args.registry, tag=args.tag,
@@ -360,6 +364,11 @@ def build_parser() -> argparse.ArgumentParser:
                           "level into collection repos like rig-infra): populate services.yaml + copy "
                           "examples + a commented vehicle.yaml menu")
 
+    ad = sub.add_parser("add", help="add a service to THIS deployment (route + config + manifest row)")
+    ad.add_argument("service", metavar="NAME|PATH",
+                    help="service dir path, or a bare name resolved from the workspace (like init --infra); "
+                         "infra tier is wired ENABLED, sensor/autonomy get a commented menu row")
+
     ven = sub.add_parser("vendor", help="copy a service's launch surface into services/<service>/")
     ven.add_argument("service", help="service name (key in services.yaml / its rigging.yaml)")
     ven.add_argument("--from", dest="source", default=None,
@@ -398,6 +407,8 @@ def main(argv=None) -> int:
         if args.cmd == "init":  # creates a NEW deployment; doesn't read an existing one
             return cmd_init(args)
         root = (args.root or find_root()).resolve()
+        if args.cmd == "add":  # edits the deployment files themselves — routes its own manifest load
+            return cmd_add(args, root)
         if args.cmd == "vendor":  # operates on a source repo, not the manifest
             return cmd_vendor(args, root)
         if args.cmd == "unbake":  # operates on an artifact, not the manifest

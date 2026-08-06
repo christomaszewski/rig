@@ -131,7 +131,9 @@ passed through untouched). See `config/sensors/camera.profile.yaml` and `docs/RO
 
 Ready-to-use shared (`infra:`) services live in their own repo — clone it beside your deployment,
 point `services.yaml` at a service dir (`../rig-infra/zenoh-router`) and add an `infra:` entry, or let
-`rig init --infra zenoh-router` (bare name — the workspace scan finds it) wire it for you:
+`rig init --infra zenoh-router` (bare name — the workspace scan finds it) wire it for you; in an
+EXISTING deployment, `rig add <name|path>` does the same wiring after the fact (infra arrives enabled,
+sensor/autonomy services get a commented menu row to uncomment):
 
 - **`zenoh-router/`** — the vehicle's shared `rmw_zenoh` router (order 0). Default: the `fleet-ros`
   base image running `rmw_zenohd`, so the router and the ROS sessions share one distro's zenoh packages
