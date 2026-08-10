@@ -7,7 +7,8 @@ from pathlib import Path
 
 from . import (
     RigError, __version__, bake as bake_mod, build as build_mod, certify as certify_mod,
-    doctor as doctor_mod, dispatch, init as init_mod, resolve, runs as runs_mod, status as status_mod,
+    doctor as doctor_mod, dispatch, init as init_mod, resolve, rigify as rigify_mod,
+    runs as runs_mod, status as status_mod,
     vendor as vendor_mod,
 )
 from .catalog import ServiceEntry, load_catalog
@@ -249,6 +250,10 @@ def cmd_add(args, root: Path) -> int:
     return init_mod.add_service(root, args.service)
 
 
+def cmd_rigify(args) -> int:
+    return rigify_mod.rigify(Path(args.directory), service=args.service)
+
+
 def cmd_build(args, root: Path) -> int:
     manifest, catalog, descriptors = _load(root)
     return build_mod.build(manifest, descriptors, registry=args.registry, tag=args.tag,
@@ -364,6 +369,12 @@ def build_parser() -> argparse.ArgumentParser:
                           "level into collection repos like rig-infra): populate services.yaml + copy "
                           "examples + a commented vehicle.yaml menu")
 
+    rgf = sub.add_parser("rigify", help="make an existing software dir rig-compatible "
+                                        "(rigging.yaml + launcher + example config, analysis-seeded)")
+    rgf.add_argument("directory", help="the service repo to rigify — files are only ADDED, never overwritten")
+    rgf.add_argument("--service", default=None,
+                     help="service name (default: the directory name, sanitized)")
+
     ad = sub.add_parser("add", help="add a service to THIS deployment (route + config + manifest row)")
     ad.add_argument("service", metavar="NAME|PATH",
                     help="service dir path, or a bare name resolved from the workspace (like init --infra); "
@@ -406,6 +417,8 @@ def main(argv=None) -> int:
     try:
         if args.cmd == "init":  # creates a NEW deployment; doesn't read an existing one
             return cmd_init(args)
+        if args.cmd == "rigify":  # operates on a service repo — needs no deployment at all
+            return cmd_rigify(args)
         root = (args.root or find_root()).resolve()
         if args.cmd == "add":  # edits the deployment files themselves — routes its own manifest load
             return cmd_add(args, root)

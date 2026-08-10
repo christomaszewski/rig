@@ -1,0 +1,294 @@
+"""rig rigify — make an EXISTING software directory rig-compatible: generate the porting adapter
+(`rigging.yaml`), a contract-correct launcher skeleton, and an example instance config, pre-wired from a
+light read-only analysis of what's already there (compose files, Dockerfiles, ROS launch files, entry
+scripts). Files are only ever ADDED — never overwritten — and everything uncertain lands as a COMMENTED
+line, not a guess.
+
+This stays consistent with rig's schema-opacity: the analysis is one-shot authoring-time advice echoed
+to the operator; at runtime rig still reads only `service` + `name` and delegates everything to the
+launcher. The finisher is the executable contract: `rig certify --repo <dir>` red/greens the remaining
+service-specific work, then `rig add <dir>` wires the service into a deployment.
+"""
+from __future__ import annotations
+
+import os
+import re
+from dataclasses import dataclass, field
+from pathlib import Path
+
+import yaml
+
+from . import RigError
+from .common import eprint
+from .descriptor import find_descriptor
+
+# Directories that are never part of a launch surface (VCS state, package caches, ROS build trees).
+_SKIP_DIRS = {".git", "__pycache__", "node_modules", "var", "build", "install", "log",
+              ".venv", "venv", "dist", "target"}
+_COMPOSE_RE = re.compile(r"^(docker-)?compose[^/]*\.ya?ml$")
+_LAUNCH_RE = re.compile(r"\.launch(\.py|\.xml)?$")
+
+
+@dataclass
+class Findings:
+    composes: list[Path] = field(default_factory=list)      # repo-relative
+    unparsed_composes: list[Path] = field(default_factory=list)
+    dockerfiles: list[Path] = field(default_factory=list)
+    launch_files: list[Path] = field(default_factory=list)
+    ros_package: bool = False
+    scripts: list[str] = field(default_factory=list)        # top-level entry-point candidates
+    host_ports: list[int] = field(default_factory=list)
+    external_volumes: list[str] = field(default_factory=list)
+    build_services: list[str] = field(default_factory=list)  # compose services carrying `build:`
+    images: list[str] = field(default_factory=list)          # literal (non-interpolated) image refs
+
+
+def _walk(target: Path, max_depth: int = 3):
+    """Bounded, pruned walk — deep trees (ROS ws, node_modules) must not stall a one-shot analysis."""
+    for dirpath, dirnames, filenames in os.walk(target):
+        depth = len(Path(dirpath).relative_to(target).parts)
+        dirnames[:] = ([] if depth >= max_depth else
+                       [d for d in dirnames if d not in _SKIP_DIRS and not d.startswith(".")])
+        for f in sorted(filenames):
+            yield Path(dirpath) / f
+
+
+def _host_port(entry) -> int | None:
+    """The HOST side of a compose port entry ('8080:80', 'ip:8080:80', {published: 8080}); None for
+    container-only or interpolated forms."""
+    if isinstance(entry, dict):
+        pub = entry.get("published")
+        return int(pub) if str(pub or "").isdigit() else None
+    if isinstance(entry, str) and ":" in entry:
+        host = entry.rsplit(":", 2)[-2]
+        return int(host) if host.isdigit() else None
+    return None
+
+
+def analyze(target: Path) -> Findings:
+    f = Findings()
+    for path in _walk(target):
+        rel = path.relative_to(target)
+        name = path.name
+        if _COMPOSE_RE.match(name):
+            try:
+                data = yaml.safe_load(path.read_text()) or {}
+            except yaml.YAMLError:
+                f.unparsed_composes.append(rel)
+                continue
+            f.composes.append(rel)
+            for sname, svc in (data.get("services") or {}).items():
+                if not isinstance(svc, dict):
+                    continue
+                f.host_ports += [p for p in map(_host_port, svc.get("ports") or []) if p]
+                if "build" in svc:
+                    f.build_services.append(str(sname))
+                img = svc.get("image")
+                if isinstance(img, str) and "$" not in img:
+                    f.images.append(img)
+            f.external_volumes += [str(n) for n, v in (data.get("volumes") or {}).items()
+                                   if isinstance(v, dict) and v.get("external")]
+        elif name == "Dockerfile" or name.startswith("Dockerfile."):
+            f.dockerfiles.append(rel)
+        elif _LAUNCH_RE.search(name):
+            f.launch_files.append(rel)
+        elif name == "package.xml":
+            f.ros_package = True
+        elif len(rel.parts) == 1 and (name.endswith(".sh") or name in ("Makefile", "justfile")):
+            f.scripts.append(name)
+    return f
+
+
+def _env_prefix(svc: str) -> str:
+    return re.sub(r"[^A-Za-z0-9]", "_", svc.upper())
+
+
+def _default_service(dirname: str) -> str:
+    name = re.sub(r"[^a-z0-9_-]", "-", dirname.lower()).strip("-")
+    return name or "service"
+
+
+def _instance_name(svc: str) -> str:
+    name = re.sub(r"[^a-z0-9_]", "_", svc.lower())
+    return name if name and name[0].isalpha() else f"s_{name}"
+
+
+_RIGGING = """\
+# rigging.yaml — rig's porting adapter for @SVC@ (generated by `rig rigify`; hand-finish, then prove it
+# with `rig certify --repo .` — the launcher contract as an executable gate). rig reads THIS file + the
+# launcher CLI and nothing else; it never interprets your config body.
+service: @SVC@
+launcher: @SVC@-up
+# verbs: { status: ps }             # adapt logical verbs -> launcher args when your CLI differs
+# ros_distro: lyrical               # uncomment for a ROS service — ONE distro per vehicle (doctor checks,
+#                                   #   and `rig build` exports it as ROS_DISTRO to build commands)
+# tier: sensor                      # "infra" = shared, up-first; "autonomy" = consumer, up-last/down-first
+examples: [config/@SVC@.example.yaml]   # `rig certify --repo` default config; copied by init/add
+launch_surface:                     # the minimal file set rig vendors/bakes to LAUNCH this service
+  - @SVC@-up
+@SURFACE@
+@HINTS@"""
+
+_LAUNCHER = """\
+#!/usr/bin/env bash
+# @SVC@-up — rig launcher for @SVC@ (generated by `rig rigify`; finish the TODOs, then
+# `rig certify --repo .` until green). The contract: `@SVC@-up <config.yaml> [verb...]` where the verb
+# defaults to `up`; honor COMPOSE_PROJECT_NAME (NEVER pass -p); fleet env (ROS_DOMAIN_ID,
+# RMW_IMPLEMENTATION, VEHICLE_ID, RIG_*) flows through the compose; human output on stderr ONLY —
+# stdout belongs to machine-readable verbs (`config` is captured verbatim by `rig bake`).
+set -euo pipefail
+REPO="$(cd "$(dirname "$0")" && pwd)"
+PYTHON="${@ENV@_PYTHON:-python3}"
+
+CONFIG="${1:?usage: @SVC@-up <config.yaml> [up [-d]|down|status|logs|config|...]}"; shift || true
+[ -f "$CONFIG" ] || { echo "@SVC@-up: config not found: $CONFIG" >&2; exit 1; }
+CONFIG_ABS="$(cd "$(dirname "$CONFIG")" && pwd)/$(basename "$CONFIG")"
+
+# The instance name comes from the config — it keys EVERYTHING (compose project, volumes, ROS namespace).
+NAME="$("$PYTHON" -c 'import sys, yaml; print((yaml.safe_load(open(sys.argv[1])) or {}).get("name") or "@SVC@")' "$CONFIG_ABS")"
+export @ENV@_NAME="$NAME"
+export @ENV@_CONFIG="$CONFIG_ABS"   # interpolate either of these in the compose if useful
+
+# rig sets COMPOSE_PROJECT_NAME=<name>-vehicle-<id>; honor it (our own fallback is standalone-only).
+export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-@SVC@_${NAME}}"
+
+# TODO: render whatever your software needs FROM the config (param files, env exports) into
+# var/run/$NAME/ here, BEFORE compose runs. Deterministic output only — `rig certify` diffs two runs.
+
+@FILES@
+ARGS=("$@"); [ ${#ARGS[@]} -eq 0 ] && ARGS=(up)
+[ "${ARGS[0]}" = "status" ] && ARGS=(ps "${ARGS[@]:1}")   # standalone nicety; rig maps verbs itself
+echo "@SVC@-up: project=${COMPOSE_PROJECT_NAME} name=${NAME}" >&2
+exec docker compose "${FILES[@]}" "${ARGS[@]}"
+"""
+
+_EXAMPLE = """\
+# Example instance config for @SVC@ (generated by `rig rigify`). rig is SCHEMA-OPAQUE: it reads only
+# `service` + `name` and hands the whole file to your launcher — the body below is YOURS to design.
+# An instance of this service on a vehicle = one vehicle.yaml row pointing at a config like this one.
+service: @SVC@
+name: @INSTANCE@            # unique vehicle-wide; ROS-safe (letters/digits/underscores — no hyphens)
+# connection: { type: tcp, host: 192.168.1.50, port: 9000 }
+# driver_params: {}         # an opaque block your launcher renders for the underlying software
+"""
+
+_COMPOSE_SKELETON = """\
+# docker/compose.deploy.yaml — generated by `rig rigify` as a starting point; replace `main` with your
+# real stack. The image ref opts into the fleet registry/tag (certify checks these interpolations).
+services:
+  main:
+    image: ${@ENV@_IMAGE:-${RIG_IMAGE_REGISTRY:+${RIG_IMAGE_REGISTRY}/}@SVC@:${RIG_IMAGE_TAG:-latest}}
+    # network_mode: host        # typical for ROS/zenoh stacks (reach the router at localhost:7447)
+    restart: unless-stopped
+    environment:
+      ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-0}          # fleet env passthrough — certify checks these arrive
+      RMW_IMPLEMENTATION: ${RMW_IMPLEMENTATION:-}
+      VEHICLE_ID: ${VEHICLE_ID:-}
+@COMMAND@"""
+
+
+def _write_if_absent(root: Path, path: Path, content: str, wrote: list[str], skipped: list[str],
+                     *, executable: bool = False) -> None:
+    rel = str(path.relative_to(root))
+    if path.exists():
+        skipped.append(rel)
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content)
+    if executable:
+        path.chmod(0o755)
+    wrote.append(rel)
+
+
+def rigify(target: Path, *, service: str | None = None) -> int:
+    target = target.resolve()
+    if not target.is_dir():
+        raise RigError(f"rigify: not a directory: {target} (rigify retrofits EXISTING software; "
+                       f"for a brand-new thin driver start from the boilerplate template)")
+    if find_descriptor(target) is not None:
+        raise RigError(f"rigify: {target.name} already has a rigging.yaml — it's rigged; the next steps "
+                       f"are `rig certify --repo {target}` (until green), then `rig add {target}`. "
+                       f"rigify never overwrites.")
+    svc = service or _default_service(target.name)
+    env = _env_prefix(svc)
+    f = analyze(target)
+
+    eprint(f"rigify: {target} -> service '{svc}'")
+    for rel in f.composes:
+        eprint(f"  found: {rel} — pre-wired into the launcher's compose file list")
+    for rel in f.unparsed_composes:
+        eprint(f"  found: {rel} — did not parse as YAML; wire it into the launcher yourself")
+    if f.host_ports:
+        eprint(f"  found: host-facing port(s) {sorted(set(f.host_ports))} — declare `host_ports:` config "
+               f"paths in rigging.yaml so `rig doctor` can flag cross-instance clashes")
+    if f.external_volumes:
+        eprint(f"  found: external volume(s) {sorted(set(f.external_volumes))} — declare "
+               f"`external_volumes:` (with {{name}}) so `rig down --purge` can GC them")
+    if f.build_services or f.dockerfiles:
+        src = ", ".join([*map(str, f.dockerfiles), *(f"compose service '{s}'" for s in f.build_services)])
+        eprint(f"  found: build inputs ({src}) — declare `build:` in rigging.yaml so `rig build` "
+               f"builds+pushes your images (`<cmd> <registry> [tag]`, ROS_DISTRO exported)")
+    if f.launch_files:
+        eprint(f"  found: ROS launch file(s) {[str(p) for p in f.launch_files[:3]]} — see the command "
+               f"hint in the compose; a ROS service should also uncomment `ros_distro:`")
+    if f.scripts:
+        eprint(f"  found: entry script(s) {f.scripts} — your current launch path? the generated "
+               f"launcher should wrap what these do")
+
+    wrote: list[str] = []
+    skipped: list[str] = []
+
+    # Launcher compose list: first found compose active, the rest commented; none found -> the skeleton.
+    if f.composes:
+        lines = [f'FILES=(-f "$REPO/{f.composes[0]}")']
+        lines += [f'# FILES+=(-f "$REPO/{c}")' for c in f.composes[1:]]
+        surface_paths = [str(c) for c in f.composes]
+    else:
+        lines = ['FILES=(-f "$REPO/docker/compose.deploy.yaml")']
+        surface_paths = ["docker/compose.deploy.yaml"]
+        cmd = ("    # command: [\"ros2\", \"launch\", \"<pkg>\", \"" + str(f.launch_files[0]) + "\"]\n"
+               if f.launch_files else
+               "    # command: [\"<your entrypoint>\"]\n")
+        _write_if_absent(target, target / "docker" / "compose.deploy.yaml",
+                         _COMPOSE_SKELETON.replace("@SVC@", svc).replace("@ENV@", env)
+                                          .replace("@COMMAND@", cmd),
+                         wrote, skipped)
+
+    hints = []
+    if f.images:
+        hints.append(f"# mirror: {sorted(set(f.images))}   # third-party images `rig build` copies "
+                     f"into the fleet registry")
+    else:
+        hints.append("# mirror: []                        # third-party images to copy into the fleet registry")
+    hints.append("# build: { command: tools/build-images.sh, images: [@SVC@] }   # build+push your OWN images"
+                 .replace("@SVC@", svc))
+    if f.host_ports:
+        hints.append(f"# host_ports: []                    # dotted config paths to ports "
+                     f"{sorted(set(f.host_ports))} above — doctor flags clashes")
+    else:
+        hints.append("# host_ports: []                    # config paths to host-facing ports (doctor checks clashes)")
+    if f.external_volumes:
+        hints.append(f"# external_volumes: {sorted(set(f.external_volumes))}   # add {{name}} so instances "
+                     f"don't collide; GC'd by `rig down --purge`")
+    else:
+        hints.append('# external_volumes: ["@SVC@_{name}_data"]   # GC\'d only by `rig down --purge`'
+                     .replace("@SVC@", svc))
+
+    _write_if_absent(target, target / "rigging.yaml",
+                     _RIGGING.replace("@SVC@", svc)
+                             .replace("@SURFACE@", "\n".join(f"  - {p}" for p in surface_paths))
+                             .replace("@HINTS@", "\n".join(hints) + "\n"),
+                     wrote, skipped)
+    _write_if_absent(target, target / f"{svc}-up",
+                     _LAUNCHER.replace("@SVC@", svc).replace("@ENV@", env)
+                              .replace("@FILES@", "\n".join(lines)),
+                     wrote, skipped, executable=True)
+    _write_if_absent(target, target / "config" / f"{svc}.example.yaml",
+                     _EXAMPLE.replace("@SVC@", svc).replace("@INSTANCE@", _instance_name(svc)),
+                     wrote, skipped)
+
+    if skipped:
+        eprint(f"  kept: {', '.join(skipped)} (already existed — rigify never overwrites)")
+    eprint(f"  wrote: {', '.join(wrote) if wrote else 'nothing (everything already existed)'}")
+    eprint(f"  next: finish the TODOs -> `rig certify --repo {target}` until green -> `rig add {target}`")
+    return 0

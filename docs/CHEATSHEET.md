@@ -131,7 +131,7 @@ scp -r $VEHICLE:<data_dir>/runs/<stamp>_dock-test .        # the whole session, 
 | service code/images     | `rig build` → `rig bake --tag v2` → ship → `./run.sh up`          |
 | field tweak on-vehicle  | edit the extracted tree's config → `./rig up` (re-renders live)   |
 | save a field state      | on the vehicle: `./rig bake --tag day3-final [--bundle-images]` — re-bakes the extracted tree (local edits included) and stamps its parent artifact (lineage) |
-| new service             | add launcher+`rigging.yaml` in its repo → `rig certify --repo` until green → `rig add <name\|path>` (routes services.yaml + copies the example config + adds the vehicle.yaml row: infra ENABLED, sensor/autonomy a commented menu row) |
+| new service             | `rig rigify <dir>` (descriptor + launcher skeleton + example config, analysis-seeded; never overwrites) → finish TODOs → `rig certify --repo` until green → `rig add <name\|path>` (routes services.yaml + copies the example config + adds the vehicle.yaml row: infra ENABLED, sensor/autonomy a commented menu row) |
 
 Teardown: `./run.sh down` (volumes survive); final removal `rig down --purge`. Dev registry off:
 `docker rm -f registry` (keep the `registry-data` volume unless you're truly done).

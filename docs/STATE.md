@@ -1,8 +1,8 @@
 # rig — project state & handoff (resume here)
 
 > Snapshot for picking the project up cold in a new session. Read this first, then `CHEATSHEET.md` /
-> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.1.31**, branch
-> **`main`** (the `config-schema-symmetric` work is merged; feature branches deleted), 119 tests passing
+> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.1.32**, branch
+> **`main`** (the `config-schema-symmetric` work is merged; feature branches deleted), 126 tests passing
 > (`for t in tests/test_*.py; do python3 $t; done`). Tool at `/Users/ckt/ws/bringup`; run-from-source
 > `./rig <verb>`.
 > **Remote: https://github.com/christomaszewski/rig (public)** — Actions runs the test suite on push/PR.
@@ -70,6 +70,16 @@ A launcher's compose opts into each (`${RIG_IMAGE_REGISTRY:+…}`, `:${RIG_IMAGE
   deprecation stub for one version (v0.1.28).
 - `rig pull` + baked `pull.sh` (v0.1.19): pre-pull every stack's images with NO container changes — prime
   the vehicle's cache while the registry is reachable, then run offline; safe against a live deployment.
+- v0.1.32: **`rig rigify <dir> [--service NAME]`** — retrofit rig-compatibility onto EXISTING software
+  (`rig_cli/rigify.py`; deployment-independent like `certify --repo`). Generates only-if-absent, never
+  overwrites: rigging.yaml (tier/ros_distro/build/mirror/host_ports/external_volumes as COMMENTED
+  hints), a contract-correct `<svc>-up` launcher (COMPOSE_PROJECT_NAME honored, name-from-config,
+  stderr discipline), `config/<svc>.example.yaml`, and a compose skeleton only when none exists. A
+  bounded read-only analysis seeds real values: found composes are `-f`-pre-wired into the launcher +
+  launch_surface, their host ports / external volumes / literal images / build sections become the
+  hints, ROS launch files seed the command suggestion, entry scripts are called out. Acceptance
+  (tested, incl. against real `docker compose config`): a rigified bare dir passes `rig certify` with
+  ZERO hand edits. The onboarding arc is now rigify → certify --repo → add.
 - v0.1.31: **`rig add <name|path>`** — wire one more service into an EXISTING deployment (init's
   accelerators are init-time only). Same resolution as `--infra` (path, or bare-name one-level
   workspace scan), same asymmetry (infra = ENABLED row, zenoh-router pinned order 0; sensor/autonomy =

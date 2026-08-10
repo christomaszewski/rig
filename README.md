@@ -155,7 +155,11 @@ more version.
 
 A repo is rig-compatible when its launcher exposes `up/down/status/logs/config` on one config, accepts a
 config at any host path, honors fleet ROS env, observes **stdout/stderr discipline** (machine output on
-stdout, human lines on stderr), and ships a `rigging.yaml` (the legacy name `deploy.yaml` is still accepted):
+stdout, human lines on stderr), and ships a `rigging.yaml` (the legacy name `deploy.yaml` is still accepted).
+**Start from `rig rigify <dir>`**: it generates the descriptor + a contract-correct launcher skeleton +
+an example config in an existing software dir, pre-wired from a read-only analysis (found composes get
+`-f`-wired; ports/volumes/images/Dockerfiles become commented `host_ports`/`external_volumes`/`mirror`/
+`build:` hints). The onboarding arc is `rig rigify` → `rig certify --repo` (until green) → `rig add`:
 
 ```yaml
 service: novatel
