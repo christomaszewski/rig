@@ -1,8 +1,8 @@
 # rig — project state & handoff (resume here)
 
 > Snapshot for picking the project up cold in a new session. Read this first, then `CHEATSHEET.md` /
-> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.1.32**, branch
-> **`main`** (the `config-schema-symmetric` work is merged; feature branches deleted), 126 tests passing
+> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.1.33**, branch
+> **`main`** (the `config-schema-symmetric` work is merged; feature branches deleted), 131 tests passing
 > (`for t in tests/test_*.py; do python3 $t; done`). Tool at `/Users/ckt/ws/bringup`; run-from-source
 > `./rig <verb>`.
 > **Remote: https://github.com/christomaszewski/rig (public)** — Actions runs the test suite on push/PR.
@@ -70,6 +70,15 @@ A launcher's compose opts into each (`${RIG_IMAGE_REGISTRY:+…}`, `:${RIG_IMAGE
   deprecation stub for one version (v0.1.28).
 - `rig pull` + baked `pull.sh` (v0.1.19): pre-pull every stack's images with NO container changes — prime
   the vehicle's cache while the registry is reachable, then run offline; safe against a live deployment.
+- v0.1.33: **`rig fetch`** — unblocks the HAND-AUTHORED workflow (init → write vehicle.yaml +
+  services.yaml yourself → fetch). Reads vehicle.yaml RAW (the deployment is unloadable until configs
+  exist — that's the point): every row whose `config:` is missing gets the routed service's first
+  example copied TO THAT PATH as a nameless profile (row stamps the name; a surviving example name that
+  differs WARNs with both names); routed-but-unreferenced services get material into
+  config/{infra,sensors,autonomy}/ with a suggested row ECHOED, never written. Never edits manifests,
+  never overwrites, per-route failures reported not fatal, ends by saying whether the manifest now
+  loads. (`pull` fetches images; `fetch` fetches configs.) Verb taxonomy complete: rigify makes a repo
+  compatible → certify grades it → init/add/fetch wire deployments → doctor grades the vehicle.
 - v0.1.32: **`rig rigify <dir> [--service NAME]`** — retrofit rig-compatibility onto EXISTING software
   (`rig_cli/rigify.py`; deployment-independent like `certify --repo`). Generates only-if-absent, never
   overwrites: rigging.yaml (tier/ros_distro/build/mirror/host_ports/external_volumes as COMMENTED

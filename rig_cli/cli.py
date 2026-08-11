@@ -254,6 +254,10 @@ def cmd_rigify(args) -> int:
     return rigify_mod.rigify(Path(args.directory), service=args.service)
 
 
+def cmd_fetch(args, root: Path) -> int:
+    return init_mod.fetch(root)
+
+
 def cmd_build(args, root: Path) -> int:
     manifest, catalog, descriptors = _load(root)
     return build_mod.build(manifest, descriptors, registry=args.registry, tag=args.tag,
@@ -375,6 +379,9 @@ def build_parser() -> argparse.ArgumentParser:
     rgf.add_argument("--service", default=None,
                      help="service name (default: the directory name, sanitized)")
 
+    ftc = sub.add_parser("fetch", help="materialize example configs for hand-authored manifest rows "
+                                       "(`pull` fetches images; `fetch` fetches configs)")
+
     ad = sub.add_parser("add", help="add a service to THIS deployment (route + config + manifest row)")
     ad.add_argument("service", metavar="NAME|PATH",
                     help="service dir path, or a bare name resolved from the workspace (like init --infra); "
@@ -422,6 +429,8 @@ def main(argv=None) -> int:
         root = (args.root or find_root()).resolve()
         if args.cmd == "add":  # edits the deployment files themselves — routes its own manifest load
             return cmd_add(args, root)
+        if args.cmd == "fetch":  # runs BEFORE the manifest is loadable — reads vehicle.yaml raw
+            return cmd_fetch(args, root)
         if args.cmd == "vendor":  # operates on a source repo, not the manifest
             return cmd_vendor(args, root)
         if args.cmd == "unbake":  # operates on an artifact, not the manifest

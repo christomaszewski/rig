@@ -52,7 +52,9 @@ cd my-vehicle
 #   infra:   [ {name: zenoh-router, ...order: 0}, {name: dashboard, ...order: 5} ]     # up FIRST
 #   sensors: [ {name: cam_usb, ...order: 10}, {name: cam_rtsp, ...order: 20} ]
 #   autonomy: [ {name: planner, ...order: 10} ]      # graph consumers: up after ALL sensors, down FIRST
-# config/{infra,sensors,autonomy}/<name>.yaml — one per instance (copy keys from the service's examples)
+# config/{infra,sensors,autonomy}/<name>.yaml — one per instance. Hand-authored the rows? `rig fetch`
+#   materializes each missing row config from the routed service's example (nameless profile — the row
+#   stamps the name). Never edits manifests, never overwrites. (`pull` = images; `fetch` = configs.)
 ```
 
 Naming rules: instance `name` is unique vehicle-wide and keys *everything* (compose project, volumes,

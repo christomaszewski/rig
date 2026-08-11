@@ -71,7 +71,8 @@ The manifest + per-sensor configs for one vehicle/fleet (no driver source lives 
    image registry).
 2. Add a config per sensor under `config/sensors/` (or reference a nameless profile + per-sensor
    overrides), per shared infra service under `config/infra/`, and per autonomy stack (planners, SLAM,
-   perception — up last, down first) under `config/autonomy/`.
+   perception — up last, down first) under `config/autonomy/`. Wrote the manifest rows by hand?
+   `rig fetch` materializes each missing config from the routed service's example.
 3. Validate + run: `rig doctor` · `rig up --dry-run` · `rig up` · `rig status`.
 4. Deploy: `rig vendor <svc> --from <repo>` · `rig bake --registry <host> --tag <t>` · ship the artifact ·
    on the vehicle `rig unbake <artifact> && ./run.sh up`.
@@ -505,4 +506,108 @@ def add_service(root: Path, token: str) -> int:
         eprint(f"add: {svc} -> {rel} · commented menu row under `{sub}:` — uncomment it when this "
                f"vehicle actually runs the stack")
     eprint("  next: `rig doctor`")
+    return 0
+
+
+# --- rig fetch: materialize example configs for hand-authored manifests ----------------------------
+
+def fetch(root: Path) -> int:
+    """`rig fetch` — the missing support for the HAND-AUTHORED workflow: `rig init`, write
+    vehicle.yaml + services.yaml yourself, then fetch materializes the config files. Until it runs,
+    the deployment is unloadable (load_manifest errors on a row whose config file is missing), so
+    fetch deliberately reads vehicle.yaml RAW instead of through the manifest loader.
+
+    Two passes, mirroring the two directions people author from:
+    1. vehicle.yaml-driven — every row whose `config:` path is missing gets the routed service's first
+       declared example copied TO THAT PATH as a nameless profile (the row stamps the name).
+    2. services.yaml-driven — routed services referenced by NO row get their examples copied into
+       config/{infra,sensors,autonomy}/ as material, with a suggested row ECHOED, never written.
+
+    The contract: fetch never touches vehicle.yaml or services.yaml and never overwrites an existing
+    config — only missing files are created, so reruns are no-ops. (`rig pull` is images; `rig fetch`
+    is configs.)"""
+    from .manifest import load_manifest
+
+    root = root.resolve()
+    veh_path, svc_path = root / "vehicle.yaml", root / "services.yaml"
+    if not veh_path.exists():
+        raise RigError(f"fetch: {root} is not a rig deployment (no vehicle.yaml) — `rig init` creates one")
+    data = load_yaml(veh_path) or {}
+    routes = ((load_yaml(svc_path) or {}).get("services") or {}) if svc_path.exists() else {}
+
+    repos: dict[str, Path] = {}
+    descs: dict[str, object] = {}
+    for svc, entry in routes.items():
+        p = Path(str((entry or {}).get("path") or ""))
+        repo = (p if p.is_absolute() else root / p).resolve()
+        try:
+            descs[svc] = load_descriptor(svc, repo)
+            repos[svc] = repo
+        except RigError as exc:  # a dead route must not abort the whole pass — report, keep going
+            eprint(f"  fetch: route '{svc}' unusable ({exc}); skipped")
+
+    fetched, present = 0, 0
+    referenced: set[str] = set()
+    for key, tier in (("infra", "infra"), ("sensors", "sensor"), ("autonomy", "autonomy")):
+        for entry in data.get(key) or []:
+            entry = entry or {}
+            name, svc, cfg = entry.get("name"), entry.get("service"), entry.get("config")
+            if not (name and svc and cfg):
+                continue  # malformed rows are doctor's report, not fetch's
+            referenced.add(svc)
+            cfg_path = Path(str(cfg))
+            cfg_path = cfg_path if cfg_path.is_absolute() else root / cfg_path
+            if cfg_path.exists():
+                present += 1
+                continue
+            if svc not in repos:
+                eprint(f"  fetch: row '{name}' needs service '{svc}', which services.yaml doesn't "
+                       f"route (or its route failed above) — cannot fetch {cfg}")
+                continue
+            examples = _repo_examples(repos[svc], descs[svc].examples)
+            if not examples:
+                eprint(f"  fetch: row '{name}' ({svc}): no example config in {repos[svc]} — "
+                       f"author {cfg} yourself")
+                continue
+            src = examples[0]
+            cfg_path.parent.mkdir(parents=True, exist_ok=True)
+            surviving = _copy_as_profile(src, cfg_path)  # nameless profile: the ROW stamps the name
+            note = "nameless profile"
+            if surviving and surviving != name:
+                note = f"VERBATIM — kept its own name '{surviving}'"
+                eprint(f"  fetch: WARNING — {cfg} kept the example's name '{surviving}' (rig couldn't "
+                       f"neutralize its spelling) but the row says '{name}'; align them or the "
+                       f"manifest cross-check will error")
+            elif surviving:
+                note = "verbatim"
+            extra = f"; also available: {', '.join(e.name for e in examples[1:])}" if len(examples) > 1 else ""
+            eprint(f"  fetch: {name} ({svc}) <- {src.relative_to(repos[svc])} ({note}{extra})")
+            fetched += 1
+
+    for svc in routes:
+        if svc in referenced or svc not in repos:
+            continue
+        desc = descs[svc]
+        tier = desc.tier if desc.tier in ("infra", "autonomy") else "sensor"
+        sub = {"infra": "infra", "sensor": "sensors", "autonomy": "autonomy"}[tier]
+        for src in _repo_examples(repos[svc], desc.examples):
+            stem = src.name[: -len(".example.yaml")] if src.name.endswith(".example.yaml") else src.stem
+            dest = root / "config" / sub / f"{stem}.yaml"
+            if dest.exists():
+                present += 1
+                continue
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            kept_name = _copy_as_profile(src, dest)
+            stub = str(kept_name) if kept_name else _safe_name(stem)
+            eprint(f"  fetch: material for un-referenced service '{svc}' -> config/{sub}/{stem}.yaml")
+            eprint(f"         suggested row (under `{sub}:`): "
+                   f"{_entry(stub, svc, f'config/{sub}/{stem}.yaml', 10)}")
+            fetched += 1
+
+    eprint(f"rig fetch: {fetched} config(s) fetched, {present} already present (never overwritten)")
+    try:  # tell the operator whether the hand-authored deployment is now loadable
+        load_manifest(root)
+        eprint("  manifest loads — next: `rig doctor`")
+    except RigError as exc:
+        eprint(f"  manifest still doesn't load ({exc}) — finish the rows above, then `rig doctor`")
     return 0
