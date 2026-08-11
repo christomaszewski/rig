@@ -2,7 +2,7 @@
 
 > Snapshot for picking the project up cold in a new session. Read this first, then `CHEATSHEET.md` /
 > `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.1.34**, branch
-> **`main`** (the `config-schema-symmetric` work is merged; feature branches deleted), 135 tests passing
+> **`main`** (the `config-schema-symmetric` work is merged; feature branches deleted), 134 tests passing
 > (`for t in tests/test_*.py; do python3 $t; done`). Tool at `/Users/ckt/ws/bringup`; run-from-source
 > `./rig <verb>`.
 > **Remote: https://github.com/christomaszewski/rig (public)** — Actions runs the test suite on push/PR.
