@@ -247,11 +247,11 @@ def cmd_init(args) -> int:
 
 
 def cmd_add(args, root: Path) -> int:
-    return init_mod.add_service(root, args.service)
+    return init_mod.add_service(root, args.service, tier=args.tier)
 
 
 def cmd_rigify(args) -> int:
-    return rigify_mod.rigify(Path(args.directory), service=args.service)
+    return rigify_mod.rigify(Path(args.directory), service=args.service, tier=args.tier)
 
 
 def cmd_fetch(args, root: Path) -> int:
@@ -378,6 +378,9 @@ def build_parser() -> argparse.ArgumentParser:
     rgf.add_argument("directory", help="the service repo to rigify — files are only ADDED, never overwritten")
     rgf.add_argument("--service", default=None,
                      help="service name (default: the directory name, sanitized)")
+    rgf.add_argument("--tier", choices=["infra", "sensor", "autonomy"], default=None,
+                     help="declare the tier in the generated rigging.yaml (default: a commented hint, "
+                          "meaning sensor)")
 
     ftc = sub.add_parser("fetch", help="materialize example configs for hand-authored manifest rows "
                                        "(`pull` fetches images; `fetch` fetches configs)")
@@ -386,6 +389,9 @@ def build_parser() -> argparse.ArgumentParser:
     ad.add_argument("service", metavar="NAME|PATH",
                     help="service dir path, or a bare name resolved from the workspace (like init --infra); "
                          "infra tier is wired ENABLED, sensor/autonomy get a commented menu row")
+    ad.add_argument("--tier", choices=["infra", "sensor", "autonomy"], default=None,
+                    help="override the service's declared tier for THIS deployment (placement + the "
+                         "enabled-vs-menu behavior follow the override)")
 
     ven = sub.add_parser("vendor", help="copy a service's launch surface into services/<service>/")
     ven.add_argument("service", help="service name (key in services.yaml / its rigging.yaml)")

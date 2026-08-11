@@ -1,8 +1,8 @@
 # rig — project state & handoff (resume here)
 
 > Snapshot for picking the project up cold in a new session. Read this first, then `CHEATSHEET.md` /
-> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.1.33**, branch
-> **`main`** (the `config-schema-symmetric` work is merged; feature branches deleted), 131 tests passing
+> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.1.34**, branch
+> **`main`** (the `config-schema-symmetric` work is merged; feature branches deleted), 135 tests passing
 > (`for t in tests/test_*.py; do python3 $t; done`). Tool at `/Users/ckt/ws/bringup`; run-from-source
 > `./rig <verb>`.
 > **Remote: https://github.com/christomaszewski/rig (public)** — Actions runs the test suite on push/PR.
@@ -70,6 +70,11 @@ A launcher's compose opts into each (`${RIG_IMAGE_REGISTRY:+…}`, `:${RIG_IMAGE
   deprecation stub for one version (v0.1.28).
 - `rig pull` + baked `pull.sh` (v0.1.19): pre-pull every stack's images with NO container changes — prime
   the vehicle's cache while the registry is reachable, then run offline; safe against a live deployment.
+- v0.1.34: **`--tier infra|sensor|autonomy` on `add` and `rigify`** — `add --tier` overrides the
+  service's DECLARED tier for one deployment (section placement + the enabled-vs-menu behavior follow;
+  a note nudges toward declaring it in the repo's rigging.yaml when it's yours — the vehicle.yaml
+  SECTION is the runtime authority, the descriptor tier only routes the automation); `rigify --tier`
+  emits an uncommented `tier:` declaration in the generated rigging.yaml instead of the commented hint.
 - v0.1.33: **`rig fetch`** — unblocks the HAND-AUTHORED workflow (init → write vehicle.yaml +
   services.yaml yourself → fetch). Reads vehicle.yaml RAW (the deployment is unloadable until configs
   exist — that's the point): every row whose `config:` is missing gets the routed service's first

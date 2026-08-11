@@ -122,7 +122,7 @@ launcher: @SVC@-up
 # verbs: { status: ps }             # adapt logical verbs -> launcher args when your CLI differs
 # ros_distro: lyrical               # uncomment for a ROS service — ONE distro per vehicle (doctor checks,
 #                                   #   and `rig build` exports it as ROS_DISTRO to build commands)
-# tier: sensor                      # "infra" = shared, up-first; "autonomy" = consumer, up-last/down-first
+@TIERLINE@
 examples: [config/@SVC@.example.yaml]   # `rig certify --repo` default config; copied by init/add
 launch_surface:                     # the minimal file set rig vendors/bakes to LAUNCH this service
   - @SVC@-up
@@ -200,7 +200,7 @@ def _write_if_absent(root: Path, path: Path, content: str, wrote: list[str], ski
     wrote.append(rel)
 
 
-def rigify(target: Path, *, service: str | None = None) -> int:
+def rigify(target: Path, *, service: str | None = None, tier: str | None = None) -> int:
     target = target.resolve()
     if not target.is_dir():
         raise RigError(f"rigify: not a directory: {target} (rigify retrofits EXISTING software; "
@@ -209,11 +209,13 @@ def rigify(target: Path, *, service: str | None = None) -> int:
         raise RigError(f"rigify: {target.name} already has a rigging.yaml — it's rigged; the next steps "
                        f"are `rig certify --repo {target}` (until green), then `rig add {target}`. "
                        f"rigify never overwrites.")
+    if tier is not None and tier not in ("infra", "sensor", "autonomy"):
+        raise RigError(f"rigify: --tier must be infra, sensor, or autonomy, not '{tier}'")
     svc = service or _default_service(target.name)
     env = _env_prefix(svc)
     f = analyze(target)
 
-    eprint(f"rigify: {target} -> service '{svc}'")
+    eprint(f"rigify: {target} -> service '{svc}'{f' · tier: {tier}' if tier else ''}")
     for rel in f.composes:
         eprint(f"  found: {rel} — pre-wired into the launcher's compose file list")
     for rel in f.unparsed_composes:
@@ -274,8 +276,12 @@ def rigify(target: Path, *, service: str | None = None) -> int:
         hints.append('# external_volumes: ["@SVC@_{name}_data"]   # GC\'d only by `rig down --purge`'
                      .replace("@SVC@", svc))
 
+    tier_comment = '# "infra" = shared, up-first; "autonomy" = consumer, up-last/down-first'
+    tier_line = (f"{f'tier: {tier}':<36}{tier_comment}" if tier else
+                 f"{'# tier: sensor':<36}{tier_comment}")  # declared when asked; a commented hint otherwise
     _write_if_absent(target, target / "rigging.yaml",
                      _RIGGING.replace("@SVC@", svc)
+                             .replace("@TIERLINE@", tier_line)
                              .replace("@SURFACE@", "\n".join(f"  - {p}" for p in surface_paths))
                              .replace("@HINTS@", "\n".join(hints) + "\n"),
                      wrote, skipped)

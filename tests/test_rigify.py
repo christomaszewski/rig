@@ -95,6 +95,21 @@ def test_ros_launch_file_seeds_command_hint():
     assert 'launch/bringup.launch.py' in skeleton                   # command hint points at the real file
 
 
+def test_tier_flag_declares_in_generated_rigging():
+    d = _bare()
+    rigify(d, tier="autonomy")
+    assert load_descriptor("my_thing", d).tier == "autonomy"          # declared, not a commented hint
+    d2 = _bare()
+    rigify(d2)                                                        # default stays a commented hint
+    assert load_descriptor("my_thing", d2).tier == "sensor"
+    assert "# tier: sensor" in (d2 / "rigging.yaml").read_text()
+    try:
+        rigify(_bare(), tier="bogus")
+        raise AssertionError("expected RigError")
+    except RigError as exc:
+        assert "--tier" in str(exc)
+
+
 def test_generated_skeleton_passes_certify_out_of_the_box():
     # THE acceptance: rigify -> certify green with ZERO hand edits (the contract mechanics come free;
     # certify then teaches only the service-specific 20%). Needs docker compose; skip cleanly without.

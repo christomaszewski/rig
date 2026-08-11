@@ -58,8 +58,10 @@ cd my-vehicle
 ```
 
 Grow the deployment later with `rig add <name|path>` (routes + config + manifest row: infra ENABLED,
-sensor/autonomy a commented menu row); make NON-rig software compatible first with `rig rigify <dir>`
-(descriptor + launcher skeleton + example, analysis-seeded) → `rig certify --repo` until green.
+sensor/autonomy a commented menu row; `--tier` overrides the service's declared tier for THIS vehicle —
+placement + enabled-vs-menu follow); make NON-rig software compatible first with `rig rigify <dir>`
+(descriptor + launcher skeleton + example, analysis-seeded; `--tier` declares it in the generated
+rigging.yaml) → `rig certify --repo` until green.
 
 Naming rules: instance `name` is unique vehicle-wide and keys *everything* (compose project, volumes,
 ROS namespace). **Underscores, never hyphens** (`cam_usb`, not `cam-usb`). Two instances of one service:

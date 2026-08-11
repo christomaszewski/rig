@@ -89,6 +89,36 @@ def test_add_appends_missing_section_header():
     assert load_manifest(veh) is not None                # still a valid manifest
 
 
+def test_add_tier_override_promotes_sensor_to_infra():
+    # A repo that declares no tier (sensor default) but IS infra for this vehicle: --tier flips both
+    # the section AND the enabled-vs-menu behavior.
+    ws = _ws()
+    veh = ws / "veh"
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        add_service(veh, str(ws / "foo_driver"), tier="infra")
+    body = (veh / "vehicle.yaml").read_text()
+    assert "- { name: front, service: foo, config: config/infra/front.yaml, enabled: true, order: 5 }" in body
+    assert body.index("service: foo") < body.index("sensors:")        # row landed in the infra section
+    assert (veh / "config" / "infra" / "front.yaml").is_file()        # config follows the tier subdir
+    assert [s.tier for s in load_manifest(veh).sensors] == ["infra"]  # runtime tier = section
+    assert "overrides foo's declared 'sensor'" in err.getvalue()      # nudge toward fixing the rigging
+
+
+def test_add_tier_override_demotes_infra_to_menu():
+    ws = _ws()
+    veh = ws / "veh"
+    add_service(veh, "zenoh-router", tier="autonomy")                 # deliberate nonsense tier — honored
+    body = (veh / "vehicle.yaml").read_text()
+    assert "# - { name: zenoh_router, service: zenoh-router, config: config/autonomy/zenoh-router.yaml" in body
+    assert not load_manifest(veh).sensors                             # menu row: nothing enabled
+    try:
+        add_service(veh, "nav", tier="bogus")
+        raise AssertionError("expected RigError")
+    except RigError as exc:
+        assert "--tier" in str(exc)
+
+
 def test_add_duplicate_service_errors():
     ws = _ws()
     veh = ws / "veh"

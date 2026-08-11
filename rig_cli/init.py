@@ -401,7 +401,7 @@ def _append_tier_row(text: str, section: str, row: str) -> str | None:
     return "\n".join(lines + ["", f"{section}:", f"  {row}"]) + "\n"
 
 
-def add_service(root: Path, token: str) -> int:
+def add_service(root: Path, token: str, tier: str | None = None) -> int:
     """`rig add <name|path>` — the post-init sibling of --infra/--discover, for a deployment that
     already exists (init refuses those). Resolves the token exactly like --infra (path form, or a
     bare name via the one-level workspace scan), copies the example config, routes services.yaml, and
@@ -426,7 +426,14 @@ def add_service(root: Path, token: str) -> int:
     desc_path = find_descriptor(tdir)
     svc = str(load_yaml(desc_path).get("service") or tdir.name) if desc_path else tdir.name
     desc = load_descriptor(svc, tdir)  # full validation — a tier typo errors here, not in the manifest
-    tier = desc.tier if desc.tier in ("infra", "autonomy") else "sensor"
+    declared = desc.tier if desc.tier in ("infra", "autonomy") else "sensor"
+    if tier is not None and tier not in ("infra", "sensor", "autonomy"):
+        raise RigError(f"add: --tier must be infra, sensor, or autonomy, not '{tier}'")
+    if tier and tier != declared:  # the section you place a row in IS its runtime tier — rig honors it;
+        #                            the note nudges toward fixing the declaration when the repo is yours
+        eprint(f"  add: tier '{tier}' overrides {svc}'s declared '{declared}' — if the repo is yours, "
+               f"declare `tier: {tier}` in its rigging.yaml so every deployment benefits")
+    tier = tier or declared
     sub = {"infra": "infra", "sensor": "sensors", "autonomy": "autonomy"}[tier]
 
     routes = ((load_yaml(svc_path) or {}).get("services") or {}) if svc_path.exists() else {}
