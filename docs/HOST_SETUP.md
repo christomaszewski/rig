@@ -15,17 +15,14 @@ following are one-time, out-of-band host steps.
 
 ## Wiring the service repos
 
-For **deployment**, vendor each service as a git submodule so its launcher + compose are pinned on the
-robot (runtime images are pulled from the registry, not built there):
+For **local development**, point `services.yaml` at sibling checkouts (`../novatel`, …) — the default;
+`rig init --discover` and `rig add` write these routes for you.
 
-```bash
-git submodule add <url> services/camera-service
-git submodule add <url> services/novatel
-git submodule add <url> services/sbg_driver
-# then point services.yaml at services/<name>
-```
-
-For **local development**, point `services.yaml` at sibling checkouts (`../novatel`, …) — the default.
+For **deployment**, don't put repos on the vehicle at all: `rig bake` **auto-vendors** each service's
+declared `launch_surface` (launcher + composes, never source) into the artifact, and the vehicle runs
+the extracted tree (`rig vendor <svc> --from <repo>` is the manual form — it copies the surface under
+`services/<svc>/` with provenance, and you repoint services.yaml). Runtime images are pulled from the
+registry, not built on the robot. No git, no submodules on the vehicle.
 
 ## Per-device host state (out of band)
 
@@ -45,8 +42,9 @@ For **local development**, point `services.yaml` at sibling checkouts (`../novat
 
 `rig` exports `ROS_DOMAIN_ID` + `RMW_IMPLEMENTATION` (from `vehicle.yaml`) to every launcher; all stacks
 run `network_mode: host` + `ipc: host`, so they share one ROS graph on the host. With the default
-`rmw_zenoh_cpp`, discovery runs through the **shared zenoh router** infra stack (rig ships
-`templates/zenoh-router/`; `rig doctor` warns when the rmw is zenoh and no router is declared). Keep the
+`rmw_zenoh_cpp`, discovery runs through the **shared zenoh router** infra stack (rig-infra ships
+`zenoh-router/` — https://github.com/christomaszewski/rig-infra; `rig doctor` warns when the rmw is
+zenoh and no router is declared). Keep the
 distro aligned (Lyrical) across services. Under a DDS rmw instead (`rmw_fastrtps_cpp`), the one-graph
 model is multicast discovery — at higher sensor counts, partition unrelated stacks onto distinct
 `ROS_DOMAIN_ID`s and/or mount a Fast DDS XML profile (static peers) to tame it.

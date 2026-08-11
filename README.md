@@ -7,7 +7,8 @@ reimplements per-stack logic.
 
 The dependency is strictly one-way: `rig` depends on the service repos; **a service never knows about
 `rig`**. `rig` learns each service only through its `rigging.yaml` descriptor + the launcher CLI, so
-services evolve independently and new ones drop in by adding two files (a launcher + a `rigging.yaml`).
+services evolve independently and new ones drop in by adding two files (a launcher + a `rigging.yaml` —
+`rig rigify` generates both onto existing software).
 
 ```
                  vehicle.yaml (which sensors)          services.yaml (where each repo is)
@@ -37,17 +38,24 @@ services evolve independently and new ones drop in by adding two files (a launch
 # host needs Python 3 + PyYAML and Docker (compose v2). For local dev:
 python3 -m venv .venv && .venv/bin/pip install pyyaml
 
+# authoring — build a deployment (see docs/CHEATSHEET.md for the full flow)
+./rig init my-vehicle --infra zenoh-router --discover   # scaffold: wired infra + a discovered menu
+./rig add ../novatel      # wire ONE more service into an existing deployment (path or bare name)
+./rig fetch               # hand-wrote vehicle.yaml rows? materialize their configs from examples
+./rig rigify ../my-sw     # make EXISTING software rig-compatible (descriptor + launcher + example)
+
+# lifecycle — run the vehicle
 ./rig doctor              # read-only preflight (unique names, one ROS distro, launchers present, ...)
 ./rig doctor --deep       # + certify each service's launcher against the contract (runs `config`)
 ./rig certify             # launcher-contract conformance under a poisoned fleet env (see below)
 ./rig up --dry-run        # print the exact launcher invocations + fleet ROS env, run nothing
-./rig up                  # bring all enabled sensors up (ascending order)
+./rig up                  # bring everything up: infra → sensors → autonomy (order within a tier)
 ./rig pull                # pre-pull every stack's images, NO container changes (prime a cache, then run offline)
 ./rig status             # one rolled-up row per sensor (state + health from compose ps)
 ./rig status -v           # expand per-container detail
 ./rig logs cam_front -f   # follow one sensor's logs
 ./rig config gnss_primary # render a sensor's merged compose (delegates to the launcher's `config`)
-./rig down                # tear down (reverse order); --purge also GCs declared external volumes
+./rig down                # tear down in reverse (autonomy FIRST); --purge also GCs external volumes
 ./rig up cam_front ins_main   # operate on a subset by name
 ```
 
@@ -98,9 +106,11 @@ services.yaml           # catalog: service routing key -> where its repo lives
 config/sensors/*.yaml   # one config per sensor (the single source of truth for that stack)
 config/infra/*.yaml     # one config per shared infra service (zenoh router, bag logger, …)
 config/autonomy/*.yaml  # one config per autonomy stack (planner, SLAM, perception, …)
-services/               # service repos as git submodules (deployment); or point services.yaml at sibling checkouts
+services/               # VENDORED launch surfaces (`rig vendor`; bake auto-vendors) — deployment mode;
+                        #   for dev, point services.yaml at sibling checkouts instead. Never source/submodules.
 templates/              # DEPRECATED stub — the infra services moved to the rig-infra repo (see below)
-rig, rig_cli/           # the CLI (thin shim + package: manifest/catalog/dispatch/status/doctor/certify/build/bake/…)
+rig, rig_cli/           # the CLI (thin shim + package: manifest/catalog/dispatch/status/doctor/certify/
+                        #   build/bake/init/rigify/runs/…)
 docs/                   # CHEATSHEET (1-page flow) · RUNBOOK (worked example) · DESIGN/ROADMAP · STATE · HOST_SETUP
 ```
 
@@ -168,8 +178,14 @@ verbs: { status: ps }                # adapt logical verbs -> launcher args (def
 ros_distro: lyrical
 tier: sensor                         # optional: "infra" = shared, up-first (routers, loggers, dashboards);
                                      #   "autonomy" = graph consumer, up-last / down-first (planners, SLAM)
-examples: [sensors/novatel.example.yaml]     # optional: example configs — `rig init --discover` copies
-                                             #   them; `rig certify --repo` uses the first as its default --config
+examples: [sensors/novatel.example.yaml]     # optional: example configs — init/add/fetch copy them;
+                                             #   `rig certify --repo` uses the first as its default --config
+launch_surface:                              # the minimal file set `rig vendor`/`bake` copy to LAUNCH
+  - novatel-up                               #   this service (never its source)
+  - docker/compose/compose.deploy.yaml
+# build: { command: tools/build-images.sh, images: [novatel] }   # `rig build` runs `<cmd> <registry> [tag]`
+#                                            #   (ROS_DISTRO exported from vehicle.yaml ros.distro)
+# mirror: [eclipse/zenoh:1.2.1]              # third-party images `rig build` copies into the registry
 external_volumes: ["novatel_{name}_data"]    # optional: GC'd by `rig down --purge` (final teardown only)
 host_ports: ["plugins[name=webrtc-bridge,enabled=true].params.port"]  # optional: rig validates these don't clash
 ```

@@ -1,6 +1,6 @@
 # rig — deployment cheat sheet
 
-> The whole workflow on one page (rig ≥ v0.1.27). Long-form: `RUNBOOK.md` (worked Orin example),
+> The whole workflow on one page (rig ≥ v0.1.33). Long-form: `RUNBOOK.md` (worked Orin example),
 > `README.md` (concepts), `STATE.md` (current live state). Mental model: **services own their bring-up**
 > (launcher + `rigging.yaml`); **rig owns the vehicle** (manifest, env, ordering, artifacts). The vehicle
 > runs the baked compose-only form — no source, no internet.
@@ -56,6 +56,10 @@ cd my-vehicle
 #   materializes each missing row config from the routed service's example (nameless profile — the row
 #   stamps the name). Never edits manifests, never overwrites. (`pull` = images; `fetch` = configs.)
 ```
+
+Grow the deployment later with `rig add <name|path>` (routes + config + manifest row: infra ENABLED,
+sensor/autonomy a commented menu row); make NON-rig software compatible first with `rig rigify <dir>`
+(descriptor + launcher skeleton + example, analysis-seeded) → `rig certify --repo` until green.
 
 Naming rules: instance `name` is unique vehicle-wide and keys *everything* (compose project, volumes,
 ROS namespace). **Underscores, never hyphens** (`cam_usb`, not `cam-usb`). Two instances of one service:

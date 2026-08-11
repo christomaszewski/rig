@@ -18,7 +18,8 @@ lifecycle + params + transport for the nav drivers) already lives in each servic
 3. owns only what is genuinely vehicle-wide (below).
 
 This keeps the one-way dependency clean: **a service never imports or knows about rig.** New services
-(a lidar, an autonomy stack, a ported third-party driver) join by adding a launcher + a `rigging.yaml`,
+(a lidar, an autonomy stack, a ported third-party driver) join by adding a launcher + a `rigging.yaml`
+(`rig rigify` scaffolds both onto existing software),
 not by changing rig.
 
 ## The launcher contract (rig-compatible)
@@ -67,14 +68,19 @@ template — it adapts to each via `rigging.yaml`'s `verbs` map (e.g. cam-up tak
 ## Status & roadmap
 
 Implemented (see `ROADMAP.md` for the per-version log): manifest/catalog/descriptor loaders with
-validation; overrides + nameless profiles; dispatch with fleet env + dry-run + ordering; the `infra:`
-tier; `status` roll-up; `doctor` (incl. enabled-aware host-port clash checks) + `doctor --deep`;
+validation; overrides + nameless profiles; dispatch with fleet env + dry-run + tiered ordering
+(`infra:` → `sensors:` → `autonomy:`; down reversed, so the decider dies before its eyes); `status`
+roll-up; run directories (one session = one folder, `new-run`/`end-run`/`runs`); `doctor` (incl.
+enabled-aware host-port clash checks, distro agreement as ERROR) + `doctor --deep`;
 `up/down/--purge/logs/config/pull`; `certify` (the launcher contract as executable checks, `--repo` CI
-mode, `--emit/--diff` host-independence proof); `build` (per-service build + mirror); `vendor` (with
-provenance) and `bake/unbake` (digest pinning, compose-only form, `--bundle-images` air-gap bundles,
-parent provenance on re-bake); `init` (name seed, `--infra` templates, `--discover` workspace scan).
-Validated against the real launchers (cam-up, dash-up, novatel-up, sbg-up, vectornav-up, the bundled
-templates) — and continuously, by `rig certify` in each repo's CI.
+mode, `--emit/--diff` host-independence proof); `build` (per-service build + mirror; exports
+`ros.distro` as ROS_DISTRO); `vendor` (with provenance) and `bake/unbake` (digest pinning, compose-only
+form, `--bundle-images` air-gap bundles, parent provenance on re-bake); the authoring family — `init`
+(name seed, `--infra` path/bare-name workspace resolution, `--discover` one-level scan), `add` (wire a
+service into an existing deployment), `fetch` (materialize configs for hand-authored rows), `rigify`
+(retrofit the contract onto existing software, analysis-seeded, certify-green out of the box).
+Validated against the real launchers (cam-up, dash-up, novatel-up, sbg-up, vectornav-up, the rig-infra
+services) — and continuously, by `rig certify` in each repo's CI.
 
 Open items: a **dev-vs-prod** affordance (cam-up's `--dev` vs config-driven replay for thin drivers); a
 service-defined **`health` verb** (supersedes the ROS-`/diagnostics`-only idea — covers non-ROS stacks);

@@ -68,7 +68,7 @@ _README = """\
 The manifest + per-sensor configs for one vehicle/fleet (no driver source lives here).
 
 1. Edit `services.yaml` (where each service repo is) and `vehicle.yaml` (which sensors, fleet ROS env,
-   image registry).
+   image registry) — or let `rig add <name|path>` wire a service in for you.
 2. Add a config per sensor under `config/sensors/` (or reference a nameless profile + per-sensor
    overrides), per shared infra service under `config/infra/`, and per autonomy stack (planners, SLAM,
    perception — up last, down first) under `config/autonomy/`. Wrote the manifest rows by hand?
