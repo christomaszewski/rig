@@ -1,8 +1,15 @@
-"""The `rig` command line — lifecycle (up/down/status/logs/config/pull), checks (doctor/certify),
-authoring (init/vendor), and deployment (build/bake/unbake)."""
+"""The `rig` command line.
+
+Taxonomy (registry plan, settled 2026-08-12): the DEPLOYMENT is the CLI's implicit noun — verbs whose
+object is the deployment itself stay top-level (init/add/fetch/up/down/status/logs/pull/doctor/certify);
+everything acting on a subordinate noun groups under it (config/run/registry/pkg/overlay/service/
+artifact/image). The noun groups are a thin argv translation over the flat command engine below, so
+every pre-registry spelling (`new-run`, `bake`, `build`, `rigify`, bare `config`, …) keeps working as a
+permanent alias — docs teach the canonical grouped forms."""
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
 from . import (
@@ -259,6 +266,45 @@ def cmd_fetch(args, root: Path) -> int:
     return init_mod.fetch(root)
 
 
+def cmd_config_render(args, manifest, catalog, descriptors) -> int:
+    """`rig config render` — run the config pipeline (profile/overrides materialization happened at
+    load) and print each instance's effective config path. Layer attribution (`config diff`) lands
+    with the working-copy pipeline."""
+    for sensor in manifest.select(args.names, enabled_only=False):
+        print(f"{sensor.name}: {sensor.config}")
+    return 0
+
+
+def cmd_artifact_list(args, root: Path) -> int:
+    """`rig artifact list` — the baked artifacts under var/artifacts with their provenance."""
+    import tarfile
+
+    import yaml as _yaml
+
+    artifacts = sorted((root / "var" / "artifacts").glob("*.tar.gz"))
+    if not artifacts:
+        print("no artifacts baked (var/artifacts is empty)")
+        return 0
+    rows = [("TAG", "VEHICLE", "CREATED", "PINNING", "PARENT", "SIZE")]
+    for path in artifacts:
+        tag = path.name[:-len(".tar.gz")]
+        meta = {}
+        try:
+            with tarfile.open(path) as tf:
+                member = tf.extractfile(f"{tag}/metadata.yaml")
+                meta = _yaml.safe_load(member.read()) if member else {}
+        except (tarfile.TarError, KeyError, OSError, _yaml.YAMLError):
+            pass
+        size_mb = path.stat().st_size / 1e6
+        rows.append((tag, str(meta.get("vehicle", "?")), str(meta.get("created", "?")),
+                     str(meta.get("pinning", "?")), str((meta.get("parent") or {}).get("tag", "—")),
+                     f"{size_mb:,.0f}M" if size_mb >= 1 else f"{path.stat().st_size / 1e3:.0f}K"))
+    widths = [max(len(r[i]) for r in rows) for i in range(len(rows[0]))]
+    for r in rows:
+        print("  ".join(cell.ljust(widths[i]) for i, cell in enumerate(r)))
+    return 0
+
+
 def cmd_registry(args) -> int:
     """Registry authoring verbs — fully deployment-independent (a registry is its own tree)."""
     if args.registry_cmd == "init":
@@ -301,16 +347,72 @@ _HANDLERS = {
     "new-run": cmd_new_run,
     "end-run": cmd_end_run,
     "runs": cmd_runs,
+    "config-render": cmd_config_render,
 }
 
 
+# --- noun-group translation over the flat engine ----------------------------
+# (group, verb) -> the flat command it runs. Groups that are real subparsers (registry, and pkg
+# when it lands) are NOT here — argparse owns them directly.
+_GROUP_VERBS: dict[str, dict[str, str]] = {
+    "config": {"show": "config", "render": "config-render"},
+    "run": {"new": "new-run", "end": "end-run", "list": "runs"},
+    "artifact": {"bake": "bake", "unbake": "unbake", "list": "artifact-list"},
+    "image": {"build": "build", "pull": "pull"},
+    "service": {"rigify": "rigify", "vendor": "vendor", "certify": "certify"},
+}
+# Not-yet-implemented grouped verbs get a pointed error instead of an "unknown sensor" mystery.
+_GROUP_PENDING: dict[tuple[str, str], str] = {
+    ("config", "diff"): "config diff arrives with the registry working-copy pipeline",
+}
+
+
+def translate_argv(argv: list[str]) -> list[str] | None:
+    """Rewrite a canonical grouped spelling (`rig run list`, `rig artifact bake`) onto the flat
+    engine. Global flags before the command (--root X) are preserved. Returns None after printing a
+    synthesized group help (`rig run`, `rig run --help`) — the caller exits 0. Bare `config` is NOT
+    a group here: it stays the legacy alias for `config show`."""
+    i = 0
+    while i < len(argv):  # skip global flags to find the command token
+        tok = argv[i]
+        if tok in ("-h", "--help", "--version") or not tok.startswith("-"):
+            break
+        i += 2 if tok == "--root" else 1  # --root takes a value; --root=X is one token
+    if i >= len(argv):
+        return argv
+    noun = argv[i]
+    verbs = _GROUP_VERBS.get(noun)
+    if verbs is None:
+        return argv
+    rest = argv[i + 1:]
+    if noun != "config" and (not rest or rest[0] in ("-h", "--help")):
+        print(f"usage: rig {noun} <verb> …\nverbs: {', '.join(sorted(verbs))}")
+        return None
+    if not rest:
+        return argv  # bare `config` = legacy show-all
+    if (noun, rest[0]) in _GROUP_PENDING:
+        raise RigError(f"{noun} {rest[0]}: not yet — {_GROUP_PENDING[(noun, rest[0])]}")
+    if rest[0] in verbs:
+        return argv[:i] + [verbs[rest[0]]] + rest[1:]
+    if noun == "config":
+        return argv  # `rig config <sensor…>` — legacy positional names
+    raise RigError(f"rig {noun}: unknown verb '{rest[0]}' (expected: {', '.join(sorted(verbs))})")
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="rig", description="vehicle-level sensor-stack orchestrator")
+    parser = argparse.ArgumentParser(
+        prog="rig", description="vehicle-level sensor-stack orchestrator",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="noun groups (canonical forms; the flat spellings above stay as permanent aliases):\n"
+               "  rig config   show | render          rig run      new | end | list\n"
+               "  rig registry init | add | remove | list | sync | validate | index\n"
+               "  rig service  rigify | vendor | certify\n"
+               "  rig artifact bake | unbake | list   rig image    build | pull")
     parser.add_argument("--version", action="version", version=f"rig {__version__}")
     parser.add_argument("--root", type=Path, default=None,
                         help="deployment root holding vehicle.yaml (default: detected from the cwd, "
                              "else alongside the CLI)")
-    sub = parser.add_subparsers(dest="cmd", required=True)
+    sub = parser.add_subparsers(dest="cmd", required=True, metavar="<command>")
 
     def add(name, help_text):
         p = sub.add_parser(name, help=help_text)
@@ -350,7 +452,11 @@ def build_parser() -> argparse.ArgumentParser:
     logs.add_argument("-f", "--follow", action="store_true", help="follow (single sensor only)")
     logs.add_argument("--tail", type=int, default=None, help="show only the last N lines")
 
-    add("config", "render each sensor's merged compose").add_argument("--dry-run", action="store_true")
+    add("config", "show each sensor's merged compose (canonical: config show)").add_argument(
+        "--dry-run", action="store_true")
+
+    add("config-render", "run the config pipeline; print each instance's effective config path "
+                         "(canonical: config render)")
 
     add("pull", "pre-pull each stack's images (no container changes)").add_argument(
         "--dry-run", action="store_true"
@@ -429,6 +535,8 @@ def build_parser() -> argparse.ArgumentParser:
     ub.add_argument("artifact", help="path to the .tar.gz artifact")
     ub.add_argument("--into", default=None, help="destination dir (default: var/unbaked/<tag>)")
 
+    sub.add_parser("artifact-list", help="list baked artifacts with provenance (canonical: artifact list)")
+
     reg = sub.add_parser("registry", help="package registries (authoring: init/validate/index)")
     regsub = reg.add_subparsers(dest="registry_cmd", required=True)
     ri = regsub.add_parser("init", help="scaffold a new empty registry in DIR — usable as a local-dir "
@@ -445,6 +553,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv=None) -> int:
+    argv = list(sys.argv[1:]) if argv is None else list(argv)
+    try:
+        argv = translate_argv(argv)
+    except RigError as exc:
+        eprint(f"rig: {exc}")
+        return 1
+    if argv is None:  # a synthesized group help was printed
+        return 0
     args = build_parser().parse_args(argv)
     # Defaults for flags not present on every subcommand.
     for attr, default in (("verbose", False), ("dry_run", False), ("force", False),
@@ -467,6 +583,8 @@ def main(argv=None) -> int:
             return cmd_vendor(args, root)
         if args.cmd == "unbake":  # operates on an artifact, not the manifest
             return cmd_unbake(args, root)
+        if args.cmd == "artifact-list":  # reads var/artifacts, not the manifest
+            return cmd_artifact_list(args, root)
         if args.cmd == "build":
             return cmd_build(args, root)
         if args.cmd == "bake":
