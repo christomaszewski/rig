@@ -49,6 +49,9 @@ def _code_repo() -> tuple[pathlib.Path, str]:
     for svc, tier, example in (
         ("routerish", "infra", "service: routerish\nname: routerish\nrate: 5\n"),
         ("camish", "sensor", "service: camish\ncamera: {type: usb}\n"),
+        # hyphenated EMBEDDED name — the shipped rig-infra convention (e.g. `zenoh-router`);
+        # accepted verbatim, while rig-DERIVED names stay ROS-safe
+        ("dash-board", "infra", "service: dash-board\nname: dash-board\nport: 8080\n"),
     ):
         d = repo / svc
         (d / "config").mkdir(parents=True)
@@ -69,7 +72,7 @@ def _registry_with(repo: pathlib.Path, rev: str) -> pathlib.Path:
     reg = pathlib.Path(tempfile.mkdtemp()) / "reg"
     with contextlib.redirect_stderr(io.StringIO()):
         registry_init(reg, namespace="testns")
-    for svc in ("routerish", "camish"):
+    for svc in ("routerish", "camish", "dash-board"):
         d = reg / "services" / svc
         d.mkdir(parents=True)
         (d / "manifest.yaml").write_text(yaml.safe_dump({
@@ -123,6 +126,14 @@ def test_service_install_vendors_routes_and_wires():
         lock = load_lock(root)
         assert "testns/routerish@1.2.0" in lock["packages"]
         assert lock["instances"]["routerish"]["base_sha256"]
+
+
+def test_hyphenated_embedded_example_name_accepted_verbatim():
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        root, _ = _world()
+        rc, _, err = _run("--root", str(root), "add", "testns/dash-board")
+        assert rc == 0, err
+        assert any(s.name == "dash-board" for s in load_manifest(root).sensors)
 
 
 def test_profile_install_transitive_and_working_copy():

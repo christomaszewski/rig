@@ -1,16 +1,21 @@
 # rig — project state & handoff (resume here)
 
 > Snapshot for picking the project up cold in a new session. Read this first, then `CHEATSHEET.md` /
-> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.1.37**, branch
-> **`main`**, 139 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
-> **In progress: the package-registry layer** (plan: `rig-registry-plan.md`, untracked by request —
-> all design decisions settled 2026-08-12). Landed so far: templates/ deleted (v0.1.35, rig-infra owns
-> those services), pyproject packaging foundation (v0.1.36), registry core + `rig registry
-> init|validate|index` (v0.1.37), and the live seed registry
-> **https://github.com/christomaszewski/rig-registry-public** (namespace `public`: rig-infra services
-> at real pins + camera-service + siyi-zr30/mapir-survey3w profiles). Next: M2 registry management
-> (`~/.rig` cache/sync, `rig setup`, CLI noun regrouping with aliases), then lockfile → install →
-> overlays/promotion (M3–M5), docs sweep (M6), deb/brew distribution (M7). Tool at `/Users/ckt/ws/bringup`; run-from-source
+> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.1.45**,
+> branch **`main`**, 189 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> **The package-registry layer is IMPLEMENTED** (v0.1.35–v0.1.45; plan doc `rig-registry-plan.md`,
+> untracked by request; design summary in DESIGN.md): registry model + `registry
+> init|validate|index`, live seed registry
+> **https://github.com/christomaszewski/rig-registry-public**, `~/.rig` client
+> (`setup`/`add`/`sync`, ordered priority, degrade-not-fail), CLI noun taxonomy with permanent
+> aliases, one extended `rig.lock`, `pkg install` (+ `rig add` porcelain: path | name | registry
+> ref | `sensor:<id>`) with vendored-at-pin self-contained deployments, the working-copy pipeline
+> (`config/.pins/` anchors, `config diff` attribution, `pkg upgrade` three-way), ordered overlay
+> bindings (local beats overlays), `pkg promote` (overlay/profile/suite; write+validate, git
+> publish stays manual) and atomic suite install with rollback. E2E-verified live: fresh
+> `RIG_HOME` → setup → sync → `add public/zenoh-router` + `add sensor:zr30` → doctor 0 errors.
+> Remaining: M7 distribution (deb/brew/release automation) — in progress; `Sensor`→`Instance`
+> dataclass rename deferred (cosmetic, large mechanical diff). Tool at `/Users/ckt/ws/bringup`; run-from-source
 > `./rig <verb>`.
 > **Remote: https://github.com/christomaszewski/rig (public)** — Actions runs the test suite on push/PR.
 > camera-service has a `rig certify` CI gate (launcher-contract) via PR #36 (+ the cam-up verbatim-pull-tag

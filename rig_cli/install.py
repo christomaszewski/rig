@@ -229,7 +229,10 @@ def _materialize_instance(root: Path, *, svc: str, desc, instance: str | None, b
         name = embedded
     else:
         name = _safe_name(base_src.name.replace(".example.yaml", "").replace(".yaml", ""))
-    if not _INSTANCE_RE.match(name):
+    # ROS-safety is enforced on names RIG derives; a service author's own embedded example name
+    # (e.g. rig-infra's `zenoh-router`) is accepted verbatim — the existing shipped convention,
+    # and the manifest cross-check requires the row to match it anyway.
+    if name != embedded and not _INSTANCE_RE.match(name):
         raise RigError(f"install: instance name '{name}' must be ROS-safe ([a-z][a-z0-9_]*) — "
                        f"pass --as <name>")
     if any(s.name == name for s in manifest.sensors):

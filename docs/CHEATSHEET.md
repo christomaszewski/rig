@@ -63,6 +63,51 @@ placement + enabled-vs-menu follow); make NON-rig software compatible first with
 (descriptor + launcher skeleton + example, analysis-seeded; `--tier` declares it in the generated
 rigging.yaml) → `rig certify --repo` until green.
 
+## 1.5 — the package registry (rig ≥ v0.1.44): install, tune, promote
+
+No workspace checkouts needed — services/profiles install from registries, pinned + vendored:
+
+```bash
+rig setup                          # once per machine: ~/.rig + the default `public` registry
+rig registry sync                  # clone/ff-pull the caches; everything below is OFFLINE after this
+rig init my-vehicle --vehicle-id 7 && cd my-vehicle    # born a git repo (--no-git opts out)
+rig add public/zenoh-router        # infra from the registry: repo cloned AT THE PIN, launch surface
+                                   #   VENDORED into services/, config from its example, rig.lock written
+rig add sensor:zr30                # match a profile (exact → glob → fallback), install its service
+                                   #   transitively, materialize the payload as the EDITABLE config
+```
+
+The working config (`config/sensors/<name>.yaml`) is yours to edit — the pristine base is pinned at
+`config/.pins/` (committed, hash-locked). The git-style loop:
+
+```bash
+vim config/sensors/siyi_zr30.yaml  # tune for your project — edit the file directly
+rig config diff                    # like `git status`: which instances are dirty, per key, attributed
+rig pkg promote siyi_zr30 --name zr30-gideon --project gideon --to internal
+                                   # delta -> a versioned overlay in your internal registry checkout
+                                   #   (write+validate; publish = plain git push/PR, printed for you)
+rig registry sync && rig overlay apply siyi_zr30 internal/zr30-gideon --clear-local
+                                   # same render, tuning now VERSIONED (local always beats overlays)
+rig pkg promote --all --project gideon --suite gideon-boat --to internal
+                                   # whole-deployment capture: overlays + a suite; a fresh vehicle
+                                   #   reproduces it with `rig pkg install internal/gideon-boat`
+rig pkg upgrade                    # registry moved? three-way merge: new base ⊕ your edits, conflicts loud
+```
+
+Registries: `rig registry init <dir>` scaffolds a new one (usable immediately via
+`rig registry add internal --path <dir>`; push it to GitHub/GitLab later — CI wrappers included).
+`--front` makes a dev checkout shadow `public` for unqualified names. `rig.lock` records every pin +
+hash; `rig pkg install <ref> --locked` reproduces byte-identical configs on a second machine.
+
+Canonical grouped commands (old flat spellings stay as permanent aliases): `config show|render|diff` ·
+`run new|end|list` · `registry init|add|remove|list|sync|validate|index` · `pkg
+search|info|install|upgrade|lock|promote` · `overlay apply|remove|reorder|list` · `service
+rigify|vendor|certify` · `artifact bake|unbake|list` · `image build|pull`.
+
+Airgap: `sync` → `install` → `rig pull` → `rig bake --bundle-images` — the deployment is
+self-contained after install (vendored surfaces + materialized configs); the registry cache is only
+needed to install/upgrade.
+
 Naming rules: instance `name` is unique vehicle-wide and keys *everything* (compose project, volumes,
 ROS namespace). **Underscores, never hyphens** (`cam_usb`, not `cam-usb`). Two instances of one service:
 unique names + unique host-facing ports (declare `host_ports` in the service's rigging.yaml → doctor checks).

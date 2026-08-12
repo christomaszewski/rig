@@ -65,6 +65,37 @@ template — it adapts to each via `rigging.yaml`'s `verbs` map (e.g. cam-up tak
 - **Host networking** for sensor discovery; per-instance ports/topics namespaced by `name`.
 - **One ROS distro fleet-wide** (Lyrical) + one RMW, so all stacks interoperate on one graph.
 
+## The package-registry layer (v0.1.35–v0.1.44)
+
+Services, sensor **profiles**, config **overlays**, and **suites** publish to git-repo registries
+(`registry.yaml` + `<kind>s/<name>/manifest.yaml` + a GENERATED `index.json`; validation lives in
+rig itself — `rig registry validate` — with thin GHA/GitLab CI wrappers). The public seed registry:
+**https://github.com/christomaszewski/rig-registry-public** (namespace `public`). Client side:
+`~/.rig/registries.yaml` is an ORDERED list (priority; `--front` lets a dev checkout shadow public),
+git registries are managed full clones with ff-only sync, local-dir registries are used in place,
+and a broken/too-new registry degrades with a warning instead of bricking field ops.
+
+Key design points (full decision log: the registry plan document):
+
+- **Terminology**: the tree `rig init` creates is a **deployment**; a manifest row is an
+  **instance**; `rig bake` emits a **deployment artifact**.
+- **Working-copy model**: install materializes a profile's payload as the instance's EDITABLE
+  config; the pristine copy is pinned at `config/.pins/` and hash-anchored in `rig.lock`. The one
+  primitive `structural_diff` (deep_merge's inverse) powers `config diff` (per-key attribution),
+  `pkg upgrade` (three-way, local wins, conflicts loud), and `pkg promote` (the delta IS the
+  overlay payload — round-trip law: promote → `overlay apply --clear-local` renders identically).
+- **Four config layers, local beats overlays**: pin ⊕ bound overlays (ordered, last wins) ⊕ local
+  file-delta ⊕ row overrides → `var/rendered/`.
+- **Instance names stay ROS-safe and operator-chosen** (`--as`); `service@profile` is display
+  only; registry provenance is a row field (`profile:`) + lock anchors.
+- **Exact pins everywhere**: full-SHA sources, digest-only images, one `rig.lock`
+  (registries@commit / package pins+hashes / instance anchors / bake's image digests);
+  `--locked` reproduces byte-identically. Suites install atomically (any failure rolls the
+  deployment back untouched).
+- **rig never pushes**: promotion writes + validates into a registry checkout (git targets get a
+  local commit on a `promote/` branch); publishing is plain git. `rig setup` owns all user state
+  (`~/.rig`, default registry, shell PATH block, `--purge`) — package managers never touch $HOME.
+
 ## Status & roadmap
 
 Implemented (see `ROADMAP.md` for the per-version log): manifest/catalog/descriptor loaders with

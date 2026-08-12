@@ -44,6 +44,13 @@ python3 -m venv .venv && .venv/bin/pip install pyyaml
 ./rig fetch               # hand-wrote vehicle.yaml rows? materialize their configs from examples
 ./rig rigify ../my-sw     # make EXISTING software rig-compatible (descriptor + launcher + example)
 
+# the package registry — no checkouts needed (CHEATSHEET §1.5; public seed registry on GitHub)
+./rig setup               # once per machine: ~/.rig + the default `public` registry
+./rig registry sync       # then fully offline: pinned installs, vendored surfaces, rig.lock
+./rig add public/zenoh-router          # infra from the registry, at an exact pin
+./rig add sensor:zr30                  # profile match -> service + editable config, hash-anchored
+./rig config diff         # git-status for configs; `pkg promote` lifts your tuning into a registry
+
 # lifecycle — run the vehicle
 ./rig doctor              # read-only preflight (unique names, one ROS distro, launchers present, ...)
 ./rig doctor --deep       # + certify each service's launcher against the contract (runs `config`)
@@ -106,8 +113,14 @@ services.yaml           # catalog: service routing key -> where its repo lives
 config/sensors/*.yaml   # one config per sensor (the single source of truth for that stack)
 config/infra/*.yaml     # one config per shared infra service (zenoh router, bag logger, …)
 config/autonomy/*.yaml  # one config per autonomy stack (planner, SLAM, perception, …)
-services/               # VENDORED launch surfaces (`rig vendor`; bake auto-vendors) — deployment mode;
-                        #   for dev, point services.yaml at sibling checkouts instead. Never source/submodules.
+services/               # VENDORED launch surfaces (`rig vendor`; bake auto-vendors; `rig add
+                        #   public/<svc>` vendors at the registry pin) — for dev, point services.yaml
+                        #   at sibling checkouts instead. Never source/submodules.
+config/.pins/           # GENERATED pristine base copies (registry installs) — what `config diff`,
+                        #   `pkg upgrade`, and `pkg promote` measure against. Commit them.
+config/.overlays/       # GENERATED bound-overlay payload copies (deployment stays self-contained)
+rig.lock                # GENERATED pins: registries@commit, packages+hashes, instance anchors,
+                        #   image digests (bake). Commit it; `pkg install --locked` reproduces.
 rig, rig_cli/           # the CLI (thin shim + package: manifest/catalog/dispatch/status/doctor/certify/
                         #   build/bake/init/rigify/runs/…)
 docs/                   # CHEATSHEET (1-page flow) · RUNBOOK (worked example) · DESIGN/ROADMAP · STATE · HOST_SETUP
