@@ -539,8 +539,12 @@ def bake(root: Path, manifest, catalog, descriptors, env, tag: str, *, registry:
         meta["parent"] = parent
     (staging / "metadata.yaml").write_text(yaml.safe_dump(meta, sort_keys=False))
     pinned = sum(1 for d in images.values() if d)
-    (staging / "rig.lock").write_text(yaml.safe_dump(
-        {"images": {ref: dig for ref, dig in images.items() if dig}}, sort_keys=False))
+    # ONE lockfile: merge bake's image digests into the deployment's package lock (if any), so the
+    # artifact carries registries+packages+instances+images under a single rig.lock.
+    from .lock import load_lock, save_lock
+    locked = load_lock(root)
+    locked["images"] = {ref: dig for ref, dig in images.items() if dig}
+    save_lock(staging, locked)
 
     # 6. bundle
     artifacts = root / "var" / "artifacts"
