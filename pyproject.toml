@@ -1,0 +1,27 @@
+# Packaging foundation (registry plan M1): one console entry point, version single-sourced from
+# rig_cli.__version__, sole runtime dependency PyYAML. This is the base every distribution channel
+# builds on — pipx/uv from git today, the arch=all deb and the Homebrew formula later (M7). The
+# ./rig shim stays alongside forever: dev checkouts and baked deployment artifacts run uninstalled.
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rig-cli"
+description = "vehicle-level sensor-stack orchestrator: a loop + a manifest that delegates to each service's own launcher"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = ["pyyaml"]
+dynamic = ["version"]
+
+[project.scripts]
+rig = "rig_cli.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/christomaszewski/rig"
+
+[tool.setuptools]
+packages = ["rig_cli"]
+
+[tool.setuptools.dynamic]
+version = { attr = "rig_cli.__version__" }
