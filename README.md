@@ -32,6 +32,18 @@ services evolve independently and new ones drop in by adding two files (a launch
   fleet-wide ROS env (`ROS_DOMAIN_ID`/`RMW_IMPLEMENTATION`),
   status/health aggregation, and lifecycle/cleanup (external-volume GC on final teardown).
 
+## Install
+
+- **Ubuntu/Debian** (incl. Jetson, works offline): download `rig_<v>_all.deb` from the
+  [releases](https://github.com/christomaszewski/rig/releases) → `sudo dpkg -i rig_<v>_all.deb`
+- **macOS**: `brew install christomaszewski/rig/rig`
+- **anywhere with pipx/uv**: `pipx install git+https://github.com/christomaszewski/rig`
+- **from a checkout**: `./rig …` works as-is; `rig setup --shell` puts it on PATH
+
+Then once per user: `rig setup` (creates `~/.rig` + the default public registry). Upgrades ride the
+package manager — rig never self-updates. Uninstall: `rig setup --purge` (user state), then the
+package manager (the package never touches `~/.rig`).
+
 ## Quick start
 
 ```bash

@@ -14,8 +14,11 @@
 > bindings (local beats overlays), `pkg promote` (overlay/profile/suite; write+validate, git
 > publish stays manual) and atomic suite install with rollback. E2E-verified live: fresh
 > `RIG_HOME` → setup → sync → `add public/zenoh-router` + `add sensor:zr30` → doctor 0 errors.
-> Remaining: M7 distribution (deb/brew/release automation) — in progress; `Sensor`→`Instance`
-> dataclass rename deferred (cosmetic, large mechanical diff). Tool at `/Users/ckt/ws/bringup`; run-from-source
+> **M7 distribution SHIPPED** (v0.1.46): release automation on tag (tests → wheel/sdist → arch=all
+> deb → GitHub Release; release v0.1.46 live with all three assets), Homebrew tap
+> **christomaszewski/homebrew-rig** (verified: `brew install christomaszewski/rig/rig`), tap
+> auto-bump wired behind a `TAP_PUSH_TOKEN` secret (unset = bump by hand). Deferred:
+> `Sensor`→`Instance` dataclass rename (cosmetic, large mechanical diff). Tool at `/Users/ckt/ws/bringup`; run-from-source
 > `./rig <verb>`.
 > **Remote: https://github.com/christomaszewski/rig (public)** — Actions runs the test suite on push/PR.
 > camera-service has a `rig certify` CI gate (launcher-contract) via PR #36 (+ the cam-up verbatim-pull-tag
