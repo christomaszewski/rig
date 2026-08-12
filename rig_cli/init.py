@@ -30,6 +30,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 from pathlib import Path
 
 import yaml
@@ -314,8 +315,34 @@ def _services_yaml(services: dict[str, str]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _git_init_deployment(target: Path) -> None:
+    """OQ-9's rollback affordance: a deployment is born a git repo, so operator-level rollback is
+    always `git`. Skipped when git is absent or the target already lives inside a worktree (never
+    nest); rig itself never commits again after this."""
+    if shutil.which("git") is None:
+        eprint("  git: not found — skipping repo init (version-control the deployment when you can)")
+        return
+
+    def run(*args):
+        return subprocess.run(["git", "-C", str(target), *args], capture_output=True, text=True)
+
+    if run("rev-parse", "--is-inside-work-tree").stdout.strip() == "true":
+        eprint("  git: already inside a worktree — not nesting a repo")
+        return
+    if run("init", "-q").returncode != 0:
+        eprint("  git: init failed — skipping")
+        return
+    run("add", "-A")
+    commit = run("commit", "-q", "-m", "rig init: deployment scaffold")
+    if commit.returncode != 0:  # fresh machine without git identity — commit with a local fallback
+        commit = run("-c", "user.name=rig", "-c", "user.email=rig@localhost",
+                     "commit", "-q", "-m", "rig init: deployment scaffold")
+    eprint("  git: repo initialized, scaffold committed" if commit.returncode == 0
+           else "  git: repo created; initial commit failed (configure git user.name/email)")
+
+
 def init(target: Path, *, vehicle_id: int = 1, infra: list[str] | None = None,
-         discover: Path | None = None) -> Path:
+         discover: Path | None = None, no_git: bool = False) -> Path:
     target = target.resolve()
     if (target / "vehicle.yaml").exists():
         raise RigError(f"init: {target} already has a vehicle.yaml (refusing to overwrite)")
@@ -345,6 +372,8 @@ def init(target: Path, *, vehicle_id: int = 1, infra: list[str] | None = None,
     (target / "services" / ".gitkeep").write_text("")
 
     eprint(f"initialized rig deployment '{target.name}' at {target}")
+    if not no_git:
+        _git_init_deployment(target)
     if discovered:
         eprint(f"  {discovered} service(s) catalogued from {discover} — vehicle.yaml holds a commented MENU;"
                f" uncomment the entries for hardware THIS vehicle carries, then `rig doctor`")

@@ -14,8 +14,8 @@ from pathlib import Path
 
 from . import (
     RigError, __version__, bake as bake_mod, build as build_mod, certify as certify_mod,
-    doctor as doctor_mod, dispatch, init as init_mod, registry as registry_mod,
-    registry_scaffold, resolve, rigify as rigify_mod,
+    doctor as doctor_mod, dispatch, init as init_mod, pkg as pkg_mod, registries as registries_mod,
+    registry as registry_mod, registry_scaffold, resolve, rigify as rigify_mod,
     runs as runs_mod, status as status_mod,
     vendor as vendor_mod,
 )
@@ -250,7 +250,7 @@ def cmd_init(args) -> int:
     if args.discover is not None:  # flag given; "" = no dir supplied -> scan the target's parent
         discover = Path(args.discover).resolve() if args.discover else Path(args.target).resolve().parent
     init_mod.init(Path(args.target), vehicle_id=args.vehicle_id, infra=args.infra or [],
-                  discover=discover)
+                  discover=discover, no_git=args.no_git)
     return 0
 
 
@@ -306,13 +306,30 @@ def cmd_artifact_list(args, root: Path) -> int:
 
 
 def cmd_registry(args) -> int:
-    """Registry authoring verbs — fully deployment-independent (a registry is its own tree)."""
+    """Registry verbs — authoring (init/validate/index, on a registry tree) and client management
+    (add/remove/list/sync, on ~/.rig). All deployment-independent."""
     if args.registry_cmd == "init":
         return registry_scaffold.registry_init(Path(args.directory), namespace=args.namespace)
+    if args.registry_cmd == "add":
+        registries_mod.add_entry(args.name, url=args.url, path=args.path, front=args.front)
+        return 0
+    if args.registry_cmd == "remove":
+        registries_mod.remove_entry(args.name)
+        return 0
+    if args.registry_cmd == "list":
+        return registries_mod.list_registries()
+    if args.registry_cmd == "sync":
+        return registries_mod.sync(args.names or None)
     root = Path(args.directory).resolve()
     if args.registry_cmd == "validate":
         return registry_mod.cli_validate(root)
     return registry_mod.cli_index(root)
+
+
+def cmd_pkg(args) -> int:
+    if args.pkg_cmd == "search":
+        return pkg_mod.search(args.query)
+    return pkg_mod.info(args.ref)
 
 
 def cmd_build(args, root: Path) -> int:
@@ -406,6 +423,7 @@ def build_parser() -> argparse.ArgumentParser:
         epilog="noun groups (canonical forms; the flat spellings above stay as permanent aliases):\n"
                "  rig config   show | render          rig run      new | end | list\n"
                "  rig registry init | add | remove | list | sync | validate | index\n"
+               "  rig pkg      search | info          rig setup    (first-run host setup)\n"
                "  rig service  rigify | vendor | certify\n"
                "  rig artifact bake | unbake | list   rig image    build | pull")
     parser.add_argument("--version", action="version", version=f"rig {__version__}")
@@ -485,6 +503,9 @@ def build_parser() -> argparse.ArgumentParser:
                      help="fully wire a shared-infra service (repeatable): a service-dir path, or a bare "
                           "name resolved from the workspace (e.g. --infra zenoh-router finds "
                           "../rig-infra/zenoh-router)")
+    ini.add_argument("--no-git", action="store_true", dest="no_git",
+                     help="skip the default `git init` + scaffold commit (a deployment is born a "
+                          "git repo so rollback is always git)")
     ini.add_argument("--discover", nargs="?", const="", default=None, metavar="DIR",
                      help="scan DIR (default: the target's parent) for service repos (rigging.yaml; one "
                           "level into collection repos like rig-infra): populate services.yaml + copy "
@@ -537,18 +558,53 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("artifact-list", help="list baked artifacts with provenance (canonical: artifact list)")
 
-    reg = sub.add_parser("registry", help="package registries (authoring: init/validate/index)")
+    reg = sub.add_parser("registry", help="package registries — client (add/remove/list/sync) and "
+                                          "authoring (init/validate/index)")
     regsub = reg.add_subparsers(dest="registry_cmd", required=True)
     ri = regsub.add_parser("init", help="scaffold a new empty registry in DIR — usable as a local-dir "
                                         "registry at once; CI wrappers (GitHub + GitLab) included")
     ri.add_argument("directory", help="directory to create (must not exist, or be empty)")
     ri.add_argument("--namespace", default=None,
                     help="the namespace consumers see, [a-z][a-z0-9-]* (default: from the dir name)")
+    ra = regsub.add_parser("add", help="subscribe this client to a registry (~/.rig/registries.yaml; "
+                                       "order = resolution priority)")
+    ra.add_argument("name", help="local alias AND the qualifier you type (public/…)")
+    ra.add_argument("url", nargs="?", default=None, help="git URL (managed clone + sync)")
+    ra.add_argument("--path", default=None, help="use an existing folder IN PLACE (local-dir type)")
+    ra.add_argument("--front", action="store_true",
+                    help="insert at HIGHEST priority (e.g. a dev checkout shadowing public)")
+    rr = regsub.add_parser("remove", help="unsubscribe a registry (cache is kept)")
+    rr.add_argument("name")
+    regsub.add_parser("list", help="configured registries with sync state")
+    rs = regsub.add_parser("sync", help="git: clone/ff-pull into the cache; local-dir: re-check. "
+                                        "All resolution is offline afterwards")
+    rs.add_argument("names", nargs="*", help="registry name(s); default: all")
     rv = regsub.add_parser("validate", help="validate a registry tree (every CI rule + index freshness) "
                                             "— what tools/validate and the CI wrappers call")
     rv.add_argument("directory", nargs="?", default=".", help="registry root (default: cwd)")
     rx = regsub.add_parser("index", help="regenerate index.json (refuses an invalid registry)")
     rx.add_argument("directory", nargs="?", default=".", help="registry root (default: cwd)")
+
+    pkgp = sub.add_parser("pkg", help="package operations across registries (search/info; "
+                                      "install/upgrade/lock/promote land with the lockfile)")
+    pkgsub = pkgp.add_subparsers(dest="pkg_cmd", required=True)
+    ps = pkgsub.add_parser("search", help="search names, sensor:<id>, or project:<tag> — results are "
+                                          "fully qualified, priority order")
+    ps.add_argument("query")
+    pi = pkgsub.add_parser("info", help="one package's manifest highlights + provenance")
+    pi.add_argument("ref", help="[registry/]name")
+
+    st = sub.add_parser("setup", help="first-run host setup: ~/.rig + the default public registry; "
+                                      "--shell wires a source checkout onto PATH; --purge removes "
+                                      "user state")
+    st.add_argument("--shell", action="store_true",
+                    help="append a delimited PATH block to your shell rc (skipped when `rig` is "
+                         "already on PATH — deb/brew/pipx installs need no wiring)")
+    st.add_argument("--no-default-registry", action="store_true", dest="no_default_registry",
+                    help="don't seed registries.yaml with the public registry")
+    st.add_argument("--purge", action="store_true",
+                    help="remove ~/.rig and the shell block (run BEFORE uninstalling the package)")
+    st.add_argument("--yes", action="store_true", help="confirm --purge non-interactively")
     return parser
 
 
@@ -572,8 +628,13 @@ def main(argv=None) -> int:
             return cmd_init(args)
         if args.cmd == "rigify":  # operates on a service repo — needs no deployment at all
             return cmd_rigify(args)
-        if args.cmd == "registry":  # operates on a registry tree — needs no deployment either
+        if args.cmd == "registry":  # operates on a registry tree / ~/.rig — needs no deployment
             return cmd_registry(args)
+        if args.cmd == "pkg":  # consults ~/.rig registries — needs no deployment (yet: install will)
+            return cmd_pkg(args)
+        if args.cmd == "setup":  # host/user environment — the one command whose object is the HOST
+            return registries_mod.setup(shell=args.shell, no_default_registry=args.no_default_registry,
+                                        purge=args.purge, yes=args.yes)
         root = (args.root or find_root()).resolve()
         if args.cmd == "add":  # edits the deployment files themselves — routes its own manifest load
             return cmd_add(args, root)
