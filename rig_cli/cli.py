@@ -15,7 +15,7 @@ from pathlib import Path
 from . import (
     RigError, __version__, bake as bake_mod, build as build_mod, certify as certify_mod,
     doctor as doctor_mod, dispatch, init as init_mod, install as install_mod,
-    overlay as overlay_mod, pkg as pkg_mod,
+    overlay as overlay_mod, pkg as pkg_mod, promote as promote_mod,
     registries as registries_mod,
     registry as registry_mod, registry_scaffold, resolve, rigify as rigify_mod,
     runs as runs_mod, status as status_mod,
@@ -441,7 +441,7 @@ def build_parser() -> argparse.ArgumentParser:
         epilog="noun groups (canonical forms; the flat spellings above stay as permanent aliases):\n"
                "  rig config   show | render          rig run      new | end | list\n"
                "  rig registry init | add | remove | list | sync | validate | index\n"
-               "  rig pkg      search | info | install | upgrade | lock\n"
+               "  rig pkg      search | info | install | upgrade | lock | promote\n"
                "  rig overlay  apply | remove | reorder | list     rig setup (first-run host setup)\n"
                "  rig service  rigify | vendor | certify\n"
                "  rig artifact bake | unbake | list   rig image    build | pull")
@@ -632,6 +632,32 @@ def build_parser() -> argparse.ArgumentParser:
     pu.add_argument("names", nargs="*", help="instance name(s); default: every profile instance")
     pkgsub.add_parser("lock", help="re-verify every instance anchor and rewrite rig.lock "
                                    "deterministically")
+    pp = pkgsub.add_parser("promote", help="lift local deltas into scaffolded packages in a "
+                                           "registry checkout (write + validate; publishing stays "
+                                           "plain git)")
+    pp.add_argument("names", nargs="*", help="instance name(s) — or --all for every dirty instance")
+    pp.add_argument("--to", required=True, metavar="REGISTRY", help="target registry (from "
+                    "`rig registry list`; local-dir written in place, git on a promote/ branch)")
+    pp.add_argument("--all", action="store_true", dest="all_dirty",
+                    help="promote every dirty instance (one overlay each)")
+    pp.add_argument("--name", default=None, help="package name (single instance only; default: "
+                    "<instance>[-<project>])")
+    pp.add_argument("--project", default=None, help="project tag (searchable axis; also the "
+                    "default name suffix)")
+    pp.add_argument("--kind", choices=["overlay", "profile"], default="overlay",
+                    help="overlay = the delta (default); profile = the full effective config "
+                         "(migration path for hand-authored instances)")
+    pp.add_argument("--suite", default=None, metavar="NAME",
+                    help="also emit a suite referencing the deployment's profiles + the new "
+                         "overlays in binding order")
+    pp.add_argument("--bump", action="store_true",
+                    help="the package exists in the target — publish the next patch version")
+    pp.add_argument("--target-instance", action="store_true", dest="target_instance",
+                    help="scope the overlay to THIS instance name instead of its service")
+    pp.add_argument("--match", action="append", default=[], metavar="ID",
+                    help="(--kind profile) hardware match identifier (repeatable)")
+    pp.add_argument("--requires", default=None, metavar="REF",
+                    help="(--kind profile) service requirement override (ns/service@X.Y.Z)")
 
     ov = sub.add_parser("overlay", help="overlay BINDINGS on instances (apply/remove/reorder/list) "
                                         "— authoring/publishing is `pkg promote`")
@@ -691,7 +717,7 @@ def main(argv=None) -> int:
         if args.cmd == "registry":  # operates on a registry tree / ~/.rig — needs no deployment
             return cmd_registry(args)
         if args.cmd == "pkg":
-            if args.pkg_cmd in ("install", "upgrade", "lock"):  # the pkg verbs that touch a deployment
+            if args.pkg_cmd in ("install", "upgrade", "lock", "promote"):  # deployment-touching verbs
                 root = (args.root or find_root()).resolve()
                 if not (root / "vehicle.yaml").exists():
                     raise RigError(f"pkg {args.pkg_cmd}: not in a rig deployment (no vehicle.yaml) — "
@@ -701,6 +727,12 @@ def main(argv=None) -> int:
                                                locked=args.locked)
                 if args.pkg_cmd == "upgrade":
                     return workingcopy_mod.upgrade(root, args.names)
+                if args.pkg_cmd == "promote":
+                    return promote_mod.promote(
+                        root, args.names, to=args.to, all_dirty=args.all_dirty, name=args.name,
+                        project=args.project, kind=args.kind, suite=args.suite, bump=args.bump,
+                        target_instance=args.target_instance, matches=args.match,
+                        requires=args.requires)
                 return workingcopy_mod.relock(root)
             return cmd_pkg(args)  # search/info consult ~/.rig only
         if args.cmd == "setup":  # host/user environment — the one command whose object is the HOST

@@ -265,15 +265,105 @@ def _materialize_instance(root: Path, *, svc: str, desc, instance: str | None, b
     return name
 
 
+def _snapshot(root: Path) -> dict:
+    """Everything a rollback needs: the three mutable texts + the set of files under the dirs
+    install creates into (services/, config/) — created files are exactly the after-minus-before."""
+    files = {p for d in ("services", "config") for p in (root / d).rglob("*") if p.is_file()}
+    return {"texts": {n: (root / n).read_text() if (root / n).exists() else None
+                      for n in ("vehicle.yaml", "services.yaml", "rig.lock")},
+            "files": files}
+
+
+def _rollback(root: Path, snap: dict) -> None:
+    import shutil
+    for rel, text in snap["texts"].items():
+        path = root / rel
+        if text is None:
+            path.unlink(missing_ok=True)
+        else:
+            path.write_text(text)
+    now = {p for d in ("services", "config") for p in (root / d).rglob("*") if p.is_file()}
+    for created in now - snap["files"]:
+        created.unlink(missing_ok=True)
+    for d in ("services", "config"):  # prune dirs the deletions emptied
+        for sub in sorted((root / d).rglob("*"), reverse=True):
+            if sub.is_dir() and not any(sub.iterdir()):
+                shutil.rmtree(sub, ignore_errors=True)
+
+
+def _install_suite(root: Path, entry: Entry, pkg: Package, *, locked: bool) -> int:
+    """Atomic (OQ-9, plan-validate-then-write approximated as all-or-rollback): resolve and install
+    every member; ANY failure restores vehicle.yaml/services.yaml/rig.lock and removes every file
+    this install created — the deployment is untouched or fully installed, never half."""
+    from .overlay import apply as overlay_apply
+    members = pkg.manifest.get("members") or {}
+    ref = qualified(entry, pkg)
+    eprint(f"rig install: suite {ref}")
+    snap = _snapshot(root)
+    before_names = {s.name for s in load_manifest(root).sensors}
+    try:
+        for member in members.get("services") or []:
+            m_entry, _, m_pkg = resolve_ref(str(member).split("@", 1)[0])
+            if m_pkg.version != str(member).rpartition("@")[-1]:
+                raise RigError(f"suite member {member}: registry carries {m_pkg.version} — the "
+                               f"exact pin is uninstallable at this sync state")
+            lock = load_lock(root)
+            desc = _install_service(root, m_entry, m_pkg, lock, locked=locked)
+            save_lock(root, lock)
+            examples = [root / "services" / m_pkg.name / e for e in desc.examples]
+            examples = [e for e in examples if e.is_file()]
+            if examples and not any(s.service == m_pkg.name for s in load_manifest(root).sensors):
+                lock = load_lock(root)
+                _materialize_instance(root, svc=m_pkg.name, desc=desc, instance=None,
+                                      base_src=examples[0], profile_ref=None, lock=lock,
+                                      enabled=True)
+                save_lock(root, lock)
+        for member in members.get("profiles") or []:
+            m_entry, m_reg, m_pkg = resolve_ref(str(member).split("@", 1)[0])
+            if m_pkg.version != str(member).rpartition("@")[-1]:
+                raise RigError(f"suite member {member}: registry carries {m_pkg.version} — the "
+                               f"exact pin is uninstallable at this sync state")
+            install(root, f"{m_entry.name}/{m_pkg.name}", locked=locked)
+        created = [s for s in load_manifest(root).sensors if s.name not in before_names]
+        for member in members.get("overlays") or []:
+            m_entry, _, m_pkg = resolve_ref(str(member).split("@", 1)[0])
+            if m_pkg.version != str(member).rpartition("@")[-1]:
+                raise RigError(f"suite member {member}: registry carries {m_pkg.version} — the "
+                               f"exact pin is uninstallable at this sync state")
+            targets = [s.name for s in created if _overlay_covers(m_pkg.manifest, s)]
+            if not targets:
+                raise RigError(f"suite member {member}: no instance created by this suite matches "
+                               f"its targets — the suite is inconsistent with its members")
+            for instance in targets:
+                overlay_apply(root, instance, f"{m_entry.name}/{m_pkg.name}")
+    except BaseException:
+        _rollback(root, snap)
+        eprint(f"rig install: suite {ref} FAILED — deployment rolled back untouched")
+        raise
+    eprint(f"rig install: suite {ref} complete")
+    return 0
+
+
+def _overlay_covers(manifest: dict, sensor) -> bool:
+    for target in manifest.get("targets") or []:
+        if not isinstance(target, dict):
+            continue
+        if target.get("service") and str(target["service"]).rpartition("/")[-1] == sensor.service:
+            return True
+        if target.get("instance") == sensor.name:
+            return True
+    return False
+
+
 def install(root: Path, spec: str, *, as_name: str | None = None, locked: bool = False) -> int:
-    """One spec: `sensor:<id>` | `[registry/]profile` | `[registry/]service`."""
+    """One spec: `sensor:<id>` | `[registry/]profile` | `[registry/]service` | `[registry/]suite`."""
     lock = load_lock(root)
     if spec.startswith("sensor:"):
         entry, reg, pkg = resolve_sensor(spec[len("sensor:"):])
     else:
         entry, reg, pkg = resolve_ref(spec)
     if pkg.kind == "suite":
-        raise RigError("install: suites land with overlays (next milestone)")
+        return _install_suite(root, entry, pkg, locked=locked)
     if pkg.kind == "overlay":
         raise RigError(f"install: '{pkg.name}' is an overlay — overlays are BOUND to an instance "
                        f"(rig overlay apply), not installed standalone")
