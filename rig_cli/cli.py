@@ -14,7 +14,8 @@ from pathlib import Path
 
 from . import (
     RigError, __version__, bake as bake_mod, build as build_mod, certify as certify_mod,
-    doctor as doctor_mod, dispatch, init as init_mod, install as install_mod, pkg as pkg_mod,
+    doctor as doctor_mod, dispatch, init as init_mod, install as install_mod,
+    overlay as overlay_mod, pkg as pkg_mod,
     registries as registries_mod,
     registry as registry_mod, registry_scaffold, resolve, rigify as rigify_mod,
     runs as runs_mod, status as status_mod,
@@ -440,7 +441,8 @@ def build_parser() -> argparse.ArgumentParser:
         epilog="noun groups (canonical forms; the flat spellings above stay as permanent aliases):\n"
                "  rig config   show | render          rig run      new | end | list\n"
                "  rig registry init | add | remove | list | sync | validate | index\n"
-               "  rig pkg      search | info          rig setup    (first-run host setup)\n"
+               "  rig pkg      search | info | install | upgrade | lock\n"
+               "  rig overlay  apply | remove | reorder | list     rig setup (first-run host setup)\n"
                "  rig service  rigify | vendor | certify\n"
                "  rig artifact bake | unbake | list   rig image    build | pull")
     parser.add_argument("--version", action="version", version=f"rig {__version__}")
@@ -631,6 +633,27 @@ def build_parser() -> argparse.ArgumentParser:
     pkgsub.add_parser("lock", help="re-verify every instance anchor and rewrite rig.lock "
                                    "deterministically")
 
+    ov = sub.add_parser("overlay", help="overlay BINDINGS on instances (apply/remove/reorder/list) "
+                                        "— authoring/publishing is `pkg promote`")
+    ovsub = ov.add_subparsers(dest="overlay_cmd", required=True)
+    oa = ovsub.add_parser("apply", help="bind an overlay to an instance (appends to the ordered "
+                                        "list; last wins, local still beats every overlay)")
+    oa.add_argument("instance")
+    oa.add_argument("ref", help="[registry/]overlay-name")
+    oa.add_argument("--clear-local", action="store_true", dest="clear_local",
+                    help="reset the working config to its pristine pin and drop row overrides — "
+                         "the promote round-trip's second half (identical render, tuning now "
+                         "versioned)")
+    orm = ovsub.add_parser("remove", help="unbind an overlay (payload copy dropped with the last "
+                                          "binding)")
+    orm.add_argument("instance")
+    orm.add_argument("ref")
+    oro = ovsub.add_parser("reorder", help="set the COMPLETE new binding order (order = merge order)")
+    oro.add_argument("instance")
+    oro.add_argument("refs", nargs="+")
+    ol = ovsub.add_parser("list", help="bindings per instance, in order")
+    ol.add_argument("instance", nargs="?", default=None)
+
     st = sub.add_parser("setup", help="first-run host setup: ~/.rig + the default public registry; "
                                       "--shell wires a source checkout onto PATH; --purge removes "
                                       "user state")
@@ -696,6 +719,14 @@ def main(argv=None) -> int:
             return cmd_artifact_list(args, root)
         if args.cmd == "config-diff":  # needs the RAW rows (working files), not the rendered output
             return workingcopy_mod.cmd_diff(args, root)
+        if args.cmd == "overlay":  # bindings edit vehicle.yaml rows + config/.overlays
+            if args.overlay_cmd == "apply":
+                return overlay_mod.apply(root, args.instance, args.ref, clear_local=args.clear_local)
+            if args.overlay_cmd == "remove":
+                return overlay_mod.remove(root, args.instance, args.ref)
+            if args.overlay_cmd == "reorder":
+                return overlay_mod.reorder(root, args.instance, args.refs)
+            return overlay_mod.list_bindings(root, args.instance)
         if args.cmd == "build":
             return cmd_build(args, root)
         if args.cmd == "bake":

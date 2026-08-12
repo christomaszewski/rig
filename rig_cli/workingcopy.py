@@ -24,7 +24,7 @@ from .install import qualified, registry_commit
 from .lock import load_lock, record_instance, record_package, record_registry, save_lock, sha256_file
 from .manifest import Manifest, Sensor, load_manifest
 from .pkg import _each_index, _entries_or_hint
-from .resolve import deep_merge, structural_diff
+from .resolve import deep_merge, overlay_payload_path, structural_diff
 
 PINS_DIR = "config/.pins"
 
@@ -55,15 +55,42 @@ def _dig(data: dict, path: str):
     return cur
 
 
+def expected_base(root: Path, sensor: Sensor) -> dict | None:
+    """Layers 1+2: the pinned base with the bound overlays merged in order — what `working ⊕
+    overrides` is measured against. None without a pin (hand-authored instance)."""
+    pin = pin_path(root, sensor.name)
+    if not pin.is_file():
+        return None
+    base = _strip_identity(load_yaml(pin))
+    for ref in sensor.overlays:
+        payload = overlay_payload_path(root, ref)
+        if payload.is_file():
+            base = deep_merge(base, _strip_identity(load_yaml(payload)))
+    return base
+
+
 def local_delta(root: Path, sensor: Sensor) -> tuple[dict, dict] | None:
-    """(file_delta, overrides) for an instance with a pinned base — or None when there's no pin
-    (hand-authored instance: nothing to diff against)."""
+    """(file_delta, overrides) — the FILE delta is measured against the PIN (the surface you
+    actually edit; the render pipeline re-applies it after overlays), so binding an overlay never
+    makes a pristine file look dirty. None without a pin (hand-authored instance)."""
     pin = pin_path(root, sensor.name)
     if not pin.is_file():
         return None
     base = _strip_identity(load_yaml(pin))
     working = _strip_identity(load_yaml(sensor.config))
     return structural_diff(base, working), dict(sensor.overrides or {})
+
+
+def promote_delta(root: Path, sensor: Sensor) -> dict | None:
+    """THE promote payload: D such that (pin ⊕ overlays) ⊕ D == the final render minus identity —
+    i.e. binding D last reproduces current behavior exactly (the round-trip law)."""
+    base = expected_base(root, sensor)
+    if base is None:
+        return None
+    state = local_delta(root, sensor)
+    file_delta, overrides = state if state else ({}, {})
+    final = deep_merge(deep_merge(base, file_delta), overrides)
+    return structural_diff(base, final)
 
 
 def cmd_diff(args, root: Path) -> int:
@@ -83,13 +110,16 @@ def cmd_diff(args, root: Path) -> int:
         if anchored and anchored != sha256_file(pin_path(root, sensor.name)):
             eprint(f"  WARNING {sensor.name}: config/.pins/{sensor.name}.yaml no longer matches "
                    f"rig.lock — the pin was edited by hand?")
+        masked = set(dict(_flat(delta))) | set(dict(_flat(overrides)))
         if not delta and not overrides:
             if args.names:
                 print(f"{sensor.name}: clean")
+                _print_overlay_attribution(root, sensor, masked)
             continue
         dirty += 1
         provenance = f" (base: {sensor.profile})" if sensor.profile else ""
         print(f"{sensor.name}: dirty{provenance}")
+        _print_overlay_attribution(root, sensor, masked)
         base = _strip_identity(load_yaml(pin_path(root, sensor.name)))
         for path, value in sorted(_flat(delta)):
             was = _dig(base, path)
@@ -104,6 +134,22 @@ def cmd_diff(args, root: Path) -> int:
     if not args.names:
         print(f"{dirty} instance(s) dirty" if dirty else "all pinned instances clean")
     return 0
+
+
+def _print_overlay_attribution(root: Path, sensor: Sensor, masked: set) -> None:
+    """Which overlay set each layer-2 key's final value (last binding wins) — plus a marker when a
+    local edit/override masks it (local beats overlays)."""
+    if not sensor.overlays:
+        return
+    attribution: dict[str, tuple] = {}
+    for ref in sensor.overlays:
+        payload = overlay_payload_path(root, ref)
+        if payload.is_file():
+            for path, value in _flat(_strip_identity(load_yaml(payload))):
+                attribution[path] = (value, ref)
+    for path, (value, ref) in sorted(attribution.items()):
+        note = "  (masked by local)" if path in masked else ""
+        print(f"  = {path}: {value!r}  [overlay {ref}]{note}")
 
 
 def _resolve_current(ref: str):

@@ -56,9 +56,53 @@ def structural_diff(base: dict, current: dict) -> dict:
     return patch
 
 
-def resolved_dict(sensor: Sensor) -> dict:
-    """The fully-merged config dict for a sensor (base + overrides + injected name/service). No file I/O —
-    used where a caller needs the resolved values (e.g. doctor reading a host port)."""
+def overlay_payload_path(root: Path, ref: str) -> Path:
+    """The deployment-local copy of a bound overlay's delta (`rig overlay apply` records it) —
+    self-containment: rendering never needs the registry cache."""
+    return root / "config" / ".overlays" / (ref.replace("/", "--").replace("@", "--") + ".yaml")
+
+
+def _layered_dict(sensor: Sensor, root: Path) -> dict:
+    """The four-layer merge, honoring LOCAL BEATS OVERLAYS: pinned base ⊕ overlays (bound order) ⊕
+    the working file's local delta ⊕ row overrides. Without a pinned base (hand-authored instance)
+    the working file itself is the base. Identity (name/service) is stamped last."""
+    working = load_yaml(sensor.config)
+    if sensor.overlays:
+        pin = root / "config" / ".pins" / f"{sensor.name}.yaml"
+        if pin.is_file():
+            base = load_yaml(pin)
+            local = structural_diff(
+                {k: v for k, v in base.items() if k not in ("name", "service")},
+                {k: v for k, v in working.items() if k not in ("name", "service")})
+        else:
+            base, local = working, {}
+        cfg = dict(base)
+        for ref in sensor.overlays:
+            payload_file = overlay_payload_path(root, ref)
+            if not payload_file.is_file():
+                from . import RigError
+                raise RigError(f"{sensor.name}: overlay '{ref}' payload copy missing "
+                               f"({payload_file.relative_to(root)}) — re-run `rig overlay apply`")
+            cfg = deep_merge(cfg, load_yaml(payload_file))
+        cfg = deep_merge(cfg, local)
+    else:
+        cfg = dict(working)
+    if sensor.overrides:
+        cfg = deep_merge(cfg, sensor.overrides)
+    cfg.setdefault("service", sensor.service)
+    cfg["name"] = sensor.name
+    return cfg
+
+
+def resolved_dict(sensor: Sensor, root: Path | None = None) -> dict:
+    """The fully-merged config dict for a sensor. Used where a caller needs the resolved values
+    (e.g. doctor reading a host port). `root` is needed once overlays are bound; without it, a
+    sensor with overlays raises rather than silently dropping layer 2."""
+    if sensor.overlays and root is None:
+        from . import RigError
+        raise RigError(f"{sensor.name}: overlays bound but no deployment root given (internal)")
+    if root is not None:
+        return _layered_dict(sensor, root)
     base = load_yaml(sensor.config)
     cfg = deep_merge(base, sensor.overrides) if sensor.overrides else dict(base)
     cfg.setdefault("service", sensor.service)
@@ -67,15 +111,12 @@ def resolved_dict(sensor: Sensor) -> dict:
 
 
 def materialize(sensor: Sensor, root: Path) -> Path:
-    """Return the config path to hand the launcher. If the base is already a complete *named* config with no
-    overrides, return it unchanged; otherwise render the merged result to ``var/rendered/<name>.yaml`` and
-    return that. Deterministic: same manifest + overrides -> identical render (so up and down agree)."""
-    base = load_yaml(sensor.config)
-    if not sensor.overrides and "name" in base:
+    """Return the config path to hand the launcher. If the base is already a complete *named* config
+    with no overrides and no overlays, return it unchanged; otherwise render the four-layer merge to
+    ``var/rendered/<name>.yaml``. Deterministic: same inputs -> identical render (up and down agree)."""
+    if not sensor.overrides and not sensor.overlays and "name" in load_yaml(sensor.config):
         return sensor.config
-    cfg = deep_merge(base, sensor.overrides) if sensor.overrides else dict(base)
-    cfg.setdefault("service", sensor.service)
-    cfg["name"] = sensor.name
+    cfg = _layered_dict(sensor, root)
     out_dir = root / "var" / "rendered"
     out_dir.mkdir(parents=True, exist_ok=True)
     out = out_dir / f"{sensor.name}.yaml"

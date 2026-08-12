@@ -84,6 +84,15 @@ def _registry_with(repo: pathlib.Path, rev: str) -> pathlib.Path:
         "config": {"payload": "config/payload.yaml"}}))
     (p / "config" / "payload.yaml").write_text(
         "# tuned default\nservice: camish\ncamera: {type: usb}\nusb: {width: 1280}\n")
+    for oname, payload in (("cam-tune", "usb: {width: 1600, fps: 25}\n"),
+                           ("cam-tune-b", "usb: {width: 2222}\n")):
+        o = reg / "overlays" / oname
+        (o / "config").mkdir(parents=True)
+        (o / "manifest.yaml").write_text(yaml.safe_dump({
+            "kind": "overlay", "name": oname, "version": "1.0.0",
+            "targets": [{"service": "camish"}], "project": "gideon",
+            "config": {"payload": "config/delta.yaml"}}))
+        (o / "config" / "delta.yaml").write_text(payload)
     _run("registry", "index", str(reg))
     return reg
 

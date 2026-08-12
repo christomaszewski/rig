@@ -29,6 +29,8 @@ class Sensor:
     tier: str = "sensor"  # "infra" (up first / down last) | "sensor" | "autonomy" (up last / down FIRST)
     profile: str | None = None  # registry provenance (`public/siyi-zr30@1.0.0`) — never part of identity;
     #                             the pinned payload hash lives in rig.lock's `instances` section
+    overlays: tuple = ()  # ORDERED overlay bindings (fully-qualified refs) — layer 2; payload copies
+    #                       live under config/.overlays/ so the deployment stays self-contained
 
 
 @dataclass(frozen=True)
@@ -91,6 +93,9 @@ def _parse_entries(entries, tier: str, root: Path, seen: dict[str, Path]) -> lis
         overrides = entry.get("overrides") or {}
         if not isinstance(overrides, dict):
             raise RigError(f"{tier} '{name}': `overrides` must be a mapping")
+        overlays = entry.get("overlays") or []
+        if not isinstance(overlays, list) or not all(isinstance(o, str) for o in overlays):
+            raise RigError(f"{tier} '{name}': `overlays` must be a list of overlay refs")
 
         if name in seen:  # THE top correctness check — unique across infra + sensors
             raise RigError(f"duplicate name '{name}' ({cfg_path} and {seen[name]}); names must be unique "
@@ -101,7 +106,8 @@ def _parse_entries(entries, tier: str, root: Path, seen: dict[str, Path]) -> lis
                           enabled=bool(entry.get("enabled", True)),
                           order=int(entry.get("order", (index + 1) * 10)),
                           overrides=overrides, tier=tier,
-                          profile=(str(entry["profile"]) if entry.get("profile") else None)))
+                          profile=(str(entry["profile"]) if entry.get("profile") else None),
+                          overlays=tuple(overlays)))
     return out
 
 
