@@ -1,0 +1,53 @@
+# Release automation (plan M7): push a tag `vX.Y.Z` -> tests, wheel+sdist, arch=all deb,
+# GitHub Release with all three as assets. The optional last step bumps the Homebrew tap
+# (christomaszewski/homebrew-rig) and only runs when the TAP_PUSH_TOKEN secret is configured —
+# without it the release still completes and the formula is bumped by hand.
+name: release
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install pyyaml build
+      - name: tag must match rig_cli.__version__
+        run: |
+          v=$(python3 -c "import rig_cli; print(rig_cli.__version__)")
+          [ "v$v" = "$GITHUB_REF_NAME" ] || { echo "tag $GITHUB_REF_NAME != v$v"; exit 1; }
+      - name: tests
+        run: |
+          rc=0
+          for t in tests/test_*.py; do python3 "$t" || rc=1; done
+          exit $rc
+      - name: wheel + sdist
+        run: python3 -m build
+      - name: deb
+        run: ./packaging/build-deb.sh
+      - name: github release
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: |
+          gh release create "$GITHUB_REF_NAME" --title "rig $GITHUB_REF_NAME" --generate-notes \
+            dist/*.whl dist/*.tar.gz build/deb/*.deb
+      - name: bump homebrew tap
+        if: ${{ secrets.TAP_PUSH_TOKEN != '' }}
+        env:
+          TAP_TOKEN: ${{ secrets.TAP_PUSH_TOKEN }}
+        run: |
+          set -e
+          v=${GITHUB_REF_NAME#v}
+          url="https://github.com/christomaszewski/rig/archive/refs/tags/${GITHUB_REF_NAME}.tar.gz"
+          sha=$(curl -sL "$url" | sha256sum | cut -d' ' -f1)
+          git clone -q "https://x-access-token:${TAP_TOKEN}@github.com/christomaszewski/homebrew-rig" tap
+          cd tap
+          sed -i -E "s|url \".*\"|url \"$url\"|" Formula/rig.rb
+          sed -i -E "0,/sha256 \"[0-9a-f]{64}\"/s//sha256 \"$sha\"/" Formula/rig.rb
+          git -c user.name=rig-release -c user.email=rig@localhost commit -am "rig $v"
+          git push -q
