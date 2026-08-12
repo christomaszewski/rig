@@ -13,6 +13,8 @@ permissions:
 jobs:
   release:
     runs-on: ubuntu-latest
+    env:
+      TAP_TOKEN: ${{ secrets.TAP_PUSH_TOKEN }}  # secrets aren't valid in step `if` — env is
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -37,9 +39,7 @@ jobs:
           gh release create "$GITHUB_REF_NAME" --title "rig $GITHUB_REF_NAME" --generate-notes \
             dist/*.whl dist/*.tar.gz build/deb/*.deb
       - name: bump homebrew tap
-        if: ${{ secrets.TAP_PUSH_TOKEN != '' }}
-        env:
-          TAP_TOKEN: ${{ secrets.TAP_PUSH_TOKEN }}
+        if: ${{ env.TAP_TOKEN != '' }}
         run: |
           set -e
           v=${GITHUB_REF_NAME#v}
