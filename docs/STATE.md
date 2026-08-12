@@ -1,10 +1,16 @@
 # rig — project state & handoff (resume here)
 
 > Snapshot for picking the project up cold in a new session. Read this first, then `CHEATSHEET.md` /
-> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.1.35**, branch
-> **`main`** (the deprecated bundled `templates/` is deleted — rig-infra owns those services; its 13
-> bag-logger tests moved with it), 121 tests passing
-> (`for t in tests/test_*.py; do python3 $t; done`). Tool at `/Users/ckt/ws/bringup`; run-from-source
+> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.1.37**, branch
+> **`main`**, 139 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> **In progress: the package-registry layer** (plan: `rig-registry-plan.md`, untracked by request —
+> all design decisions settled 2026-08-12). Landed so far: templates/ deleted (v0.1.35, rig-infra owns
+> those services), pyproject packaging foundation (v0.1.36), registry core + `rig registry
+> init|validate|index` (v0.1.37), and the live seed registry
+> **https://github.com/christomaszewski/rig-registry-public** (namespace `public`: rig-infra services
+> at real pins + camera-service + siyi-zr30/mapir-survey3w profiles). Next: M2 registry management
+> (`~/.rig` cache/sync, `rig setup`, CLI noun regrouping with aliases), then lockfile → install →
+> overlays/promotion (M3–M5), docs sweep (M6), deb/brew distribution (M7). Tool at `/Users/ckt/ws/bringup`; run-from-source
 > `./rig <verb>`.
 > **Remote: https://github.com/christomaszewski/rig (public)** — Actions runs the test suite on push/PR.
 > camera-service has a `rig certify` CI gate (launcher-contract) via PR #36 (+ the cam-up verbatim-pull-tag
