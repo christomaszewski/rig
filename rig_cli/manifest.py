@@ -27,6 +27,8 @@ class Sensor:
     order: int
     overrides: dict = field(default_factory=dict)  # per-instance patch deep-merged onto the config
     tier: str = "sensor"  # "infra" (up first / down last) | "sensor" | "autonomy" (up last / down FIRST)
+    profile: str | None = None  # registry provenance (`public/siyi-zr30@1.0.0`) — never part of identity;
+    #                             the pinned payload hash lives in rig.lock's `instances` section
 
 
 @dataclass(frozen=True)
@@ -98,7 +100,8 @@ def _parse_entries(entries, tier: str, root: Path, seen: dict[str, Path]) -> lis
         out.append(Sensor(name=name, service=service, config=cfg_path,
                           enabled=bool(entry.get("enabled", True)),
                           order=int(entry.get("order", (index + 1) * 10)),
-                          overrides=overrides, tier=tier))
+                          overrides=overrides, tier=tier,
+                          profile=(str(entry["profile"]) if entry.get("profile") else None)))
     return out
 
 

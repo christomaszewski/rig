@@ -14,7 +14,8 @@ from pathlib import Path
 
 from . import (
     RigError, __version__, bake as bake_mod, build as build_mod, certify as certify_mod,
-    doctor as doctor_mod, dispatch, init as init_mod, pkg as pkg_mod, registries as registries_mod,
+    doctor as doctor_mod, dispatch, init as init_mod, install as install_mod, pkg as pkg_mod,
+    registries as registries_mod,
     registry as registry_mod, registry_scaffold, resolve, rigify as rigify_mod,
     runs as runs_mod, status as status_mod,
     vendor as vendor_mod,
@@ -255,7 +256,25 @@ def cmd_init(args) -> int:
 
 
 def cmd_add(args, root: Path) -> int:
-    return init_mod.add_service(root, args.service, tier=args.tier)
+    """`rig add` — the single porcelain for "put this in my deployment": local path | bare workspace
+    name (the original forms) | registry ref (`public/zenoh-router`) | `sensor:<id>`. Local always
+    wins for bare names; the registry is the fallback."""
+    token = args.service
+    if token.startswith("sensor:"):
+        return install_mod.install(root, token, as_name=args.as_name)
+    if "/" in token and not Path(token).expanduser().exists():
+        ns = token.split("/", 1)[0]
+        if any(e.name == ns for e in registries_mod.load_entries()):
+            return install_mod.install(root, token, as_name=args.as_name)
+    try:
+        return init_mod.add_service(root, token, tier=args.tier)
+    except RigError as exc:
+        if "unknown service" not in str(exc) or "/" in token:
+            raise
+        try:  # bare name, not in the workspace — fall back to unqualified registry resolution
+            return install_mod.install(root, token, as_name=args.as_name)
+        except RigError as reg_exc:
+            raise RigError(f"{exc}\n  (registry fallback: {reg_exc})")
 
 
 def cmd_rigify(args) -> int:
@@ -523,13 +542,16 @@ def build_parser() -> argparse.ArgumentParser:
     ftc = sub.add_parser("fetch", help="materialize example configs for hand-authored manifest rows "
                                        "(`pull` fetches images; `fetch` fetches configs)")
 
-    ad = sub.add_parser("add", help="add a service to THIS deployment (route + config + manifest row)")
-    ad.add_argument("service", metavar="NAME|PATH",
-                    help="service dir path, or a bare name resolved from the workspace (like init --infra); "
-                         "infra tier is wired ENABLED, sensor/autonomy get a commented menu row")
+    ad = sub.add_parser("add", help="add a service to THIS deployment — local path, workspace name, "
+                                    "registry ref, or sensor:<id>")
+    ad.add_argument("service", metavar="NAME|PATH|REF|sensor:ID",
+                    help="service dir path or bare workspace name (like init --infra; infra wired "
+                         "ENABLED, sensor/autonomy a commented menu row) — or a registry ref "
+                         "(public/zenoh-router) / sensor:<id>, which install from the registries")
     ad.add_argument("--tier", choices=["infra", "sensor", "autonomy"], default=None,
-                    help="override the service's declared tier for THIS deployment (placement + the "
-                         "enabled-vs-menu behavior follow the override)")
+                    help="override the service's declared tier for THIS deployment (local forms only)")
+    ad.add_argument("--as", dest="as_name", default=None, metavar="NAME",
+                    help="instance name for registry installs (ROS-safe; default from the package)")
 
     ven = sub.add_parser("vendor", help="copy a service's launch surface into services/<service>/")
     ven.add_argument("service", help="service name (key in services.yaml / its rigging.yaml)")
@@ -593,6 +615,14 @@ def build_parser() -> argparse.ArgumentParser:
     ps.add_argument("query")
     pi = pkgsub.add_parser("info", help="one package's manifest highlights + provenance")
     pi.add_argument("ref", help="[registry/]name")
+    pin = pkgsub.add_parser("install", help="install a service/profile (or sensor:<id>) into THIS "
+                                            "deployment: fetch @ pin, vendor, materialize the working "
+                                            "config, lock")
+    pin.add_argument("spec", help="[registry/]name[@version] | sensor:<id>")
+    pin.add_argument("--as", dest="as_name", default=None, metavar="NAME",
+                     help="instance name (ROS-safe; default: from the package name)")
+    pin.add_argument("--locked", action="store_true",
+                     help="reproduce rig.lock exactly (same pins, same payload hashes)")
 
     st = sub.add_parser("setup", help="first-run host setup: ~/.rig + the default public registry; "
                                       "--shell wires a source checkout onto PATH; --purge removes "
@@ -630,8 +660,14 @@ def main(argv=None) -> int:
             return cmd_rigify(args)
         if args.cmd == "registry":  # operates on a registry tree / ~/.rig — needs no deployment
             return cmd_registry(args)
-        if args.cmd == "pkg":  # consults ~/.rig registries — needs no deployment (yet: install will)
-            return cmd_pkg(args)
+        if args.cmd == "pkg":
+            if args.pkg_cmd == "install":  # the one pkg verb that mutates a deployment
+                root = (args.root or find_root()).resolve()
+                if not (root / "vehicle.yaml").exists():
+                    raise RigError("pkg install: not in a rig deployment (no vehicle.yaml) — "
+                                   "`rig init` creates one")
+                return install_mod.install(root, args.spec, as_name=args.as_name, locked=args.locked)
+            return cmd_pkg(args)  # search/info consult ~/.rig only
         if args.cmd == "setup":  # host/user environment — the one command whose object is the HOST
             return registries_mod.setup(shell=args.shell, no_default_registry=args.no_default_registry,
                                         purge=args.purge, yes=args.yes)
