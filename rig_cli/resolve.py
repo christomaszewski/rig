@@ -33,6 +33,29 @@ def deep_merge(base: dict, patch: dict) -> dict:
     return out
 
 
+def structural_diff(base: dict, current: dict) -> dict:
+    """The inverse of deep_merge: the patch D such that ``deep_merge(base, D) == current``. Maps
+    recurse; scalar/list differences become replacements; a key present in base but absent in
+    current becomes a ``None`` delete marker (which deep_merge already honors). This is THE
+    working-copy primitive: `config diff`, `pkg upgrade`, and `pkg promote` are all built on it.
+    Caveat (documented): a legitimate bare ``null`` in `current` is indistinguishable from a
+    deletion — rig configs don't use bare nulls."""
+    patch: dict = {}
+    for key, b in base.items():
+        if key not in current:
+            patch[key] = None
+        elif isinstance(b, dict) and isinstance(current[key], dict):
+            sub = structural_diff(b, current[key])
+            if sub:
+                patch[key] = sub
+        elif current[key] != b:
+            patch[key] = current[key]
+    for key, c in current.items():
+        if key not in base:
+            patch[key] = c
+    return patch
+
+
 def resolved_dict(sensor: Sensor) -> dict:
     """The fully-merged config dict for a sensor (base + overrides + injected name/service). No file I/O —
     used where a caller needs the resolved values (e.g. doctor reading a host port)."""

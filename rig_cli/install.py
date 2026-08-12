@@ -250,6 +250,9 @@ def _materialize_instance(root: Path, *, svc: str, desc, instance: str | None, b
                            f"neutralize — use --as {survived}, or author the config by hand")
     else:
         dest.write_bytes(base_src.read_bytes())  # VERBATIM — comments survive; this is the working copy
+    pin = root / "config" / ".pins" / f"{name}.yaml"
+    pin.parent.mkdir(parents=True, exist_ok=True)
+    pin.write_bytes(dest.read_bytes())  # the PRISTINE base copy — config diff/pkg upgrade anchor on it
     base_sha = sha256_file(dest)
     order = _next_order(root, tier)
     profile_part = f"profile: {profile_ref}, " if profile_ref else ""

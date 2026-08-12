@@ -68,9 +68,10 @@ def test_group_help_synthesized():
     assert rc == 1 and "unknown verb" in err and "build" in err
 
 
-def test_config_diff_stub_errors_pointedly():
-    rc, _, err = _run("config", "diff")
-    assert rc == 1 and "working-copy" in err
+def test_config_diff_translates_and_runs():
+    root = _deployment()
+    rc, out, _ = _run("--root", str(root), "config", "diff")
+    assert rc == 0 and "clean" in out  # no pinned instances yet -> trivially clean
 
 
 def test_grouped_commands_run_end_to_end():

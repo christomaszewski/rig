@@ -18,7 +18,7 @@ from . import (
     registries as registries_mod,
     registry as registry_mod, registry_scaffold, resolve, rigify as rigify_mod,
     runs as runs_mod, status as status_mod,
-    vendor as vendor_mod,
+    vendor as vendor_mod, workingcopy as workingcopy_mod,
 )
 from .catalog import ServiceEntry, load_catalog
 from .common import eprint
@@ -391,16 +391,14 @@ _HANDLERS = {
 # (group, verb) -> the flat command it runs. Groups that are real subparsers (registry, and pkg
 # when it lands) are NOT here — argparse owns them directly.
 _GROUP_VERBS: dict[str, dict[str, str]] = {
-    "config": {"show": "config", "render": "config-render"},
+    "config": {"show": "config", "render": "config-render", "diff": "config-diff"},
     "run": {"new": "new-run", "end": "end-run", "list": "runs"},
     "artifact": {"bake": "bake", "unbake": "unbake", "list": "artifact-list"},
     "image": {"build": "build", "pull": "pull"},
     "service": {"rigify": "rigify", "vendor": "vendor", "certify": "certify"},
 }
 # Not-yet-implemented grouped verbs get a pointed error instead of an "unknown sensor" mystery.
-_GROUP_PENDING: dict[tuple[str, str], str] = {
-    ("config", "diff"): "config diff arrives with the registry working-copy pipeline",
-}
+_GROUP_PENDING: dict[tuple[str, str], str] = {}
 
 
 def translate_argv(argv: list[str]) -> list[str] | None:
@@ -494,6 +492,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     add("config-render", "run the config pipeline; print each instance's effective config path "
                          "(canonical: config render)")
+
+    add("config-diff", "which instances are dirty vs their pinned registry base, per key "
+                       "(canonical: config diff)")
 
     add("pull", "pre-pull each stack's images (no container changes)").add_argument(
         "--dry-run", action="store_true"
@@ -623,6 +624,12 @@ def build_parser() -> argparse.ArgumentParser:
                      help="instance name (ROS-safe; default: from the package name)")
     pin.add_argument("--locked", action="store_true",
                      help="reproduce rig.lock exactly (same pins, same payload hashes)")
+    pu = pkgsub.add_parser("upgrade", help="re-pin profile instances to the registries' current "
+                                           "versions — three-way merge, local edits win, conflicts "
+                                           "surfaced")
+    pu.add_argument("names", nargs="*", help="instance name(s); default: every profile instance")
+    pkgsub.add_parser("lock", help="re-verify every instance anchor and rewrite rig.lock "
+                                   "deterministically")
 
     st = sub.add_parser("setup", help="first-run host setup: ~/.rig + the default public registry; "
                                       "--shell wires a source checkout onto PATH; --purge removes "
@@ -661,12 +668,17 @@ def main(argv=None) -> int:
         if args.cmd == "registry":  # operates on a registry tree / ~/.rig — needs no deployment
             return cmd_registry(args)
         if args.cmd == "pkg":
-            if args.pkg_cmd == "install":  # the one pkg verb that mutates a deployment
+            if args.pkg_cmd in ("install", "upgrade", "lock"):  # the pkg verbs that touch a deployment
                 root = (args.root or find_root()).resolve()
                 if not (root / "vehicle.yaml").exists():
-                    raise RigError("pkg install: not in a rig deployment (no vehicle.yaml) — "
-                                   "`rig init` creates one")
-                return install_mod.install(root, args.spec, as_name=args.as_name, locked=args.locked)
+                    raise RigError(f"pkg {args.pkg_cmd}: not in a rig deployment (no vehicle.yaml) — "
+                                   f"`rig init` creates one")
+                if args.pkg_cmd == "install":
+                    return install_mod.install(root, args.spec, as_name=args.as_name,
+                                               locked=args.locked)
+                if args.pkg_cmd == "upgrade":
+                    return workingcopy_mod.upgrade(root, args.names)
+                return workingcopy_mod.relock(root)
             return cmd_pkg(args)  # search/info consult ~/.rig only
         if args.cmd == "setup":  # host/user environment — the one command whose object is the HOST
             return registries_mod.setup(shell=args.shell, no_default_registry=args.no_default_registry,
@@ -682,6 +694,8 @@ def main(argv=None) -> int:
             return cmd_unbake(args, root)
         if args.cmd == "artifact-list":  # reads var/artifacts, not the manifest
             return cmd_artifact_list(args, root)
+        if args.cmd == "config-diff":  # needs the RAW rows (working files), not the rendered output
+            return workingcopy_mod.cmd_diff(args, root)
         if args.cmd == "build":
             return cmd_build(args, root)
         if args.cmd == "bake":
