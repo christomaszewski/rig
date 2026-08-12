@@ -7,7 +7,8 @@ from pathlib import Path
 
 from . import (
     RigError, __version__, bake as bake_mod, build as build_mod, certify as certify_mod,
-    doctor as doctor_mod, dispatch, init as init_mod, resolve, rigify as rigify_mod,
+    doctor as doctor_mod, dispatch, init as init_mod, registry as registry_mod,
+    registry_scaffold, resolve, rigify as rigify_mod,
     runs as runs_mod, status as status_mod,
     vendor as vendor_mod,
 )
@@ -258,6 +259,16 @@ def cmd_fetch(args, root: Path) -> int:
     return init_mod.fetch(root)
 
 
+def cmd_registry(args) -> int:
+    """Registry authoring verbs — fully deployment-independent (a registry is its own tree)."""
+    if args.registry_cmd == "init":
+        return registry_scaffold.registry_init(Path(args.directory), namespace=args.namespace)
+    root = Path(args.directory).resolve()
+    if args.registry_cmd == "validate":
+        return registry_mod.cli_validate(root)
+    return registry_mod.cli_index(root)
+
+
 def cmd_build(args, root: Path) -> int:
     manifest, catalog, descriptors = _load(root)
     return build_mod.build(manifest, descriptors, registry=args.registry, tag=args.tag,
@@ -417,6 +428,19 @@ def build_parser() -> argparse.ArgumentParser:
     ub = sub.add_parser("unbake", help="extract a baked artifact to an editable tree")
     ub.add_argument("artifact", help="path to the .tar.gz artifact")
     ub.add_argument("--into", default=None, help="destination dir (default: var/unbaked/<tag>)")
+
+    reg = sub.add_parser("registry", help="package registries (authoring: init/validate/index)")
+    regsub = reg.add_subparsers(dest="registry_cmd", required=True)
+    ri = regsub.add_parser("init", help="scaffold a new empty registry in DIR — usable as a local-dir "
+                                        "registry at once; CI wrappers (GitHub + GitLab) included")
+    ri.add_argument("directory", help="directory to create (must not exist, or be empty)")
+    ri.add_argument("--namespace", default=None,
+                    help="the namespace consumers see, [a-z][a-z0-9-]* (default: from the dir name)")
+    rv = regsub.add_parser("validate", help="validate a registry tree (every CI rule + index freshness) "
+                                            "— what tools/validate and the CI wrappers call")
+    rv.add_argument("directory", nargs="?", default=".", help="registry root (default: cwd)")
+    rx = regsub.add_parser("index", help="regenerate index.json (refuses an invalid registry)")
+    rx.add_argument("directory", nargs="?", default=".", help="registry root (default: cwd)")
     return parser
 
 
@@ -432,6 +456,8 @@ def main(argv=None) -> int:
             return cmd_init(args)
         if args.cmd == "rigify":  # operates on a service repo — needs no deployment at all
             return cmd_rigify(args)
+        if args.cmd == "registry":  # operates on a registry tree — needs no deployment either
+            return cmd_registry(args)
         root = (args.root or find_root()).resolve()
         if args.cmd == "add":  # edits the deployment files themselves — routes its own manifest load
             return cmd_add(args, root)
