@@ -73,8 +73,8 @@ class Descriptor:
 def load_descriptor(service: str, repo: Path) -> Descriptor:
     path = find_descriptor(repo)
     if path is None:
-        # The bundled templates/ are a deprecation stub (moved to rig-infra); once deleted, an old
-        # services.yaml path must fail with the pointer, not a mystery.
+        # The bundled templates/ moved to rig-infra and were deleted (v0.1.35); an old services.yaml
+        # path under them must fail with the pointer, not a mystery.
         bundled = Path(__file__).resolve().parent.parent / "templates"
         try:
             in_bundled = repo.resolve().is_relative_to(bundled)

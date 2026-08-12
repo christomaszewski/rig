@@ -37,13 +37,29 @@ def test_init_seeds_vehicle_name_and_id_from_args():
     assert "vehicle: skiff1" in body and "vehicle_id: 7" in body
 
 
-def test_init_infra_wires_template_and_doctor_is_green():
+def _rig_infra_ws() -> pathlib.Path:
+    """A workspace with a rig-infra-style checkout beside the target: zenoh-router + both bag loggers
+    (which collide on instance name `bag_logger`, like the real ones)."""
+    ws = pathlib.Path(tempfile.mkdtemp())
+    coll = ws / "rig-infra"
+    for svc, inst in (("zenoh-router", "zenoh-router"), ("ros2-bag-logger", "bag_logger"),
+                      ("ros1-bag-logger", "bag_logger")):
+        d = coll / svc
+        (d / "config").mkdir(parents=True)
+        (d / "rigging.yaml").write_text(f"service: {svc}\nlauncher: {svc}-up\ntier: infra\n")
+        (d / f"{svc}-up").write_text("#!/bin/sh\n")
+        (d / f"{svc}-up").chmod(0o755)
+        (d / "config" / f"{svc}.example.yaml").write_text(f"service: {svc}\nname: {inst}\n")
+    return ws
+
+
+def test_init_infra_wires_workspace_service_and_doctor_is_green():
     from rig_cli import doctor
     from rig_cli.catalog import load_catalog
     from rig_cli.descriptor import load_descriptor
     from rig_cli.manifest import load_manifest
 
-    target = pathlib.Path(tempfile.mkdtemp()) / "veh"
+    target = _rig_infra_ws() / "veh"
     init(target, infra=["zenoh-router", "ros2-bag-logger"])
     body = (target / "vehicle.yaml").read_text()
     assert "- { name: zenoh-router, service: zenoh-router, config: config/infra/zenoh-router.yaml, enabled: true, order: 0 }" in body
@@ -57,14 +73,14 @@ def test_init_infra_wires_template_and_doctor_is_green():
     assert not [i for i in issues if i.level == "ERROR"], [i.message for i in issues]
 
 
-def test_init_infra_rejects_unknown_template_and_collisions():
-    target = pathlib.Path(tempfile.mkdtemp()) / "veh"
+def test_init_infra_rejects_unknown_service_and_collisions():
+    target = _rig_infra_ws() / "veh"
     try:
         init(target, infra=["nope"])
-        raise AssertionError("expected RigError for unknown template")
+        raise AssertionError("expected RigError for unknown service")
     except RigError as exc:
-        assert "zenoh-router" in str(exc)  # lists what IS available
-    target2 = pathlib.Path(tempfile.mkdtemp()) / "veh"
+        assert "rig-infra" in str(exc)  # points at the checkout to clone
+    target2 = _rig_infra_ws() / "veh"
     try:  # both bag loggers claim instance `bag_logger` (and mix distros) — refuse early
         init(target2, infra=["ros2-bag-logger", "ros1-bag-logger"])
         raise AssertionError("expected RigError for instance collision")
@@ -74,8 +90,8 @@ def test_init_infra_rejects_unknown_template_and_collisions():
 
 def test_init_failed_run_leaves_nothing_and_retry_succeeds():
     # Pre-flight validation: a bad --infra list must write NOTHING, so the corrected retry just works
-    # (previously the first template's config leaked out and wedged the retry on a bogus collision).
-    target = pathlib.Path(tempfile.mkdtemp()) / "veh"
+    # (previously the first service's config leaked out and wedged the retry on a bogus collision).
+    target = _rig_infra_ws() / "veh"
     for bad in (["ros2-bag-logger", "ros1-bag-logger"], ["zenoh-router", "zenoh-rooter"]):
         try:
             init(target, infra=bad)
@@ -89,11 +105,11 @@ def test_init_failed_run_leaves_nothing_and_retry_succeeds():
 
 
 def test_init_infra_token_is_normalized():
-    target = pathlib.Path(tempfile.mkdtemp()) / "veh"
+    target = _rig_infra_ws() / "veh"
     init(target, infra=["zenoh-router/"])  # tab-completion slash
     body = (target / "vehicle.yaml").read_text()
     assert "service: zenoh-router," in body and "order: 0 }" in body  # key clean, router still pinned
-    assert "zenoh-router/" not in (target / "services.yaml").read_text().replace("templates/zenoh-router", "")
+    assert "zenoh-router/" not in (target / "services.yaml").read_text().replace("rig-infra/zenoh-router", "")
 
 
 def test_init_yaml_hostile_dirname_is_quoted():
@@ -293,14 +309,15 @@ def test_init_discover_conflicting_checkouts_still_warn():
     assert (ws / "veh" / "services.yaml").read_text().count("zenoh-router:") == 1
 
 
-def test_missing_bundled_template_errors_with_rig_infra_pointer():
-    # The templates/ stub is deleted a version after v0.1.28 — an old services.yaml path must then fail
-    # WITH the pointer, not a generic "no rigging.yaml" mystery.
+def test_stale_bundled_templates_path_errors_with_rig_infra_pointer():
+    # templates/ was deleted in v0.1.35 — an old services.yaml path under it must fail WITH the
+    # rig-infra pointer, not a generic "no rigging.yaml" mystery.
+    import rig_cli
     from rig_cli.descriptor import load_descriptor
-    from rig_cli.init import _tool_templates
 
+    bundled = pathlib.Path(rig_cli.__file__).resolve().parent.parent / "templates"
     try:
-        load_descriptor("zenoh-router", _tool_templates() / "no-such-service")
+        load_descriptor("zenoh-router", bundled / "no-such-service")
         raise AssertionError("expected RigError")
     except RigError as exc:
         assert "rig-infra" in str(exc) and "../rig-infra/no-such-service" in str(exc)

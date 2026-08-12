@@ -8,7 +8,7 @@
 # you repoint here (`rig bake` does this automatically; runtime images are pulled from a registry). For
 # LOCAL DEVELOPMENT, point at sibling checkouts, as below. See docs/HOST_SETUP.md.
 services:
-  zenoh-router:   { path: templates/zenoh-router }   # shared infra (ships with rig)
+  zenoh-router:   { path: ../rig-infra/zenoh-router }  # shared infra (rig-infra checkout beside this repo)
   camera-service: { path: ../camera-service }
   novatel:     { path: ../novatel }
   sbg:         { path: ../sbg_driver }

@@ -108,7 +108,6 @@ config/infra/*.yaml     # one config per shared infra service (zenoh router, bag
 config/autonomy/*.yaml  # one config per autonomy stack (planner, SLAM, perception, …)
 services/               # VENDORED launch surfaces (`rig vendor`; bake auto-vendors) — deployment mode;
                         #   for dev, point services.yaml at sibling checkouts instead. Never source/submodules.
-templates/              # DEPRECATED stub — the infra services moved to the rig-infra repo (see below)
 rig, rig_cli/           # the CLI (thin shim + package: manifest/catalog/dispatch/status/doctor/certify/
                         #   build/bake/init/rigify/runs/…)
 docs/                   # CHEATSHEET (1-page flow) · RUNBOOK (worked example) · DESIGN/ROADMAP · STATE · HOST_SETUP
@@ -158,8 +157,7 @@ sensor/autonomy services get a commented menu row to uncomment):
   declaration, and certify enforces the composes pull the same tag.
 
 Each is just a launcher + compose around a stock tool — the same contract any service meets; rig-infra's
-CI runs `rig certify` against every one. rig's bundled `templates/` copy is a deprecation stub for one
-more version.
+CI runs `rig certify` against every one.
 
 ## The contract: `rigging.yaml`
 

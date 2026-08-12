@@ -9,8 +9,7 @@ Two optional accelerators, with a principled asymmetry between them:
 shared infra is decidable: a zenoh-rmw vehicle wants its router, period. A value containing ``/`` is a
 service-dir path; a bare name scans the workspace (the target's parent's siblings, descending ONE level
 into repos whose subdirs carry a ``rigging.yaml`` — so ``zenoh-router`` finds
-``../rig-infra/zenoh-router``), falling back to rig's bundled ``templates/`` (deprecated — moving to
-https://github.com/christomaszewski/rig-infra) while those still exist.
+``../rig-infra/zenoh-router``, a checkout of https://github.com/christomaszewski/rig-infra).
 
 Both accelerators are init-time only (init refuses an existing deployment); ``rig add <name|path>``
 (`add_service`, below) is their post-init sibling — same resolution, same asymmetry, one service at a
@@ -82,11 +81,6 @@ Run rig from the cloned/installed tool: `cd` here and `/path/to/rig/rig <verb>` 
 """
 
 
-def _tool_templates() -> Path:
-    """The bundled templates dir — resolved from THIS package (the tool may live anywhere)."""
-    return Path(__file__).resolve().parent.parent / "templates"
-
-
 def _safe_name(token: str) -> str:
     """A ROS-/compose-safe instance-name suggestion for menu stubs: [a-z][a-z0-9_]*."""
     name = re.sub(r"[^a-z0-9_]", "_", token.lower())
@@ -107,8 +101,7 @@ def _resolve_service_dir(raw: str, parent: Path, *, label: str = "init --infra")
     """Resolve one --infra / `rig add` token to a service dir. A token containing `/` is a repo path
     (cwd-relative, like the target argument itself). A bare name scans the workspace — the parent's
     siblings, descending ONE level into repos whose subdirs carry a rigging.yaml (so `zenoh-router`
-    finds a sibling checkout OR `../rig-infra/zenoh-router`) — falling back to rig's bundled
-    `templates/` (deprecated) while those still exist. Ambiguity is an error: the operator
+    finds a sibling checkout OR `../rig-infra/zenoh-router`). Ambiguity is an error: the operator
     disambiguates with a path."""
     token = raw.strip().rstrip("/")  # tab-completion slash must not fork the service key / order-0 pin
     if "/" in token:
@@ -128,17 +121,12 @@ def _resolve_service_dir(raw: str, parent: Path, *, label: str = "init --infra")
                        f"{', '.join(str(h) for h in hits)} — pass a path instead")
     if hits:
         return hits[0]
-    tdir = _tool_templates() / token
-    if tdir.is_dir():
-        eprint(f"  {label}: '{token}' resolved from rig's bundled templates/ — DEPRECATED (one more "
-               f"version); clone https://github.com/christomaszewski/rig-infra beside your deployment")
-        return tdir
-    avail = sorted(p.name for p in _tool_templates().iterdir() if p.is_dir())
-    raise RigError(f"{label}: unknown service '{raw}' — no service dir under {parent} "
-                   f"(one level deep), and not a bundled template ({', '.join(avail)})")
+    raise RigError(f"{label}: unknown service '{raw}' — no service dir under {parent} (one level "
+                   f"deep); clone https://github.com/christomaszewski/rig-infra beside your "
+                   f"deployment, or pass a path")
 
 
-def _plan_templates(tokens: list[str], parent: Path) -> list[tuple[str, Path, Path, str]]:
+def _plan_infra(tokens: list[str], parent: Path) -> list[tuple[str, Path, Path, str]]:
     """--infra pre-flight: resolve + validate EVERY requested service before anything is written, so a
     bad flag can't leave a half-wired target that misdiagnoses the retry. Returns
     (service, service-dir, example-src, instance) per request; raises on unknown names and
@@ -148,8 +136,8 @@ def _plan_templates(tokens: list[str], parent: Path) -> list[tuple[str, Path, Pa
     seen: dict[str, str] = {}
     for raw in dict.fromkeys(tokens):  # de-dup, keep order
         tdir = _resolve_service_dir(raw, parent)
-        desc = find_descriptor(tdir)  # may be absent only on the bundled-template fallback path
-        svc = str(load_yaml(desc).get("service") or tdir.name) if desc else tdir.name
+        desc = find_descriptor(tdir)  # never None: _resolve_service_dir only returns descriptor-bearing dirs
+        svc = str(load_yaml(desc).get("service") or tdir.name)
         examples = sorted(tdir.glob("config/*.example.yaml"))
         if not examples:
             raise RigError(f"init --infra: '{svc}' ({tdir}) ships no config/*.example.yaml")
@@ -162,9 +150,9 @@ def _plan_templates(tokens: list[str], parent: Path) -> list[tuple[str, Path, Pa
     return plan
 
 
-def _wire_template(t: str, tdir: Path, example: Path, instance: str, target: Path,
+def _wire_infra(t: str, tdir: Path, example: Path, instance: str, target: Path,
                    services: dict[str, str], infra_rows: list[str], used_orders: list[int]) -> None:
-    """--infra: wire one pre-validated template (config copy + catalog route + ENABLED manifest row)."""
+    """--infra: wire one pre-validated infra service (config copy + catalog route + ENABLED manifest row)."""
     shutil.copy2(example, target / "config" / "infra" / f"{instance}.yaml")
     services[t] = os.path.relpath(tdir, target)
     order = 0 if t == "zenoh-router" else (max(used_orders, default=0) + 1)  # router FIRST, always
@@ -333,7 +321,7 @@ def init(target: Path, *, vehicle_id: int = 1, infra: list[str] | None = None,
         raise RigError(f"init: {target} already has a vehicle.yaml (refusing to overwrite)")
     # Validate EVERYTHING that can fail BEFORE the first write — a failed init must leave no partial
     # target whose leftovers wedge or misdiagnose the corrected retry.
-    plan = _plan_templates(infra or [], target.parent)
+    plan = _plan_infra(infra or [], target.parent)
     if discover is not None and not discover.resolve().is_dir():
         raise RigError(f"init --discover: not a directory: {discover}")
     for sub in ("config/sensors", "config/infra", "config/autonomy", "services"):
@@ -344,7 +332,7 @@ def init(target: Path, *, vehicle_id: int = 1, infra: list[str] | None = None,
     menu: dict[str, list[str]] = {"infra": [], "sensor": [], "autonomy": []}
     used_orders: list[int] = []
     for t, tdir, example, instance in plan:
-        _wire_template(t, tdir, example, instance, target, services, infra_rows, used_orders)
+        _wire_infra(t, tdir, example, instance, target, services, infra_rows, used_orders)
     discovered = _discover(discover, target, services, menu) if discover is not None else 0
 
     (target / "vehicle.yaml").write_text(_vehicle_yaml(target.name, vehicle_id, infra_rows, menu))

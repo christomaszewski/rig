@@ -363,8 +363,10 @@ base/Dockerfile     base/build.sh                                # fleet-ros: FR
 2. `--discover` gains the same one-level descent (finds rig-infra's service dirs; their `tier:` hints
    route the menu). Bounded depth; skip `var/`/hidden.
 3. `templates/` → deprecation stub for ONE version (README pointing at rig-infra; old services.yaml
-   paths fail loudly with a pointer, not a mystery), then delete. rig CI drops the live-template certify
-   steps (infra CI owns them); the sh-fixture certify tests remain rig's contract reference.
+   paths fail loudly with a pointer, not a mystery), then delete — ✅ **deleted in v0.1.35** (stale
+   services.yaml paths under templates/ still fail with the rig-infra pointer). rig CI drops the
+   live-template certify steps (infra CI owns them); the sh-fixture certify tests remain rig's
+   contract reference.
 4. Note: §3d (shipped v0.1.27) already grew descriptor `tier:` + discover routing to three tiers —
    extend those, don't re-plan them.
 
