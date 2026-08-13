@@ -15,7 +15,7 @@ from pathlib import Path
 from . import (
     RigError, __version__, bake as bake_mod, build as build_mod, certify as certify_mod,
     doctor as doctor_mod, dispatch, init as init_mod, install as install_mod,
-    overlay as overlay_mod, pkg as pkg_mod, promote as promote_mod,
+    overlay as overlay_mod, pkg as pkg_mod, promote as promote_mod, provision as provision_mod,
     registries as registries_mod,
     registry as registry_mod, registry_scaffold, resolve, rigify as rigify_mod,
     runs as runs_mod, status as status_mod,
@@ -359,6 +359,13 @@ def cmd_build(args, root: Path) -> int:
 
 
 def cmd_bake(args, root: Path) -> int:
+    # Fleet-ness is a property of the deployment, not a flag: {{var}} references anywhere mean
+    # bake stages the UNRESOLVED tree (a mandatory-marker deployment can't even load resolved
+    # here — bake never reads vehicle.local.yaml/shell vars by design).
+    if bake_mod.is_fleet(root):
+        bake_mod.bake_fleet(root, args.tag, registry=args.registry,
+                            bundle_images=args.bundle_images)
+        return 0
     manifest, catalog, descriptors = _load(root)
     env = dispatch.fleet_env(manifest)
     bake_mod.bake(root, manifest, catalog, descriptors, env, args.tag, registry=args.registry,
@@ -680,6 +687,18 @@ def build_parser() -> argparse.ArgumentParser:
     ol = ovsub.add_parser("list", help="bindings per instance, in order")
     ol.add_argument("instance", nargs="?", default=None)
 
+    pv = sub.add_parser("provision", help="THIS machine's vehicle identity "
+                                          "(/etc/rig/vehicle.local.yaml) — write with sudo; bare "
+                                          "form shows + checks against the current deployment")
+    pv.add_argument("--id", dest="vehicle_id", default=None, metavar="N",
+                    help="vehicle id (numeric: ROS domain + compose-project suffix)")
+    pv.add_argument("--name", default=None, help="vehicle name")
+    pv.add_argument("--var", action="append", default=[], metavar="k=v",
+                    help="per-vehicle var (repeatable; lowercase names)")
+    pv.add_argument("--force", action="store_true",
+                    help="allow CHANGING an existing identity (renames compose projects — "
+                         "bring the vehicle down first)")
+
     st = sub.add_parser("setup", help="first-run host setup: ~/.rig + the default public registry; "
                                       "--shell wires a source checkout onto PATH; --purge removes "
                                       "user state")
@@ -738,6 +757,11 @@ def main(argv=None) -> int:
         if args.cmd == "setup":  # host/user environment — the one command whose object is the HOST
             return registries_mod.setup(shell=args.shell, no_default_registry=args.no_default_registry,
                                         purge=args.purge, yes=args.yes)
+        if args.cmd == "provision":  # machine identity — works with or without a deployment nearby
+            root = (args.root or find_root()).resolve()
+            return provision_mod.provision(
+                root if (root / "vehicle.yaml").exists() else None,
+                vehicle_id=args.vehicle_id, name=args.name, set_vars=args.var, force=args.force)
         root = (args.root or find_root()).resolve()
         if args.cmd == "add":  # edits the deployment files themselves — routes its own manifest load
             return cmd_add(args, root)

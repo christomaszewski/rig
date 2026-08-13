@@ -17,8 +17,13 @@
 > **M7 distribution SHIPPED** (v0.1.46): release automation on tag (tests → wheel/sdist → arch=all
 > deb → GitHub Release; release v0.1.46 live with all three assets), Homebrew tap
 > **christomaszewski/homebrew-rig** (verified: `brew install christomaszewski/rig/rig`), tap
-> auto-bump wired behind a `TAP_PUSH_TOKEN` secret (unset = bump by hand). Deferred:
-> `Sensor`→`Instance` dataclass rename (cosmetic, large mechanical diff). Tool at `/Users/ckt/ws/bringup`; run-from-source
+> auto-bump wired behind a `TAP_PUSH_TOKEN` secret (unset = bump by hand).
+> **Vehicle-local vars + fleet artifacts SHIPPED** (v0.1.47–48, CHEATSHEET §1.6): `{{var}}`
+> interpolation (render-time configs + load-time manifest markers, self-marker = mandatory
+> per-vehicle), sources shell > vehicle.local.yaml > /etc/rig/vehicle.local.yaml > vehicle.yaml,
+> `env:` passthrough on fleet_env, flagless fleet bake (templates in ⇒ templates out, bake blind
+> to local sources), `rig provision` (+ artifact provision.sh shim, --force re-identification
+> gate). Deferred: `Sensor`→`Instance` dataclass rename (cosmetic, large mechanical diff). Tool at `/Users/ckt/ws/bringup`; run-from-source
 > `./rig <verb>`.
 > **Remote: https://github.com/christomaszewski/rig (public)** — Actions runs the test suite on push/PR.
 > camera-service has a `rig certify` CI gate (launcher-contract) via PR #36 (+ the cam-up verbatim-pull-tag

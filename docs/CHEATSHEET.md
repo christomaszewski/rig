@@ -108,6 +108,40 @@ Airgap: `sync` → `install` → `rig pull` → `rig bake --bundle-images` — t
 self-contained after install (vendored surfaces + materialized configs); the registry cache is only
 needed to install/upgrade.
 
+## 1.6 — fleet vehicles: one artifact, N vehicles (rig ≥ v0.1.48)
+
+Reference per-vehicle values with `{{var}}` anywhere in configs (never `${VAR}` — that's compose's):
+
+```yaml
+# vehicle.yaml (fleet-shared)
+vehicle: "{{vehicle}}"            # self-marker = supplied PER VEHICLE, mandatory (never vehicle 0)
+vehicle_id: "{{vehicle_id}}"
+vars: {rtsp_port: 8554}           # fleet defaults; vars may chain: ip: 10.160.{{vehicle_id}}.25
+env:  {SIYI_IP: "10.160.{{vehicle_id}}.25"}   # exported to every launcher via the fleet env
+# config/sensors/zr30.yaml:  url: rtsp://10.160.{{vehicle_id}}.80:{{rtsp_port}}/main
+```
+
+Sources, most-specific wins: shell (`RIG_VEHICLE_ID`, `RIG_VAR_<name>`) > `vehicle.local.yaml`
+beside vehicle.yaml (bench trees) > **`/etc/rig/vehicle.local.yaml`** (THE machine's identity) >
+vehicle.yaml. Unknown var = hard error listing what's available.
+
+`rig bake` detects markers automatically (no flag): a templated deployment bakes a **fleet
+artifact** — unresolved configs, no compose-only form, rendered on-vehicle by the bundled rig
+(python3 + pyyaml required). Bake never reads vehicle.local.yaml/shell vars, so bench identity
+can't leak into artifacts. Vehicle lifecycle:
+
+```bash
+# once per vehicle (imaging time):
+sudo ./provision.sh --id 7 --name skiff-07     # or: sudo rig provision …  (writes /etc/rig/…)
+# forever after, ANY artifact:
+tar xzf v3.tar.gz && cd v3 && ./run.sh up
+rig provision                                   # no sudo: show identity + check the deployment's vars
+```
+
+Re-identifying a machine needs `--force` (compose projects rename → running containers orphan —
+bring the vehicle down first). `certify --emit/--diff` output legitimately differs across vehicles
+for templated configs — that's the feature, not a bug.
+
 Naming rules: instance `name` is unique vehicle-wide and keys *everything* (compose project, volumes,
 ROS namespace). **Underscores, never hyphens** (`cam_usb`, not `cam-usb`). Two instances of one service:
 unique names + unique host-facing ports (declare `host_ports` in the service's rigging.yaml → doctor checks).

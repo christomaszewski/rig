@@ -563,6 +563,129 @@ def bake(root: Path, manifest, catalog, descriptors, env, tag: str, *, registry:
     return tarpath
 
 
+def is_fleet(root: Path) -> bool:
+    """Fleet-ness is a PROPERTY OF THE DEPLOYMENT, not a bake flag (settled): any `{{var}}`
+    reference in vehicle.yaml or the config tree makes the artifact a fleet artifact — bake
+    resolves from the committed tree only (never vehicle.local.yaml/shell), so markers cannot
+    resolve at bake time by construction."""
+    return bool(fleet_refs(root))
+
+
+def fleet_refs(root: Path) -> set[str]:
+    from .interpolate import MARKER
+    refs: set[str] = set(MARKER.findall((root / "vehicle.yaml").read_text()))
+    cfg = root / "config"
+    if cfg.is_dir():
+        for path in sorted(cfg.rglob("*.yaml")):
+            refs |= set(MARKER.findall(path.read_text()))
+    return refs
+
+
+def bake_fleet(root: Path, tag: str, *, registry: str | None = None,
+               bundle_images: bool = False) -> Path:
+    """The fleet artifact: ONE tar for N vehicles. Stages the UNRESOLVED tree (vehicle.yaml +
+    the whole config/ tree incl. .pins/.overlays, verbatim) + vendored launch surfaces + the
+    bundled rig; rendering happens on-vehicle at `rig up` from /etc/rig/vehicle.local.yaml.
+    No compose-only form (it would embed one vehicle's values) — run.sh's existing fallback
+    drives the bundled rig, which needs python3 + pyyaml on the vehicle (a documented install).
+    Ships provision.sh + vehicle.local.example.yaml so a fresh vehicle needs zero rig knowledge."""
+    from .catalog import load_catalog
+    from .interpolate import MARKER
+
+    if bundle_images:
+        raise RigError("bake: --bundle-images needs the resolved compose-only form, which a fleet "
+                       "(templated) artifact deliberately omits — pre-pull per vehicle instead "
+                       "(`./run.sh pull`)")
+    if registry:
+        raise RigError("bake: --registry cannot override a fleet artifact (values resolve "
+                       "per-vehicle) — set images.registry in vehicle.yaml, or per vehicle in "
+                       "vehicle.local.yaml")
+    refs = sorted(fleet_refs(root))
+    raw = load_yaml(root / "vehicle.yaml")
+
+    staging = root / "var" / "bake" / tag
+    if staging.exists():
+        shutil.rmtree(staging)
+    staging.mkdir(parents=True)
+
+    # rig itself + the raw tree, verbatim (templates preserved — that's the whole point)
+    tool_root = Path(__file__).resolve().parent.parent
+    shutil.copy2(tool_root / "rig", staging / "rig")
+    (staging / "rig").chmod(0o755)
+    shutil.copytree(tool_root / "rig_cli", staging / "rig_cli",
+                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    shutil.copy2(root / "vehicle.yaml", staging / "vehicle.yaml")
+    if (root / "config").is_dir():
+        shutil.copytree(root / "config", staging / "config")
+    if (root / "rig.lock").is_file():
+        shutil.copy2(root / "rig.lock", staging / "rig.lock")
+
+    # vendor every service the rows reference; route the staged catalog at the vendored copies
+    rows = [row for tier in ("infra", "sensors", "autonomy") for row in (raw.get(tier) or [])
+            if isinstance(row, dict) and row.get("service")]
+    catalog = load_catalog(root)
+    catalog_out = {}
+    for service in sorted({str(row["service"]) for row in rows}):
+        if service not in catalog:
+            raise RigError(f"bake: service '{service}' in vehicle.yaml is not routed in services.yaml")
+        vendor(service, catalog[service].path, staging)
+        catalog_out[service] = {"path": f"services/{service}"}
+    (staging / "services.yaml").write_text(yaml.safe_dump({"services": catalog_out}, sort_keys=False))
+
+    # vehicle.local.example.yaml: every referenced var, split mandatory vs fleet-defaulted
+    defaults = raw.get("vars") or {}
+
+    def _provided_literally(name: str) -> bool:  # vehicle.yaml itself supplies a non-marker value
+        value = raw.get(name)
+        return value is not None and not (isinstance(value, str) and name in MARKER.findall(value))
+
+    mandatory = sorted(r for r in refs
+                       if r != "ros_domain_id"  # always derived — never needs supplying
+                       and r not in defaults and not _provided_literally(r))
+    lines = ["# vehicle.local.yaml — THIS vehicle's identity + values. Write it ONCE per vehicle:",
+             "#   sudo ./provision.sh --id <N> --name <name> [--var k=v ...]",
+             "# (or by hand at /etc/rig/vehicle.local.yaml). This example lists every var the",
+             "# deployment references.", ""]
+    for name in mandatory:
+        if name == "vehicle_id":
+            lines.append("vehicle_id: 1            # REQUIRED")
+        elif name == "vehicle":
+            lines.append("vehicle: my-vehicle      # REQUIRED")
+        else:
+            lines.append(f"# vars: {{{name}: <value>}}   # REQUIRED")
+    for name in sorted(set(refs) & set(defaults)):
+        lines.append(f"# vars: {{{name}: {defaults[name]}}}   # optional — fleet default shown")
+    (staging / "vehicle.local.example.yaml").write_text("\n".join(lines) + "\n")
+
+    shim = staging / "provision.sh"
+    shim.write_text("#!/bin/sh\n# Provision THIS machine's identity (writes /etc/rig/vehicle.local.yaml).\n"
+                    'cd "$(dirname "$0")"\nexec sudo ./rig provision "$@"\n')
+    shim.chmod(0o755)
+    _write_bootstrap(staging)  # no compose-only scripts exist -> every verb falls through to rig
+
+    meta = {
+        "tag": tag, "vehicle": "(fleet)", "fleet": True,
+        "created": datetime.datetime.now().isoformat(timespec="seconds"),
+        "rig_version": __version__,
+        "pinning": "fleet-deferred (rendered on-vehicle)",
+        "vars": refs,
+        "sensors": [str(row.get("name")) for row in rows],
+    }
+    (staging / "metadata.yaml").write_text(yaml.safe_dump(meta, sort_keys=False))
+
+    artifacts = root / "var" / "artifacts"
+    artifacts.mkdir(parents=True, exist_ok=True)
+    tarpath = artifacts / f"{tag}.tar.gz"
+    with tarfile.open(tarpath, "w:gz") as tf:
+        tf.add(staging, arcname=tag)
+    eprint(f"baked FLEET artifact '{tag}' -> {tarpath}")
+    eprint(f"  sha256:{_sha256(tarpath)}")
+    eprint(f"  vars: {', '.join(refs)} — resolved per vehicle (vehicle.local.yaml); "
+           f"provision.sh + vehicle.local.example.yaml included")
+    eprint(f"  no compose-only form: vehicles run the bundled rig (python3 + pyyaml required)")
+    return tarpath
+
+
 def unbake(artifact: Path, into: Path) -> Path:
     if not artifact.exists():
         raise RigError(f"unbake: artifact not found: {artifact}")
