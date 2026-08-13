@@ -118,6 +118,8 @@ Reference per-vehicle values with `{{var}}` anywhere in configs (never `${VAR}` 
 ```yaml
 # vehicle.yaml (fleet-shared)
 vehicle: "{{vehicle}}"            # self-marker = supplied PER VEHICLE, mandatory (never vehicle 0)
+                                  # QUOTE markers that START a value (bare {{ is YAML mapping syntax);
+                                  #   mid-string markers (rtsp://10.{{vehicle_id}}.80) are fine unquoted
 vehicle_id: "{{vehicle_id}}"
 vars: {rtsp_port: 8554}           # fleet defaults; vars may chain: ip: 10.160.{{vehicle_id}}.25
 env:  {SIYI_IP: "10.160.{{vehicle_id}}.25"}   # exported to every launcher via the fleet env
