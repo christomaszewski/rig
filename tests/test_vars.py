@@ -99,7 +99,7 @@ def test_mandatory_marker_lazy_load_and_strict_gate():
         with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
             rc = main(["--root", str(root), "up", "--dry-run"])        # …but CONSUMING identity gates
         assert rc == 1
-        assert "supplied per vehicle" in err.getvalue() and "rig provision" in err.getvalue()
+        assert "unresolved per-vehicle" in err.getvalue() and "rig provision" in err.getvalue()
     machine = pathlib.Path(tempfile.mkdtemp()) / "id.yaml"
     machine.write_text("vehicle: skiff-07\nvehicle_id: 7\n")
     with _env(RIG_VEHICLE_LOCAL=str(machine)):
@@ -172,6 +172,34 @@ def test_env_map_interpolated_exported_and_guarded():
             raise AssertionError("expected RigError")
         except RigError as exc:
             assert "UPPERCASE" in str(exc)
+
+
+def test_non_identity_markers_are_also_lazy():
+    # data_dir: "{{log_dir}}" with nothing providing log_dir: loading (and management verbs)
+    # still work; only identity-consuming commands gate, naming the unresolved value.
+    root = _deployment('vehicle: t\nvehicle_id: 1\ndata_dir: "{{log_dir}}"\nsensors: []\n')
+    with _env(RIG_VEHICLE_LOCAL=_NO_MACHINE):
+        m = load_manifest(root)
+        assert m.missing_identity == ("data_dir",) and m.data_dir is None
+        from rig_cli.cli import main
+        import io
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+            rc = main(["--root", str(root), "up", "--dry-run"])
+        assert rc == 1 and "data_dir" in err.getvalue()
+
+
+def test_fleet_build_needs_no_identity():
+    root = _deployment('vehicle: "{{vehicle}}"\nvehicle_id: "{{vehicle_id}}"\nsensors: []\n',
+                       files={"services.yaml": "services: {}\n"})
+    with _env(RIG_VEHICLE_LOCAL=_NO_MACHINE, RIG_VEHICLE_ID=None, RIG_VEHICLE_NAME=None):
+        from rig_cli.cli import main
+        import io
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = main(["--root", str(root), "image", "build", "--dry-run"])
+        assert rc == 0, err.getvalue()                                  # no identity gate
+        assert "unresolved per-vehicle" not in err.getvalue()
 
 
 def test_unquoted_leading_marker_error_names_the_fix():

@@ -215,14 +215,14 @@ def _missing_mandatory(key: str, effective, base) -> bool:
 
 
 def require_identity(manifest: "Manifest", *, what: str) -> None:
-    """The gate identity-CONSUMING commands call: `{{vehicle_id}}`-style mandatory keys must be
-    resolved before anything renders configs or names compose projects — never vehicle 0."""
+    """The gate identity-CONSUMING commands call: per-vehicle values (mandatory identity markers,
+    or manifest scalars whose vars nothing provides) must be resolved before anything renders
+    configs, names compose projects, or exports the fleet env — never vehicle 0."""
     if not manifest.missing_identity:
         return
     keys = ", ".join(manifest.missing_identity)
     machine = os.environ.get("RIG_VEHICLE_LOCAL") or MACHINE_LOCAL_DEFAULT
-    raise RigError(f"{what}: vehicle.yaml declares {keys} as supplied per vehicle and nothing "
-                   f"provides {'it' if len(manifest.missing_identity) == 1 else 'them'} — "
+    raise RigError(f"{what}: unresolved per-vehicle value(s): {keys} — "
                    + _PROVISION_HINT.format(machine=machine))
 
 
@@ -281,8 +281,20 @@ def load_manifest(root: Path) -> Manifest:
     ctx.setdefault("vehicle", vehicle)
     ctx["ros_domain_id"] = ros.domain_id
 
-    if isinstance(eff_data_dir, str) and MARKER.search(eff_data_dir):
-        eff_data_dir = substitute_scalar(eff_data_dir, ctx, where="data_dir")
+    unresolved: list[str] = list(missing)  # identity keys first, then any manifest scalar whose
+    #                                        vars nothing provides — loading stays LAZY throughout;
+    #                                        require_identity gates the commands that CONSUME them
+
+    def _lazy(value, label: str):
+        if isinstance(value, str) and MARKER.search(value):
+            try:
+                return substitute_scalar(value, ctx, where=label)
+            except RigError:
+                unresolved.append(label)
+                return None
+        return value
+
+    eff_data_dir = _lazy(eff_data_dir, "data_dir")
     data_dir = (str(eff_data_dir or "").strip()) or None
     if data_dir is not None:
         ctx["data_dir"] = data_dir
@@ -291,8 +303,7 @@ def load_manifest(root: Path) -> Manifest:
     eff_images = {}
     for sub in ("registry", "tag"):
         value = _effective(sub, [s.get("images") or {} for s in sources], base_images.get(sub))
-        if isinstance(value, str) and MARKER.search(value):
-            value = substitute_scalar(value, ctx, where=f"images.{sub}")
+        value = _lazy(value, f"images.{sub}")
         eff_images[sub] = (str(value or "").strip()) or None
 
     extra_env: dict = {}
@@ -302,8 +313,9 @@ def load_manifest(root: Path) -> Manifest:
         if key in RIG_OWNED_ENV:
             raise RigError(f"env: '{key}' collides with a rig-owned variable — rig sets it from "
                            f"the manifest; use the manifest field instead")
-        extra_env[key] = substitute_scalar(value, ctx, where=f"env.{key}") \
-            if isinstance(value, str) else value
+        resolved_value = _lazy(value, f"env.{key}")
+        if resolved_value is not None or not isinstance(value, str):
+            extra_env[key] = resolved_value if resolved_value is not None else value
 
     # --- rows ---------------------------------------------------------------------------------
     seen: dict[str, Path] = {}
@@ -318,4 +330,4 @@ def load_manifest(root: Path) -> Manifest:
                     image_registry=eff_images["registry"], vehicle_id=vehicle_id,
                     image_tag=eff_images["tag"],
                     data_dir=data_dir, vars=ctx, extra_env=extra_env,
-                    missing_identity=missing)
+                    missing_identity=tuple(unresolved))

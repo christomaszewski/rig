@@ -38,14 +38,19 @@ def find_root() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
-def _load(root: Path) -> tuple[Manifest, dict[str, ServiceEntry], dict[str, Descriptor]]:
+def _load(root: Path, *, identity: bool = True,
+          render: bool = True) -> tuple[Manifest, dict[str, ServiceEntry], dict[str, Descriptor]]:
     manifest = load_manifest(root)
-    # Everything routed through _load CONSUMES identity (renders configs, names compose projects,
-    # exports fleet env) — the mandatory-marker gate lives here, so management verbs that load the
-    # manifest directly (pkg list/remove/…) keep working on an unprovisioned box.
-    from .manifest import require_identity
-    require_identity(manifest, what="this command needs a resolved vehicle identity")
-    manifest = resolve.materialize_manifest(manifest, root)  # render profiles/overrides -> per-instance configs
+    # Most of what routes through _load CONSUMES identity (renders configs, names compose
+    # projects, exports fleet env) — the mandatory-marker gate lives here, so management verbs
+    # that load the manifest directly (pkg list/remove/…) keep working on an unprovisioned box.
+    # `identity=False, render=False` is for commands that need only services + descriptors
+    # (rig build: images have no vehicle identity).
+    if identity:
+        from .manifest import require_identity
+        require_identity(manifest, what="this command needs a resolved vehicle identity")
+    if render:
+        manifest = resolve.materialize_manifest(manifest, root)  # profiles/overlays/vars -> rendered
     catalog = load_catalog(root)
     descriptors: dict[str, Descriptor] = {}
     for sensor in manifest.sensors:
@@ -358,7 +363,12 @@ def cmd_pkg(args) -> int:
 
 
 def cmd_build(args, root: Path) -> int:
-    manifest, catalog, descriptors = _load(root)
+    # Building images consumes NO vehicle identity (service list + descriptors + registry/tag +
+    # ROS_DISTRO) and never renders configs — a fleet deployment builds on any box.
+    manifest, catalog, descriptors = _load(root, identity=False, render=False)
+    if any(u.startswith("images.") for u in manifest.missing_identity):
+        eprint("rig build: note — images.registry/tag are per-vehicle and unresolved here; "
+               "building without a push target unless --registry/--tag are passed")
     return build_mod.build(manifest, descriptors, registry=args.registry, tag=args.tag,
                            dry_run=args.dry_run, jobs=args.jobs, root=root)
 
