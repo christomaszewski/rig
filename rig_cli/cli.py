@@ -360,7 +360,7 @@ def cmd_pkg(args) -> int:
 def cmd_build(args, root: Path) -> int:
     manifest, catalog, descriptors = _load(root)
     return build_mod.build(manifest, descriptors, registry=args.registry, tag=args.tag,
-                           dry_run=args.dry_run, jobs=args.jobs)
+                           dry_run=args.dry_run, jobs=args.jobs, root=root)
 
 
 def cmd_bake(args, root: Path) -> int:

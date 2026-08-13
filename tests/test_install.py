@@ -46,6 +46,10 @@ def _code_repo() -> tuple[pathlib.Path, str]:
     """One collection repo carrying TWO services (source.path case): infra `routerish` (named
     example) and sensor `camish` (instantiable)."""
     repo = pathlib.Path(tempfile.mkdtemp()) / "collection"
+    shared = repo / "shared"
+    shared.mkdir(parents=True)
+    (shared / "build.sh").write_text("#!/bin/sh\necho built-from-source > /dev/null\n")
+    (shared / "build.sh").chmod(0o755)
     for svc, tier, example in (
         ("routerish", "infra", "service: routerish\nname: routerish\nrate: 5\n"),
         ("camish", "sensor", "service: camish\ncamera: {type: usb}\n"),
@@ -55,8 +59,10 @@ def _code_repo() -> tuple[pathlib.Path, str]:
     ):
         d = repo / svc
         (d / "config").mkdir(parents=True)
+        build_line = ("build: { command: ../shared/build.sh, images: [routerish] }\n"
+                      if svc == "routerish" else "")  # collection-sibling build ctx, NOT vendored
         (d / "rigging.yaml").write_text(
-            f"service: {svc}\nlauncher: {svc}-up\ntier: {tier}\n"
+            f"service: {svc}\nlauncher: {svc}-up\ntier: {tier}\n{build_line}"
             f"examples: [config/{svc}.example.yaml]\nlaunch_surface: [{svc}-up]\n")
         (d / f"{svc}-up").write_text("#!/bin/sh\n")
         (d / f"{svc}-up").chmod(0o755)
@@ -217,6 +223,29 @@ def test_version_spec_and_wrong_kind_errors():
         assert rc == 1 and "is at 1.2.0" in err
         rc, _, err = _run("--root", str(root), "pkg", "install", "testns/ghost")
         assert rc == 1 and "not found" in err
+
+
+def test_build_falls_back_to_pinned_source_for_vendored_services():
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        root, _ = _world()
+        assert _run("--root", str(root), "pkg", "add", "testns/routerish")[0] == 0
+        assert not (root / "services" / "routerish" / ".." / "shared" / "build.sh").resolve().exists()
+        rc, _, err = _run("--root", str(root), "image", "build", "--dry-run")
+        assert rc == 0, err
+        assert "using the pinned source checkout" in err               # fallback engaged
+        assert "cache/src/routerish-" in err                           # cwd = the pinned clone
+        # a service with a repo-relative build command, NO context, NO lock pin: pointed error, rc 1
+        fake = pathlib.Path(tempfile.mkdtemp()) / "handsvc"
+        (fake / "config").mkdir(parents=True)
+        (fake / "rigging.yaml").write_text("service: handsvc\nlauncher: handsvc-up\ntier: infra\n"
+                                           "build: tools/nope.sh\nlaunch_surface: [handsvc-up]\n"
+                                           "examples: [config/handsvc.example.yaml]\n")
+        (fake / "handsvc-up").write_text("#!/bin/sh\n")
+        (fake / "handsvc-up").chmod(0o755)
+        (fake / "config" / "handsvc.example.yaml").write_text("service: handsvc\nname: handsvc\n")
+        assert _run("--root", str(root), "add", str(fake))[0] == 0     # workspace add: no lock pin
+        rc, _, err = _run("--root", str(root), "image", "build", "--dry-run")
+        assert rc == 1 and "no source pin for 'handsvc'" in err
 
 
 def test_pkg_list_shows_installed_users_and_upgrades():
