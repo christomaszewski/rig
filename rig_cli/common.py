@@ -24,7 +24,17 @@ def load_yaml(path: Path) -> dict:
     except FileNotFoundError:
         raise RigError(f"file not found: {path}")
     except yaml.YAMLError as exc:
-        raise RigError(f"invalid YAML in {path}: {exc}")
+        hint = ""
+        try:  # an UNQUOTED {{var}} at the start of a value is YAML flow-mapping syntax — the
+            #   number-one marker trap ("found unhashable key"). Diagnose it by name.
+            import re
+            if re.search(r":\s*\{\{", path.read_text()):
+                hint = ('\n  (a {{var}} marker that STARTS a value must be quoted — YAML reads '
+                        'bare {{ as a mapping: use  vehicle_id: "{{vehicle_id}}"  — mid-string '
+                        'markers like  url: rtsp://10.{{vehicle_id}}.80  are fine unquoted)')
+        except OSError:
+            pass
+        raise RigError(f"invalid YAML in {path}: {exc}{hint}")
     if data is None:
         return {}
     if not isinstance(data, dict):

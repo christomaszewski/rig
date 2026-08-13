@@ -169,6 +169,16 @@ def test_env_map_interpolated_exported_and_guarded():
             assert "UPPERCASE" in str(exc)
 
 
+def test_unquoted_leading_marker_error_names_the_fix():
+    root = _deployment('vehicle: t\nvehicle_id: {{vehicle_id}}\n')   # UNQUOTED — the classic trap
+    with _env(RIG_VEHICLE_LOCAL=_NO_MACHINE):
+        try:
+            load_manifest(root)
+            raise AssertionError("expected RigError")
+        except RigError as exc:
+            assert "must be quoted" in str(exc) and '"{{vehicle_id}}"' in str(exc)
+
+
 def test_local_file_key_whitelist():
     root = _deployment("vehicle: t\n", local="vehicle_id: 2\nsensors: []\n")
     with _env(RIG_VEHICLE_LOCAL=_NO_MACHINE):
