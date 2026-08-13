@@ -37,7 +37,7 @@ services evolve independently and new ones drop in by adding two files (a launch
 - **Ubuntu/Debian** (incl. Jetson, works offline): download `rig_<v>_all.deb` from the
   [latest release](https://github.com/christomaszewski/rig/releases/latest) →
   `sudo dpkg -i rig_<v>_all.deb` (pulls in `python3` + `python3-yaml`; nothing else)
-- **macOS**: `brew install christomaszewski/rig/rig` (the tap tracks releases automatically)
+- **macOS**: `brew install christomaszewski/rig/rig-cli` (formula `rig-cli`, binary `rig`; the tap tracks releases automatically)
 - **anywhere with pipx/uv**: `pipx install git+https://github.com/christomaszewski/rig`
 - **from a checkout**: `./rig …` works as-is; `rig setup --shell` puts it on PATH
 

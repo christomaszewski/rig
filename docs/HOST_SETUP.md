@@ -8,7 +8,7 @@ following are one-time, out-of-band host steps.
 - **Ubuntu/Debian (incl. the Jetson)**: `sudo dpkg -i rig_<v>_all.deb` from the
   [latest release](https://github.com/christomaszewski/rig/releases/latest) — pulls in
   `python3` + `python3-yaml`, so the Python prerequisite below is satisfied automatically.
-- **macOS dev box**: `brew install christomaszewski/rig/rig`.
+- **macOS dev box**: `brew install christomaszewski/rig/rig-cli` (formula `rig-cli`, binary `rig` — core's unrelated `rig` formula shadows the bare name).
 - **pipx/uv**: `pipx install git+https://github.com/christomaszewski/rig`.
 - **from a checkout** (developing rig itself): `./rig …`, or `rig setup --shell` for PATH.
 

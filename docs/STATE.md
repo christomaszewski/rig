@@ -17,7 +17,7 @@
 > `RIG_HOME` → setup → sync → `add public/zenoh-router` + `add sensor:zr30` → doctor 0 errors.
 > **M7 distribution SHIPPED** (v0.1.46): release automation on tag (tests → wheel/sdist → arch=all
 > deb → GitHub Release; release v0.1.46 live with all three assets), Homebrew tap
-> **christomaszewski/homebrew-rig** (verified: `brew install christomaszewski/rig/rig`), tap
+> **christomaszewski/homebrew-rig** (verified: `brew install christomaszewski/rig/rig-cli`; formula renamed rig-cli — core's `rig` shadows bare names), tap
 > auto-bump wired behind a `TAP_PUSH_TOKEN` secret (unset = bump by hand).
 > **Vehicle-local vars + fleet artifacts SHIPPED** (v0.1.47–48, CHEATSHEET §1.6): `{{var}}`
 > interpolation (render-time configs + load-time manifest markers, self-marker = mandatory

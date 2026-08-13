@@ -51,7 +51,7 @@ jobs:
           python3 - "$url" "$sha" <<'EOF'
           import pathlib, re, sys
           url, sha = sys.argv[1], sys.argv[2]
-          path = pathlib.Path("tap/Formula/rig.rb")
+          path = pathlib.Path("tap/Formula/rig-cli.rb")
           lines = path.read_text().splitlines()
           hit = [i for i, l in enumerate(lines)
                  if re.search(r'url "https://github\.com/christomaszewski/rig/archive/', l)]
