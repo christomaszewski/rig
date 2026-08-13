@@ -425,6 +425,32 @@ def _compose_only(manifest, descriptors, env, staging: Path, images: dict, *, pi
     return entries
 
 
+_RIG_SHIM = '''#!/usr/bin/env python3
+"""rig — bundled entry point (staged by bake). Runs the rig_cli packaged alongside, so the
+artifact needs NO rig installed on the vehicle (python3 + pyyaml only)."""
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+
+from rig_cli.cli import main  # noqa: E402
+
+raise SystemExit(main())
+'''
+
+
+def _stage_rig(staging: Path) -> None:
+    """Bundle rig into the artifact: the rig_cli package from WHEREVER it is imported
+    (site-packages for brew/deb/pipx installs, the repo for checkouts) plus a GENERATED shim —
+    an installed rig has no ./rig file beside the package (the console script is the
+    installer's), which is exactly the layout the old copy-the-shim approach crashed on."""
+    package_dir = Path(__file__).resolve().parent  # == the rig_cli package, any install layout
+    shutil.copytree(package_dir, staging / "rig_cli",
+                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    (staging / "rig").write_text(_RIG_SHIM)
+    (staging / "rig").chmod(0o755)
+
+
 def bake(root: Path, manifest, catalog, descriptors, env, tag: str, *, registry: str | None = None,
          bundle_images: bool = False) -> Path:
     if registry:
@@ -434,14 +460,8 @@ def bake(root: Path, manifest, catalog, descriptors, env, tag: str, *, registry:
         shutil.rmtree(staging)
     staging.mkdir(parents=True)
 
-    # 1. rig itself (so the artifact is self-contained for the Python path). The tool may live in a
-    #    different dir than the deployment root (the `rig init` layout), so source it from THIS package,
-    #    not from `root`. tool_root holds `rig` + `rig_cli/` (== root in the classic single-repo layout).
-    tool_root = Path(__file__).resolve().parent.parent
-    shutil.copy2(tool_root / "rig", staging / "rig")
-    (staging / "rig").chmod(0o755)
-    shutil.copytree(tool_root / "rig_cli", staging / "rig_cli",
-                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    # 1. rig itself (so the artifact is self-contained for the Python path).
+    _stage_rig(staging)
 
     # 2. resolved per-sensor configs + a COMPLETE resolved vehicle.yaml (overrides/profiles already baked
     #    in; images / vehicle_id / all three tiers preserved so a `rig up` on the unbaked tree exports
@@ -609,11 +629,7 @@ def bake_fleet(root: Path, tag: str, *, registry: str | None = None,
     staging.mkdir(parents=True)
 
     # rig itself + the raw tree, verbatim (templates preserved — that's the whole point)
-    tool_root = Path(__file__).resolve().parent.parent
-    shutil.copy2(tool_root / "rig", staging / "rig")
-    (staging / "rig").chmod(0o755)
-    shutil.copytree(tool_root / "rig_cli", staging / "rig_cli",
-                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    _stage_rig(staging)
     shutil.copy2(root / "vehicle.yaml", staging / "vehicle.yaml")
     if (root / "config").is_dir():
         shutil.copytree(root / "config", staging / "config")

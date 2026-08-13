@@ -82,6 +82,10 @@ def test_fleet_bake_stages_unresolved_and_flags_reject():
         assert "{{vehicle_id}}" in (staging / "vehicle.yaml").read_text()      # UNRESOLVED
         assert "{{rtsp_port}}" in (staging / "config" / "sensors" / "cam.yaml").read_text()
         assert (staging / "provision.sh").is_file()
+        shim = staging / "rig"
+        assert shim.stat().st_mode & 0o111                             # bundled rig: GENERATED shim
+        assert "bundled entry point" in shim.read_text()               # (installed rigs have no ./rig
+        assert (staging / "rig_cli" / "cli.py").is_file()              #  to copy — regression, v0.1.58)
         assert (staging / "services" / "camsvc" / "rigging.yaml").is_file()    # vendored
         assert not (staging / "up.sh").exists()                                # no compose-only form
         example = (staging / "vehicle.local.example.yaml").read_text()
