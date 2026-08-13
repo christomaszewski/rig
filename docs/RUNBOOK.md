@@ -4,6 +4,14 @@ A concrete, copy-pasteable walkthrough for the test deployment: **two camera-ser
 + the dashboard + a zenoh router**, built on a dev box, pulled onto a Jetson Orin from a local registry.
 Set the placeholders, then work top to bottom. The only files you author by hand are the two camera configs.
 
+> **Note (rig ≥ v0.1.44):** this walkthrough predates the package-registry layer and uses the
+> clone-and-wire workspace flow, which still works exactly as written. The registry flow removes
+> the clone steps — `rig setup && rig registry sync`, then `rig add public/zenoh-router` /
+> `rig add sensor:zr30` install pinned, vendored services with no checkouts (CHEATSHEET §1.5) —
+> and `{{var}}` templating turns the bake into a fleet artifact deployable to any provisioned
+> vehicle (CHEATSHEET §1.6). The dashboard still has no public remote, so this walkthrough's §2
+> clone remains the way to get it.
+
 ```
 infra:   zenoh-router (order 0)   +  dashboard (order 5; a zenoh-client sidecar)
 sensors: cam_usb (camera.type usb) +  cam_rtsp (camera.type rtsp)

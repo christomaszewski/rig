@@ -3,12 +3,26 @@
 `rig` orchestrates; it deliberately does **not** mutate host state (`rig doctor` only *checks*). The
 following are one-time, out-of-band host steps.
 
+## Installing rig
+
+- **Ubuntu/Debian (incl. the Jetson)**: `sudo dpkg -i rig_<v>_all.deb` from the
+  [latest release](https://github.com/christomaszewski/rig/releases/latest) — pulls in
+  `python3` + `python3-yaml`, so the Python prerequisite below is satisfied automatically.
+- **macOS dev box**: `brew install christomaszewski/rig/rig`.
+- **pipx/uv**: `pipx install git+https://github.com/christomaszewski/rig`.
+- **from a checkout** (developing rig itself): `./rig …`, or `rig setup --shell` for PATH.
+
+Then per user: `rig setup` (creates `~/.rig`, subscribes the default `public` package registry).
+On a **vehicle**, provision its identity once — `sudo rig provision --id 7 --name skiff-07`
+(writes `/etc/rig/vehicle.local.yaml`; every fleet artifact on the machine reads it; bare
+`rig provision` shows/checks it). Uninstall: `rig setup --purge`, then the package manager.
+
 ## Prerequisites
 
 - **Docker + Compose v2** (`docker compose version` ≥ 2.20 for `include:`).
 - **Python 3 + PyYAML** on the host — every launcher's `render_params.py` / `sensor_env.py` needs it, and
-  so does `rig`.
-  - Robot/Linux: `sudo apt install python3-yaml`.
+  so does `rig` (the deb declares both; brew/pipx bring their own).
+  - Robot/Linux without the deb: `sudo apt install python3-yaml`.
   - Dev box (PEP 668 / externally-managed): `python3 -m venv .venv && .venv/bin/pip install pyyaml`, then
     run `.venv/bin/python rig …` and export each launcher's interpreter:
     `export NOVATEL_PYTHON=$PWD/.venv/bin/python SBG_PYTHON=… CAM_PYTHON=…` (or just `apt install python3-yaml`).
@@ -89,6 +103,11 @@ cd /opt/rig/<name>
 Images pull from `devbox:5000` by digest on first `up`, then cache locally → the vehicle runs offline
 thereafter. To tweak on the vehicle, edit the unbaked tree and `./run.sh up`; `rig bake` again to capture a
 new tagged artifact.
+
+**Fleet artifacts** (the deployment references `{{var}}` values — CHEATSHEET §1.6): the artifact
+ships *unresolved* and renders on-vehicle, so `python3-yaml` is REQUIRED there (no compose-only
+fallback) and the vehicle must be provisioned once (`sudo ./provision.sh --id 7 --name skiff-07`,
+shipped in the artifact). After that, the same artifact deploys to every vehicle unchanged.
 
 ## Boot-time bring-up
 

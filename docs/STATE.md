@@ -1,8 +1,9 @@
 # rig — project state & handoff (resume here)
 
 > Snapshot for picking the project up cold in a new session. Read this first, then `CHEATSHEET.md` /
-> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.1.45**,
-> branch **`main`**, 189 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.1.48**
+> (released — tag pipeline verified end-to-end incl. the Homebrew tap auto-bump), branch **`main`**,
+> 204 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
 > **The package-registry layer is IMPLEMENTED** (v0.1.35–v0.1.45; plan doc `rig-registry-plan.md`,
 > untracked by request; design summary in DESIGN.md): registry model + `registry
 > init|validate|index`, live seed registry

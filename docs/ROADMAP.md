@@ -315,7 +315,7 @@ A three-tier manifest: `up --dry-run` shows infra → sensors → autonomy; `dow
 doctor green; a `tier: autonomy` fixture repo lands in the right menu section with its config under
 `config/autonomy/`.
 
-## 3e. Infra spin-out: `rig-infra` repo — ⚙ steps 1–2 done (v0.1.28); deployment migration + stub deletion remain
+## 3e. Infra spin-out: `rig-infra` repo — ✅ complete (steps 1–2 v0.1.28; templates/ stub deleted v0.1.35)
 
 > **Status:** rig-infra repo created (services moved verbatim, provenance in the first commit; `base/`
 > fleet-ros image; defaults flipped; CI certifies 3/3 + the router_config path). rig side shipped:
@@ -404,3 +404,32 @@ CI checkout secret-free like rig/camera-service).
   `--bundle-images` (v0.1.21, docker save/load for full air-gap) done.)
 - **camera-service `rigging.yaml`** — ✅ done: declares `external_volumes: ["cam_{name}_sock"]` so
   `rig down --purge` GCs it.
+
+## 5. Package registry, distribution & fleet vars — ✅ implemented (v0.1.35–v0.1.48)
+
+The full arc (design record: the registry plan doc; summaries in DESIGN.md; workflows in
+CHEATSHEET §1.5–1.6):
+
+- **v0.1.35** deprecated bundled `templates/` deleted (rig-infra owns those services).
+- **v0.1.36** packaging foundation: pyproject + `rig` console entry point (pipx installs work).
+- **v0.1.37** registry core: four manifest kinds + validators + deterministic index;
+  `rig registry init|validate|index`; live seed registry **rig-registry-public** (GitHub).
+- **v0.1.38** CLI noun taxonomy (config/run/registry/pkg/overlay/service/artifact/image) —
+  every flat spelling stays a permanent alias.
+- **v0.1.39** client registries: `~/.rig` cache + ff-only sync + degrade-not-fail; `rig setup`;
+  `pkg search|info`; deployments born as git repos.
+- **v0.1.40** one `rig.lock` (registries@commit / packages+hashes / instance anchors / images).
+- **v0.1.41** `pkg install` + `rig add` unification (path | name | registry ref | `sensor:<id>`),
+  vendored-at-pin self-contained deployments, `--locked` byte-identical reproduction.
+- **v0.1.42** working-copy layer: `config/.pins/` anchors, `config diff` attribution,
+  `pkg upgrade` three-way (local wins, conflicts loud), `pkg lock`.
+- **v0.1.43** ordered overlay bindings + four-layer render (local beats overlays).
+- **v0.1.44** `pkg promote` (overlay/profile/suite; round-trip law proven) + atomic suite
+  install with rollback.
+- **v0.1.45** docs sweep; embedded example names accepted verbatim (live-E2E catch).
+- **v0.1.46** distribution: release-on-tag (tests → wheel/sdist → arch=all deb → GitHub
+  Release), Homebrew tap with auto-bump (TAP_PUSH_TOKEN).
+- **v0.1.47** vehicle-local vars: `{{var}}` interpolation, source precedence
+  (shell > local > /etc/rig > vehicle.yaml), mandatory self-markers, `env:` passthrough.
+- **v0.1.48** flagless fleet artifacts (templates in ⇒ templates out; bake blind to local
+  sources) + `rig provision` with the `--force` re-identification gate.

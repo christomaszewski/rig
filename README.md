@@ -35,14 +35,20 @@ services evolve independently and new ones drop in by adding two files (a launch
 ## Install
 
 - **Ubuntu/Debian** (incl. Jetson, works offline): download `rig_<v>_all.deb` from the
-  [releases](https://github.com/christomaszewski/rig/releases) → `sudo dpkg -i rig_<v>_all.deb`
-- **macOS**: `brew install christomaszewski/rig/rig`
+  [latest release](https://github.com/christomaszewski/rig/releases/latest) →
+  `sudo dpkg -i rig_<v>_all.deb` (pulls in `python3` + `python3-yaml`; nothing else)
+- **macOS**: `brew install christomaszewski/rig/rig` (the tap tracks releases automatically)
 - **anywhere with pipx/uv**: `pipx install git+https://github.com/christomaszewski/rig`
 - **from a checkout**: `./rig …` works as-is; `rig setup --shell` puts it on PATH
 
-Then once per user: `rig setup` (creates `~/.rig` + the default public registry). Upgrades ride the
-package manager — rig never self-updates. Uninstall: `rig setup --purge` (user state), then the
-package manager (the package never touches `~/.rig`).
+Then, per user: `rig setup` (creates `~/.rig` + subscribes the default `public` registry). On a
+**vehicle**, also provision its identity once: `sudo rig provision --id 7 --name skiff-07`
+(writes `/etc/rig/vehicle.local.yaml` — every fleet artifact on the machine reads it).
+
+Upgrades ride the package manager (`apt`/`brew upgrade`) — rig never self-updates. Uninstall:
+`rig setup --purge` (user state), then the package manager (the package never touches `~/.rig`).
+Releases are cut by tag: every `vX.Y.Z` tag publishes the deb/wheel/sdist and bumps the Homebrew
+formula automatically.
 
 ## Quick start
 
@@ -62,6 +68,10 @@ python3 -m venv .venv && .venv/bin/pip install pyyaml
 ./rig add public/zenoh-router          # infra from the registry, at an exact pin
 ./rig add sensor:zr30                  # profile match -> service + editable config, hash-anchored
 ./rig config diff         # git-status for configs; `pkg promote` lifts your tuning into a registry
+
+# fleet vehicles — one artifact, N vehicles (CHEATSHEET §1.6)
+# reference per-vehicle values as {{vehicle_id}} etc. in configs; `rig bake` auto-detects the
+# templates and defers rendering to the vehicle, which supplies identity via `rig provision`
 
 # lifecycle — run the vehicle
 ./rig doctor              # read-only preflight (unique names, one ROS distro, launchers present, ...)
@@ -100,6 +110,12 @@ the image set into the artifact (multi-GB) for **zero-registry deploys** — `up
 Re-baking *inside an extracted artifact* (on the vehicle, after field edits) records the parent artifact in
 `metadata.yaml`, so save-points form a lineage. Full offline / local-registry flow: `docs/HOST_SETUP.md`.
 
+**Fleet artifacts** need no flag: if the deployment references `{{var}}` values (e.g.
+`rtsp://10.160.{{vehicle_id}}.80/…`), `rig bake` stages the tree *unresolved* and each vehicle
+renders it locally from its provisioned identity — one artifact serves the whole fleet
+(`sudo ./provision.sh --id 7 --name skiff-07` once per vehicle, then `./run.sh up` forever).
+CHEATSHEET §1.6 has the full lifecycle.
+
 ## Certify a launcher (the contract, executable)
 
 `doctor` checks the *vehicle* (manifest composition); **`certify` checks a *service*** — it runs the
@@ -120,7 +136,10 @@ rig certify --diff /tmp/mac.yaml /tmp/orin.yaml   # identical = `config` output 
 ## Layout
 
 ```
-vehicle.yaml            # which stacks THIS machine runs + fleet-wide ROS settings
+vehicle.yaml            # which stacks THIS machine runs + fleet-wide ROS settings (+ vars:/env:
+                        #   fleet defaults; {{var}} markers = supplied per vehicle)
+vehicle.local.yaml      # OPTIONAL, gitignored, never baked: THIS machine's identity/values for
+                        #   bench trees; vehicles use /etc/rig/vehicle.local.yaml (rig provision)
 services.yaml           # catalog: service routing key -> where its repo lives
 config/sensors/*.yaml   # one config per sensor (the single source of truth for that stack)
 config/infra/*.yaml     # one config per shared infra service (zenoh router, bag logger, …)
@@ -146,6 +165,12 @@ decider dies before its eyes). The tier partition is hard; per-entry `order` sor
 and ordering is a courtesy, not correctness: consumers must still retry (discovery is dynamic). Disable
 a stack with `enabled: false` rather than deleting its config. `name` must be unique across the vehicle —
 it keys the compose project, external volumes, and ROS namespace.
+
+Per-vehicle values flow through `{{var}}` markers (never `${VAR}` — that's compose's): configs and
+manifest scalars may reference `{{vehicle_id}}`, `vars:` entries, etc., resolved at render from
+shell (`RIG_VAR_*`) > `vehicle.local.yaml` > `/etc/rig/vehicle.local.yaml` > `vehicle.yaml`
+defaults. A self-marker (`vehicle_id: "{{vehicle_id}}"`) makes the value MANDATORY per vehicle.
+An `env:` map exports extra (interpolated) variables to every launcher. CHEATSHEET §1.6.
 
 ### `services.yaml` (catalog)
 Maps each `service` routing key to its repo `path` (resolved relative to this repo). The key may differ

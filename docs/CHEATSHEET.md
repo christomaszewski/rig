@@ -1,9 +1,10 @@
 # rig — deployment cheat sheet
 
-> The whole workflow on one page (rig ≥ v0.1.33). Long-form: `RUNBOOK.md` (worked Orin example),
-> `README.md` (concepts), `STATE.md` (current live state). Mental model: **services own their bring-up**
-> (launcher + `rigging.yaml`); **rig owns the vehicle** (manifest, env, ordering, artifacts). The vehicle
-> runs the baked compose-only form — no source, no internet.
+> The whole workflow on one page (rig ≥ v0.1.48). Long-form: `RUNBOOK.md` (worked Orin example),
+> `README.md` (concepts + install), `STATE.md` (current live state). Mental model: **services own their
+> bring-up** (launcher + `rigging.yaml`); **rig owns the vehicle** (manifest, env, ordering, artifacts).
+> The vehicle runs the baked artifact — no source, no internet (fleet artifacts render on-vehicle, §1.6).
+> Install rig itself via deb/brew/pipx (README "Install"); `rig setup` once per user.
 
 ```
 author configs ──▶ validate ──▶ build images ──▶ bake ──▶ ship ──▶ run ──▶ iterate
@@ -31,9 +32,11 @@ docker run -d --restart always -p 5000:5000 -v registry-data:/var/lib/registry -
 ## 1 — workspace + deployment scaffold
 
 ```bash
+# with rig INSTALLED (deb/brew/pipx — README "Install") the registry flow in §1.5 needs no
+# workspace at all. The clone-and-wire flow below remains for local service development:
 mkdir -p ~/ws && cd ~/ws                      # service repos + rig + rig-infra as siblings
 git clone <camera-service> <dashboard> <rig> https://github.com/christomaszewski/rig-infra ...
-alias rig="$PWD/rig/rig"
+alias rig="$PWD/rig/rig"                      # only when running rig from this checkout
 
 # --infra: shared services from the workspace (rig-infra), wired + ENABLED (router pinned to order 0)
 # --discover: scan sibling repos (rigging.yaml) -> services.yaml populated + examples copied + commented MENU

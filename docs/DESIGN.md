@@ -96,6 +96,22 @@ Key design points (full decision log: the registry plan document):
   local commit on a `promote/` branch); publishing is plain git. `rig setup` owns all user state
   (`~/.rig`, default registry, shell PATH block, `--purge`) — package managers never touch $HOME.
 
+## Vehicle-local vars & fleet artifacts (v0.1.47–48)
+
+One artifact, N vehicles. Configs and manifest scalars reference per-vehicle values as
+``{{var}}`` (deliberately not ``${VAR}`` — compose refs pass through untouched), resolved
+most-specific-wins: shell (`RIG_VAR_*`) > deployment-local `vehicle.local.yaml` (bench trees) >
+**`/etc/rig/vehicle.local.yaml`** (THE machine's identity, written by `sudo rig provision`) >
+vehicle.yaml `vars:` defaults. A self-marker (`vehicle_id: "{{vehicle_id}}"`) declares the value
+MANDATORY per vehicle — loading fails with the provision hint rather than coming up as vehicle 0.
+An `env:` map rides the existing fleet_env channel (interpolated; rig-owned keys rejected) for
+services that consume environment instead of config. `rig bake` needs no flag: fleet-ness is a
+property of the deployment (templates in ⇒ templates out), and bake reads NEITHER local file nor
+shell vars — bench identity cannot leak into an artifact, and rendering happens on-vehicle via
+the bundled rig. The working-copy machinery (pins/diff/promote/upgrade) operates on raw bytes,
+so registry profiles and overlays carry markers untouched: the template is the intent, the
+resolution is per-vehicle.
+
 ## Status & roadmap
 
 Implemented (see `ROADMAP.md` for the per-version log): manifest/catalog/descriptor loaders with
@@ -115,8 +131,8 @@ services) — and continuously, by `rig certify` in each repo's CI.
 
 Open items: a **dev-vs-prod** affordance (cam-up's `--dev` vs config-driven replay for thin drivers); a
 service-defined **`health` verb** (supersedes the ROS-`/diagnostics`-only idea — covers non-ROS stacks);
-boot-time bring-up via a systemd unit + a `rig verify --fix` reconciler; fleet mode (one artifact, N
-vehicles, id resolved on-vehicle); OCI artifact format.
+boot-time bring-up via a systemd unit + a `rig verify --fix` reconciler; OCI artifact format.
+(Fleet mode — one artifact, N vehicles, identity resolved on-vehicle — ✅ shipped v0.1.47–48, above.)
 
 See **`docs/ROADMAP.md`** for config overrides & reusable profiles (✅ implemented, §1) and the **SIL/HIL**
 model (per-sensor source × per-run footprint — still open, §2).
