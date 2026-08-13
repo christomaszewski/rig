@@ -88,19 +88,24 @@ def test_precedence_shell_local_machine_yaml():
         assert str(m.vehicle_id) == "9" and m.vars["camera_ip"] == "10.9.9.9"  # shell beats all
 
 
-def test_mandatory_marker_requires_local_and_hint():
-    root = _deployment('vehicle: "{{vehicle}}"\nvehicle_id: "{{vehicle_id}}"\n')
+def test_mandatory_marker_lazy_load_and_strict_gate():
+    root = _deployment('vehicle: "{{vehicle}}"\nvehicle_id: "{{vehicle_id}}"\nsensors: []\n')
     with _env(RIG_VEHICLE_LOCAL=_NO_MACHINE, RIG_VEHICLE_ID=None, RIG_VEHICLE_NAME=None):
-        try:
-            load_manifest(root)
-            raise AssertionError("expected RigError")
-        except RigError as exc:
-            assert "supplied per vehicle" in str(exc) and "rig provision" in str(exc)
+        m = load_manifest(root)                                        # LAZY: loading succeeds…
+        assert m.missing_identity == ("vehicle", "vehicle_id")
+        from rig_cli.cli import main
+        import io
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+            rc = main(["--root", str(root), "up", "--dry-run"])        # …but CONSUMING identity gates
+        assert rc == 1
+        assert "supplied per vehicle" in err.getvalue() and "rig provision" in err.getvalue()
     machine = pathlib.Path(tempfile.mkdtemp()) / "id.yaml"
     machine.write_text("vehicle: skiff-07\nvehicle_id: 7\n")
     with _env(RIG_VEHICLE_LOCAL=str(machine)):
         m = load_manifest(root)
         assert m.vehicle == "skiff-07" and m.vehicle_id == 7 and m.ros.domain_id == 7
+        assert m.missing_identity == ()
 
 
 def test_render_interpolates_configs_and_passthrough_rule():

@@ -19,6 +19,9 @@ from .manifest import Manifest, Sensor, project_name
 
 def fleet_env(manifest: Manifest) -> dict[str, str]:
     """The process env with which to call every launcher: inherit + pin the shared DDS graph."""
+    if getattr(manifest, "missing_identity", ()):  # belt — _load gates first
+        from .manifest import require_identity
+        require_identity(manifest, what="fleet env")
     env = dict(os.environ)
     env["ROS_DOMAIN_ID"] = str(manifest.ros.domain_id)
     env["RMW_IMPLEMENTATION"] = manifest.ros.rmw

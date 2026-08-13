@@ -119,15 +119,16 @@ def test_one_artifact_two_vehicles():
     assert urls == {3: "rtsp://10.160.3.80:8554/main", 9: "rtsp://10.160.9.80:8554/main"}
 
 
-def test_unprovisioned_vehicle_fails_with_hint():
+def test_unprovisioned_vehicle_gates_identity_consumers_only():
     root = _fleet_deployment()
     with _env(RIG_VEHICLE_LOCAL=str(pathlib.Path(tempfile.mkdtemp()) / "none.yaml"),
               RIG_VEHICLE_ID=None, RIG_VEHICLE_NAME=None):
-        try:
-            load_manifest(root)
-            raise AssertionError("expected RigError")
-        except RigError as exc:
-            assert "rig provision" in str(exc)
+        rc, _, err = _run("--root", str(root), "up", "--dry-run")      # consumes identity -> gated
+        assert rc == 1 and "rig provision" in err
+        rc, out, _ = _run("--root", str(root), "pkg", "list")          # management verb -> works
+        assert rc == 0 and "no registry packages installed" in out
+        rc, out, _ = _run("--root", str(root), "config", "diff")       # raw-file diff -> works
+        assert rc == 0
 
 
 def test_provision_write_show_check_and_force_gate():

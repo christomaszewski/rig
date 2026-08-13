@@ -40,6 +40,11 @@ def find_root() -> Path:
 
 def _load(root: Path) -> tuple[Manifest, dict[str, ServiceEntry], dict[str, Descriptor]]:
     manifest = load_manifest(root)
+    # Everything routed through _load CONSUMES identity (renders configs, names compose projects,
+    # exports fleet env) — the mandatory-marker gate lives here, so management verbs that load the
+    # manifest directly (pkg list/remove/…) keep working on an unprovisioned box.
+    from .manifest import require_identity
+    require_identity(manifest, what="this command needs a resolved vehicle identity")
     manifest = resolve.materialize_manifest(manifest, root)  # render profiles/overrides -> per-instance configs
     catalog = load_catalog(root)
     descriptors: dict[str, Descriptor] = {}

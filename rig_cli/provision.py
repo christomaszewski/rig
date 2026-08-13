@@ -48,12 +48,17 @@ def _show(root: Path | None) -> int:
     try:
         from .manifest import load_manifest
         manifest = load_manifest(root)
-        eprint(f"  deployment at {root}: all vars satisfied "
-               f"({', '.join(f'{r}={manifest.vars.get(r)}' for r in refs if r in manifest.vars)})")
-        return 0
     except RigError as exc:
         eprint(f"  deployment at {root}: NOT satisfied — {exc}")
         return 1
+    known = set(manifest.vars) | {"ros_domain_id"}
+    unmet = sorted((set(refs) - known) | set(manifest.missing_identity))
+    if unmet:
+        eprint(f"  deployment at {root}: NOT satisfied — missing: {', '.join(unmet)}")
+        return 1
+    eprint(f"  deployment at {root}: all vars satisfied "
+           f"({', '.join(f'{r}={manifest.vars.get(r)}' for r in refs if r in manifest.vars)})")
+    return 0
 
 
 def provision(root: Path | None, *, vehicle_id: str | None, name: str | None,

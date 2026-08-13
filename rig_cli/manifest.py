@@ -70,6 +70,9 @@ class Manifest:
     data_dir: str | None = None      # host dir for recordings/logs/outputs; -> RIG_DATA_DIR
     vars: dict = field(default_factory=dict)      # resolved {{var}} context (built-ins + vars:)
     extra_env: dict = field(default_factory=dict)  # `env:` map, interpolated — fleet_env exports it
+    missing_identity: tuple = ()  # mandatory per-vehicle keys nothing provides — loading stays
+    #                               LAZY so management verbs (pkg list/remove/…) work on any box;
+    #                               identity-CONSUMING commands (up/render/…) enforce via require_identity
 
     def select(self, names: list[str], enabled_only: bool) -> list[Sensor]:
         """Resolve a name filter into a tiered, ordered list (infra → sensors → autonomy). Explicit names win."""
@@ -203,16 +206,24 @@ def _effective(key: str, sources: list[dict], base):
 
 
 _PROVISION_HINT = ("provision this machine once: sudo rig provision --id <N> --name <name> "
-                   "(writes {machine}), or set RIG_VEHICLE_ID / a vehicle.local.yaml beside "
-                   "vehicle.yaml")
+                   "(writes {machine}), set RIG_VEHICLE_ID, or drop a bench vehicle.local.yaml "
+                   "beside vehicle.yaml for dev work")
 
 
-def _require(key: str, effective, base) -> None:
-    if effective is None and _self_referencing(base, key):
-        machine = os.environ.get("RIG_VEHICLE_LOCAL") or MACHINE_LOCAL_DEFAULT
-        raise RigError(f"vehicle.yaml declares `{key}` as supplied per vehicle "
-                       f"(\"{{{{{key}}}}}\") and nothing provides it — "
-                       + _PROVISION_HINT.format(machine=machine))
+def _missing_mandatory(key: str, effective, base) -> bool:
+    return effective is None and _self_referencing(base, key)
+
+
+def require_identity(manifest: "Manifest", *, what: str) -> None:
+    """The gate identity-CONSUMING commands call: `{{vehicle_id}}`-style mandatory keys must be
+    resolved before anything renders configs or names compose projects — never vehicle 0."""
+    if not manifest.missing_identity:
+        return
+    keys = ", ".join(manifest.missing_identity)
+    machine = os.environ.get("RIG_VEHICLE_LOCAL") or MACHINE_LOCAL_DEFAULT
+    raise RigError(f"{what}: vehicle.yaml declares {keys} as supplied per vehicle and nothing "
+                   f"provides {'it' if len(manifest.missing_identity) == 1 else 'them'} — "
+                   + _PROVISION_HINT.format(machine=machine))
 
 
 def _derive_domain(vehicle_id, ros_raw: dict) -> int:
@@ -239,8 +250,9 @@ def load_manifest(root: Path) -> Manifest:
     eff_vehicle = _effective("vehicle", sources, data.get("vehicle"))
     eff_id = _effective("vehicle_id", sources, data.get("vehicle_id"))
     eff_data_dir = _effective("data_dir", sources, data.get("data_dir"))
-    for key, eff in (("vehicle", eff_vehicle), ("vehicle_id", eff_id), ("data_dir", eff_data_dir)):
-        _require(key, eff, data.get(key))
+    missing = tuple(key for key, eff in (("vehicle", eff_vehicle), ("vehicle_id", eff_id),
+                                         ("data_dir", eff_data_dir))
+                    if _missing_mandatory(key, eff, data.get(key)))
 
     merged_vars: dict = {}
     merged_env: dict = {}
@@ -305,4 +317,5 @@ def load_manifest(root: Path) -> Manifest:
                     sensors=infra + sensors + autonomy,
                     image_registry=eff_images["registry"], vehicle_id=vehicle_id,
                     image_tag=eff_images["tag"],
-                    data_dir=data_dir, vars=ctx, extra_env=extra_env)
+                    data_dir=data_dir, vars=ctx, extra_env=extra_env,
+                    missing_identity=missing)
