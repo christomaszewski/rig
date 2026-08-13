@@ -104,7 +104,7 @@ hash; `rig pkg add <ref> --locked` reproduces byte-identical configs on a second
 
 Canonical grouped commands (old flat spellings stay as permanent aliases): `config show|render|diff` ·
 `run new|end|list` · `registry init|add|remove|list|sync|validate|index` · `pkg
-search|info|list|add|upgrade|lock|promote` · `overlay apply|remove|reorder|list` · `service
+search|info|list|add|remove|upgrade|lock|promote` · `overlay apply|remove|reorder|list` · `service
 rigify|vendor|certify` · `artifact bake|unbake|list` · `image build|pull`.
 
 Airgap: `sync` → `install` → `rig pull` → `rig bake --bundle-images` — the deployment is

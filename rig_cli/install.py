@@ -369,6 +369,142 @@ def _overlay_covers(manifest: dict, sensor) -> bool:
     return False
 
 
+def _delete_row(root: Path, instance: str) -> bool:
+    """Drop one generated single-line row from vehicle.yaml; False = shape rig can't edit
+    (instructions printed, nothing touched)."""
+    veh = root / "vehicle.yaml"
+    lines = veh.read_text().splitlines()
+    hits = [i for i, line in enumerate(lines)
+            if re.match(r"^\s*- \{.*\bname: " + re.escape(instance) + r"[,}]", line)]
+    if len(hits) != 1:
+        eprint(f"remove: vehicle.yaml row for '{instance}' "
+               f"{'not found' if not hits else 'ambiguous'} or hand-authored — delete it yourself")
+        return False
+    del lines[hits[0]]
+    new = "\n".join(lines) + "\n"
+    import yaml as _yaml
+    _yaml.safe_load(new)  # belt: never write a file that will not parse
+    veh.write_text(new)
+    return True
+
+
+def _drop_route(root: Path, svc: str) -> None:
+    svc_path = root / "services.yaml"
+    if not svc_path.is_file():
+        return
+    lines = svc_path.read_text().splitlines()
+    hits = [i for i, line in enumerate(lines) if re.match(r"^\s{2}" + re.escape(svc) + r":\s*\{", line)]
+    if len(hits) != 1:
+        eprint(f"remove: services.yaml route for '{svc}' not in the generated form — "
+               f"remove it yourself")
+        return
+    del lines[hits[0]]
+    svc_path.write_text("\n".join(lines) + "\n")
+
+
+def _gc_service(root: Path, lock: dict, svc: str) -> None:
+    """Drop a service package once NOTHING uses it: no instance rows, no locked profile requiring
+    it. Only ever removes a VENDORED services/ dir — a workspace route target is never touched."""
+    import shutil
+    packages = lock.get("packages") or {}
+    if any(s.service == svc for s in load_manifest(root).sensors):
+        return
+    still_required = any(
+        str(info.get("requires") or "").rpartition("/")[-1].split("@")[0] == svc
+        for info in packages.values() if info.get("kind") == "profile")
+    if still_required:
+        return
+    refs = [r for r, info in packages.items()
+            if info.get("kind") == "service" and r.rpartition("/")[-1].split("@")[0] == svc]
+    if not refs:
+        return  # not a registry package (workspace-wired) — never GC'd
+    vendored = root / "services" / svc
+    if (vendored / ".vendored.yaml").exists():
+        shutil.rmtree(vendored)
+        _drop_route(root, svc)
+        eprint(f"  service '{svc}': unused — vendored dir + route removed")
+    else:
+        eprint(f"  service '{svc}': unused, but services/{svc} is not a vendored dir — "
+               f"route left for you to review")
+    for ref in refs:
+        packages.pop(ref, None)
+
+
+def remove(root: Path, specs: list[str], *, purge_config: bool = False) -> int:
+    """`rig pkg remove <instance…|package>` — the inverse of `pkg add`. Instance form removes the
+    row, bindings, anchors, and (when clean vs its pin) the working config; dependency services
+    are GC'd. Package form removes an instance-less dependency service, and refuses (listing the
+    instances) when anything still uses the package. rig only edits files: bring the instance
+    DOWN first — a removed row orphans running containers from rig's view."""
+    lock = load_lock(root)
+    packages = lock.setdefault("packages", {})
+    anchors = lock.setdefault("instances", {})
+    for spec in specs:
+        manifest = load_manifest(root)
+        sensor = next((s for s in manifest.sensors if s.name == spec), None)
+        if sensor is None:
+            bare = spec.rpartition("/")[-1].split("@")[0]
+            refs = [r for r in packages if r.rpartition("/")[-1].split("@")[0] == bare]
+            if not refs:
+                raise RigError(f"remove: '{spec}' is neither an instance nor an installed package "
+                               f"(rig pkg list shows both)")
+            ref, kind = refs[0], (packages[refs[0]] or {}).get("kind")
+            if kind == "service":
+                users = [s.name for s in manifest.sensors if s.service == bare]
+            elif kind == "profile":
+                users = [s.name for s in manifest.sensors
+                         if s.profile and s.profile.rpartition("/")[-1].split("@")[0] == bare]
+            else:
+                users = [s.name for s in manifest.sensors if any(o == ref for o in s.overlays)]
+            if users:
+                raise RigError(f"remove: {ref} is used by instance{'s' if len(users) > 1 else ''} "
+                               f"{', '.join(users)} — remove those instead "
+                               f"(rig pkg remove {users[0]})")
+            if kind == "service":
+                _gc_service(root, lock, bare)
+            else:
+                packages.pop(ref, None)
+                eprint(f"  {ref}: removed from rig.lock (nothing was using it)")
+            continue
+
+        if sensor.name not in anchors and not sensor.profile:
+            raise RigError(f"remove: '{spec}' is hand-wired (no registry provenance) — delete its "
+                           f"row and config yourself; rig pkg remove only undoes rig pkg add")
+        eprint(f"remove: make sure '{spec}' is DOWN first (`rig down {spec}`) — a removed row "
+               f"orphans any running containers from rig's view")
+        if not _delete_row(root, sensor.name):
+            continue
+        # overlay bindings: refcount the payload copies against the REMAINING rows
+        remaining = load_manifest(root).sensors
+        for fq in sensor.overlays:
+            if not any(fq in s.overlays for s in remaining):
+                from .resolve import overlay_payload_path
+                overlay_payload_path(root, fq).unlink(missing_ok=True)
+                packages.pop(fq, None)
+                eprint(f"  overlay '{fq}': last binding — payload copy + lock entry removed")
+        pin = root / "config" / ".pins" / f"{sensor.name}.yaml"
+        working = Path(sensor.config)
+        if working.is_file():
+            clean = pin.is_file() and sha256_file(working) == sha256_file(pin)
+            if clean or purge_config:
+                working.unlink()
+            else:
+                eprint(f"  kept {working.relative_to(root)} — it has local edits "
+                       f"(--purge-config deletes it anyway)")
+        pin.unlink(missing_ok=True)
+        anchors.pop(sensor.name, None)
+        if sensor.profile:
+            others = [s for s in remaining if s.profile == sensor.profile]
+            if not others:
+                packages.pop(str(sensor.profile), None)
+        _gc_service(root, lock, sensor.service)
+        eprint(f"  instance '{sensor.name}' removed")
+    save_lock(root, lock)
+    load_manifest(root)  # the gate: the deployment must still load
+    eprint("rig pkg remove: done — rig.lock updated, commit it")
+    return 0
+
+
 def install(root: Path, spec: str, *, as_name: str | None = None, locked: bool = False) -> int:
     """One spec: `sensor:<id>` | `[registry/]profile` | `[registry/]service` | `[registry/]suite`."""
     lock = load_lock(root)
