@@ -8,7 +8,7 @@ registry checkout. Promotion emits packages of ANY kind, which is why it lives u
   path: hand-tuned or pre-registry instances get first-class packages).
 - ``--all [--suite S]``: every dirty instance → an overlay each, plus a suite referencing the
   deployment's pinned profiles and the new overlays in binding order — the whole-deployment
-  capture a fresh vehicle reproduces with ``pkg install <suite> `` (`--locked` for byte-identity).
+  capture a fresh vehicle reproduces with ``pkg add <suite>`` (`--locked` for byte-identity).
 
 Publish scope is WRITE + VALIDATE only (settled): into a local-dir registry the files land in
 place; into a git registry's managed cache they land as a LOCAL commit on a ``promote/…`` branch

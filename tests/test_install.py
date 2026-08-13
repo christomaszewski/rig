@@ -112,6 +112,17 @@ def _world():
     return target, reg
 
 
+def test_pkg_add_is_canonical_and_install_is_alias():
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        root, _ = _world()
+        rc, _, err = _run("--root", str(root), "pkg", "add", "testns/routerish")
+        assert rc == 0, err
+        rc, _, err = _run("--root", str(root), "pkg", "install", "sensor:acme")  # permanent alias
+        assert rc == 0, err
+        names = {s.name for s in load_manifest(root).sensors}
+        assert {"routerish", "acme_cam"} <= names
+
+
 def test_service_install_vendors_routes_and_wires():
     with _env(RIG_HOME=tempfile.mkdtemp()):
         root, _ = _world()

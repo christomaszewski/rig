@@ -93,18 +93,18 @@ rig registry sync && rig overlay apply siyi_zr30 internal/zr30-gideon --clear-lo
                                    # same render, tuning now VERSIONED (local always beats overlays)
 rig pkg promote --all --project gideon --suite gideon-boat --to internal
                                    # whole-deployment capture: overlays + a suite; a fresh vehicle
-                                   #   reproduces it with `rig pkg install internal/gideon-boat`
+                                   #   reproduces it with `rig pkg add internal/gideon-boat`
 rig pkg upgrade                    # registry moved? three-way merge: new base ⊕ your edits, conflicts loud
 ```
 
 Registries: `rig registry init <dir>` scaffolds a new one (usable immediately via
 `rig registry add internal --path <dir>`; push it to GitHub/GitLab later — CI wrappers included).
 `--front` makes a dev checkout shadow `public` for unqualified names. `rig.lock` records every pin +
-hash; `rig pkg install <ref> --locked` reproduces byte-identical configs on a second machine.
+hash; `rig pkg add <ref> --locked` reproduces byte-identical configs on a second machine.
 
 Canonical grouped commands (old flat spellings stay as permanent aliases): `config show|render|diff` ·
 `run new|end|list` · `registry init|add|remove|list|sync|validate|index` · `pkg
-search|info|install|upgrade|lock|promote` · `overlay apply|remove|reorder|list` · `service
+search|info|list|add|upgrade|lock|promote` · `overlay apply|remove|reorder|list` · `service
 rigify|vendor|certify` · `artifact bake|unbake|list` · `image build|pull`.
 
 Airgap: `sync` → `install` → `rig pull` → `rig bake --bundle-images` — the deployment is

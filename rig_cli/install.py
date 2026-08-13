@@ -1,4 +1,4 @@
-"""``rig pkg install`` — resolve a package from the configured registries and wire it into THIS
+"""``rig pkg add`` (alias: install) — resolve a package from the configured registries and wire it into THIS
 deployment. The porcelain `rig add` routes registry refs and ``sensor:<id>`` specs here.
 
 What install produces is a SELF-CONTAINED deployment (the offline/bake story depends on it):

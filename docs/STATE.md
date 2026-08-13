@@ -9,7 +9,7 @@
 > init|validate|index`, live seed registry
 > **https://github.com/christomaszewski/rig-registry-public**, `~/.rig` client
 > (`setup`/`add`/`sync`, ordered priority, degrade-not-fail), CLI noun taxonomy with permanent
-> aliases, one extended `rig.lock`, `pkg install` (+ `rig add` porcelain: path | name | registry
+> aliases, one extended `rig.lock`, `pkg add` (install = alias; + `rig add` porcelain: path | name | registry
 > ref | `sensor:<id>`) with vendored-at-pin self-contained deployments, the working-copy pipeline
 > (`config/.pins/` anchors, `config diff` attribution, `pkg upgrade` three-way), ordered overlay
 > bindings (local beats overlays), `pkg promote` (overlay/profile/suite; write+validate, git
