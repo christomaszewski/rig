@@ -448,7 +448,7 @@ def build_parser() -> argparse.ArgumentParser:
         epilog="noun groups (canonical forms; the flat spellings above stay as permanent aliases):\n"
                "  rig config   show | render          rig run      new | end | list\n"
                "  rig registry init | add | remove | list | sync | validate | index\n"
-               "  rig pkg      search | info | install | upgrade | lock | promote\n"
+               "  rig pkg      search | info | list | install | upgrade | lock | promote\n"
                "  rig overlay  apply | remove | reorder | list     rig setup (first-run host setup)\n"
                "  rig service  rigify | vendor | certify\n"
                "  rig artifact bake | unbake | list   rig image    build | pull")
@@ -625,6 +625,8 @@ def build_parser() -> argparse.ArgumentParser:
     ps.add_argument("query")
     pi = pkgsub.add_parser("info", help="one package's manifest highlights + provenance")
     pi.add_argument("ref", help="[registry/]name")
+    pkgsub.add_parser("list", help="THIS deployment's installed packages (from rig.lock): kind, "
+                                   "which instances use each, upgrades available")
     pin = pkgsub.add_parser("install", help="install a service/profile (or sensor:<id>) into THIS "
                                             "deployment: fetch @ pin, vendor, materialize the working "
                                             "config, lock")
@@ -736,7 +738,7 @@ def main(argv=None) -> int:
         if args.cmd == "registry":  # operates on a registry tree / ~/.rig — needs no deployment
             return cmd_registry(args)
         if args.cmd == "pkg":
-            if args.pkg_cmd in ("install", "upgrade", "lock", "promote"):  # deployment-touching verbs
+            if args.pkg_cmd in ("install", "upgrade", "lock", "promote", "list"):  # deployment verbs
                 root = (args.root or find_root()).resolve()
                 if not (root / "vehicle.yaml").exists():
                     raise RigError(f"pkg {args.pkg_cmd}: not in a rig deployment (no vehicle.yaml) — "
@@ -744,6 +746,8 @@ def main(argv=None) -> int:
                 if args.pkg_cmd == "install":
                     return install_mod.install(root, args.spec, as_name=args.as_name,
                                                locked=args.locked)
+                if args.pkg_cmd == "list":
+                    return pkg_mod.list_installed(root)
                 if args.pkg_cmd == "upgrade":
                     return workingcopy_mod.upgrade(root, args.names)
                 if args.pkg_cmd == "promote":

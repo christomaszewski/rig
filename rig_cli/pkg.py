@@ -84,6 +84,61 @@ def search(query: str) -> int:
     return 0
 
 
+def list_installed(root) -> int:
+    """`rig pkg list` — this deployment's installed packages (from rig.lock), which instances use
+    each, and whether the synced registries carry a newer version (blank when a registry is
+    unreachable — listing never fails on registry state)."""
+    from .lock import load_lock
+    from .manifest import load_manifest
+
+    lock = load_lock(root)
+    packages = lock.get("packages") or {}
+    if not packages:
+        print("no registry packages installed (rig.lock has no packages section) — "
+              "`rig add <ref|sensor:id>` installs one")
+        return 0
+    manifest = load_manifest(root)
+    entries = {e.name: e for e in load_entries()}
+
+    def users(ref: str, kind: str) -> str:
+        name = ref.rpartition("/")[-1].split("@")[0]
+        if kind == "service":
+            hits = [s.name for s in manifest.sensors if s.service == name]
+        elif kind == "profile":
+            hits = [s.name for s in manifest.sensors
+                    if s.profile and s.profile.rpartition("/")[-1].split("@")[0] == name]
+        else:  # overlay: bound instances
+            hits = [s.name for s in manifest.sensors if any(o == ref for o in s.overlays)]
+        return ", ".join(hits) or ("(dependency)" if kind == "service" else "—")
+
+    def registry_current(ref: str) -> str:
+        ns, _, rest = ref.partition("/")
+        name, _, pinned = rest.partition("@")
+        entry = entries.get(ns)
+        if entry is None:
+            return "registry gone"
+        try:
+            reg, index = open_registry(entry)
+        except RigError:
+            return ""
+        current = ((index.get("packages") or {}).get(name) or {}).get("version")
+        if current is None:
+            return "gone from registry"
+        return "" if current == pinned else f"{current} available"
+
+    rows = [("PACKAGE", "KIND", "USED BY", "UPGRADE")]
+    for ref in sorted(packages):
+        info_ = packages[ref] or {}
+        kind = str(info_.get("kind", "?"))
+        rows.append((ref, kind, users(ref, kind), registry_current(ref)))
+    widths = [max(len(r[i]) for r in rows) for i in range(len(rows[0]))]
+    for r in rows:
+        print("  ".join(cell.ljust(widths[i]) for i, cell in enumerate(r)).rstrip())
+    if any(r[3] for r in rows[1:]):
+        print("\n(`rig registry sync && rig pkg upgrade` updates; local edits are three-way-merged)")
+    return 0
+
+
 def info(ref: str) -> int:
     entries = _entries_or_hint()
     ns, _, name = ref.rpartition("/")

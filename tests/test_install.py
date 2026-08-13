@@ -208,6 +208,32 @@ def test_version_spec_and_wrong_kind_errors():
         assert rc == 1 and "not found" in err
 
 
+def test_pkg_list_shows_installed_users_and_upgrades():
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        root, reg = _world()
+        rc, out, _ = _run("--root", str(root), "pkg", "list")
+        assert rc == 0 and "no registry packages installed" in out
+        assert _run("--root", str(root), "add", "testns/routerish")[0] == 0
+        assert _run("--root", str(root), "pkg", "install", "sensor:acme")[0] == 0
+        assert _run("--root", str(root), "overlay", "apply", "acme_cam", "testns/cam-tune")[0] == 0
+        rc, out, _ = _run("--root", str(root), "pkg", "list")
+        assert rc == 0, out
+        lines = {l.split()[0]: l for l in out.splitlines() if "/" in l}
+        assert "acme_cam" in lines["testns/acme-cam@2.0.0"]           # profile -> its instance
+        assert "acme_cam" in lines["testns/camish@1.2.0"]             # service -> instances using it
+        assert "routerish" in lines["testns/routerish@1.2.0"]
+        assert "acme_cam" in lines["testns/cam-tune@1.0.0"]           # overlay -> bound instance
+        assert "available" not in out                                  # everything current
+        # registry moves -> the UPGRADE column lights up
+        mpath = reg / "services" / "routerish" / "manifest.yaml"
+        m = yaml.safe_load(mpath.read_text())
+        m["version"] = "2.0.0"
+        mpath.write_text(yaml.safe_dump(m, sort_keys=False))
+        _run("registry", "index", str(reg))
+        rc, out, _ = _run("--root", str(root), "pkg", "list")
+        assert "2.0.0 available" in out and "pkg upgrade" in out
+
+
 def test_locked_reproduces_and_detects_drift():
     with _env(RIG_HOME=tempfile.mkdtemp()):
         root, reg = _world()
