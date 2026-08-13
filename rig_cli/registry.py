@@ -44,6 +44,8 @@ _INSTANCE = re.compile(r"^[a-z][a-z0-9_]*$")                    # instance-scope
 class Issue:
     where: str    # registry-relative context, e.g. "profiles/siyi-zr30/manifest.yaml"
     message: str
+    level: str = "error"  # "error" fails validation; "warning" surfaces without failing (e.g. an
+    #                       overlay authored against an older service version — staleness signal)
 
 
 @dataclass(frozen=True)
@@ -212,6 +214,19 @@ def _validate_overlay(pkg: Package, reg: Registry, issues: list[Issue]) -> None:
             if banned in payload:
                 issues.append(Issue(where, f"overlay deltas must not set `{banned}` — identity belongs "
                                            f"to the instance row"))
+    # Staleness signal (tier 1): the promote-stamped provenance vs the registry's CURRENT service.
+    # In-registry only (cross-registry refs resolve at install, not here); a version drift is a
+    # WARNING — the delta may be fine, but its keys were authored against an older config surface.
+    authored = m.get("authored_against")
+    if isinstance(authored, dict) and isinstance(authored.get("service"), str):
+        match = _QUALIFIED_EXACT.match(authored["service"])
+        if match and match["ns"] == reg.namespace:
+            dep = reg.packages.get(match["name"])
+            if dep is not None and dep.kind == "service" and dep.version != match["ver"]:
+                issues.append(Issue(where, f"authored against {authored['service']}; this registry "
+                                           f"now carries {dep.name}@{dep.version} — re-verify the "
+                                           f"delta's keys against the newer config surface, then "
+                                           f"bump authored_against", level="warning"))
 
 
 def _validate_suite(pkg: Package, reg: Registry, issues: list[Issue]) -> None:
@@ -414,17 +429,21 @@ def write_index(reg: Registry) -> Path:
 
 def _report(issues: list[Issue]) -> int:
     for issue in issues:
-        eprint(f"  [✗] {issue.where}: {issue.message}")
-    return 1 if issues else 0
+        eprint(f"  [{'!' if issue.level == 'warning' else '✗'}] {issue.where}: {issue.message}")
+    return 1 if any(i.level == "error" for i in issues) else 0
 
 
 def cli_validate(root: Path) -> int:
     reg, issues = validate_registry(root)
-    if issues:
-        eprint(f"rig registry validate: {len(issues)} issue(s) in {reg.root}")
+    errors = [i for i in issues if i.level == "error"]
+    if errors:
+        eprint(f"rig registry validate: {len(errors)} issue(s) in {reg.root}")
         return _report(issues)
+    if issues:  # warnings only — surface them, still green
+        _report(issues)
     eprint(f"rig registry validate: OK — namespace '{reg.namespace}', "
-           f"{len(reg.packages)} package(s), index fresh")
+           f"{len(reg.packages)} package(s), index fresh"
+           + (f", {len(issues)} warning(s)" if issues else ""))
     return 0
 
 
@@ -432,8 +451,8 @@ def cli_index(root: Path) -> int:
     """Regenerate index.json — but never index a registry whose manifests don't validate (a broken
     index would launder the breakage into consumers' resolution)."""
     reg, issues = validate_registry(root, check_index=False)
-    if issues:
-        eprint(f"rig registry index: refusing to index an invalid registry ({len(issues)} issue(s)):")
+    if any(i.level == "error" for i in issues):
+        eprint(f"rig registry index: refusing to index an invalid registry:")
         return _report(issues)
     out = write_index(reg)
     eprint(f"rig registry index: wrote {out} ({len(reg.packages)} package(s))")

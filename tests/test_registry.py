@@ -247,6 +247,24 @@ def test_index_sensor_tiers_and_projects():
     assert render_index(index) == render_index(generate_index(reg))  # deterministic
 
 
+def test_authored_against_drift_warns_without_failing():
+    root = _registry()
+    _service(root, version="2.0.0")
+    _overlay(root, authored_against={"service": "testns/camera-service@1.4.2"})
+    _reindex(root)
+    reg, issues = validate_registry(root)
+    warnings = [i for i in issues if i.level == "warning"]
+    errors = [i for i in issues if i.level == "error"]
+    assert not errors and len(warnings) == 1
+    assert "now carries camera-service@2.0.0" in warnings[0].message
+    from rig_cli.registry import cli_validate
+    import contextlib, io
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        assert cli_validate(root) == 0                              # warnings never fail CI
+    assert "[!]" in err.getvalue() and "1 warning(s)" in err.getvalue()
+
+
 def test_newer_registry_schema_is_refused_with_upgrade_pointer():
     root = _registry()
     (root / "registry.yaml").write_text("schema: 99\nname: reg\nnamespace: testns\n")

@@ -175,9 +175,20 @@ def promote(root: Path, names: list[str], *, to: str, all_dirty: bool, name: str
                                 and ref.rpartition("/")[-1].split("@")[0] == sensor.service), None)
                     if pin:
                         svc_target = pin.split("@", 1)[0]  # ns/name
+                # Provenance stamp (staleness tier 1): what this delta was authored against —
+                # registry CI warns when the target service moves past it.
+                authored = {}
+                svc_pin = next((r for r, info in (lock.get("packages") or {}).items()
+                                if info.get("kind") == "service"
+                                and r.rpartition("/")[-1].split("@")[0] == sensor.service), None)
+                if svc_pin:
+                    authored["service"] = svc_pin
+                if sensor.profile:
+                    authored["profile"] = str(sensor.profile)
                 omanifest = {"kind": "overlay", "name": pkg_name, "version": version,
                              "targets": ([{"instance": sensor.name}] if target_instance
                                          else [{"service": svc_target}]),
+                             **({"authored_against": authored} if authored else {}),
                              **({"project": project} if project else {}),
                              "config": {"payload": "config/delta.yaml"}}
                 _write_pkg(reg_root, "overlays", pkg_name, omanifest, delta, written)
@@ -202,8 +213,9 @@ def promote(root: Path, names: list[str], *, to: str, all_dirty: bool, name: str
                    f"{len(bound)} overlay(s) in binding order)")
 
         _, issues = validate_registry(reg_root, check_index=False)
-        if issues:
-            details = "; ".join(f"{i.where}: {i.message}" for i in issues[:3])
+        errors = [i for i in issues if i.level == "error"]
+        if errors:
+            details = "; ".join(f"{i.where}: {i.message}" for i in errors[:3])
             raise RigError(f"promote: the emitted packages do not validate — {details}")
         write_index(load_registry(reg_root, []))
 

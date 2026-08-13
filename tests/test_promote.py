@@ -53,6 +53,8 @@ def test_promote_overlay_roundtrip_identical_render():
         assert delta == {"usb": {"width": 640}}
         m = yaml.safe_load((internal / "overlays" / "zr-gideon" / "manifest.yaml").read_text())
         assert m["targets"] == [{"service": "testns/camish"}]     # fully qualified (not in `internal`)
+        assert m["authored_against"] == {"service": "testns/camish@1.2.0",  # staleness tier 1
+                                         "profile": "testns/acme-cam@2.0.0"}
         assert _run("registry", "validate", str(internal))[0] == 0
         rc, _, err = _run("--root", str(root), "overlay", "apply", "acme_cam",
                           "internal/zr-gideon", "--clear-local")
