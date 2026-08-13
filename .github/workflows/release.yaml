@@ -42,12 +42,26 @@ jobs:
         if: ${{ env.TAP_TOKEN != '' }}
         run: |
           set -e
-          v=${GITHUB_REF_NAME#v}
           url="https://github.com/christomaszewski/rig/archive/refs/tags/${GITHUB_REF_NAME}.tar.gz"
           sha=$(curl -sL "$url" | sha256sum | cut -d' ' -f1)
           git clone -q "https://x-access-token:${TAP_TOKEN}@github.com/christomaszewski/homebrew-rig" tap
+          # Surgical bump: ONLY the formula's own rig-archive url + the sha256 on the line right
+          # after it. A blanket url substitution once clobbered the pyyaml resource's url too —
+          # resources must stay untouched.
+          python3 - "$url" "$sha" <<'EOF'
+          import pathlib, re, sys
+          url, sha = sys.argv[1], sys.argv[2]
+          path = pathlib.Path("tap/Formula/rig.rb")
+          lines = path.read_text().splitlines()
+          hit = [i for i, l in enumerate(lines)
+                 if re.search(r'url "https://github\.com/christomaszewski/rig/archive/', l)]
+          assert len(hit) == 1, f"expected exactly one rig-archive url line, found {len(hit)}"
+          i = hit[0]
+          lines[i] = re.sub(r'url "[^"]*"', f'url "{url}"', lines[i])
+          assert 'sha256 "' in lines[i + 1], "sha256 must follow the url line"
+          lines[i + 1] = re.sub(r'sha256 "[0-9a-f]{64}"', f'sha256 "{sha}"', lines[i + 1])
+          path.write_text("\n".join(lines) + "\n")
+          EOF
           cd tap
-          sed -i -E "s|url \".*\"|url \"$url\"|" Formula/rig.rb
-          sed -i -E "0,/sha256 \"[0-9a-f]{64}\"/s//sha256 \"$sha\"/" Formula/rig.rb
-          git -c user.name=rig-release -c user.email=rig@localhost commit -am "rig $v"
+          git -c user.name=rig-release -c user.email=rig@localhost commit -am "rig ${GITHUB_REF_NAME#v}"
           git push -q
