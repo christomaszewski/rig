@@ -33,6 +33,9 @@ def fleet_env(manifest: Manifest) -> dict[str, str]:
             env[key] = str(value)
         else:
             env.pop(key, None)
+    # The operator-extensible tail on this channel: vehicle.yaml/local `env:` (already
+    # interpolated; collisions with the rig-owned keys above were rejected at manifest load).
+    env.update({key: str(value) for key, value in manifest.extra_env.items()})
     return env
 
 

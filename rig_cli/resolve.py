@@ -16,6 +16,7 @@ from pathlib import Path
 import yaml  # PyYAML — already required by common
 
 from .common import load_yaml
+from .interpolate import substitute
 from .manifest import Manifest, Sensor
 
 
@@ -62,10 +63,12 @@ def overlay_payload_path(root: Path, ref: str) -> Path:
     return root / "config" / ".overlays" / (ref.replace("/", "--").replace("@", "--") + ".yaml")
 
 
-def _layered_dict(sensor: Sensor, root: Path) -> dict:
+def _layered_dict(sensor: Sensor, root: Path, variables: dict | None = None) -> dict:
     """The four-layer merge, honoring LOCAL BEATS OVERLAYS: pinned base ⊕ overlays (bound order) ⊕
-    the working file's local delta ⊕ row overrides. Without a pinned base (hand-authored instance)
-    the working file itself is the base. Identity (name/service) is stamped last."""
+    the working file's local delta ⊕ row overrides — then ONE `{{var}}` interpolation pass
+    (vehicle-local vars; unknown var = hard error). Without a pinned base (hand-authored
+    instance) the working file itself is the base. Identity (name/service) is stamped last,
+    never interpolated."""
     working = load_yaml(sensor.config)
     if sensor.overlays:
         pin = root / "config" / ".pins" / f"{sensor.name}.yaml"
@@ -89,6 +92,8 @@ def _layered_dict(sensor: Sensor, root: Path) -> dict:
         cfg = dict(working)
     if sensor.overrides:
         cfg = deep_merge(cfg, sensor.overrides)
+    if variables is not None:
+        cfg = substitute(cfg, variables, where=f"{sensor.name}: config")
     cfg.setdefault("service", sensor.service)
     cfg["name"] = sensor.name
     return cfg
@@ -110,13 +115,16 @@ def resolved_dict(sensor: Sensor, root: Path | None = None) -> dict:
     return cfg
 
 
-def materialize(sensor: Sensor, root: Path) -> Path:
+def materialize(sensor: Sensor, root: Path, variables: dict | None = None) -> Path:
     """Return the config path to hand the launcher. If the base is already a complete *named* config
-    with no overrides and no overlays, return it unchanged; otherwise render the four-layer merge to
-    ``var/rendered/<name>.yaml``. Deterministic: same inputs -> identical render (up and down agree)."""
-    if not sensor.overrides and not sensor.overlays and "name" in load_yaml(sensor.config):
+    with no overrides, no overlays, and no `{{var}}` markers, return it unchanged; otherwise render
+    the four-layer merge (+ interpolation) to ``var/rendered/<name>.yaml``. Deterministic: same
+    inputs -> identical render (up and down agree)."""
+    if (not sensor.overrides and not sensor.overlays
+            and "{{" not in Path(sensor.config).read_text()
+            and "name" in load_yaml(sensor.config)):
         return sensor.config
-    cfg = _layered_dict(sensor, root)
+    cfg = _layered_dict(sensor, root, variables)
     out_dir = root / "var" / "rendered"
     out_dir.mkdir(parents=True, exist_ok=True)
     out = out_dir / f"{sensor.name}.yaml"
@@ -126,7 +134,9 @@ def materialize(sensor: Sensor, root: Path) -> Path:
 
 
 def materialize_manifest(manifest: Manifest, root: Path) -> Manifest:
-    """Rewrite each sensor's ``config`` to its resolved path (rendering profiles/overrides as needed), so
-    the rest of rig (dispatch, status, doctor) just uses ``sensor.config`` and never sees the templating."""
-    sensors = [dataclasses.replace(s, config=materialize(s, root)) for s in manifest.sensors]
+    """Rewrite each sensor's ``config`` to its resolved path (rendering profiles/overrides/overlays/
+    vars as needed), so the rest of rig (dispatch, status, doctor) just uses ``sensor.config`` and
+    never sees the templating."""
+    sensors = [dataclasses.replace(s, config=materialize(s, root, manifest.vars))
+               for s in manifest.sensors]
     return dataclasses.replace(manifest, sensors=sensors)

@@ -11,11 +11,25 @@ courtesy, not correctness — consumers must still retry (discovery is dynamic).
 """
 from __future__ import annotations
 
+import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import RigError
 from .common import load_yaml
+from .interpolate import MARKER, resolve_map, substitute_scalar
+
+# THE machine's identity file — a property of the vehicle computer, not of any deployment tree
+# (the boot-time systemd unit and an ssh operator must see the same vehicle_id, so this is
+# system-level, never ~/.rig). Hardcoded default; RIG_VEHICLE_LOCAL overrides (tests, rootless).
+MACHINE_LOCAL_DEFAULT = "/etc/rig/vehicle.local.yaml"
+# The only keys a vehicle-local file may carry: the per-host knobs that genuinely vary across a
+# fleet. Never sensor rows — a local file silently flipping stacks makes fleet debugging miserable.
+LOCAL_KEYS = {"vehicle", "vehicle_id", "vars", "env", "data_dir", "images"}
+# Env keys rig owns end-to-end (fleet_env sets them; an `env:` map may not shadow them).
+RIG_OWNED_ENV = {"VEHICLE_ID", "ROS_DOMAIN_ID", "RMW_IMPLEMENTATION", "RIG_IMAGE_REGISTRY",
+                 "RIG_IMAGE_TAG", "RIG_DATA_DIR", "COMPOSE_PROJECT_NAME"}
 
 
 @dataclass(frozen=True)
@@ -54,6 +68,8 @@ class Manifest:
     vehicle_id: object = None        # int|str; decides the ROS domain + exported as VEHICLE_ID
     image_tag: str | None = None     # fleet-wide image tag (e.g. a JetPack platform jp7); -> RIG_IMAGE_TAG
     data_dir: str | None = None      # host dir for recordings/logs/outputs; -> RIG_DATA_DIR
+    vars: dict = field(default_factory=dict)      # resolved {{var}} context (built-ins + vars:)
+    extra_env: dict = field(default_factory=dict)  # `env:` map, interpolated — fleet_env exports it
 
     def select(self, names: list[str], enabled_only: bool) -> list[Sensor]:
         """Resolve a name filter into a tiered, ordered list (infra → sensors → autonomy). Explicit names win."""
@@ -133,6 +149,72 @@ def stack_summary(sensors: list[Sensor]) -> str:
     return " + ".join(parts) or "0 stacks"
 
 
+def _local_sources(root: Path) -> list[dict]:
+    """Vehicle-local files, highest precedence first: the deployment-local vehicle.local.yaml
+    (bench/dev trees — artifacts never ship one), then the MACHINE identity file."""
+    sources: list[dict] = []
+    machine = Path(os.environ.get("RIG_VEHICLE_LOCAL") or MACHINE_LOCAL_DEFAULT)
+    for path in (root / "vehicle.local.yaml", machine):
+        if not path.is_file():
+            continue
+        data = load_yaml(path)
+        unknown = set(data) - LOCAL_KEYS
+        if unknown:
+            raise RigError(f"{path}: unknown key(s): {', '.join(sorted(unknown))} — vehicle-local "
+                           f"files carry only: {', '.join(sorted(LOCAL_KEYS))}")
+        sources.append(data)
+    return sources
+
+
+def _shell_source() -> dict:
+    """Shell overrides — only rig-namespaced env feeds vars, never arbitrary environment."""
+    data: dict = {}
+    if os.environ.get("RIG_VEHICLE_ID"):
+        data["vehicle_id"] = os.environ["RIG_VEHICLE_ID"]
+    if os.environ.get("RIG_VEHICLE_NAME"):
+        data["vehicle"] = os.environ["RIG_VEHICLE_NAME"]
+    shell_vars: dict = {}
+    for key, value in os.environ.items():
+        if key.startswith("RIG_VAR_"):
+            name = key[len("RIG_VAR_"):]
+            if not re.match(r"^[a-z][a-z0-9_]*$", name):
+                raise RigError(f"{key}: var names are lowercase [a-z][a-z0-9_]* "
+                               f"(shell spelling: RIG_VAR_<name>)")
+            shell_vars[name] = value
+    if shell_vars:
+        data["vars"] = shell_vars
+    return data
+
+
+def _self_referencing(value, key: str) -> bool:
+    """`vehicle_id: "{{vehicle_id}}"` — the field references ITSELF, i.e. vehicle.yaml provides
+    no value and declares it supplied per vehicle (mandatory-from-local)."""
+    return isinstance(value, str) and key in MARKER.findall(value)
+
+
+def _effective(key: str, sources: list[dict], base):
+    """Precedence walk (shell > deployment-local > machine > vehicle.yaml); a self-referencing
+    value contributes nothing. None = no source provides it."""
+    for candidate in [s.get(key) for s in sources] + [base]:
+        if candidate is None or _self_referencing(candidate, key):
+            continue
+        return candidate
+    return None
+
+
+_PROVISION_HINT = ("provision this machine once: sudo rig provision --id <N> --name <name> "
+                   "(writes {machine}), or set RIG_VEHICLE_ID / a vehicle.local.yaml beside "
+                   "vehicle.yaml")
+
+
+def _require(key: str, effective, base) -> None:
+    if effective is None and _self_referencing(base, key):
+        machine = os.environ.get("RIG_VEHICLE_LOCAL") or MACHINE_LOCAL_DEFAULT
+        raise RigError(f"vehicle.yaml declares `{key}` as supplied per vehicle "
+                       f"(\"{{{{{key}}}}}\") and nothing provides it — "
+                       + _PROVISION_HINT.format(machine=machine))
+
+
 def _derive_domain(vehicle_id, ros_raw: dict) -> int:
     """Explicit `ros.domain_id` wins; else a numeric vehicle id IS the domain (so one knob picks both);
     else 0."""
@@ -149,26 +231,78 @@ def _derive_domain(vehicle_id, ros_raw: dict) -> int:
 
 def load_manifest(root: Path) -> Manifest:
     data = load_yaml(root / "vehicle.yaml")
-    vehicle_id = data.get("vehicle_id")
+
+    # --- vehicle-local sources & {{var}} resolution (load-time pass) --------------------------
+    # Precedence, most-specific-wins: shell > deployment-local > machine (/etc/rig) > vehicle.yaml.
+    # A self-referencing vehicle.yaml field ("{{vehicle_id}}") provides nothing and is MANDATORY.
+    sources = [_shell_source()] + _local_sources(root)
+    eff_vehicle = _effective("vehicle", sources, data.get("vehicle"))
+    eff_id = _effective("vehicle_id", sources, data.get("vehicle_id"))
+    eff_data_dir = _effective("data_dir", sources, data.get("data_dir"))
+    for key, eff in (("vehicle", eff_vehicle), ("vehicle_id", eff_id), ("data_dir", eff_data_dir)):
+        _require(key, eff, data.get(key))
+
+    merged_vars: dict = {}
+    merged_env: dict = {}
+    for src in [data] + list(reversed(sources)):  # lowest precedence first; higher overwrites
+        for bucket, merged in (("vars", merged_vars), ("env", merged_env)):
+            extra = src.get(bucket) or {}
+            if not isinstance(extra, dict):
+                raise RigError(f"`{bucket}` must be a mapping")
+            merged.update(extra)
+
+    raw_ctx = dict(merged_vars)
+    if eff_vehicle is not None:
+        raw_ctx["vehicle"] = eff_vehicle
+    if eff_id is not None:
+        raw_ctx["vehicle_id"] = eff_id
+    ctx = resolve_map(raw_ctx, where="vars")  # vars may reference identity/other vars; cycles error
+
+    vehicle = str(ctx.get("vehicle", "vehicle"))
+    vehicle_id = ctx.get("vehicle_id")
     ros_raw = data.get("ros") or {}
     ros = RosSettings(
         domain_id=_derive_domain(vehicle_id, ros_raw),
         rmw=str(ros_raw.get("rmw", "rmw_fastrtps_cpp")),
         distro=ros_raw.get("distro"),
     )
+    ctx.setdefault("vehicle", vehicle)
+    ctx["ros_domain_id"] = ros.domain_id
 
+    if isinstance(eff_data_dir, str) and MARKER.search(eff_data_dir):
+        eff_data_dir = substitute_scalar(eff_data_dir, ctx, where="data_dir")
+    data_dir = (str(eff_data_dir or "").strip()) or None
+    if data_dir is not None:
+        ctx["data_dir"] = data_dir
+
+    base_images = data.get("images") or {}
+    eff_images = {}
+    for sub in ("registry", "tag"):
+        value = _effective(sub, [s.get("images") or {} for s in sources], base_images.get(sub))
+        if isinstance(value, str) and MARKER.search(value):
+            value = substitute_scalar(value, ctx, where=f"images.{sub}")
+        eff_images[sub] = (str(value or "").strip()) or None
+
+    extra_env: dict = {}
+    for key, value in merged_env.items():
+        if not re.match(r"^[A-Z][A-Z0-9_]*$", str(key)):
+            raise RigError(f"env: '{key}' — exported names are UPPERCASE [A-Z][A-Z0-9_]*")
+        if key in RIG_OWNED_ENV:
+            raise RigError(f"env: '{key}' collides with a rig-owned variable — rig sets it from "
+                           f"the manifest; use the manifest field instead")
+        extra_env[key] = substitute_scalar(value, ctx, where=f"env.{key}") \
+            if isinstance(value, str) else value
+
+    # --- rows ---------------------------------------------------------------------------------
     seen: dict[str, Path] = {}
     infra = _parse_entries(data.get("infra"), "infra", root, seen)
     sensors = _parse_entries(data.get("sensors"), "sensor", root, seen)
     autonomy = _parse_entries(data.get("autonomy"), "autonomy", root, seen)
 
-    images = data.get("images") or {}
-    image_registry = (str(images.get("registry") or "").strip()) or None
-    image_tag = (str(images.get("tag") or "").strip()) or None
-    data_dir = (str(data.get("data_dir") or "").strip()) or None
     # Concatenation order matters beyond select(): bake iterates `manifest.sensors` as-is, so the tier
     # partition must already hold here for up.sh line order (autonomy last) and down.sh (reversed).
-    return Manifest(vehicle=str(data.get("vehicle", "vehicle")), ros=ros,
+    return Manifest(vehicle=vehicle, ros=ros,
                     sensors=infra + sensors + autonomy,
-                    image_registry=image_registry, vehicle_id=vehicle_id, image_tag=image_tag,
-                    data_dir=data_dir)
+                    image_registry=eff_images["registry"], vehicle_id=vehicle_id,
+                    image_tag=eff_images["tag"],
+                    data_dir=data_dir, vars=ctx, extra_env=extra_env)
