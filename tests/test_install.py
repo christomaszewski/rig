@@ -128,6 +128,22 @@ def test_service_install_vendors_routes_and_wires():
         assert lock["instances"]["routerish"]["base_sha256"]
 
 
+def test_package_name_must_equal_declared_service_name():
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        root, reg = _world()
+        # a package published under the REPO name while rigging.yaml declares another (sbg-driver/sbg)
+        m = yaml.safe_load((reg / "services" / "camish" / "manifest.yaml").read_text())
+        m["name"] = "camish-driver"
+        d = reg / "services" / "camish-driver"
+        d.mkdir(parents=True)
+        (d / "manifest.yaml").write_text(yaml.safe_dump(m, sort_keys=False))
+        _run("registry", "index", str(reg))
+        rc, _, err = _run("--root", str(root), "add", "testns/camish-driver")
+        assert rc == 1 and "declares service 'camish'" in err and "Rename the package" in err
+        assert not (root / "services" / "camish-driver").exists()      # deployment untouched
+        assert "camish-driver" not in (root / "vehicle.yaml").read_text()
+
+
 def test_hyphenated_embedded_example_name_accepted_verbatim():
     with _env(RIG_HOME=tempfile.mkdtemp()):
         root, _ = _world()

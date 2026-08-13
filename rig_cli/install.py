@@ -205,6 +205,16 @@ def _install_service(root: Path, entry: Entry, pkg: Package, lock: dict, *, lock
     vendored = root / "services" / pkg.name
     if not (already and (vendored / ".vendored.yaml").exists()):
         service_dir = _fetch_source(pkg.name, source)
+        from .descriptor import find_descriptor
+        desc_path = find_descriptor(service_dir)
+        declared = load_yaml(desc_path).get("service") if desc_path else None
+        if declared and declared != pkg.name:
+            raise RigError(
+                f"install: package '{ref}' points at a repo whose rigging.yaml declares service "
+                f"'{declared}' — registry package names MUST equal the declared service name (it "
+                f"keys the services.yaml route, the vehicle.yaml row, and services/<name>/). "
+                f"Rename the package to '{declared}' (fix the workflow that publishes it), then "
+                f"re-sync")
         vendor(pkg.name, service_dir, root)
     _route_service(root, pkg.name)
     record_registry(lock, entry.name, rtype=entry.type, location=entry.location,
@@ -397,8 +407,9 @@ def install(root: Path, spec: str, *, as_name: str | None = None, locked: bool =
             _materialize_instance(root, svc=pkg.name, desc=desc, instance=as_name,
                                   base_src=examples[0], profile_ref=None, lock=lock, enabled=True)
         else:
-            eprint(f"  no declared example config — route + vendor done; author "
-                   f"config/<tier>/<name>.yaml and its vehicle.yaml row yourself")
+            eprint(f"  no example config DECLARED at this pin — route + vendor done; author "
+                   f"config/<tier>/<name>.yaml and its vehicle.yaml row yourself. (To automate "
+                   f"this: declare `examples:` in the repo's rigging.yaml and cut a release)")
     save_lock(root, lock)
     # The real gate: the deployment must still LOAD (name uniqueness, cross-checks) — surface now.
     load_manifest(root)
