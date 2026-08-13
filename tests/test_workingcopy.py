@@ -11,7 +11,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
 import yaml  # noqa: E402
 
-from test_install import _env, _run, _world  # noqa: E402  (shared fixtures)
+from test_install import _env, _git, _run, _world  # noqa: E402  (shared fixtures)
 
 from rig_cli.lock import load_lock  # noqa: E402
 from rig_cli.resolve import deep_merge, structural_diff  # noqa: E402
@@ -105,6 +105,85 @@ def test_upgrade_dirty_keeps_local_and_surfaces_conflicts():
         assert data["usb"]["fps"] == 30                           # new base key arrives
         rc, out, _ = _run("--root", str(root), "config", "diff", "acme_cam")
         assert "~ usb.width: 3840 -> 640  [local edit]" in out    # delta now vs the NEW pin
+
+
+def _bump_service(reg, svc, version, example_text):
+    """New commit in the pinned code repo + manifest version/rev bump + reindex."""
+    mpath = reg / "services" / svc / "manifest.yaml"
+    m = yaml.safe_load(mpath.read_text())
+    repo = pathlib.Path(m["source"]["repo"])
+    (repo / svc / "config" / f"{svc}.example.yaml").write_text(example_text)
+    _git("add", "-A", cwd=repo)
+    _git("commit", "-q", "-m", "bump", cwd=repo)
+    m["version"] = version
+    m["source"]["rev"] = _git("rev-parse", "HEAD", cwd=repo).stdout.strip()
+    mpath.write_text(yaml.safe_dump(m, sort_keys=False))
+    _run("registry", "index", str(reg))
+    return m["source"]["rev"]
+
+
+def test_upgrade_bare_service_instance_clean():
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        root, reg = _world()
+        assert _run("--root", str(root), "add", "testns/routerish")[0] == 0
+        rev = _bump_service(reg, "routerish", "1.3.0",
+                            "service: routerish\nname: routerish\nrate: 9\n")
+        rc, _, err = _run("--root", str(root), "pkg", "upgrade")
+        assert rc == 0, err
+        assert "testns/routerish@1.2.0 -> testns/routerish@1.3.0" in err
+        assert "rate: 9" in (root / "config" / "infra" / "routerish.yaml").read_text()
+        lock = load_lock(root)
+        assert "testns/routerish@1.3.0" in lock["packages"]
+        assert "testns/routerish@1.2.0" not in lock["packages"]
+        vend = yaml.safe_load((root / "services" / "routerish" / ".vendored.yaml").read_text())
+        assert vend["ref"] == rev                                       # re-vendored at the new pin
+
+
+def test_upgrade_bare_service_instance_dirty_keeps_local():
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        root, reg = _world()
+        assert _run("--root", str(root), "add", "testns/routerish")[0] == 0
+        working = root / "config" / "infra" / "routerish.yaml"
+        working.write_text(working.read_text().replace("rate: 5", "rate: 7"))   # local edit
+        _bump_service(reg, "routerish", "1.3.0",
+                      "service: routerish\nname: routerish\nrate: 9\nburst: 2\n")
+        rc, _, err = _run("--root", str(root), "pkg", "upgrade", "routerish")
+        assert rc == 0, err
+        assert "CONFLICT rate" in err and "keeping yours: 7" in err
+        data = yaml.safe_load(working.read_text())
+        assert data["rate"] == 7 and data["burst"] == 2                 # local wins; new key arrives
+
+
+def test_upgrade_repins_profile_required_service():
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        root, reg = _world()
+        _install_acme(root)
+        rev = _bump_service(reg, "camish", "1.3.0", "service: camish\ncamera: {type: usb}\n")
+        rc, _, err = _run("--root", str(root), "pkg", "upgrade")
+        assert rc == 0, err
+        assert "testns/camish@1.2.0 -> testns/camish@1.3.0" in err
+        lock = load_lock(root)
+        assert lock["packages"]["testns/acme-cam@2.0.0"]["requires"] == "testns/camish@1.3.0"
+        assert "testns/camish@1.3.0" in lock["packages"]
+        vend = yaml.safe_load((root / "services" / "camish" / ".vendored.yaml").read_text())
+        assert vend["ref"] == rev
+
+
+def test_readd_of_installed_package_errors_early_without_mutation():
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        root, reg = _world()
+        assert _run("--root", str(root), "add", "testns/routerish")[0] == 0
+        old_ref = yaml.safe_load((root / "services" / "routerish" / ".vendored.yaml").read_text())["ref"]
+        _bump_service(reg, "routerish", "1.3.0",
+                      "service: routerish\nname: routerish\nrate: 9\n")
+        rc, _, err = _run("--root", str(root), "add", "testns/routerish")
+        assert rc == 1 and "already installed" in err and "pkg upgrade routerish" in err
+        now = yaml.safe_load((root / "services" / "routerish" / ".vendored.yaml").read_text())["ref"]
+        assert now == old_ref                                           # nothing mutated
+        rc, _, err = _run("--root", str(root), "pkg", "install", "sensor:acme")
+        assert rc == 0, err
+        rc, _, err = _run("--root", str(root), "pkg", "install", "testns/acme-cam")
+        assert rc == 1 and "pkg upgrade acme_cam" in err                # profile re-add too
 
 
 def test_relock_verifies_anchors():

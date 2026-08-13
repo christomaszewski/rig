@@ -166,73 +166,157 @@ def _resolve_current(ref: str):
     raise RigError(f"upgrade: '{ref.split('@')[0]}' no longer exists in registry '{ns}'")
 
 
+def _three_way(root: Path, sensor: Sensor, new_base_path: Path) -> list[str]:
+    """New pinned base ⊕ local delta onto the working file + pin; returns the conflict paths.
+    Clean (delta-free) working copies take the new base VERBATIM so its comments survive."""
+    pin = pin_path(root, sensor.name)
+    old_base = _strip_identity(load_yaml(pin))
+    new_base = _strip_identity(load_yaml(new_base_path))
+    working = _strip_identity(load_yaml(sensor.config))
+    delta = structural_diff(old_base, working)
+    conflicts = sorted(set(dict(_flat(delta))) & set(dict(_flat(structural_diff(old_base, new_base)))))
+    working_path = Path(sensor.config)
+    if not delta:
+        embedded = str((load_yaml(new_base_path) or {}).get("name") or "")
+        if embedded and embedded != sensor.name:  # upstream renamed its example — neutralize it
+            from .init import _copy_as_profile
+            _copy_as_profile(new_base_path, working_path)
+        else:
+            working_path.write_bytes(new_base_path.read_bytes())
+    else:
+        merged = deep_merge(new_base, delta)
+        working_path.write_text(yaml.safe_dump(merged, sort_keys=False, default_flow_style=False))
+        eprint(f"  {sensor.name}: local edits re-applied — the working file was re-rendered "
+               f"(comments lost); review it")
+    pin.write_bytes(working_path.read_bytes() if not delta else new_base_path.read_bytes())
+    for path in conflicts:
+        eprint(f"    CONFLICT {path}: base {_dig(old_base, path)!r} -> "
+               f"{_dig(new_base, path)!r}, keeping yours: {_dig(working, path)!r}")
+    return conflicts
+
+
 def upgrade(root: Path, names: list[str]) -> int:
-    """`rig pkg upgrade [instance…]` — three-way: new pinned base ⊕ local delta, conflicts loud."""
+    """`rig pkg upgrade [instance…]` — re-pin EVERY registry package this deployment uses: profile
+    instances (three-way payload merge, local wins), bare service instances (three-way against the
+    new vendored example), the services themselves (refetch + re-vendor at the new pin, including a
+    profile's required service), and instance-less service dependencies."""
+    from .install import _install_service
+
     manifest = load_manifest(root)
     lock = load_lock(root)
-    targets = [s for s in manifest.sensors if s.profile and (not names or s.name in names)]
+    packages = lock.setdefault("packages", {})
     unknown = set(names) - {s.name for s in manifest.sensors}
     if unknown:
         raise RigError(f"upgrade: unknown instance(s): {', '.join(sorted(unknown))}")
-    if not targets:
-        eprint("rig pkg upgrade: no profile-provenance instances" +
-               (" among those named" if names else "") + " — nothing to upgrade")
-        return 0
+    anchors = lock.get("instances") or {}
+    targets = [s for s in manifest.sensors
+               if (s.profile or s.name in anchors) and (not names or s.name in names)]
     changed = 0
-    for sensor in targets:
-        ref = str(sensor.profile)
-        entry, reg, pkg = _resolve_current(ref)
-        payload_rel = (pkg.manifest.get("config") or {}).get("payload")
-        payload_path = pkg.pkg_dir / str(payload_rel)
-        if not payload_path.is_file():
-            raise RigError(f"upgrade {sensor.name}: payload missing in registry: {payload_rel}")
+    repinned: dict[str, str] = {}  # old service ref -> current ref (re-vendored at most once)
+
+    def repin_service(old_ref: str) -> str:
+        if old_ref in repinned:
+            return repinned[old_ref]
+        entry, _, pkg = _resolve_current(old_ref)
         new_ref = qualified(entry, pkg)
-        pin = pin_path(root, sensor.name)
-        if not pin.is_file():
-            eprint(f"  {sensor.name}: no pinned base copy ({PINS_DIR}/) — cannot three-way; "
-                   f"re-install to re-anchor")
-            continue
-        if new_ref == ref and sha256_file(payload_path) == sha256_file(pin):
-            eprint(f"  {sensor.name}: {ref} is current — up to date")
-            continue
+        if new_ref != old_ref or not (root / "services" / pkg.name / ".vendored.yaml").exists():
+            _install_service(root, entry, pkg, lock, locked=False)  # refetch + re-vendor + record
+            if new_ref != old_ref:
+                packages.pop(old_ref, None)
+                eprint(f"  service: {old_ref} -> {new_ref} (re-vendored at the new pin)")
+        repinned[old_ref] = new_ref
+        return new_ref
 
-        old_base = _strip_identity(load_yaml(pin))
-        new_base = _strip_identity(load_yaml(payload_path))
-        working = _strip_identity(load_yaml(sensor.config))
-        delta = structural_diff(old_base, working)
-        base_changes = structural_diff(old_base, new_base)
-        conflicts = sorted(set(dict(_flat(delta))) & set(dict(_flat(base_changes))))
-        merged = deep_merge(new_base, delta)
+    def service_ref_for(service_name: str) -> str | None:
+        hits = [r for r, info in packages.items()
+                if info.get("kind") == "service" and r.rpartition("/")[-1].split("@")[0] == service_name]
+        return hits[0] if hits else None
 
-        working_path = Path(sensor.config)
-        if not delta:  # clean: take the new payload verbatim — its comments survive
-            working_path.write_bytes(payload_path.read_bytes())
-        else:
-            working_path.write_text(yaml.safe_dump(merged, sort_keys=False, default_flow_style=False))
-            eprint(f"  {sensor.name}: local edits re-applied — the working file was re-rendered "
-                   f"(comments lost); review it")
-        pin.write_bytes(payload_path.read_bytes())
-        for path in conflicts:
-            eprint(f"    CONFLICT {path}: base {_dig(old_base, path)!r} -> "
-                   f"{_dig(new_base, path)!r}, keeping yours: {_dig(working, path)!r}")
+    for sensor in targets:
+        if sensor.profile:  # profile instance: new payload three-way + requires re-pin
+            ref = str(sensor.profile)
+            entry, reg, pkg = _resolve_current(ref)
+            payload_rel = (pkg.manifest.get("config") or {}).get("payload")
+            payload_path = pkg.pkg_dir / str(payload_rel)
+            if not payload_path.is_file():
+                raise RigError(f"upgrade {sensor.name}: payload missing in registry: {payload_rel}")
+            new_ref = qualified(entry, pkg)
+            pin = pin_path(root, sensor.name)
+            if not pin.is_file():
+                eprint(f"  {sensor.name}: no pinned base copy ({PINS_DIR}/) — cannot three-way; "
+                       f"re-install to re-anchor")
+                continue
+            old_svc = ((packages.get(ref) or {}).get("requires")
+                       or service_ref_for(sensor.service))
+            new_svc = repin_service(old_svc) if old_svc else None
+            if new_ref == ref and sha256_file(payload_path) == sha256_file(pin):
+                if old_svc == new_svc:
+                    eprint(f"  {sensor.name}: {ref} is current — up to date")
+                    continue
+                record_package(lock, ref, {**packages.get(ref, {}), "requires": new_svc})
+                changed += 1
+                continue
+            conflicts = _three_way(root, sensor, payload_path)
+            record_package(lock, new_ref, {"kind": "profile",
+                                           "payload_sha256": sha256_file(payload_path),
+                                           "requires": new_svc})
+            if new_ref != ref:
+                packages.pop(ref, None)
+                _rewrite_row_profile(root, sensor.name, new_ref)
+            record_instance(lock, sensor.name, profile=new_ref,
+                            base_sha256=sha256_file(pin_path(root, sensor.name)))
+            record_registry(lock, entry.name, rtype=entry.type, location=entry.location,
+                            commit=registry_commit(entry))
+            changed += 1
+            eprint(f"  {sensor.name}: {ref} -> {new_ref}"
+                   + (f" ({len(conflicts)} conflict(s), local kept)" if conflicts else ""))
+        else:  # bare service instance: base = the service's vendored example at the NEW pin
+            old_svc = service_ref_for(sensor.service)
+            if old_svc is None:
+                eprint(f"  {sensor.name}: no locked service package for '{sensor.service}' — "
+                       f"hand-wired instance, skipping")
+                continue
+            new_svc = repin_service(old_svc)
+            pin = pin_path(root, sensor.name)
+            from .descriptor import load_descriptor
+            desc = load_descriptor(sensor.service, root / "services" / sensor.service)
+            examples = [root / "services" / sensor.service / e for e in desc.examples]
+            examples = [e for e in examples if e.is_file()]
+            if not pin.is_file() or not examples:
+                if old_svc != new_svc:
+                    changed += 1
+                    eprint(f"  {sensor.name}: service re-pinned; "
+                           + ("no pinned base copy — working config left as-is"
+                              if not pin.is_file() else
+                              "no declared example at the new pin — working config left as-is"))
+                else:
+                    eprint(f"  {sensor.name}: {old_svc} is current — up to date")
+                continue
+            if old_svc == new_svc and sha256_file(examples[0]) == sha256_file(pin):
+                eprint(f"  {sensor.name}: {old_svc} is current — up to date")
+                continue
+            conflicts = _three_way(root, sensor, examples[0])
+            row = anchors.get(sensor.name) or {}
+            record_instance(lock, sensor.name, profile=None,
+                            base_sha256=sha256_file(pin_path(root, sensor.name)),
+                            overlays=list(row.get("overlays") or []))
+            changed += 1
+            eprint(f"  {sensor.name}: base refreshed from {new_svc}"
+                   + (f" ({len(conflicts)} conflict(s), local kept)" if conflicts else ""))
 
-        # Re-pin the lock: profile, its (possibly newer) required service, the instance anchor.
-        svc_ref = ((lock.get("packages") or {}).get(ref) or {}).get("requires")
-        record_package(lock, new_ref, {"kind": "profile", "payload_sha256": sha256_file(payload_path),
-                                       "requires": svc_ref})
-        if new_ref != ref:
-            (lock.get("packages") or {}).pop(ref, None)
-            _rewrite_row_profile(root, sensor.name, new_ref)
-        record_instance(lock, sensor.name, profile=new_ref, base_sha256=sha256_file(pin))
-        record_registry(lock, entry.name, rtype=entry.type, location=entry.location,
-                        commit=registry_commit(entry))
-        changed += 1
-        eprint(f"  {sensor.name}: {ref} -> {new_ref}"
-               + (f" ({len(conflicts)} conflict(s), local kept)" if conflicts else ""))
+    if not names:  # instance-less service dependencies still get re-pinned in a full sweep
+        for ref in [r for r, info in list(packages.items()) if info.get("kind") == "service"]:
+            if ref in packages and ref not in repinned and ref not in repinned.values():
+                new_ref = repin_service(ref)
+                if new_ref != ref:
+                    changed += 1
+
     if changed:
         save_lock(root, lock)
         load_manifest(root)  # the gate: the deployment must still load
-        eprint(f"rig pkg upgrade: {changed} instance(s) upgraded — rig.lock updated, commit it")
+        eprint(f"rig pkg upgrade: {changed} change(s) — rig.lock updated, commit it")
+    else:
+        eprint("rig pkg upgrade: everything current")
     return 0
 
 

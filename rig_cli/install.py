@@ -247,7 +247,8 @@ def _materialize_instance(root: Path, *, svc: str, desc, instance: str | None, b
                        f"pass --as <name>")
     if any(s.name == name for s in manifest.sensors):
         raise RigError(f"install: instance name '{name}' already exists in vehicle.yaml — "
-                       f"pass --as <name> (duplicate hardware needs distinct names)")
+                       f"pass --as <name> (duplicate hardware needs distinct names; updating an "
+                       f"existing instance is `rig pkg upgrade {name}`)")
     tier = desc.tier if desc.tier in ("infra", "autonomy") else "sensor"
     sub = {"infra": "infra", "sensor": "sensors", "autonomy": "autonomy"}[tier]
     dest = root / "config" / sub / f"{name}.yaml"
@@ -380,6 +381,20 @@ def install(root: Path, spec: str, *, as_name: str | None = None, locked: bool =
     if pkg.kind == "overlay":
         raise RigError(f"install: '{pkg.name}' is an overlay — overlays are BOUND to an instance "
                        f"(rig overlay apply), not installed standalone")
+
+    # Updating, not installing? Catch it BEFORE anything mutates (a failed re-add used to leave a
+    # re-vendored services/ dir behind) and point at the right verb.
+    if as_name is None:
+        rows = load_manifest(root).sensors
+        if pkg.kind == "profile":
+            held = [s.name for s in rows
+                    if s.profile and s.profile.rpartition("/")[-1].split("@")[0] == pkg.name]
+        else:
+            held = [s.name for s in rows if s.service == pkg.name]
+        if held:
+            raise RigError(f"install: '{pkg.name}' is already installed (instance"
+                           f"{'s' if len(held) > 1 else ''} {', '.join(held)}) — update with "
+                           f"`rig pkg upgrade {held[0]}`, or pass --as <name> for a SECOND instance")
 
     if pkg.kind == "profile":
         ref = qualified(entry, pkg)
