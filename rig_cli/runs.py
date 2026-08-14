@@ -20,13 +20,26 @@ The ``current`` symlink target is RELATIVE (``runs/<id>``) on purpose: container
 and resolve the link inside their own mount namespace. ``current_run`` enforces CONTAINMENT (the target
 must be a direct child of ``runs/``) so a mis-pointed link is a loud error, never a basename collision
 that seals the wrong run. ``manifest.yaml`` is the machine contract: ``ended:`` present ⇔ sealed.
+
+Config snapshots: every non-dry-run `up` captures the EFFECTIVE config (vehicle.yaml + lock + resolved
+vars + rendered per-instance configs) into ``runs/<id>/.rig/config/<digest12>/`` — content-addressed,
+so an unchanged config writes nothing — and appends an ``ups:`` event to the manifest. The capture
+point is `up`, not open/seal: every config that governed recorded data was live at some `up`, while the
+tree at seal time may contain edits that never ran — so sealing only DIRTY-CHECKS (flags, never copies).
+The check is gated on a per-deployment-INSTANCE id (``var/deployment-id``, minted lazily; var/ is never
+staged by bake, so every untar/clone is a fresh instance): sealing run A from a different deployment
+tree must not read as "A's config was edited". Snapshot writes fail SOFT — provenance must never wedge
+`up`. Compose-only up.sh does not snapshot (resolved artifacts are tag-determined; fleet artifacts
+route every verb through the bundled rig anyway).
 """
 from __future__ import annotations
 
 import datetime
 import json
 import re
+import shutil
 import subprocess
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -34,6 +47,7 @@ import yaml
 
 from . import RigError, __version__
 from .common import eprint, load_yaml
+from .lock import sha256_bytes
 from .manifest import Manifest, project_name
 
 _LABEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
@@ -145,6 +159,100 @@ def _artifact_tag(root: Path) -> str | None:
     return None
 
 
+def deployment_id(root: Path) -> str | None:
+    """The per-deployment-INSTANCE id (var/deployment-id), minted lazily. Lives under var/ on purpose:
+    bake never stages var/ and git ignores it, so every untar / fresh clone / re-extract is a NEW
+    instance, while a dev tree keeps its id across config edits — exactly the boundary the seal
+    dirty-check needs. Fail-soft: an unwritable tree costs the id, never the command."""
+    path = root / "var" / "deployment-id"
+    try:
+        if path.is_file():
+            if got := path.read_text().strip():
+                return got
+        path.parent.mkdir(parents=True, exist_ok=True)
+        minted = uuid.uuid4().hex[:12]
+        path.write_text(minted + "\n")
+        return minted
+    except OSError as exc:
+        eprint(f"rig: warning: cannot read/mint {path}: {exc}")
+        return None
+
+
+def _collect_config(manifest: Manifest, root: Path) -> dict[str, bytes]:
+    """The effective-config capture set, relpath -> bytes. vehicle.yaml is mandatory (no deployment
+    tree ⇒ a snapshot is meaningless); the rest joins when present. vars.yaml is generated: the
+    RESOLVED var/env context, which is the only place machine-local identity (/etc/rig) and RIG_VAR_*
+    shell contributions — sources outside the tree — leave a trace. Rendered configs come off the
+    MATERIALIZED manifest rows, never a var/rendered glob (stale files linger for removed instances)."""
+    files = {"vehicle.yaml": (root / "vehicle.yaml").read_bytes()}
+    for name in ("vehicle.local.yaml", "services.yaml", "rig.lock"):
+        if (path := root / name).is_file():
+            files[name] = path.read_bytes()
+    files["vars.yaml"] = yaml.safe_dump(
+        {"vars": manifest.vars, "env": manifest.extra_env}, sort_keys=True).encode()
+    for sensor in manifest.sensors:
+        if sensor.enabled:
+            files[f"rendered/{sensor.name}.yaml"] = Path(sensor.config).read_bytes()
+    return files
+
+
+def _config_digest(files: dict[str, bytes]) -> str:
+    """12-hex content address over the capture set (sorted `relpath sha256` lines)."""
+    lines = "".join(f"{name} {sha256_bytes(files[name])}\n" for name in sorted(files))
+    return sha256_bytes(lines.encode())[:12]
+
+
+def _live_state(manifest: Manifest, root: Path) -> tuple[str | None, str | None]:
+    """(config digest, deployment id) of the CURRENT tree, for the seal dirty-check. Fail-soft: a
+    tree that can't be collected (not a deployment, unreadable) just skips the check."""
+    try:
+        digest = _config_digest(_collect_config(manifest, root))
+    except Exception:  # noqa: BLE001 — the dirty-check is advisory, never load-bearing
+        return None, None
+    return digest, deployment_id(root)
+
+
+def snapshot(manifest: Manifest, root: Path, *, stacks: list[str]) -> str | None:
+    """Capture the effective config into the OPEN run (cmd_up calls this right after ensure/up_run).
+    Content-addressed under runs/<id>/.rig/config/<digest12>/ — an unchanged config writes no files,
+    but EVERY call appends an `ups:` event (the temporal log data analysis reads). Fail-soft
+    throughout: provenance must never wedge `up`."""
+    try:
+        data = _root(manifest)
+        cur = current_run(data)
+        if cur is None:
+            eprint("rig: warning: no open run to snapshot config into")
+            return None
+        run_id, run_dir, doc = cur
+        files = _collect_config(manifest, root)
+        digest = _config_digest(files)
+        snap_dir = run_dir / ".rig" / "config" / digest
+        if not snap_dir.is_dir():
+            tmp = run_dir / ".rig" / f".config.{digest}.tmp"
+            if tmp.exists():
+                shutil.rmtree(tmp)
+            for rel, blob in files.items():
+                (tmp / rel).parent.mkdir(parents=True, exist_ok=True)
+                (tmp / rel).write_bytes(blob)
+            snap_dir.parent.mkdir(parents=True, exist_ok=True)
+            tmp.replace(snap_dir)
+            eprint(f"rig: run {run_id}: captured config snapshot {digest}")
+        entry: dict = {"at": _iso_now(), "stacks": list(stacks), "config": digest}
+        if (dep := deployment_id(root)) is not None:
+            entry["deployment"] = dep
+        entry["root"] = str(root.resolve())
+        doc["config"] = digest
+        ups = doc.get("ups")
+        if not isinstance(ups, list):
+            ups = doc["ups"] = []
+        ups.append(entry)
+        (run_dir / "manifest.yaml").write_text(yaml.safe_dump(doc, sort_keys=False))
+        return digest
+    except Exception as exc:  # noqa: BLE001 — fail SOFT: never wedge `up` on provenance
+        eprint(f"rig: warning: config snapshot failed ({exc}) — continuing without it")
+        return None
+
+
 def _open_run(manifest: Manifest, root: Path, data: Path, label: str | None) -> str:
     runs = data / "runs"
     runs.mkdir(parents=True, exist_ok=True)
@@ -167,6 +275,8 @@ def _open_run(manifest: Manifest, root: Path, data: Path, label: str | None) -> 
         doc["label"] = label
     if (tag := _artifact_tag(root)) is not None:
         doc["artifact"] = tag
+    if (dep := deployment_id(root)) is not None:
+        doc["deployment"] = dep  # the OPENING deployment instance; each ups: entry re-attributes
     (run_dir / "manifest.yaml").write_text(yaml.safe_dump(doc, sort_keys=False))
     cur = _current(data)
     if cur.exists() and not cur.is_symlink():
@@ -178,7 +288,8 @@ def _open_run(manifest: Manifest, root: Path, data: Path, label: str | None) -> 
     return run_dir.name
 
 
-def _seal(run_dir: Path, status_text: str | None) -> None:
+def _seal(run_dir: Path, status_text: str | None, *, live_digest: str | None = None,
+          live_deployment: str | None = None) -> None:
     mpath = run_dir / "manifest.yaml"
     doc: dict = {"run": run_dir.name}
     if mpath.exists():
@@ -187,6 +298,17 @@ def _seal(run_dir: Path, status_text: str | None) -> None:
         except RigError:  # seal must not be blocked by a corrupt manifest — rewrite minimally
             eprint(f"rig: warning: {mpath} was corrupt — rewriting a minimal manifest to seal")
             doc = {"run": run_dir.name, "corrupt": True}
+    # Dirty-check, not a copy: seal-time edits never ran, so copying them would assert false
+    # provenance. Gated on the deployment id — sealing from a DIFFERENT tree (stale run rotated
+    # away by a freshly untarred artifact) must not read as "this run's config was edited".
+    ups = doc.get("ups")
+    last = ups[-1] if isinstance(ups, list) and ups and isinstance(ups[-1], dict) else None
+    if (last is not None and live_digest and live_deployment
+            and last.get("deployment") == live_deployment
+            and last.get("config") and last.get("config") != live_digest):
+        doc["config_dirty_at_seal"] = True
+        eprint("rig: warning: config changed after this run's last `up` — those edits never "
+               "applied to the recorded data (snapshot reflects what ran)")
     doc["ended"] = _iso_now()
     try:
         du = subprocess.run(["du", "-sk", str(run_dir)], capture_output=True, text=True, timeout=120)
@@ -219,22 +341,26 @@ def new_run(manifest: Manifest, root: Path, label: str | None, *, force: bool = 
     data = _root(manifest)
     _guard(manifest, force, "new-run")
     if (cur := current_run(data)) is not None:
-        _seal(cur[1], None)
+        digest, dep = _live_state(manifest, root)
+        _seal(cur[1], None, live_digest=digest, live_deployment=dep)
         eprint(f"rig: sealed run {cur[0]}")
     run_id = _open_run(manifest, root, data, label)
     eprint(f"rig: opened run {run_id}")
     return run_id
 
 
-def end_run(manifest: Manifest, *, force: bool = False, status_text: str | None = None) -> str | None:
-    """Seal the open run and remove `current`. Guarded while our stacks run; idempotent when none open."""
+def end_run(manifest: Manifest, root: Path, *, force: bool = False,
+            status_text: str | None = None) -> str | None:
+    """Seal the open run and remove `current`. Guarded while our stacks run; idempotent when none open.
+    `root` (the deployment tree sealing from) feeds the config dirty-check — advisory, fail-soft."""
     data = _root(manifest)
     cur = current_run(data)
     if cur is None:
         eprint("rig: no active run")
         return None
     _guard(manifest, force, "end-run")
-    _seal(cur[1], status_text)
+    digest, dep = _live_state(manifest, root)
+    _seal(cur[1], status_text, live_digest=digest, live_deployment=dep)
     _current(data).unlink(missing_ok=True)
     eprint(f"rig: sealed run {cur[0]}")
     return cur[0]

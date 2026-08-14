@@ -243,8 +243,8 @@ writes landing in the sealed run").
   rotates. (`_auto` in your registry = data collected outside a planned session — the safety net for the
   6am bring-up, reboots, systemd.)
 - `new-run [label]` **rotates**: seal current (if open) + open new + repoint. Guarded while running.
-- `end-run [--force]` **seals**: stamp `ended:` + snapshot (`rig status` output, disk usage) into the
-  manifest, remove `current`. Guarded while running; idempotent (no open run → warn, rc 0).
+- `end-run [--force]` **seals**: stamp `ended:` + the status table (`rig status` output, disk usage)
+  into the manifest, remove `current`. Guarded while running; idempotent (no open run → warn, rc 0).
 - `up --run <label>` names at entry: label matches the open run → join (idempotent, never mints `X_2`);
   else rotate-then-up (same guard). `down --end-run` seals after a successful full down — a partial or
   failed down leaves stacks running, so the guard refuses: you cannot seal out from under live writers.
@@ -253,10 +253,30 @@ writes landing in the sealed run").
 
 ### Manifest = the machine contract
 `runs/<id>/manifest.yaml`: run id, label, vehicle, `vehicle_id`, rig version, artifact tag (when running
-in an extracted artifact — bake's provenance chain plugs in), `started:`, enabled stacks; `end-run` adds
-`ended:` + the snapshot. **`ended:` present ⇔ sealed ⇔ safe for sync tooling** — scripts read manifests,
-never parse the human table.
+in an extracted artifact — bake's provenance chain plugs in), `deployment:` (instance id, below),
+`started:`, enabled stacks; `end-run` adds `ended:` + the status table + disk usage. **`ended:` present
+⇔ sealed ⇔ safe for sync tooling** — scripts read manifests, never parse the human table.
 Power loss mid-session: the symlink survives reboot; the run stays open and correctly continues.
+
+### Config snapshots (v0.1.60) — what config was this data recorded under?
+Every non-dry-run `rig up` captures the EFFECTIVE config into the open run:
+`runs/<id>/.rig/config/<digest12>/` holds vehicle.yaml (+ vehicle.local.yaml / services.yaml /
+rig.lock when present), `vars.yaml` (the RESOLVED var/env context — the only trace of machine-local
+`/etc/rig` identity and `RIG_VAR_*` shell values), and `rendered/<name>.yaml` per enabled instance.
+Content-addressed: an unchanged config writes nothing. The manifest gains `config:` (latest digest,
+flat/grep-able) and an `ups:` event log (`at` / `stacks` / `config` / `deployment` / `root`) — the
+temporal attribution: which config each stretch of the run's data was recorded under.
+- **Capture at `up`, not open/seal**: every config that governed data was live at some `up`; the tree
+  at seal may hold edits that never ran — so sealing only dirty-checks (`config_dirty_at_seal: true`
+  + warning), never copies.
+- **Deployment-instance id** (`var/deployment-id`, minted lazily; var/ is never staged by bake or
+  tracked by git, so every untar/clone is a fresh instance): the dirty check fires only when the
+  sealing tree IS the instance that took the run's last snapshot — a stale open run rotated away by a
+  freshly deployed artifact seals clean.
+- Fail-SOFT throughout: provenance must never wedge `up` or a seal.
+- Compose-only `up.sh` does not snapshot (rig-only, like the flagged forms): a resolved artifact's
+  config is fully determined by its recorded `artifact:` tag, and fleet artifacts route every verb
+  through the bundled rig anyway.
 
 ### Compose-only parity
 bake emits `new-run.sh` / `end-run.sh` / `runs.sh` (pure sh; manifest fields are grep-able flat keys),

@@ -99,6 +99,8 @@ def cmd_up(args, manifest, catalog, descriptors) -> int:
             runs_mod.up_run(manifest, args.rig_root, args.run, force=args.force)
         else:
             runs_mod.ensure(manifest, args.rig_root)
+        # every up logs the effective config against the run (dedup'd; fail-soft — never blocks up)
+        runs_mod.snapshot(manifest, args.rig_root, stacks=[s.name for s, _ in pairs])
     eprint(f"rig up: {manifest.vehicle} — {stack_summary([p[0] for p in pairs])}")
     return _summarize(dispatch.run_verb(pairs, env, "up", dry_run=args.dry_run))
 
@@ -120,7 +122,7 @@ def cmd_down(args, manifest, catalog, descriptors) -> int:
             eprint("rig: down failed — leaving the run open (cannot seal with stacks possibly live)")
             return rc
         # end_run's own guard re-checks: a PARTIAL down leaves other stacks running -> it refuses.
-        runs_mod.end_run(manifest)
+        runs_mod.end_run(manifest, args.rig_root)
     return rc
 
 
@@ -161,7 +163,7 @@ def cmd_end_run(args, manifest, catalog, descriptors) -> int:
     # Snapshot the fleet state into the manifest as part of sealing (best-effort).
     env = dispatch.fleet_env(manifest)
     rows = status_mod.gather(_pairs(manifest, descriptors, []), env)
-    runs_mod.end_run(manifest, force=args.force, status_text=status_mod.render(rows))
+    runs_mod.end_run(manifest, args.rig_root, force=args.force, status_text=status_mod.render(rows))
     return 0
 
 
@@ -488,7 +490,7 @@ def build_parser() -> argparse.ArgumentParser:
     down.add_argument("--dry-run", action="store_true")
     down.add_argument("--purge", action="store_true", help="also remove declared external volumes (FINAL teardown)")
     down.add_argument("--end-run", action="store_true", dest="end_run",
-                      help="after a successful FULL down, seal the open run (stamps ended: + snapshot)")
+                      help="after a successful FULL down, seal the open run (stamps ended: + size)")
 
     nr = sub.add_parser("new-run", help="rotate: seal the open run (if any) and open a new one")
     nr.add_argument("label", nargs="?", default=None, help="session label (dir becomes <stamp>_<label>)")
@@ -496,7 +498,7 @@ def build_parser() -> argparse.ArgumentParser:
                     help="rotate even while stacks run (late writes land in the sealed run)")
     nr.add_argument("names", nargs="*", default=[], help=argparse.SUPPRESS)
 
-    er = sub.add_parser("end-run", help="seal the open run: stamp ended + snapshot, remove `current`")
+    er = sub.add_parser("end-run", help="seal the open run: stamp ended + status table, remove `current`")
     er.add_argument("--force", action="store_true", help="seal even while stacks run")
     er.add_argument("names", nargs="*", default=[], help=argparse.SUPPRESS)
 

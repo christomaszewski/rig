@@ -206,7 +206,9 @@ under `data_dir`, camera log shows `health: frames=N, no drops`. After the first
 **Run directories** (needs `data_dir`; ROADMAP §3c): one session = one folder under
 `data_dir/runs/<stamp>_<label>/`, with a provenance manifest (`ended:` present = sealed = safe to sync).
 `up` auto-opens an `_auto` run if none is open — it NEVER rotates; rotation/sealing are explicit and
-refuse while stacks run:
+refuse while stacks run. Each `up` also snapshots the effective config into the run
+(`.rig/config/<digest>/`, deduplicated) — the manifest's `config:`/`ups:` say exactly which config each
+stretch of data was recorded under, and sealing warns if config changed after the last `up`:
 ```bash
 ssh $VEHICLE 'cd ~/ws/v1 && ./run.sh up --run dock-test'   # open a labeled session + up (idempotent)
 ssh $VEHICLE 'cd ~/ws/v1 && ./run.sh runs'                 # registry: OPEN / sealed / interrupted

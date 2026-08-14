@@ -1,9 +1,15 @@
 # rig — project state & handoff (resume here)
 
 > Snapshot for picking the project up cold in a new session. Read this first, then `CHEATSHEET.md` /
-> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.1.48**
-> (released — tag pipeline verified end-to-end incl. the Homebrew tap auto-bump), branch **`main`**,
-> 204 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.1.60**,
+> branch **`main`**, 232 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> **Run config snapshots SHIPPED** (v0.1.60, ROADMAP §3c "Config snapshots"): every `rig up` captures
+> the effective config (vehicle.yaml + lock + resolved vars + rendered instance configs) into the open
+> run at `runs/<id>/.rig/config/<digest12>/` (content-addressed, dedup'd) + an `ups:` event log in the
+> run manifest; sealing dirty-checks (flags `config_dirty_at_seal:`, never copies) gated on a
+> per-deployment-instance id (`var/deployment-id`) so a stale run rotated away by a freshly untarred
+> artifact seals clean. Fail-soft; rig-path only (compose-only up.sh doesn't snapshot — resolved
+> artifacts are tag-determined, fleet artifacts already route through bundled rig).
 > **The package-registry layer is IMPLEMENTED** (v0.1.35–v0.1.45; plan doc `rig-registry-plan.md`,
 > untracked by request; design summary in DESIGN.md): registry model + `registry
 > init|validate|index`, live seed registry

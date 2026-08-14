@@ -87,7 +87,7 @@ def test_rotation_and_seal_refuse_while_running():
     _mark_idle()
     runs.ensure(m, data)
     _mark_running(m)
-    for fn in (lambda: runs.new_run(m, data, "x"), lambda: runs.end_run(m)):
+    for fn in (lambda: runs.new_run(m, data, "x"), lambda: runs.end_run(m, data)):
         try:
             fn()
             raise AssertionError("expected RigError while stacks run")
@@ -102,11 +102,11 @@ def test_end_run_seals_removes_current_and_is_idempotent():
     data = pathlib.Path(tempfile.mkdtemp())
     m = _manifest(data)
     rid = runs.ensure(m, data)
-    assert runs.end_run(m, status_text="ok") == rid
+    assert runs.end_run(m, data, status_text="ok") == rid
     assert not (data / "current").exists()
     body = (data / "runs" / rid / "manifest.yaml").read_text()
     assert "ended:" in body and "status_at_end" in body
-    assert runs.end_run(m) is None                                  # nothing open -> no-op
+    assert runs.end_run(m, data) is None                            # nothing open -> no-op
     assert runs.ensure(m, data) != rid                              # next up opens a FRESH _auto
 
 
@@ -196,7 +196,7 @@ def test_current_pointing_outside_registry_is_a_loud_error():
     elsewhere = pathlib.Path(tempfile.mkdtemp()) / "foo"
     elsewhere.mkdir()
     (data / "current").symlink_to(elsewhere)                    # absolute, outside runs/
-    for fn in (lambda: runs.end_run(m), lambda: runs.new_run(m, data, "x"),
+    for fn in (lambda: runs.end_run(m, data), lambda: runs.new_run(m, data, "x"),
                lambda: runs.ensure(m, data)):
         try:
             fn()
@@ -226,7 +226,7 @@ def test_corrupt_open_manifest_never_wedges_up():
     assert runs.ensure(m, data) == rid                          # `up`'s ensure still works
     assert runs.status_line(m) is not None                      # status still works
     assert {r.run: r.state for r in runs.list_runs(m)}[rid] == "OPEN"
-    assert runs.end_run(m) == rid                               # sealing rewrites a minimal manifest
+    assert runs.end_run(m, data) == rid                         # sealing rewrites a minimal manifest
     body = (data / "runs" / rid / "manifest.yaml").read_text()
     assert "ended:" in body and "corrupt: true" in body
 
@@ -260,6 +260,147 @@ def test_status_line_states():
     runs.new_run(m, data, "dock")
     assert "dock" in runs.status_line(m)
     assert runs.status_line(_manifest(None)) is None
+
+
+# --- config snapshots (capture at `up`, dirty-check at seal) ------------------------------------
+
+import dataclasses  # noqa: E402
+
+import yaml  # noqa: E402
+
+
+def _world(port: int = 1) -> tuple[Manifest, pathlib.Path, pathlib.Path]:
+    """A real deployment tree (vehicle.yaml + one rendered config) + its own data dir."""
+    data = pathlib.Path(tempfile.mkdtemp())
+    root = pathlib.Path(tempfile.mkdtemp())
+    (root / "vehicle.yaml").write_text(f"vehicle: t\nvehicle_id: 1\nport: {port}\n")
+    cfg = root / "config" / "cam.yaml"
+    cfg.parent.mkdir()
+    cfg.write_text(f"name: cam\nport: {port}\n")
+    m = Manifest(
+        vehicle="t", ros=RosSettings(domain_id=1, rmw="rmw_zenoh_cpp", distro=None),
+        sensors=[Sensor(name="cam", service="c", config=cfg, enabled=True, order=10)],
+        vehicle_id=1, data_dir=str(data),
+    )
+    return m, root, data
+
+
+def _run_doc(data: pathlib.Path, rid: str) -> dict:
+    return yaml.safe_load((data / "runs" / rid / "manifest.yaml").read_text())
+
+
+def test_up_snapshot_writes_files_and_manifest():
+    _mark_idle()
+    m, root, data = _world()
+    rid = runs.ensure(m, root)
+    digest = runs.snapshot(m, root, stacks=["cam"])
+    assert digest is not None
+    snap = data / "runs" / rid / ".rig" / "config" / digest
+    assert (snap / "vehicle.yaml").read_text() == (root / "vehicle.yaml").read_text()
+    assert (snap / "rendered" / "cam.yaml").read_text() == "name: cam\nport: 1\n"
+    assert "vars:" in (snap / "vars.yaml").read_text()          # resolved context is captured
+    assert not (snap / "rig.lock").exists()                     # optional files simply absent
+    doc = _run_doc(data, rid)
+    assert doc["config"] == digest
+    assert doc["ups"][0]["stacks"] == ["cam"] and doc["ups"][0]["config"] == digest
+    dep = (root / "var" / "deployment-id").read_text().strip()
+    assert doc["deployment"] == dep and doc["ups"][0]["deployment"] == dep
+
+
+def test_snapshot_dedups_unchanged_config():
+    _mark_idle()
+    m, root, data = _world()
+    rid = runs.ensure(m, root)
+    a = runs.snapshot(m, root, stacks=["cam"])
+    b = runs.snapshot(m, root, stacks=["cam"])
+    assert a == b
+    assert len(list((data / "runs" / rid / ".rig" / "config").iterdir())) == 1  # one dir…
+    assert len(_run_doc(data, rid)["ups"]) == 2                                 # …two events
+
+
+def test_snapshot_new_digest_on_config_change():
+    _mark_idle()
+    m, root, data = _world()
+    rid = runs.ensure(m, root)
+    a = runs.snapshot(m, root, stacks=["cam"])
+    (root / "config" / "cam.yaml").write_text("name: cam\nport: 99\n")
+    b = runs.snapshot(m, root, stacks=["cam"])
+    assert a != b
+    assert len(list((data / "runs" / rid / ".rig" / "config").iterdir())) == 2
+    doc = _run_doc(data, rid)
+    assert doc["config"] == b and [u["config"] for u in doc["ups"]] == [a, b]
+
+
+def test_snapshot_failure_never_wedges_up():
+    _mark_idle()
+    m, root, data = _world()
+    runs.ensure(m, root)
+    (root / "vehicle.yaml").unlink()                            # not a deployment tree anymore
+    assert runs.snapshot(m, root, stacks=["cam"]) is None       # warns, returns None, no raise
+
+
+def test_snapshot_into_corrupt_manifest_rewrites_minimal():
+    _mark_idle()
+    m, root, data = _world()
+    rid = runs.ensure(m, root)
+    (data / "runs" / rid / "manifest.yaml").write_text("{{{ not yaml")
+    digest = runs.snapshot(m, root, stacks=["cam"])
+    doc = _run_doc(data, rid)
+    assert digest and doc["corrupt"] is True and doc["config"] == digest
+    assert {r.run: r.state for r in runs.list_runs(m)}[rid] == "OPEN"
+
+
+def test_seal_flags_dirty_when_config_changed_after_last_up():
+    _mark_idle()
+    m, root, data = _world()
+    rid = runs.ensure(m, root)
+    runs.snapshot(m, root, stacks=["cam"])
+    (root / "vehicle.yaml").write_text("vehicle: t\nvehicle_id: 1\nport: 7\n")  # edited, never upped
+    assert runs.end_run(m, root) == rid
+    assert _run_doc(data, rid)["config_dirty_at_seal"] is True
+
+
+def test_seal_clean_when_config_unchanged():
+    _mark_idle()
+    m, root, data = _world()
+    rid = runs.ensure(m, root)
+    runs.snapshot(m, root, stacks=["cam"])
+    runs.end_run(m, root)
+    assert "config_dirty_at_seal" not in _run_doc(data, rid)
+
+
+def test_seal_dirty_check_skipped_without_snapshot():
+    _mark_idle()
+    m, root, data = _world()
+    rid = runs.ensure(m, root)                                  # sh-opened style: no ups/config
+    runs.end_run(m, root)
+    assert "config_dirty_at_seal" not in _run_doc(data, rid)
+
+
+def test_seal_from_other_deployment_never_flags_dirty():
+    # THE forgotten-seal scenario: run from tree A left open, new artifact untarred as tree B
+    # (same data_dir), `up --run <label>` rotates — sealing A's run from B must NOT read as dirty.
+    _mark_idle()
+    m_a, root_a, data = _world(port=1)
+    rid_a = runs.ensure(m_a, root_a)
+    runs.snapshot(m_a, root_a, stacks=["cam"])
+    m_b, root_b, _ = _world(port=2)                             # different tree, different config
+    m_b = dataclasses.replace(m_b, data_dir=str(data))          # …but the SAME data disk
+    rid_b = runs.up_run(m_b, root_b, "field")                   # rotates: seals A's run from B
+    assert rid_b != rid_a
+    doc_a = _run_doc(data, rid_a)
+    assert "ended" in doc_a and "config_dirty_at_seal" not in doc_a
+    id_a = (root_a / "var" / "deployment-id").read_text().strip()
+    id_b = (root_b / "var" / "deployment-id").read_text().strip()
+    assert id_a != id_b and _run_doc(data, rid_b)["deployment"] == id_b
+
+
+def test_deployment_id_minted_once_and_stable():
+    _, root, _ = _world()
+    a = runs.deployment_id(root)
+    assert a and runs.deployment_id(root) == a                  # stable across calls
+    _, other, _ = _world()
+    assert runs.deployment_id(other) != a                       # a fresh tree is a fresh instance
 
 
 if __name__ == "__main__":

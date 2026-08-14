@@ -65,6 +65,10 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def sha256_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
 def record_registry(lock: dict, name: str, *, rtype: str, location: str, commit: str | None) -> None:
     entry: dict = {"type": rtype, ("url" if rtype == "git" else "path"): location}
     if commit:
