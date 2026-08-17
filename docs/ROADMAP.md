@@ -475,6 +475,10 @@ CHEATSHEET §1.5–1.6):
 - **v0.1.62** correctness batch: `pkg upgrade` covers bound overlays (rebound in place) and is
   all-or-nothing (content-level rollback, install too); service pin collisions error; overlay
   binding hygiene; `--locked` verifies `source.rev`; sync warns on a stale index.
+- **v0.1.68** fleet.yaml = the fleet-vars TIER (shell > local > machine > fleet.yaml >
+  vehicle.yaml): `{{fleet_ids}}` derived from the roster (single source of truth), `{{gcs_ip}}`
+  / `{{fleet_mode}}` from its keys, fleet `vars:` for policy like peer_endpoint; the pushed
+  file persists, so mid-test reboots render current fleet values standalone (DDIL gap closed).
 - **v0.1.67** profile lineage: forks record `based_on:` (parent@ver, namespace-qualified);
   `pkg rebase` three-ways a fork onto its parent's current version (old parent payload from
   registry git history; conflicts keep yours, loudly; requires adopted + re-qualified);

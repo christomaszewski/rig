@@ -53,10 +53,11 @@ images:
   registry: ""          # where stacks pull images from (e.g. devbox:5000); empty = local images
   tag: ""               # e.g. jp7 (the target's JetPack) -> RIG_IMAGE_TAG for platform-specific composes
 data_dir: ""            # host dir for recordings/logs/outputs -> RIG_DATA_DIR (e.g. /data); empty = none
-# vars:                 # fleet/per-vehicle values -> {{{{var}}}} in any config (CHEATSHEET §1.6);
-#   gcs_ip: 10.0.0.10   #   override per vehicle/test via vehicle.local.yaml or RIG_VAR_<name>
-#   fleet_ids: [1, 2]   #   rig derives {{{{fleet_peer_ids}}}} = fleet_ids minus THIS vehicle's id
-#   peer_endpoint: tcp/10.0.0.{{}}:7447   # a config key then maps ids -> endpoints, self excluded:
+# vars:                 # per-DEPLOYMENT {{{{var}}}} defaults (CHEATSHEET §1.6); FLEET values
+#   gcs_ip: 10.0.0.10   #   ({{{{fleet_ids}}}} derived from the roster, {{{{gcs_ip}}}}, {{{{fleet_mode}}}},
+#                       #   fleet vars: like peer_endpoint) come from fleet.yaml — pushed by
+#                       #   `rig fleet up`, beating these defaults. rig derives
+#                       #   {{{{fleet_peer_ids}}}} = fleet_ids minus THIS vehicle's id:
 #                       #   connect: "{{{{map fleet_peer_ids peer_endpoint}}}}"
 # env:                  # exported to launchers after interpolation (for compose ${{GCS_IP}} refs):
 #   GCS_IP: "{{{{gcs_ip}}}}"

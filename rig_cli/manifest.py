@@ -244,9 +244,13 @@ def load_manifest(root: Path) -> Manifest:
     data = load_yaml(root / "vehicle.yaml")
 
     # --- vehicle-local sources & {{var}} resolution (load-time pass) --------------------------
-    # Precedence, most-specific-wins: shell > deployment-local > machine (/etc/rig) > vehicle.yaml.
-    # A self-referencing vehicle.yaml field ("{{vehicle_id}}") provides nothing and is MANDATORY.
+    # Precedence, most-specific-wins: shell > deployment-local > machine (/etc/rig) >
+    # fleet.yaml (the FLEET tempo tier — pushed by `rig fleet up`, persists across reboots) >
+    # vehicle.yaml. A self-referencing vehicle.yaml field ("{{vehicle_id}}") is MANDATORY.
     sources = [_shell_source()] + _local_sources(root)
+    if (root / "fleet.yaml").is_file():
+        from .fleet import vars_source
+        sources.append(vars_source(root / "fleet.yaml"))
     eff_vehicle = _effective("vehicle", sources, data.get("vehicle"))
     eff_id = _effective("vehicle_id", sources, data.get("vehicle_id"))
     eff_data_dir = _effective("data_dir", sources, data.get("data_dir"))

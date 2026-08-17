@@ -39,7 +39,7 @@ from pathlib import Path
 from . import RigError
 from .common import eprint, load_yaml, print_table
 
-FLEET_KEYS = {"fleet", "mode", "gcs_ip", "sil", "vehicles"}
+FLEET_KEYS = {"fleet", "mode", "gcs_ip", "sil", "vehicles", "vars"}
 ROW_KEYS = {"id", "name", "host", "path", "data_dir", "ip"}
 SIL_KEYS = {"data_root", "network"}
 _LOCAL_HOSTS = {"", "localhost", "127.0.0.1"}
@@ -109,6 +109,8 @@ def load_fleet(explicit: str | None) -> Fleet:
                        f"carry SIL wiring (explicit beats inferred)")
     if set(sil) - SIL_KEYS:
         raise RigError(f"{path}: sil: carries only: {', '.join(sorted(SIL_KEYS))}")
+    if data.get("vars") is not None and not isinstance(data["vars"], dict):
+        raise RigError(f"{path}: `vars` must be a mapping (fleet-level {{{{var}}}} values)")
     network = sil.get("network")
     if network is not None and not (isinstance(network, dict) and network.get("name")
                                     and network.get("subnet")):
@@ -135,6 +137,34 @@ def load_fleet(explicit: str | None) -> Fleet:
                  gcs_ip=(str(data["gcs_ip"]) if data.get("gcs_ip") else None),
                  data_root=(str(sil["data_root"]) if sil.get("data_root") else None),
                  network=network, vehicles=tuple(vehicles), path=path)
+
+
+def vars_source(path: Path) -> dict:
+    """The VEHICLE-side read of a deployment-root fleet.yaml (pushed by `rig fleet up`, or
+    hand-dropped): a vars source for the manifest precedence chain — the FLEET tempo tier,
+    above vehicle.yaml defaults, below machine/local/shell. Light parse on purpose (no roster
+    validation — rows' host/path and sil: are GCS tooling, ignored here). Contributes:
+    `fleet_ids` DERIVED from the roster (the single source of truth this tier exists for),
+    `gcs_ip`, `mode` as `fleet_mode`, then the fleet-level `vars:` mapping — which overrides
+    the derived keys (explicit beats derived)."""
+    data = load_yaml(path)
+    unknown = set(data) - FLEET_KEYS
+    if unknown:
+        raise RigError(f"{path}: unknown key(s): {', '.join(sorted(unknown))} — fleet.yaml "
+                       f"carries only: {', '.join(sorted(FLEET_KEYS))}")
+    fleet_vars: dict = {}
+    ids = [row["id"] for row in (data.get("vehicles") or [])
+           if isinstance(row, dict) and row.get("id") is not None]
+    if ids:
+        fleet_vars["fleet_ids"] = ids
+    if data.get("gcs_ip"):
+        fleet_vars["gcs_ip"] = str(data["gcs_ip"])
+    fleet_vars["fleet_mode"] = str(data.get("mode") or "field")
+    extra = data.get("vars") or {}
+    if not isinstance(extra, dict):
+        raise RigError(f"{path}: `vars` must be a mapping")
+    fleet_vars.update(extra)
+    return {"vars": fleet_vars}
 
 
 def _select(fleet: Fleet, names: list[str]) -> list[Vehicle]:

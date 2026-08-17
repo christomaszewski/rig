@@ -325,6 +325,75 @@ def test_map_renders_peer_endpoints_excluding_self():
         assert cfg["connect"] == ["tcp/127.0.0.1:7449"]
 
 
+# --- fleet.yaml as the fleet-vars tier (v0.1.68) ------------------------------------------------
+
+
+def test_fleet_vars_source_derives_from_roster():
+    from rig_cli.fleet import vars_source
+    p = pathlib.Path(tempfile.mkdtemp()) / "fleet.yaml"
+    p.write_text(textwrap.dedent("""\
+        fleet: t
+        mode: sil
+        gcs_ip: 10.0.0.10
+        vehicles:
+          - {id: 3, name: a, path: /x}
+          - {name: broken-row-without-id, path: /y}
+          - {id: 9, name: b, path: /z}
+        vars: {peer_endpoint: "tcp/10.0.0.{}:7447", gcs_ip: 10.9.9.9}
+        """))
+    src = vars_source(p)["vars"]
+    assert src["fleet_ids"] == [3, 9]                  # roster order; id-less rows skipped
+    assert src["fleet_mode"] == "sil"
+    assert src["gcs_ip"] == "10.9.9.9"                 # explicit fleet vars: beats derived
+    assert src["peer_endpoint"] == "tcp/10.0.0.{}:7447"
+    p.write_text("fleet: t\nbogus: 1\n")
+    try:
+        vars_source(p)
+        raise AssertionError("expected RigError")
+    except RigError as exc:
+        assert "unknown key" in str(exc)
+
+
+def test_fleet_tier_precedence():
+    # fleet.yaml beats vehicle.yaml defaults; local file and shell beat fleet.yaml.
+    root = _deployment(
+        "vehicle: t\nvehicle_id: 3\nvars: {gcs_ip: 10.0.0.1, only_here: base}\nsensors: []\n")
+    (root / "fleet.yaml").write_text(
+        "fleet: t\ngcs_ip: 10.0.0.2\nvehicles: [{id: 3, name: a, path: /x}]\n"
+        "vars: {camera_ip: 10.5.5.5}\n")
+    with _env(RIG_VEHICLE_LOCAL=_NO_MACHINE, RIG_VEHICLE_ID=None, RIG_VAR_gcs_ip=None):
+        m = load_manifest(root)
+        assert m.vars["gcs_ip"] == "10.0.0.2"          # fleet tier beats vehicle.yaml
+        assert m.vars["only_here"] == "base"           # vehicle.yaml defaults survive
+        assert m.vars["fleet_ids"] == [3] and m.vars["fleet_peer_ids"] == []
+    (root / "vehicle.local.yaml").write_text("vars: {gcs_ip: 10.0.0.3}\n")
+    with _env(RIG_VEHICLE_LOCAL=_NO_MACHINE, RIG_VEHICLE_ID=None, RIG_VAR_gcs_ip=None):
+        assert load_manifest(root).vars["gcs_ip"] == "10.0.0.3"   # local beats fleet
+    with _env(RIG_VEHICLE_LOCAL=_NO_MACHINE, RIG_VEHICLE_ID=None, RIG_VAR_gcs_ip="10.0.0.4"):
+        assert load_manifest(root).vars["gcs_ip"] == "10.0.0.4"   # shell beats all
+
+
+def test_fleet_roster_to_peer_endpoints_with_zero_duplication():
+    # The whole chain from ONE file: roster -> fleet_ids -> fleet_peer_ids -> endpoints.
+    root = _deployment(
+        """
+        vehicle: t
+        vehicle_id: 3
+        sensors:
+          - {name: router, service: zenoh-router, config: config/sensors/router.yaml}
+        """,
+        files={"config/sensors/router.yaml":
+               'service: zenoh-router\nname: router\n'
+               'connect: "{{map fleet_peer_ids peer_endpoint}}"\n'})
+    (root / "fleet.yaml").write_text(
+        "fleet: t\nvehicles: [{id: 3, name: a, path: /x}, {id: 9, name: b, path: /y}]\n"
+        "vars: {peer_endpoint: 'tcp/10.0.0.{}:7447'}\n")
+    with _env(RIG_VEHICLE_LOCAL=_NO_MACHINE, RIG_VEHICLE_ID=None):
+        m = materialize_manifest(load_manifest(root), root)
+        cfg = yaml.safe_load(pathlib.Path(m.sensors[0].config).read_text())
+        assert cfg["connect"] == ["tcp/10.0.0.9:7447"]  # no fleet vars in vehicle.yaml at ALL
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

@@ -143,25 +143,31 @@ vehicle: "{{vehicle}}"            # self-marker = supplied PER VEHICLE, mandator
                                   #   mid-string markers (rtsp://10.{{vehicle_id}}.80) are fine unquoted
 vehicle_id: "{{vehicle_id}}"
 vars:
-  rtsp_port: 8554                 # fleet defaults; vars may chain: ip: 10.160.{{vehicle_id}}.25
-  gcs_ip: 10.160.1.10             # ground-station IP (CONVENTION): {{gcs_ip}} in configs, ${GCS_IP}
-  fleet_ids: [1, 2, 7]            #   in composes via env: below. rig derives {{fleet_peer_ids}} =
-  peer_endpoint: tcp/10.160.1.{}:7447   #   fleet_ids minus THIS vehicle's id.
+  rtsp_port: 8554                 # per-DEPLOYMENT defaults; vars may chain: ip: 10.160.{{vehicle_id}}.25
+  gcs_ip: 10.160.1.10             # a fallback default — the FLEET value comes from fleet.yaml (below)
 env:
   SIYI_IP: "10.160.{{vehicle_id}}.25"   # exported to every launcher via the fleet env
   GCS_IP: "{{gcs_ip}}"
 # config/sensors/zr30.yaml:   url: rtsp://10.160.{{vehicle_id}}.80:{{rtsp_port}}/main
 # config/infra/zenoh.yaml:    connect: "{{map fleet_peer_ids peer_endpoint}}"
 #   {{map <list_var> <template_var>}} (whole-scalar only) renders a LIST — one template expansion
-#   per element, {} as the placeholder. SIL on one box? swap the TEMPLATE, not the config:
-#   RIG_VAR_peer_endpoint='tcp/127.0.0.1:744{}' ./run.sh up   # ports instead of IPs, self excluded
+#   per element, {} as the placeholder.
 ```
+
+**Fleet-level vars live in fleet.yaml, not vehicle.yaml** (v0.1.68): the deployment-root
+fleet.yaml (pushed by `rig fleet up`, persisting across reboots) is a vars source —
+`{{fleet_ids}}` is DERIVED from the roster (`vehicles[].id`; never hand-maintained),
+`{{gcs_ip}}` and `{{fleet_mode}}` come from its top-level keys, and its `vars:` section carries
+fleet policy like `peer_endpoint` (field IPs vs SIL ports = editing ONE file, or a
+`RIG_VAR_peer_endpoint='tcp/127.0.0.1:744{}'` override). rig derives `{{fleet_peer_ids}}` =
+fleet_ids minus THIS vehicle's id.
 
 Sources, most-specific wins: shell (`RIG_VEHICLE_ID`, `RIG_VAR_<name>`) > `vehicle.local.yaml`
 beside vehicle.yaml (bench trees) > **`/etc/rig/vehicle.local.yaml`** (THE machine's identity) >
-vehicle.yaml. Unknown var = hard error listing what's available. Test-day values ride the shell
-tier (`RIG_VAR_fleet_ids=1,2,7` — comma strings coerce to lists) and land in every run's config
-snapshot, so per-run fleet composition is recorded per vehicle automatically.
+**`fleet.yaml`** (the fleet tempo tier) > vehicle.yaml. Unknown var = hard error listing what's
+available. Everything lands in every run's config snapshot — per-run fleet composition is
+recorded per vehicle automatically, and a mid-test REBOOT re-renders from the pushed fleet.yaml,
+not stale defaults.
 
 **Fleet roster + `rig fleet` (v0.1.66):** `fleet.yaml` on the GCS box is OPERATIONAL state
 (gitignored by init; commit only by choice) and drives the fan-out verbs — the ssh loop,
@@ -169,12 +175,14 @@ automated, never a control plane (system ssh/scp, BatchMode, fail-soft per vehic
 
 ```yaml
 fleet: gideon
-mode: sil                    # sil | field (EXPLICIT) -> RIG_VAR_fleet_mode in every run snapshot
-gcs_ip: 10.160.1.10
+mode: sil                    # sil | field (EXPLICIT) -> {{fleet_mode}} in every render/snapshot
+gcs_ip: 10.160.1.10          # -> {{gcs_ip}} on every vehicle (the ONE home for it)
 sil:                         # SIL block (mode: sil required)
   data_root: /sil/data       # local rows: data_dir=<data_root>/<name> via a SIMULATED machine
   network: {name: rig-sil, subnet: 10.160.1.0/24}   #   identity file (<data_root>/.identity/)
-vehicles:
+vars:                        # FLEET-level {{var}} values, pushed to every vehicle at `fleet up`
+  peer_endpoint: tcp/10.160.1.{}:7447   # SIL? tcp/127.0.0.1:744{} — one file, whole fleet
+vehicles:                    # THE roster -> {{fleet_ids}} derived ([3, 7]); never hand-listed
   - {id: 3, name: veh3, host: localhost, path: ~/sil/veh3, ip: 10.160.1.3}   # local = no ssh
   - {id: 7, name: skiff-07, host: orin, path: ~/ws/v3, data_dir: /home/uxv/logs}
 ```

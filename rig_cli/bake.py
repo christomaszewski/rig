@@ -667,7 +667,8 @@ def bake_fleet(root: Path, tag: str, *, registry: str | None = None,
     lines = ["# vehicle.local.yaml — THIS vehicle's identity + values. Write it ONCE per vehicle:",
              "#   sudo ./provision.sh --id <N> --name <name> [--var k=v ...]",
              "# (or by hand at /etc/rig/vehicle.local.yaml). This example lists every var the",
-             "# deployment references.", ""]
+             "# deployment references. Fleet-level vars (fleet_ids from the roster, gcs_ip,",
+             "# fleet vars:) may instead arrive via the fleet.yaml `rig fleet up` pushes.", ""]
     for name in mandatory:
         if name == "vehicle_id":
             lines.append("vehicle_id: 1            # REQUIRED")

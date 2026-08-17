@@ -1,8 +1,15 @@
 # rig — project state & handoff (resume here)
 
 > Snapshot for picking the project up cold in a new session. Read this first, then `CHEATSHEET.md` /
-> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.1.67**,
-> branch **`main`**, 286 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.1.68**,
+> branch **`main`**, 290 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> **fleet.yaml = the fleet-vars tier SHIPPED** (v0.1.68, CHEATSHEET §1.6): the deployment-root
+> fleet.yaml (pushed by `fleet up`) is now a vars SOURCE — precedence shell > vehicle.local >
+> /etc/rig > **fleet.yaml** > vehicle.yaml. `{{fleet_ids}}` is DERIVED from the roster (no more
+> dual maintenance), `{{gcs_ip}}`/`{{fleet_mode}}` come from its keys, and its `vars:` section
+> carries fleet policy (peer_endpoint: field IPs vs SIL ports = one file). The pushed file
+> persists, so mid-test reboots render CURRENT fleet values standalone (latent DDIL gap
+> closed); run snapshots already capture it, so per-run fleet provenance is complete.
 > **Profile lineage SHIPPED** (v0.1.67, the three-tier workflow: public base → internal org
 > profile → project overlays): fork promotes stamp `based_on: parent@ver`; `rig pkg rebase
 > <fork> --to <reg>` three-ways the fork onto the parent's current version (old parent payload

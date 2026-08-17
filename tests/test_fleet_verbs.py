@@ -276,6 +276,52 @@ def test_fleet_status_aggregates_and_survives_unreachable():
         assert "UNREACHABLE" in out                             # …and the sweep completed
 
 
+def test_fleet_vars_flow_and_reboot_persistence():
+    """The v0.1.68 tier: peer_endpoint lives ONLY in fleet.yaml, fleet_ids ONLY in the roster —
+    after `fleet up`, each tree renders mutual peers, the snapshot records the roster-derived
+    fleet_ids, and a REBOOT-style plain `rig up` (no fleet env) still sees the fleet values."""
+    trees = {}
+    for name in ("veh3", "veh9"):
+        root = _sil_tree(name)
+        cfg = root / "config" / "infra" / "router.yaml"
+        cfg.write_text('service: simsvc\nname: routerx\n'
+                       'connect: "{{map fleet_peer_ids peer_endpoint}}"\n')
+        veh = root / "vehicle.yaml"
+        veh.write_text(veh.read_text().replace(
+            "infra:", "infra:\n  - {name: routerx, service: simsvc, "
+            "config: config/infra/router.yaml}"))
+        trees[name] = root
+    data_root = pathlib.Path(tempfile.mkdtemp()) / "sil-data"
+    fy = _fleet_yaml([{"id": 3, "name": "veh3", "path": str(trees["veh3"])},
+                      {"id": 9, "name": "veh9", "path": str(trees["veh9"])}],
+                     data_root=data_root)
+    fy.write_text(fy.read_text() + "vars: {peer_endpoint: 'tcp/10.0.0.{}:7447'}\n")
+    rc, _, err = _run("fleet", "up", "--fleet", str(fy), "--run", "vars1", "-j", "1")
+    assert rc == 0, err
+    for name, vid, peer in (("veh3", "3", "tcp/10.0.0.9:7447"),
+                            ("veh9", "9", "tcp/10.0.0.3:7447")):
+        run_dir = next((data_root / name / "runs").iterdir())
+        doc = yaml.safe_load((run_dir / "manifest.yaml").read_text())
+        snap = run_dir / ".rig" / "config" / doc["config"]
+        rendered = yaml.safe_load((snap / "rendered" / "routerx.yaml").read_text())
+        assert rendered["connect"] == [peer]                     # mutual peers from ONE roster
+        vars_doc = yaml.safe_load((snap / "vars.yaml").read_text())
+        assert vars_doc["vars"]["fleet_ids"] == [3, 9]           # roster-derived, in provenance
+    # reboot simulation: plain `rig up` in the tree, identity file only — no fleet env at all
+    import subprocess
+    identity = data_root / ".identity" / "veh3.yaml"
+    env = {**os.environ, "RIG_VEHICLE_LOCAL": str(identity)}
+    env = {k: v for k, v in env.items() if not k.startswith("RIG_VAR_")}
+    proc = subprocess.run(["rig", "--root", str(trees["veh3"]), "up"],
+                          capture_output=True, text=True, env=env)
+    assert proc.returncode == 0, proc.stderr
+    run_dirs = sorted((data_root / "veh3" / "runs").iterdir())
+    doc = yaml.safe_load((run_dirs[-1] / "manifest.yaml").read_text())
+    snap = run_dirs[-1] / ".rig" / "config" / doc["config"]
+    rendered = yaml.safe_load((snap / "rendered" / "routerx.yaml").read_text())
+    assert rendered["connect"] == ["tcp/10.0.0.9:7447"]          # the PUSHED fleet.yaml persisted
+
+
 def test_fleet_sync_skips_open_runs():
     a = _sil_tree("veh_a")
     dd = pathlib.Path(tempfile.mkdtemp()) / "data"
