@@ -14,7 +14,7 @@ from pathlib import Path
 
 from . import (
     RigError, __version__, bake as bake_mod, build as build_mod, certify as certify_mod,
-    doctor as doctor_mod, dispatch, init as init_mod, install as install_mod,
+    doctor as doctor_mod, dispatch, fleet as fleet_mod, init as init_mod, install as install_mod,
     overlay as overlay_mod, pkg as pkg_mod, promote as promote_mod, provision as provision_mod,
     registries as registries_mod,
     registry as registry_mod, registry_scaffold, resolve, rigify as rigify_mod,
@@ -148,7 +148,11 @@ def cmd_status(args, manifest, catalog, descriptors) -> int:
     env = dispatch.fleet_env(manifest)
     pairs = _pairs(manifest, descriptors, args.names)
     rows = status_mod.gather(pairs, env)
-    if (run_line := runs_mod.status_line(manifest)) is not None:
+    run_line = runs_mod.status_line(manifest)
+    if getattr(args, "format", "table") == "json":  # the machine contract fleet tooling parses
+        print(status_mod.as_json(manifest, rows, run_line))
+        return 0
+    if run_line is not None:
         print(run_line)
     print(status_mod.render(rows, verbose=args.verbose))  # stdout: the report
     return 0
@@ -472,7 +476,8 @@ def build_parser() -> argparse.ArgumentParser:
                "  rig pkg      search | info | list | add | remove | upgrade | lock | promote\n"
                "  rig overlay  apply | remove | reorder | list     rig setup (first-run host setup)\n"
                "  rig service  rigify | vendor | certify\n"
-               "  rig artifact bake | unbake | list   rig image    build | pull")
+               "  rig artifact bake | unbake | list   rig image    build | pull\n"
+               "  rig fleet    list | status | sync | up | down    (GCS-side fan-out; fleet.yaml)")
     parser.add_argument("--version", action="version", version=f"rig {__version__}")
     parser.add_argument("--root", type=Path, default=None,
                         help="deployment root holding vehicle.yaml (default: detected from the cwd, "
@@ -509,9 +514,11 @@ def build_parser() -> argparse.ArgumentParser:
     rn = sub.add_parser("runs", help="list the run registry (OPEN / sealed / interrupted)")
     rn.add_argument("names", nargs="*", default=[], help=argparse.SUPPRESS)
 
-    add("status", "fleet status table").add_argument(
-        "-v", "--verbose", action="store_true", help="expand per-container detail"
-    )
+    st = add("status", "fleet status table")
+    st.add_argument("-v", "--verbose", action="store_true", help="expand per-container detail")
+    st.add_argument("--format", choices=["table", "json"], default="table",
+                    help="json = one stable object (vehicle/run/stacks) — the machine contract "
+                         "`rig fleet status` parses remotely")
 
     logs = add("logs", "stream/show a sensor's logs")
     logs.add_argument("-f", "--follow", action="store_true", help="follow (single sensor only)")
@@ -700,6 +707,45 @@ def build_parser() -> argparse.ArgumentParser:
     pp.add_argument("--requires", default=None, metavar="REF",
                     help="(--kind profile) service requirement override (ns/service@X.Y.Z)")
 
+    flc = argparse.ArgumentParser(add_help=False)  # shared fleet flags — after the verb
+    flc.add_argument("--fleet", default=None, metavar="PATH",
+                     help="fleet.yaml (default: $RIG_FLEET, else upward search from the cwd)")
+    flc.add_argument("-j", "--jobs", type=int, default=4, help="concurrent vehicles (default 4)")
+    fl = sub.add_parser("fleet", help="GCS-side fan-out over the fleet roster (fleet.yaml): the "
+                                      "ssh loop, automated — never a control plane")
+    flsub = fl.add_subparsers(dest="fleet_cmd", required=True)
+    flsub.add_parser("list", parents=[flc], help="roster + reachability table")
+    fls = flsub.add_parser("status", parents=[flc],
+                           help="aggregate `status --format json` across the fleet")
+    fls.add_argument("names", nargs="*", default=[], help="vehicle name(s); default: all")
+    fls.add_argument("-v", "--verbose", action="store_true", help="per-stack detail per vehicle")
+    flu = flsub.add_parser("up", parents=[flc], help="bring the fleet up with a CORRELATED run "
+                                                     "label; SIL: ensures the docker network + "
+                                                     "the shared run-dir view")
+    flu.add_argument("names", nargs="*", default=[], help="vehicle name(s); default: all")
+    flu.add_argument("--run", default=None, metavar="LABEL",
+                     help="run label stamped on EVERY vehicle (post-test data groups itself)")
+    flu.add_argument("--var", action="append", default=[], metavar="K=V",
+                     help="forwarded as RIG_VAR_<k> (the vars tier — lands in each run's "
+                          "snapshot; never a config push)")
+    flu.add_argument("--force", action="store_true", help="forwarded to each vehicle's up")
+    flu.add_argument("--dry-run", action="store_true", help="forwarded; no network/roster/view "
+                                                            "side effects")
+    fld = flsub.add_parser("down", parents=[flc], help="tear the fleet down (full-fleet success "
+                                                       "also removes the SIL network)")
+    fld.add_argument("names", nargs="*", default=[], help="vehicle name(s); default: all")
+    fld.add_argument("--end-run", action="store_true", dest="end_run",
+                     help="forwarded: seal each vehicle's run after a successful down")
+    fld.add_argument("--force", action="store_true", help="forwarded to each vehicle's down")
+    fld.add_argument("--dry-run", action="store_true")
+    fly = flsub.add_parser("sync", parents=[flc], help="harvest SEALED runs (ended: present = "
+                                                       "safe to sync) into <into>/<label>/<vehicle>/")
+    fly.add_argument("names", nargs="*", default=[], help="vehicle name(s); default: all")
+    fly.add_argument("--label", default=None, help="only runs with this label")
+    fly.add_argument("--into", default="fleet-runs", metavar="DIR",
+                     help="harvest root (default: fleet-runs/) — the same tree a SIL fleet "
+                          "view produces live")
+
     ov = sub.add_parser("overlay", help="overlay BINDINGS on instances (apply/remove/reorder/list) "
                                         "— authoring/publishing is `pkg promote`")
     ovsub = ov.add_subparsers(dest="overlay_cmd", required=True)
@@ -769,6 +815,23 @@ def main(argv=None) -> int:
             return cmd_rigify(args)
         if args.cmd == "registry":  # operates on a registry tree / ~/.rig — needs no deployment
             return cmd_registry(args)
+        if args.cmd == "fleet":  # GCS-side fan-out — needs fleet.yaml, never a deployment root
+            fleet = fleet_mod.load_fleet(args.fleet)
+            if args.fleet_cmd == "list":
+                return fleet_mod.cmd_list(fleet, jobs=args.jobs)
+            if args.fleet_cmd == "status":
+                return fleet_mod.cmd_status(fleet, args.names, verbose=args.verbose,
+                                            jobs=args.jobs)
+            if args.fleet_cmd == "up":
+                return fleet_mod.cmd_up(fleet, args.names, run_label=args.run,
+                                        set_vars=args.var, force=args.force,
+                                        dry_run=args.dry_run, jobs=args.jobs)
+            if args.fleet_cmd == "down":
+                return fleet_mod.cmd_down(fleet, args.names, end_run=args.end_run,
+                                          force=args.force, dry_run=args.dry_run,
+                                          jobs=args.jobs)
+            return fleet_mod.cmd_sync(fleet, args.names, label=args.label, into=args.into,
+                                      jobs=args.jobs)
         if args.cmd == "pkg":
             if args.pkg_cmd in ("add", "install", "remove", "upgrade", "lock", "promote", "list"):
                 root = (args.root or find_root()).resolve()

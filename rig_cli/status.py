@@ -78,6 +78,19 @@ def gather(pairs: list[tuple[Sensor, Descriptor]], env: dict[str, str]) -> list[
     return rows
 
 
+def as_json(manifest, rows: list[Row], run_line: str | None) -> str:
+    """The MACHINE-READABLE status (one stable object) — `rig status --format json`. The remote
+    half of `rig fleet status`: fleet tooling parses THIS, never the human table (the same
+    contract discipline the run manifests follow)."""
+    return json.dumps({
+        "vehicle": manifest.vehicle,
+        "vehicle_id": manifest.vehicle_id,
+        "run": run_line,
+        "stacks": [{"sensor": r.sensor.name, "service": r.sensor.service, "state": r.state,
+                    "health": r.health, "running": r.running, "total": r.total} for r in rows],
+    }, sort_keys=True)
+
+
 def render(rows: list[Row], *, verbose: bool = False) -> str:
     headers = ("SENSOR", "SERVICE", "STATE", "HEALTH", "CONTAINERS")
     table = [headers]

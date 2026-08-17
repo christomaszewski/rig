@@ -1,8 +1,16 @@
 # rig — project state & handoff (resume here)
 
 > Snapshot for picking the project up cold in a new session. Read this first, then `CHEATSHEET.md` /
-> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.1.65**,
-> branch **`main`**, 271 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.1.66**,
+> branch **`main`**, 278 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> **`rig fleet` verb group SHIPPED** (v0.1.66, CHEATSHEET §1.6 + ROADMAP §4):
+> list/status/sync/up/down — the GCS-side ssh loop automated, never a control plane. New
+> `rig status --format json` machine contract; correlated run labels (`fleet up --run X`);
+> sealed-run harvest into `fleet-runs/<label>/<vehicle>/<run-id>`; roster pushed at up and
+> captured by every run snapshot. SIL: local rows = simulated machines
+> (`<data_root>/.identity/` via RIG_VEHICLE_LOCAL), shared-run-dir VIEW (symlinks; sync
+> materializes the same tree from real vehicles), docker network create/rm +
+> RIG_NETWORK/RIG_VEHICLE_IP env contract. First ssh/scp test shims.
 > **`{{map}}` + fleet peers SHIPPED** (v0.1.65, CHEATSHEET §1.6): `{{map <list_var>
 > <template_var>}}` (whole-scalar, renders a LIST; the template being a VAR makes field vs SIL a
 > tiering swap — `tcp/10.160.1.{}:7447` vs `RIG_VAR_peer_endpoint=tcp/127.0.0.1:744{}`) + the

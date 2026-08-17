@@ -411,19 +411,22 @@ deployment updates + validation ≈ the rest). Requires creating the GitHub repo
 CI checkout secret-free like rig/camera-service).
 
 ## 4. Other tracked items
-- **`rig fleet` verb group** (planned; fleet.yaml shipped as a convention in v0.1.65): GCS-side
-  fan-out over the per-vehicle surface — NEVER a control plane. Invariants: transport is the
-  system's ssh/scp (no stored credentials, no agent, no daemon); the remote end is the
-  artifact's own `./run.sh`/`./rig` at the roster row's path; fail-SOFT per vehicle (an
-  unreachable vehicle mars its row, never aborts the sweep — DDIL); explicit roster only, no
-  discovery; no config side-channel (vars ride `RIG_VAR_*` forwarding and land in run
-  snapshots). Rows are (host, path) pairs — N `localhost` rows with distinct paths = a SIL
-  fleet on one machine (localhost rows skip ssh; a future `fleet doctor` can aggregate
-  host_ports across rows for the cross-deployment clash per-deployment doctor can't see).
-  Phases: `list`/`status`/`sync` (read-only + sealed-run harvest, keyed off the
-  `ended:` ⇔ safe-to-sync manifest contract) → `up --run <label>`/`down [--end-run]`
-  (correlated run labels across the fleet) → `provision`/`deploy` (only once the plumbing has
-  hardened — they touch sudo and fresh machines).
+- **`rig fleet` verb group — ✅ phases 1+2 implemented (v0.1.66)**: GCS-side fan-out over the
+  per-vehicle surface — NEVER a control plane. Shipped: `list`/`status` (aggregating the new
+  `rig status --format json` machine contract)/`sync` (sealed-run harvest into
+  `<into>/<label>/<vehicle>/<run-id>`, keyed off `ended:` ⇔ safe-to-sync) and
+  `up --run <label>`/`down [--end-run]` (correlated labels; `--var` rides `RIG_VAR_*` into
+  every run snapshot). Invariants held: system ssh/scp only (BatchMode, no credentials, no
+  agent/daemon); remote end = the deployment's own `./run.sh`/`./rig`; fail-SOFT per vehicle
+  (ssh 255 = UNREACHABLE mars the row, never aborts — DDIL); explicit roster only; no config
+  side-channel (one provenance carve-out: `fleet up` pushes fleet.yaml beside each deployment
+  so the run snapshot records the roster). SIL: local rows skip ssh; each row is a SIMULATED
+  MACHINE (`<data_root>/.identity/<name>.yaml` via RIG_VEHICLE_LOCAL — the /etc/rig tier);
+  the "shared run dir" is a VIEW (`<data_root>/runs/<label>-<date>/<vehicle>` symlinks into
+  the per-vehicle registries), and `sync` materializes the identical tree from real vehicles;
+  the docker network is create/rm + `RIG_NETWORK`/`RIG_VEHICLE_IP` env — services join it in
+  their own composes. Still deferred: `provision`/`deploy` (sudo + fresh machines — after the
+  plumbing hardens in the field), `fleet doctor` (cross-deployment host_ports aggregation).
 - **Boot-time bring-up**: a systemd unit running `rig up` (Compose handles per-stack restart thereafter).
 - **ROS `/diagnostics`** as the second health layer in `rig status`.
 - **Host-facing port-clash** extraction for list-structured configs — ✅ done: `host_ports` supports an

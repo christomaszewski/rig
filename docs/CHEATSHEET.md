@@ -153,11 +153,40 @@ vehicle.yaml. Unknown var = hard error listing what's available. Test-day values
 tier (`RIG_VAR_fleet_ids=1,2,7` — comma strings coerce to lists) and land in every run's config
 snapshot, so per-run fleet composition is recorded per vehicle automatically.
 
-**Fleet roster (GCS-side, convention):** `fleet.yaml` beside the deployment on the GCS box —
-`{fleet: <name>, gcs_ip: …, vehicles: [{id, name, host, path}]}` — is OPERATIONAL state
-(gitignored by init; commit it only by choice). Vehicles never read it; it's the input for the
-`rig fleet` verb group (planned: list/status/sync → up/down — see ROADMAP). N `localhost` rows
-with different paths describe a SIL fleet on one machine.
+**Fleet roster + `rig fleet` (v0.1.66):** `fleet.yaml` on the GCS box is OPERATIONAL state
+(gitignored by init; commit only by choice) and drives the fan-out verbs — the ssh loop,
+automated, never a control plane (system ssh/scp, BatchMode, fail-soft per vehicle):
+
+```yaml
+fleet: gideon
+mode: sil                    # sil | field (EXPLICIT) -> RIG_VAR_fleet_mode in every run snapshot
+gcs_ip: 10.160.1.10
+sil:                         # SIL block (mode: sil required)
+  data_root: /sil/data       # local rows: data_dir=<data_root>/<name> via a SIMULATED machine
+  network: {name: rig-sil, subnet: 10.160.1.0/24}   #   identity file (<data_root>/.identity/)
+vehicles:
+  - {id: 3, name: veh3, host: localhost, path: ~/sil/veh3, ip: 10.160.1.3}   # local = no ssh
+  - {id: 7, name: skiff-07, host: orin, path: ~/ws/v3, data_dir: /home/uxv/logs}
+```
+
+```bash
+rig fleet list                        # roster + reachability
+rig fleet status [-v]                 # aggregates `status --format json` per vehicle
+rig fleet up --run tuesday-swarm --var gcs_ip=192.168.44.10
+                                      # CORRELATED run label on every vehicle; --var rides the
+                                      #   RIG_VAR_* tier into each run's snapshot. SIL: ensures
+                                      #   the docker network + the shared run-dir VIEW
+                                      #   (<data_root>/runs/<label>-<date>/<vehicle> symlinks)
+rig fleet down --end-run              # tear down + seal everywhere (full success rms the network)
+rig fleet sync --into fleet-runs      # harvest SEALED runs (ended: = safe) into
+                                      #   fleet-runs/<label>/<vehicle>/<run-id> — the SAME tree
+                                      #   the SIL view shows live; idempotent re-sync
+```
+
+The SIL network is create/teardown + env only: `RIG_NETWORK`/`RIG_VEHICLE_IP` are exported to
+every stack; services JOIN it in their own composes (external network + ipv4_address) — rig
+never writes compose config. Vehicles never read fleet.yaml; `fleet up` pushes it beside each
+deployment so the run snapshot records the roster the run was launched under.
 
 `rig bake` detects markers automatically (no flag): a templated deployment bakes a **fleet
 artifact** — unresolved configs, no compose-only form, rendered on-vehicle by the bundled rig

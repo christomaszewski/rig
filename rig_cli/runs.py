@@ -185,7 +185,8 @@ def _collect_config(manifest: Manifest, root: Path) -> dict[str, bytes]:
     shell contributions — sources outside the tree — leave a trace. Rendered configs come off the
     MATERIALIZED manifest rows, never a var/rendered glob (stale files linger for removed instances)."""
     files = {"vehicle.yaml": (root / "vehicle.yaml").read_bytes()}
-    for name in ("vehicle.local.yaml", "services.yaml", "rig.lock"):
+    for name in ("vehicle.local.yaml", "services.yaml", "rig.lock",
+                 "fleet.yaml"):  # `fleet up` pushes the roster here — the run records its fleet
         if (path := root / name).is_file():
             files[name] = path.read_bytes()
     files["vars.yaml"] = yaml.safe_dump(
