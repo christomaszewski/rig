@@ -53,10 +53,10 @@ def registry_commit(entry: Entry) -> str | None:
     return proc.stdout.strip() or None
 
 
-def resolve_ref(ref: str) -> tuple[Entry, Registry, Package]:
+def resolve_ref(ref: str, *, history: bool = False) -> tuple[Entry, Registry, Package]:
     """`[registry/]name[@version]` -> the package, priority order for unqualified names. An explicit
-    @version must equal the registry's current version (history lives in git; `--locked` is the
-    reproduction path)."""
+    @version must equal the registry's current version — except with `history=True` (pkg add),
+    where a git-backed registry serves past versions read-only from its history."""
     want_version = None
     if "@" in ref:
         ref, want_version = ref.split("@", 1)
@@ -71,10 +71,26 @@ def resolve_ref(ref: str) -> tuple[Entry, Registry, Package]:
         if pkg is None:
             continue
         if want_version and pkg.version != want_version:
+            if history:
+                from .history import checkout_pkg, kind_dir_of
+                hist = checkout_pkg(entry, kind_dir_of(pkg.kind), name, want_version)
+                if hist is not None:
+                    return entry, reg, hist
+                hint = (" — and that version is not in the registry's git history" if
+                        checkout_pkg_capable(entry) else
+                        " — historical versions need a git-backed registry (this one has no "
+                        "git history)")
+            else:
+                hint = ""
             raise RigError(f"install: {entry.name}/{name} is at {pkg.version}, not {want_version} "
-                           f"(registries carry ONE current version; use --locked to reproduce pins)")
+                           f"(registries carry ONE current version{hint})")
         return entry, reg, pkg
     raise RigError(f"install: '{ref}' not found in any configured registry (rig registry sync?)")
+
+
+def checkout_pkg_capable(entry: Entry) -> bool:
+    from .history import _git_prefix
+    return _git_prefix(entry) is not None
 
 
 def resolve_sensor(ident: str) -> tuple[Entry, Registry, Package]:
@@ -243,8 +259,10 @@ def _install_service(root: Path, entry: Entry, pkg: Package, lock: dict, *, lock
                 f"re-sync")
         vendor(pkg.name, service_dir, root)
     _route_service(root, pkg.name)
-    record_registry(lock, entry.name, rtype=entry.type, location=entry.location,
-                    commit=registry_commit(entry))
+    if not (locked and entry.name in (lock.get("registries") or {})):
+        record_registry(lock, entry.name, rtype=entry.type, location=entry.location,
+                        commit=registry_commit(entry))  # --locked reproduces FROM that commit —
+    #                                                     never clobber the anchor it used
     record_package(lock, ref, {"kind": "service", "source": {
         "repo": source.get("repo"), "rev": source.get("rev"),
         **({"path": source["path"]} if source.get("path") else {})}})
@@ -542,13 +560,34 @@ def remove(root: Path, specs: list[str], *, purge_config: bool = False) -> int:
     return 0
 
 
+def _at_locked_commit(entry: Entry, pkg: Package, lock: dict, locked: bool) -> Package:
+    """--locked + a git-backed registry: resolve the package at the LOCKED registry commit —
+    actually reproduce, instead of verify-current-or-fail. The lock's hashes still gate the
+    result downstream, so rewritten history fails loudly rather than installing different
+    bytes. No git / no recorded commit ⇒ the package as resolved (today's behavior)."""
+    if not locked:
+        return pkg
+    commit = ((lock.get("registries") or {}).get(entry.name) or {}).get("commit")
+    if not commit:
+        return pkg
+    from .history import checkout_pkg_at, kind_dir_of
+    hist = checkout_pkg_at(entry, kind_dir_of(pkg.kind), pkg.name, commit)
+    if hist is None:
+        return pkg
+    if hist.version != pkg.version:
+        eprint(f"  --locked: {pkg.name} taken from the locked registry commit {commit[:7]} "
+               f"(@{hist.version}; the registry currently carries @{pkg.version})")
+    return hist
+
+
 def install(root: Path, spec: str, *, as_name: str | None = None, locked: bool = False) -> int:
     """One spec: `sensor:<id>` | `[registry/]profile` | `[registry/]service` | `[registry/]suite`."""
     lock = load_lock(root)
     if spec.startswith("sensor:"):
         entry, reg, pkg = resolve_sensor(spec[len("sensor:"):])
     else:
-        entry, reg, pkg = resolve_ref(spec)
+        entry, reg, pkg = resolve_ref(spec, history=True)
+    pkg = _at_locked_commit(entry, pkg, lock, locked)
     if pkg.kind == "suite":
         return _install_suite(root, entry, pkg, locked=locked)
     if pkg.kind == "overlay":
@@ -579,12 +618,14 @@ def install(root: Path, spec: str, *, as_name: str | None = None, locked: bool =
                 raise RigError(f"install: {ref} payload missing in the synced registry: {payload_rel}")
             _check_locked(lock, ref, locked=locked, payload_sha=sha256_file(payload_path))
             svc_entry, service = _resolve_required_service(entry, reg, pkg)
+            service = _at_locked_commit(svc_entry, service, lock, locked)
             desc = _install_service(root, svc_entry, service, lock, locked=locked)
             eprint(f"rig install: {ref} (requires {qualified(svc_entry, service)})")
             record_package(lock, ref, {"kind": "profile", "payload_sha256": sha256_file(payload_path),
                                        "requires": qualified(svc_entry, service)})
-            record_registry(lock, entry.name, rtype=entry.type, location=entry.location,
-                            commit=registry_commit(entry))
+            if not (locked and entry.name in (lock.get("registries") or {})):
+                record_registry(lock, entry.name, rtype=entry.type, location=entry.location,
+                                commit=registry_commit(entry))
             _materialize_instance(root, svc=service.name, desc=desc, instance=as_name,
                                   base_src=payload_path, profile_ref=ref, lock=lock, enabled=True)
         else:  # bare service: base config = its declared example at the pinned rev

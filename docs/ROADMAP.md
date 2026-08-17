@@ -453,3 +453,16 @@ CHEATSHEET §1.5–1.6):
   (shell > local > /etc/rig > vehicle.yaml), mandatory self-markers, `env:` passthrough.
 - **v0.1.48** flagless fleet artifacts (templates in ⇒ templates out; bake blind to local
   sources) + `rig provision` with the `--force` re-identification gate.
+- **v0.1.61** promote update-flow: manifest carry-forward on re-promote, package name from
+  provenance, `--kind` inference for hand-authored instances, provenance-gated auto-bump,
+  alias→namespace requalification in emitted refs, restore-not-delete rollback.
+- **v0.1.62** correctness batch: `pkg upgrade` covers bound overlays (rebound in place) and is
+  all-or-nothing (content-level rollback, install too); service pin collisions error; overlay
+  binding hygiene; `--locked` verifies `source.rev`; sync warns on a stale index.
+- **v0.1.63** **git history as the version archive** (capability-detected, read-only): the
+  "ONE current version" model keeps the index simple while git-type caches — FULL clones —
+  carry every past version. `pkg add ns/name@<old>` resolves from history (`git log`/`git
+  show`, never a checkout); `--locked` re-resolves packages at the locked registry commit, so
+  reproduction actually reproduces (hashes still gate — rewritten history fails loudly). A
+  local-dir folder without `.git` keeps the exact old behavior; a local-dir that IS a git
+  checkout gets the feature for free. No authoring-side changes (no tags, no push).

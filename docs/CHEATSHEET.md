@@ -101,6 +101,11 @@ rig pkg promote siyi_zr30 --kind profile --to internal
 rig pkg upgrade                    # registry moved? three-way merge: new base ⊕ your edits, conflicts
                                    #   loud; bound overlays rebind IN PLACE (order kept). All-or-nothing:
                                    #   a mid-sweep failure rolls the whole tree + lock back
+rig pkg add internal/zr30-gideon@1.0.0
+                                   # a PAST version: git-backed registries serve history read-only
+                                   #   (git log/show on the full clone — no checkout, no tags).
+                                   #   --locked re-resolves at the LOCKED registry commit, so
+                                   #   reproduction reproduces even after the registry moves
 ```
 
 Registries: `rig registry init <dir>` scaffolds a new one (usable immediately via

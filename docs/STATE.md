@@ -1,8 +1,14 @@
 # rig — project state & handoff (resume here)
 
 > Snapshot for picking the project up cold in a new session. Read this first, then `CHEATSHEET.md` /
-> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.1.62**,
-> branch **`main`**, 252 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.1.63**,
+> branch **`main`**, 257 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> **Git history = the registry version archive SHIPPED** (v0.1.63, ROADMAP §5): git-backed
+> registries serve PAST versions read-only from the full-clone cache (`pkg add ns/name@old`,
+> `git log`/`git show`, no checkout/tags), and `--locked` re-resolves packages at the locked
+> registry commit — reproduction actually reproduces after the registry moves, while the lock's
+> hashes still gate (rewritten history fails loudly). Capability-detected: non-git local-dir
+> registries keep the exact old behavior.
 > **pkg correctness batch SHIPPED** (v0.1.62): `pkg upgrade` now covers bound overlays (rebound in
 > place, order kept) and keeps the lock's binding record; upgrade + single-package install are
 > all-or-nothing (content-level snapshot/rollback); installing over a different service pin is an
