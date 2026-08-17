@@ -154,6 +154,21 @@ def sync(names: list[str] | None = None) -> int:
         raise RigError(f"registry sync: unknown registr{'y' if len(unknown) == 1 else 'ies'}: "
                        f"{', '.join(sorted(unknown))}")
     failed = 0
+
+    def _stale_note(entry: Entry, reg: Registry) -> str:
+        """A committed index.json that no longer matches the manifests splits the world: index
+        consumers (search, sensor: resolution, upgrade hints) disagree with manifest consumers
+        (add, info, upgrade). Surface it at sync, where the operator can actually see it."""
+        from .registry import render_index
+        path = entry.root / "index.json"
+        try:
+            if path.is_file() and path.read_text() != render_index(generate_index(reg)):
+                return (" — WARNING: index.json is STALE (its CI missed a regen; "
+                        "`rig registry index` fixes a local-dir)")
+        except (OSError, RigError):
+            pass
+        return ""
+
     for entry in chosen:
         if entry.type == "local-dir":
             try:
@@ -162,7 +177,8 @@ def sync(names: list[str] | None = None) -> int:
                     f" — WARNING: registry declares namespace '{reg.namespace}' but you consume it " \
                     f"as '{entry.name}'"
                 eprint(f"  {entry.name}: local-dir, used in place "
-                       f"({len(index.get('packages', {}))} packages){mismatch}")
+                       f"({len(index.get('packages', {}))} packages){mismatch}"
+                       f"{_stale_note(entry, reg)}")
             except RigError as exc:
                 failed += 1
                 eprint(f"  {entry.name}: DEGRADED — {exc}")
@@ -189,7 +205,8 @@ def sync(names: list[str] | None = None) -> int:
             mismatch = "" if reg.namespace == entry.name else \
                 f" — WARNING: declares namespace '{reg.namespace}', consumed as '{entry.name}'"
             eprint(f"  {entry.name}: {action} @ {commit} "
-                   f"({len(index.get('packages', {}))} packages){mismatch}")
+                   f"({len(index.get('packages', {}))} packages){mismatch}"
+                   f"{_stale_note(entry, reg)}")
         except RigError as exc:
             failed += 1
             eprint(f"  {entry.name}: {action} @ {commit} but DEGRADED — {exc}")

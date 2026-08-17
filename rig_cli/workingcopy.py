@@ -198,9 +198,11 @@ def _three_way(root: Path, sensor: Sensor, new_base_path: Path) -> list[str]:
 def upgrade(root: Path, names: list[str]) -> int:
     """`rig pkg upgrade [instance…]` — re-pin EVERY registry package this deployment uses: profile
     instances (three-way payload merge, local wins), bare service instances (three-way against the
-    new vendored example), the services themselves (refetch + re-vendor at the new pin, including a
-    profile's required service), and instance-less service dependencies."""
-    from .install import _install_service
+    new vendored example), bound overlays (payload rebound in place — order is semantic), the
+    services themselves (refetch + re-vendor at the new pin, including a profile's required
+    service), and instance-less service dependencies. All-or-nothing: any failure mid-sweep rolls
+    the tree AND the lock back (a half-upgraded deployment fails `pkg lock` on every instance)."""
+    from .install import _install_service, _rollback, _snapshot
 
     manifest = load_manifest(root)
     lock = load_lock(root)
@@ -211,8 +213,12 @@ def upgrade(root: Path, names: list[str]) -> int:
     anchors = lock.get("instances") or {}
     targets = [s for s in manifest.sensors
                if (s.profile or s.name in anchors) and (not names or s.name in names)]
-    changed = 0
+    for skipped in [n for n in names
+                    if not any(s.name == n and (s in targets or s.overlays)
+                               for s in manifest.sensors)]:
+        eprint(f"  {skipped}: no registry provenance (hand-wired) — nothing to upgrade")
     repinned: dict[str, str] = {}  # old service ref -> current ref (re-vendored at most once)
+    snap = _snapshot(root)
 
     def repin_service(old_ref: str) -> str:
         if old_ref in repinned:
@@ -220,7 +226,8 @@ def upgrade(root: Path, names: list[str]) -> int:
         entry, _, pkg = _resolve_current(old_ref)
         new_ref = qualified(entry, pkg)
         if new_ref != old_ref or not (root / "services" / pkg.name / ".vendored.yaml").exists():
-            _install_service(root, entry, pkg, lock, locked=False)  # refetch + re-vendor + record
+            _install_service(root, entry, pkg, lock, locked=False,  # refetch + re-vendor + record
+                             allow_repin=True)  # upgrade IS the deliberate pin-moving path
             if new_ref != old_ref:
                 packages.pop(old_ref, None)
                 eprint(f"  service: {old_ref} -> {new_ref} (re-vendored at the new pin)")
@@ -232,6 +239,27 @@ def upgrade(root: Path, names: list[str]) -> int:
                 if info.get("kind") == "service" and r.rpartition("/")[-1].split("@")[0] == service_name]
         return hits[0] if hits else None
 
+    try:
+        changed = _upgrade_sweep(root, manifest, lock, packages, anchors, targets, names,
+                                 repin_service, service_ref_for, repinned)
+    except BaseException:
+        _rollback(root, snap)
+        eprint("rig pkg upgrade: failed mid-sweep — rolled back (configs, pins, vehicle.yaml, "
+               "services/, rig.lock all restored)")
+        raise
+    if changed:
+        save_lock(root, lock)
+        load_manifest(root)  # the gate: the deployment must still load
+        eprint(f"rig pkg upgrade: {changed} change(s) — rig.lock updated, commit it")
+    else:
+        eprint("rig pkg upgrade: everything current")
+    return 0
+
+
+def _upgrade_sweep(root: Path, manifest, lock: dict, packages: dict, anchors: dict,
+                   targets: list, names: list[str], repin_service, service_ref_for,
+                   repinned: dict) -> int:
+    changed = 0
     for sensor in targets:
         if sensor.profile:  # profile instance: new payload three-way + requires re-pin
             ref = str(sensor.profile)
@@ -264,7 +292,8 @@ def upgrade(root: Path, names: list[str]) -> int:
                 packages.pop(ref, None)
                 _rewrite_row_profile(root, sensor.name, new_ref)
             record_instance(lock, sensor.name, profile=new_ref,
-                            base_sha256=sha256_file(pin_path(root, sensor.name)))
+                            base_sha256=sha256_file(pin_path(root, sensor.name)),
+                            overlays=list(sensor.overlays))  # the ORDERED binding record survives
             record_registry(lock, entry.name, rtype=entry.type, location=entry.location,
                             commit=registry_commit(entry))
             changed += 1
@@ -311,13 +340,47 @@ def upgrade(root: Path, names: list[str]) -> int:
                 if new_ref != ref:
                     changed += 1
 
-    if changed:
-        save_lock(root, lock)
-        load_manifest(root)  # the gate: the deployment must still load
-        eprint(f"rig pkg upgrade: {changed} change(s) — rig.lock updated, commit it")
-    else:
-        eprint("rig pkg upgrade: everything current")
-    return 0
+    # Bound overlays: rebind IN PLACE at the registry's current version. Same position (order is
+    # semantic), payload copy swapped, lock updated — this is what `pkg list`'s upgrade hint
+    # promised. Local edits are untouched: local always beats overlays, so there is no merge.
+    from .overlay import edit_row
+    rebind_names = [s.name for s in manifest.sensors
+                    if s.overlays and (not names or s.name in names)]
+    for iname in rebind_names:
+        sensor = next(s for s in load_manifest(root).sensors if s.name == iname)  # fresh row
+        for ref in list(sensor.overlays):
+            try:
+                entry, _, pkg = _resolve_current(ref)
+            except RigError as exc:
+                eprint(f"  {iname}: overlay {ref} — {exc}; binding left as-is")
+                continue
+            new_ref = qualified(entry, pkg)
+            if new_ref == ref:
+                continue
+            payload_rel = (pkg.manifest.get("config") or {}).get("payload")
+            src = pkg.pkg_dir / str(payload_rel)
+            if not src.is_file():
+                raise RigError(f"upgrade {iname}: overlay payload missing in registry: {payload_rel}")
+            dest = overlay_payload_path(root, new_ref)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(src.read_bytes())
+            edit_row(root, iname, lambda row, old=ref, new=new_ref: row.__setitem__(
+                "overlays", [new if o == old else o for o in row.get("overlays") or []]))
+            record_package(lock, new_ref, {"kind": "overlay", "payload_sha256": sha256_file(dest),
+                                           "project": pkg.manifest.get("project")})
+            record_registry(lock, entry.name, rtype=entry.type, location=entry.location,
+                            commit=registry_commit(entry))
+            if not any(ref in s.overlays for s in load_manifest(root).sensors):
+                overlay_payload_path(root, ref).unlink(missing_ok=True)  # last binding moved on
+                packages.pop(ref, None)
+            changed += 1
+            eprint(f"  {iname}: overlay {ref} -> {new_ref} (rebound in place; local still wins)")
+        fresh = next(s for s in load_manifest(root).sensors if s.name == iname)
+        anchor = anchors.get(iname) or {}
+        if anchor.get("base_sha256"):  # never synthesize an anchor for a pin-less instance
+            record_instance(lock, iname, profile=fresh.profile,
+                            base_sha256=anchor["base_sha256"], overlays=list(fresh.overlays))
+    return changed
 
 
 def _rewrite_row_profile(root: Path, instance: str, new_ref: str) -> None:
@@ -344,6 +407,11 @@ def relock(root: Path) -> int:
         pin = pin_path(root, name)
         if not any(s.name == name for s in manifest.sensors):
             eprint(f"  {name}: in rig.lock but not in vehicle.yaml — removing the stale anchor")
+            del lock["instances"][name]
+            continue
+        if not row.get("base_sha256"):  # legacy: overlay apply once synthesized pin-less anchors
+            eprint(f"  {name}: anchor has no base hash (pin-less instance) — dropping it "
+                   f"(bindings live in vehicle.yaml; anchors are for pinned bases only)")
             del lock["instances"][name]
             continue
         if not pin.is_file():

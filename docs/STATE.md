@@ -1,8 +1,18 @@
 # rig — project state & handoff (resume here)
 
 > Snapshot for picking the project up cold in a new session. Read this first, then `CHEATSHEET.md` /
-> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.1.61**,
-> branch **`main`**, 237 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.1.62**,
+> branch **`main`**, 252 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> **pkg correctness batch SHIPPED** (v0.1.62): `pkg upgrade` now covers bound overlays (rebound in
+> place, order kept) and keeps the lock's binding record; upgrade + single-package install are
+> all-or-nothing (content-level snapshot/rollback); installing over a different service pin is an
+> ERROR pointing at `pkg upgrade` (no more silent shared-service moves / duplicate lock rows);
+> overlay hygiene — pin-less instances get no lock anchor (and `pkg lock` self-heals legacy ones),
+> re-applying a bound overlay at a new version REBINDS in place, ambiguous remove/reorder refuse,
+> pin-less `--clear-local` refuses before mutating, and apply warns on `authored_against` drift
+> (the v0.1.59 stamp's first consumer); `--locked` verifies `source.rev` (a rewritten rev under
+> the same version now fails); `registry sync` warns on a stale committed index.json; `pkg remove`
+> unlinks the instance's stale `var/rendered/` file.
 > **Promote update-flow SHIPPED** (v0.1.61): re-promotes carry the existing manifest forward
 > (provides/match/overrides_schema survive a bump; authored_against always re-stamped), the profile
 > name defaults from the row's provenance, bare promote infers `--kind profile` for hand-authored

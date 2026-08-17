@@ -143,6 +143,93 @@ def test_list_bindings():
         assert "acme_cam:" in out and "1. testns/cam-tune@1.0.0" in out
 
 
+# --- binding hygiene (v0.1.62) ------------------------------------------------------------------
+
+
+def _hand_row(root, name="handy", service="camish"):
+    (root / "config" / "sensors" / f"{name}.yaml").write_text(
+        "camera: {type: usb}\nusb: {width: 111}\n")
+    veh = root / "vehicle.yaml"
+    body = veh.read_text()
+    anchor = next(line for line in body.splitlines() if "name: acme_cam" in line)
+    indent = anchor[:len(anchor) - len(anchor.lstrip())]
+    veh.write_text(body.replace(anchor, anchor + "\n" + indent +
+                                f"- {{ name: {name}, service: {service}, "
+                                f"config: config/sensors/{name}.yaml, enabled: true, order: 30 }}"))
+
+
+def test_apply_rebinds_same_package_at_new_version():
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        root, reg = _world()
+        _install_acme(root)
+        _run("--root", str(root), "overlay", "apply", "acme_cam", "testns/cam-tune")
+        mpath = reg / "overlays" / "cam-tune" / "manifest.yaml"
+        m = yaml.safe_load(mpath.read_text())
+        m["version"] = "1.1.0"
+        mpath.write_text(yaml.safe_dump(m, sort_keys=False))
+        (reg / "overlays" / "cam-tune" / "config" / "delta.yaml").write_text(
+            "usb: {width: 1700, fps: 25}\n")
+        _run("registry", "index", str(reg))
+        rc, _, err = _run("--root", str(root), "overlay", "apply", "acme_cam", "testns/cam-tune")
+        assert rc == 0, err
+        assert "rebound" in err                       # two versions of one overlay never coexist
+        assert "overlays: [testns/cam-tune@1.1.0]" in (root / "vehicle.yaml").read_text()
+        assert not (root / "config" / ".overlays" / "testns--cam-tune--1.0.0.yaml").exists()
+        lock = load_lock(root)
+        assert "testns/cam-tune@1.0.0" not in lock["packages"]
+        assert _rendered(root)["usb"]["width"] == 1700
+
+
+def test_apply_pinless_records_no_anchor_and_lock_stays_green():
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        root, _ = _world()
+        _install_acme(root)
+        _hand_row(root)
+        rc, _, err = _run("--root", str(root), "overlay", "apply", "handy", "testns/cam-tune")
+        assert rc == 0, err
+        assert "handy" not in (load_lock(root).get("instances") or {})  # no synthesized anchor
+        assert _run("--root", str(root), "pkg", "lock")[0] == 0         # pkg lock stays green
+
+
+def test_clear_local_refuses_without_pin():
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        root, _ = _world()
+        _install_acme(root)
+        _hand_row(root)
+        veh_before = (root / "vehicle.yaml").read_text()
+        rc, _, err = _run("--root", str(root), "overlay", "apply", "handy", "testns/cam-tune",
+                          "--clear-local")
+        assert rc == 1 and "no pinned base" in err and "irreversible" in err
+        assert (root / "vehicle.yaml").read_text() == veh_before        # refused BEFORE mutating
+
+
+def test_apply_warns_on_authored_against_drift():
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        root, reg = _world()
+        _install_acme(root)                                             # pins testns/camish@1.2.0
+        mpath = reg / "overlays" / "cam-tune" / "manifest.yaml"
+        m = yaml.safe_load(mpath.read_text())
+        m["authored_against"] = {"service": "testns/camish@1.1.0"}      # older than the pin
+        mpath.write_text(yaml.safe_dump(m, sort_keys=False))
+        _run("registry", "index", str(reg))
+        rc, _, err = _run("--root", str(root), "overlay", "apply", "acme_cam", "testns/cam-tune")
+        assert rc == 0, err
+        assert "authored against testns/camish@1.1.0" in err and "re-verify" in err
+
+
+def test_remove_ambiguous_versions_errors():
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        root, _ = _world()
+        _install_acme(root)
+        _run("--root", str(root), "overlay", "apply", "acme_cam", "testns/cam-tune")
+        veh = root / "vehicle.yaml"                   # hand-edited row with two versions bound
+        veh.write_text(veh.read_text().replace(
+            "overlays: [testns/cam-tune@1.0.0]",
+            "overlays: [testns/cam-tune@1.0.0, testns/cam-tune@1.1.0]"))
+        rc, _, err = _run("--root", str(root), "overlay", "remove", "acme_cam", "cam-tune")
+        assert rc == 1 and "ambiguous" in err and "fully-qualified" in err
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

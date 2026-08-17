@@ -169,6 +169,19 @@ def test_sync_warns_on_namespace_mismatch_and_degrades_broken():
         assert rc == 1 and "DEGRADED" in err and "upgrade rig" in err
 
 
+def test_sync_warns_on_stale_index():
+    with _env(RIG_HOME=_home()):
+        _run("setup", "--no-default-registry")
+        reg = _seed_registry(ns="testns")
+        _run("registry", "add", "testns", "--path", str(reg))
+        rc, _, err = _run("registry", "sync")
+        assert rc == 0 and "STALE" not in err
+        mpath = reg / "profiles" / "siyi-zr30" / "manifest.yaml"    # a merge whose CI forgot the
+        mpath.write_text(mpath.read_text().replace("1.0.0", "1.0.1"))  # index regen
+        rc, _, err = _run("registry", "sync")
+        assert rc == 0 and "STALE" in err                           # split-world surfaced at sync
+
+
 def test_pkg_search_and_info_across_registries():
     with _env(RIG_HOME=_home()):
         _run("setup", "--no-default-registry")

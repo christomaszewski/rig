@@ -97,6 +97,18 @@ def test_package_form_guards_and_dependency_removal():
         assert rc == 1 and "hand-wired" in err
 
 
+def test_remove_unlinks_stale_render():
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        root, _ = _world()
+        rc, _, err = _run("--root", str(root), "pkg", "install", "sensor:acme")
+        assert rc == 0, err
+        rendered = root / "var" / "rendered" / "acme_cam.yaml"
+        rendered.parent.mkdir(parents=True, exist_ok=True)
+        rendered.write_text("name: acme_cam\n")                   # a past render
+        assert _run("--root", str(root), "pkg", "remove", "acme_cam")[0] == 0
+        assert not rendered.exists()                              # no stale file for a gone instance
+
+
 def test_removed_instance_is_readdable():
     with _env(RIG_HOME=tempfile.mkdtemp()):
         root, _ = _world()

@@ -93,6 +93,35 @@ def _targets_cover(pkg_manifest: dict, sensor: Sensor) -> bool:
     return False
 
 
+def _record_bindings(lock: dict, root: Path, instance: str, profile, overlays: list[str]) -> None:
+    """Refresh the instance anchor's ordered binding record — but NEVER synthesize an anchor for a
+    pin-less (hand-authored) instance: an empty base_sha256 would poison `pkg lock` forever.
+    Bindings themselves live in vehicle.yaml; the anchor is for pinned bases only."""
+    row = (lock.get("instances") or {}).get(instance) or {}
+    base = row.get("base_sha256")
+    if not base:
+        pin = root / "config" / ".pins" / f"{instance}.yaml"
+        base = sha256_file(pin) if pin.is_file() else None
+    if base:
+        record_instance(lock, instance, profile=profile, base_sha256=base, overlays=overlays)
+    else:
+        (lock.get("instances") or {}).pop(instance, None)
+
+
+def _warn_authored_against(lock: dict, pkg, service: str) -> None:
+    """The consumer half of the v0.1.59 staleness stamp: binding an overlay authored against a
+    DIFFERENT service version than this deployment pins deserves a heads-up at apply time."""
+    stamp = (pkg.manifest.get("authored_against") or {}).get("service")
+    if not stamp:
+        return
+    mine = next((r for r, info in (lock.get("packages") or {}).items()
+                 if (info or {}).get("kind") == "service"
+                 and r.rpartition("/")[-1].split("@")[0] == service), None)
+    if mine and "@" in str(stamp) and mine.split("@")[-1] != str(stamp).split("@")[-1]:
+        eprint(f"  WARNING: '{pkg.name}' was authored against {stamp} but this deployment pins "
+               f"{mine} — re-verify the delta's keys against the current config surface")
+
+
 def apply(root: Path, instance: str, ref: str, *, clear_local: bool = False) -> int:
     sensor = _find_instance(root, instance)
     entry, _, pkg = resolve_ref(ref)
@@ -105,6 +134,14 @@ def apply(root: Path, instance: str, ref: str, *, clear_local: bool = False) -> 
     if fq in sensor.overlays:
         raise RigError(f"overlay apply: '{fq}' is already bound to '{instance}' "
                        f"(rig overlay reorder changes precedence)")
+    if clear_local and not (root / "config" / ".pins" / f"{instance}.yaml").is_file():
+        raise RigError(f"overlay apply --clear-local: '{instance}' has no pinned base to reset the "
+                       f"working file to — dropping its overrides would be irreversible; apply "
+                       f"without --clear-local")
+    # Same package already bound at ANOTHER version ⇒ REBIND in place (same position — order is
+    # semantic). Two versions of one overlay merging in sequence is never what anyone means.
+    replaced = next((o for o in sensor.overlays
+                     if o != fq and o.split("@", 1)[0] == fq.split("@", 1)[0]), None)
     payload_rel = (pkg.manifest.get("config") or {}).get("payload")
     src = pkg.pkg_dir / str(payload_rel)
     if not src.is_file():
@@ -118,29 +155,34 @@ def apply(root: Path, instance: str, ref: str, *, clear_local: bool = False) -> 
                               "project": pkg.manifest.get("project")})
     record_registry(lock, entry.name, rtype=entry.type, location=entry.location,
                     commit=registry_commit(entry))
+    _warn_authored_against(lock, pkg, sensor.service)
 
     def mutate(row: dict) -> None:
-        row.setdefault("overlays", [])
-        row["overlays"] = list(row["overlays"]) + [fq]
+        bound = list(row.get("overlays") or [])
+        row["overlays"] = ([fq if o == replaced else o for o in bound] if replaced
+                           else bound + [fq])
         if clear_local:
             row.pop("overrides", None)
 
     edit_row(root, instance, mutate)
+    if replaced and not any(replaced in s.overlays for s in load_manifest(root).sensors):
+        overlay_payload_path(root, replaced).unlink(missing_ok=True)  # last binding moved on
+        (lock.get("packages") or {}).pop(replaced, None)
     if clear_local:
         pin = root / "config" / ".pins" / f"{instance}.yaml"
-        if pin.is_file():
-            Path(sensor.config).write_bytes(pin.read_bytes())
-            eprint(f"  {instance}: working config reset to the pristine base (pin); row overrides "
-                   f"dropped — the tuning now lives in '{fq}'")
-        else:
-            eprint(f"  {instance}: no pinned base — working file left as-is (only overrides dropped)")
+        Path(sensor.config).write_bytes(pin.read_bytes())
+        eprint(f"  {instance}: working config reset to the pristine base (pin); row overrides "
+               f"dropped — the tuning now lives in '{fq}'")
     sensor = _find_instance(root, instance)  # re-read: the row just changed
-    record_instance(lock, instance, profile=sensor.profile,
-                    base_sha256=((lock.get("instances") or {}).get(instance) or {}).get(
-                        "base_sha256", ""), overlays=list(sensor.overlays))
+    _record_bindings(lock, root, instance, sensor.profile, list(sensor.overlays))
     save_lock(root, lock)
-    eprint(f"rig overlay apply: '{fq}' bound to '{instance}' at position {len(sensor.overlays)} "
-           f"(last binding wins on conflicts; local still beats every overlay)")
+    if replaced:
+        eprint(f"rig overlay apply: rebound '{replaced}' -> '{fq}' on '{instance}' "
+               f"(same position; last binding wins, local still beats every overlay)")
+    else:
+        eprint(f"rig overlay apply: '{fq}' bound to '{instance}' at position "
+               f"{len(sensor.overlays)} (last binding wins on conflicts; local still beats "
+               f"every overlay)")
     return 0
 
 
@@ -156,6 +198,9 @@ def remove(root: Path, instance: str, ref: str) -> int:
     if not matches:
         raise RigError(f"overlay remove: '{ref}' is not bound to '{instance}' "
                        f"(bound: {', '.join(sensor.overlays) or 'none'})")
+    if len(matches) > 1:
+        raise RigError(f"overlay remove: '{ref}' is ambiguous on '{instance}' "
+                       f"({', '.join(matches)}) — use the fully-qualified ref")
     fq = matches[0]
 
     def mutate(row: dict) -> None:
@@ -166,9 +211,7 @@ def remove(root: Path, instance: str, ref: str) -> int:
     edit_row(root, instance, mutate)
     lock = load_lock(root)
     remaining = [o for o in sensor.overlays if o != fq]
-    row = (lock.get("instances") or {}).get(instance) or {}
-    record_instance(lock, instance, profile=sensor.profile,
-                    base_sha256=row.get("base_sha256", ""), overlays=remaining)
+    _record_bindings(lock, root, instance, sensor.profile, remaining)
     still_bound = any(fq in s.overlays for s in load_manifest(root).sensors)
     if not still_bound:
         overlay_payload_path(root, fq).unlink(missing_ok=True)  # last binding gone -> drop the copy
@@ -186,6 +229,9 @@ def reorder(root: Path, instance: str, refs: list[str]) -> int:
         hit = [o for o in current if _bound_match(o, ref)]
         if not hit:
             raise RigError(f"overlay reorder: '{ref}' is not bound to '{instance}'")
+        if len(hit) > 1:
+            raise RigError(f"overlay reorder: '{ref}' is ambiguous ({', '.join(hit)}) — "
+                           f"use the fully-qualified refs")
         full.append(hit[0])
     if sorted(full) != sorted(current):
         raise RigError(f"overlay reorder: give the COMPLETE new order — bound: "
@@ -193,9 +239,7 @@ def reorder(root: Path, instance: str, refs: list[str]) -> int:
 
     edit_row(root, instance, lambda row: row.__setitem__("overlays", full))
     lock = load_lock(root)
-    row = (lock.get("instances") or {}).get(instance) or {}
-    record_instance(lock, instance, profile=sensor.profile,
-                    base_sha256=row.get("base_sha256", ""), overlays=full)
+    _record_bindings(lock, root, instance, sensor.profile, full)
     save_lock(root, lock)
     eprint(f"rig overlay reorder: '{instance}' -> {', '.join(full)} (last wins)")
     return 0

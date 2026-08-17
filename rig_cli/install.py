@@ -141,9 +141,11 @@ def _fetch_source(name: str, source: dict) -> Path:
     return service_dir
 
 
-def _check_locked(lock: dict, ref: str, *, locked: bool, payload_sha: str | None = None) -> None:
+def _check_locked(lock: dict, ref: str, *, locked: bool, payload_sha: str | None = None,
+                  source: dict | None = None) -> None:
     """--locked: what we resolved must BE what the lock records (version via the ref key; content
-    via the payload hash — the hash is the guarantee, commits are provenance)."""
+    via the payload hash for profiles/overlays and source.repo/rev for services — a registry that
+    rewrote a rev under the same version must FAIL, not fetch different code)."""
     if not locked:
         return
     name = ref.split("@")[0]
@@ -152,11 +154,19 @@ def _check_locked(lock: dict, ref: str, *, locked: bool, payload_sha: str | None
         have = f" (lock has {', '.join(recorded)})" if recorded else ""
         raise RigError(f"install --locked: {ref} is not the locked pin{have} — sync the registry "
                        f"to the locked state or install without --locked to re-pin")
-    want = (lock["packages"][ref] or {}).get("payload_sha256")
+    entry = lock["packages"][ref] or {}
+    want = entry.get("payload_sha256")
     if want and payload_sha and want != payload_sha:
         raise RigError(f"install --locked: {ref} payload hash differs from the lock "
                        f"({payload_sha[:12]}… vs {want[:12]}…) — registry content changed under "
                        f"the pin")
+    locked_src = entry.get("source") or {}
+    if source and locked_src:
+        for field in ("repo", "rev"):
+            if locked_src.get(field) and str(source.get(field)) != str(locked_src[field]):
+                raise RigError(f"install --locked: {ref} source.{field} differs from the lock "
+                               f"({source.get(field)} vs {locked_src[field]}) — the registry "
+                               f"rewrote the pin's provenance; refusing to fetch different code")
 
 
 def _next_order(root: Path, tier: str) -> int:
@@ -172,7 +182,9 @@ def _wire_row(root: Path, *, row: str, section: str) -> None:
     new = _append_tier_row(veh.read_text(), section, row)
     if new is None:
         eprint(f"install: vehicle.yaml isn't in the generated block form — paste under `{section}:`:"
-               f"\n  {row}")
+               f"\n  {row}\n"
+               f"  (the install is INCOMPLETE until pasted: config + pin + lock anchor are staged, "
+               f"and `rig pkg lock` before pasting would drop the anchor)")
         return
     veh.write_text(new)
 
@@ -192,15 +204,29 @@ def _route_service(root: Path, svc: str) -> None:
     svc_path.write_text(new)
 
 
-def _install_service(root: Path, entry: Entry, pkg: Package, lock: dict, *, locked: bool):
+def _install_service(root: Path, entry: Entry, pkg: Package, lock: dict, *, locked: bool,
+                     allow_repin: bool = False):
     """Fetch + vendor + route one service package; returns its Descriptor (from the vendored copy).
-    Idempotent: an already-vendored service is refreshed only when the pin changed."""
+    Idempotent: an already-vendored service is refreshed only when the pin changed. A DIFFERENT
+    pin for an already-locked service is an ERROR unless allow_repin (pkg upgrade's deliberate
+    path) — services are SHARED: silently re-vendoring moves the code under every instance that
+    uses it, and the stale ref would linger as a duplicate lock row."""
     ref = qualified(entry, pkg)
     source = pkg.manifest.get("source")
     if not isinstance(source, dict) or not source.get("repo"):
         raise RigError(f"install: {ref} has no source (image-only services carry no launcher — "
                        f"not installable as a stack)")
-    _check_locked(lock, ref, locked=locked)
+    _check_locked(lock, ref, locked=locked, source=source)
+    other = [r for r, info in (lock.get("packages") or {}).items()
+             if (info or {}).get("kind") == "service" and r != ref
+             and r.rpartition("/")[-1].split("@")[0] == pkg.name]
+    if other and not allow_repin:
+        raise RigError(f"install: service '{pkg.name}' is locked at {other[0]} but this install "
+                       f"needs {ref} — a service is SHARED by every instance using it; move the "
+                       f"pin deliberately with `rig pkg upgrade` first")
+    if other and allow_repin:
+        for stale in other:  # upgrading: the old pin's lock row must not linger as a duplicate
+            (lock.get("packages") or {}).pop(stale, None)
     already = (lock.get("packages") or {}).get(ref)
     vendored = root / "services" / pkg.name
     if not (already and (vendored / ".vendored.yaml").exists()):
@@ -280,9 +306,12 @@ def _materialize_instance(root: Path, *, svc: str, desc, instance: str | None, b
 
 
 def _snapshot(root: Path) -> dict:
-    """Everything a rollback needs: the three mutable texts + the set of files under the dirs
-    install creates into (services/, config/) — created files are exactly the after-minus-before."""
-    files = {p for d in ("services", "config") for p in (root / d).rglob("*") if p.is_file()}
+    """Everything a rollback needs: the three mutable texts + the CONTENTS of every file under the
+    dirs pkg verbs mutate (services/, config/) — contents, not just the file set, because upgrade
+    REWRITES working configs and pins in place (a set-only snapshot can undo creations but not
+    modifications). These are small text surfaces; holding them in memory is cheap."""
+    files = {p: p.read_bytes()
+             for d in ("services", "config") for p in (root / d).rglob("*") if p.is_file()}
     return {"texts": {n: (root / n).read_text() if (root / n).exists() else None
                       for n in ("vehicle.yaml", "services.yaml", "rig.lock")},
             "files": files}
@@ -297,8 +326,12 @@ def _rollback(root: Path, snap: dict) -> None:
         else:
             path.write_text(text)
     now = {p for d in ("services", "config") for p in (root / d).rglob("*") if p.is_file()}
-    for created in now - snap["files"]:
+    for created in now - set(snap["files"]):
         created.unlink(missing_ok=True)
+    for path, blob in snap["files"].items():  # restore modified + deleted originals
+        if not path.exists() or path.read_bytes() != blob:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(blob)
     for d in ("services", "config"):  # prune dirs the deletions emptied
         for sub in sorted((root / d).rglob("*"), reverse=True):
             if sub.is_dir() and not any(sub.iterdir()):
@@ -489,9 +522,13 @@ def remove(root: Path, specs: list[str], *, purge_config: bool = False) -> int:
             if clean or purge_config:
                 working.unlink()
             else:
-                eprint(f"  kept {working.relative_to(root)} — it has local edits "
-                       f"(--purge-config deletes it anyway)")
+                try:
+                    shown = working.relative_to(root)
+                except ValueError:  # a row may point outside the deployment — still a fine path
+                    shown = working
+                eprint(f"  kept {shown} — it has local edits (--purge-config deletes it anyway)")
         pin.unlink(missing_ok=True)
+        (root / "var" / "rendered" / f"{sensor.name}.yaml").unlink(missing_ok=True)  # no stale render
         anchors.pop(sensor.name, None)
         if sensor.profile:
             others = [s for s in remaining if s.profile == sensor.profile]
@@ -532,37 +569,44 @@ def install(root: Path, spec: str, *, as_name: str | None = None, locked: bool =
                            f"{'s' if len(held) > 1 else ''} {', '.join(held)}) — update with "
                            f"`rig pkg upgrade {held[0]}`, or pass --as <name> for a SECOND instance")
 
-    if pkg.kind == "profile":
-        ref = qualified(entry, pkg)
-        payload_rel = (pkg.manifest.get("config") or {}).get("payload")
-        payload_path = pkg.pkg_dir / str(payload_rel)
-        if not payload_path.is_file():
-            raise RigError(f"install: {ref} payload missing in the synced registry: {payload_rel}")
-        _check_locked(lock, ref, locked=locked, payload_sha=sha256_file(payload_path))
-        svc_entry, service = _resolve_required_service(entry, reg, pkg)
-        desc = _install_service(root, svc_entry, service, lock, locked=locked)
-        eprint(f"rig install: {ref} (requires {qualified(svc_entry, service)})")
-        record_package(lock, ref, {"kind": "profile", "payload_sha256": sha256_file(payload_path),
-                                   "requires": qualified(svc_entry, service)})
-        record_registry(lock, entry.name, rtype=entry.type, location=entry.location,
-                        commit=registry_commit(entry))
-        _materialize_instance(root, svc=service.name, desc=desc, instance=as_name,
-                              base_src=payload_path, profile_ref=ref, lock=lock, enabled=True)
-    else:  # bare service: base config = its declared example at the pinned rev
-        ref = qualified(entry, pkg)
-        eprint(f"rig install: {ref}")
-        desc = _install_service(root, entry, pkg, lock, locked=locked)
-        examples = [root / "services" / pkg.name / e for e in desc.examples]
-        examples = [e for e in examples if e.is_file()]
-        if examples:
-            _materialize_instance(root, svc=pkg.name, desc=desc, instance=as_name,
-                                  base_src=examples[0], profile_ref=None, lock=lock, enabled=True)
-        else:
-            eprint(f"  no example config DECLARED at this pin — route + vendor done; author "
-                   f"config/<tier>/<name>.yaml and its vehicle.yaml row yourself. (To automate "
-                   f"this: declare `examples:` in the repo's rigging.yaml and cut a release)")
-    save_lock(root, lock)
-    # The real gate: the deployment must still LOAD (name uniqueness, cross-checks) — surface now.
-    load_manifest(root)
+    snap = _snapshot(root)  # any failure past here rolls the tree back — no leaked vendor/route
+    try:
+        if pkg.kind == "profile":
+            ref = qualified(entry, pkg)
+            payload_rel = (pkg.manifest.get("config") or {}).get("payload")
+            payload_path = pkg.pkg_dir / str(payload_rel)
+            if not payload_path.is_file():
+                raise RigError(f"install: {ref} payload missing in the synced registry: {payload_rel}")
+            _check_locked(lock, ref, locked=locked, payload_sha=sha256_file(payload_path))
+            svc_entry, service = _resolve_required_service(entry, reg, pkg)
+            desc = _install_service(root, svc_entry, service, lock, locked=locked)
+            eprint(f"rig install: {ref} (requires {qualified(svc_entry, service)})")
+            record_package(lock, ref, {"kind": "profile", "payload_sha256": sha256_file(payload_path),
+                                       "requires": qualified(svc_entry, service)})
+            record_registry(lock, entry.name, rtype=entry.type, location=entry.location,
+                            commit=registry_commit(entry))
+            _materialize_instance(root, svc=service.name, desc=desc, instance=as_name,
+                                  base_src=payload_path, profile_ref=ref, lock=lock, enabled=True)
+        else:  # bare service: base config = its declared example at the pinned rev
+            ref = qualified(entry, pkg)
+            eprint(f"rig install: {ref}")
+            desc = _install_service(root, entry, pkg, lock, locked=locked)
+            examples = [root / "services" / pkg.name / e for e in desc.examples]
+            examples = [e for e in examples if e.is_file()]
+            if examples:
+                _materialize_instance(root, svc=pkg.name, desc=desc, instance=as_name,
+                                      base_src=examples[0], profile_ref=None, lock=lock, enabled=True)
+            else:
+                eprint(f"  no example config DECLARED at this pin — route + vendor done; author "
+                       f"config/<tier>/<name>.yaml and its vehicle.yaml row yourself. (To automate "
+                       f"this: declare `examples:` in the repo's rigging.yaml and cut a release)")
+        save_lock(root, lock)
+        # The real gate: the deployment must still LOAD (name uniqueness, cross-checks) — surface now.
+        load_manifest(root)
+    except BaseException:
+        _rollback(root, snap)
+        eprint("rig install: failed — rolled back (vehicle.yaml/services.yaml/rig.lock/configs "
+               "restored)")
+        raise
     eprint(f"  locked: rig.lock updated — commit it")
     return 0

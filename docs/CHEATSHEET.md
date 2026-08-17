@@ -98,7 +98,9 @@ rig pkg promote siyi_zr30 --kind profile --to internal
                                    # UPDATE the profile the instance is pinned to: name defaults from
                                    #   provenance, --bump implied, provides/match CARRIED FORWARD.
                                    #   Hand-authored instance (no pin)? bare promote infers profile.
-rig pkg upgrade                    # registry moved? three-way merge: new base ⊕ your edits, conflicts loud
+rig pkg upgrade                    # registry moved? three-way merge: new base ⊕ your edits, conflicts
+                                   #   loud; bound overlays rebind IN PLACE (order kept). All-or-nothing:
+                                   #   a mid-sweep failure rolls the whole tree + lock back
 ```
 
 Registries: `rig registry init <dir>` scaffolds a new one (usable immediately via

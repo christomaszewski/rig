@@ -9,7 +9,7 @@ The dependency is strictly one-way: rig depends on the service repos; a service 
 rig learns each service only through its ``rigging.yaml`` descriptor + the launcher CLI.
 """
 
-__version__ = "0.1.61"
+__version__ = "0.1.62"
 
 
 class RigError(Exception):
