@@ -1,8 +1,18 @@
 # rig — project state & handoff (resume here)
 
 > Snapshot for picking the project up cold in a new session. Read this first, then `CHEATSHEET.md` /
-> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.1.68**,
-> branch **`main`**, 290 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.1.69**,
+> branch **`main`**, 297 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> **`<service>:<profile>` porcelain SHIPPED** (v0.1.69, CHEATSHEET §1.5): profiles addressable by
+> the service they drive — `rig add ouster:generic` installs the profile NAMED generic whose
+> `requires.service` is ouster (unqualified match; exact name ⇒ at most one hit per registry,
+> priority order decides across them), `rig pkg search ouster:` lists every profile for a service
+> (`ouster:gen*` globs), and free-text search gained the symmetric requires axis (profiles used to
+> be invisible to `pkg search ouster` unless the name or a match id contained it — overlays already
+> had their by-target axis). Derived entirely from `requires.service`, so nothing new is authored
+> and pre-existing profiles are discoverable retroactively; versions/qualifiers are refused with a
+> pointer at the explicit ref form. `sensor:` stays the hardware-id porcelain; service names
+> `sensor`/`project` are now validation-reserved (they are porcelain prefixes).
 > **fleet.yaml = the fleet-vars tier SHIPPED** (v0.1.68, CHEATSHEET §1.6): the deployment-root
 > fleet.yaml (pushed by `fleet up`) is now a vars SOURCE — precedence shell > vehicle.local >
 > /etc/rig > **fleet.yaml** > vehicle.yaml. `{{fleet_ids}}` is DERIVED from the roster (no more

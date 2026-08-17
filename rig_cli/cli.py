@@ -274,11 +274,13 @@ def cmd_init(args) -> int:
 
 def cmd_add(args, root: Path) -> int:
     """`rig add` — the single porcelain for "put this in my deployment": local path | bare workspace
-    name (the original forms) | registry ref (`public/zenoh-router`) | `sensor:<id>`. Local always
-    wins for bare names; the registry is the fallback."""
+    name (the original forms) | registry ref (`public/zenoh-router`) | `sensor:<id>` |
+    `<service>:<profile>`. Local always wins for bare names; the registry is the fallback."""
     token = args.service
     if token.startswith("sensor:"):
         return install_mod.install(root, token, as_name=args.as_name)
+    if ":" in token and "/" not in token and not Path(token).expanduser().exists():
+        return install_mod.install(root, token, as_name=args.as_name)  # <service>:<profile>
     if "/" in token and not Path(token).expanduser().exists():
         ns = token.split("/", 1)[0]
         if any(e.name == ns for e in registries_mod.load_entries()):
@@ -581,8 +583,8 @@ def build_parser() -> argparse.ArgumentParser:
                                        "(`pull` fetches images; `fetch` fetches configs)")
 
     ad = sub.add_parser("add", help="add a service to THIS deployment — local path, workspace name, "
-                                    "registry ref, or sensor:<id>")
-    ad.add_argument("service", metavar="NAME|PATH|REF|sensor:ID",
+                                    "registry ref, sensor:<id>, or <service>:<profile>")
+    ad.add_argument("service", metavar="NAME|PATH|REF|sensor:ID|SERVICE:PROFILE",
                     help="service dir path or bare workspace name (like init --infra; infra wired "
                          "ENABLED, sensor/autonomy a commented menu row) — or a registry ref "
                          "(public/zenoh-router) / sensor:<id>, which install from the registries")
@@ -648,8 +650,9 @@ def build_parser() -> argparse.ArgumentParser:
     pkgp = sub.add_parser("pkg", help="package operations across registries (search/info; "
                                       "install/upgrade/lock/promote land with the lockfile)")
     pkgsub = pkgp.add_subparsers(dest="pkg_cmd", required=True)
-    ps = pkgsub.add_parser("search", help="search names, sensor:<id>, or project:<tag> — results are "
-                                          "fully qualified, priority order")
+    ps = pkgsub.add_parser("search", help="search names, sensor:<id>, project:<tag>, or "
+                                          "<service>:[glob] (profiles by required service) — "
+                                          "results are fully qualified, priority order")
     ps.add_argument("query")
     pi = pkgsub.add_parser("info", help="one package's manifest highlights + provenance")
     pi.add_argument("ref", help="[registry/]name")

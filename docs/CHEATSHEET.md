@@ -78,6 +78,11 @@ rig add public/zenoh-router        # infra from the registry: repo cloned AT THE
                                    #   VENDORED into services/, config from its example, rig.lock written
 rig add sensor:zr30                # match a profile (exact → glob → fallback), install its service
                                    #   transitively, materialize the payload as the EDITABLE config
+rig pkg search ouster:             # profiles by REQUIRED SERVICE, across registries ("what drives
+                                   #   ouster?" — derived from requires.service; `ouster:gen*` globs)
+rig add ouster:generic             # install the profile NAMED generic that drives ouster — exact
+                                   #   name, so priority order alone decides across registries
+
 ```
 
 The working config (`config/sensors/<name>.yaml`) is yours to edit — the pristine base is pinned at

@@ -357,6 +357,11 @@ def load_registry(root: Path, issues: list[Issue]) -> Registry:
             if not isinstance(name, str) or not _NAME.match(name or ""):
                 issues.append(Issue(where, f"`name` must match [a-z][a-z0-9-]*, got {name!r}"))
                 continue
+            if kind == "service" and name in ("sensor", "project"):
+                issues.append(Issue(where, f"service name '{name}' is reserved — `{name}:` is a "
+                                           f"CLI porcelain prefix, so `{name}:<profile>` could "
+                                           f"never reach this service's profiles"))
+                continue
             if not _VERSION.match(version):
                 issues.append(Issue(where, f"`version` must be exact X.Y.Z, got {version!r}"))
                 continue

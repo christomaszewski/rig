@@ -64,6 +64,18 @@ def search(query: str) -> int:
                 meta = packages.get(name) or {}
                 rows.append((f"{entry.name}/{name}", meta.get("kind", "?"),
                              meta.get("version", "?"), f"project: {tag}"))
+    elif ":" in query:  # <service>:[glob] — profiles by required service: "what drives ouster?"
+        from .install import profile_serves
+        svc, _, want = query.partition(":")
+        for entry, reg, _ in _each_index(entries):
+            for pname in sorted(reg.packages):
+                p = reg.packages[pname]
+                if p.kind != "profile" or not profile_serves(p, svc):
+                    continue
+                if want and not fnmatch.fnmatch(pname, want):
+                    continue
+                req = (p.manifest.get("requires") or {}).get("service")
+                rows.append((f"{entry.name}/{pname}", "profile", p.version, f"requires: {req}"))
     else:
         needle = query.lower()
         for entry, reg, index in _each_index(entries):
@@ -80,6 +92,11 @@ def search(query: str) -> int:
                         needle in str(v).lower() for t in (pkg.manifest.get("targets") or [])
                         if isinstance(t, dict) for v in t.values()):
                     matched.setdefault(pname, f"targets: {needle}")
+                elif pkg.kind == "profile":  # profiles by SERVICE: "what drives ouster?"
+                    req = (pkg.manifest.get("requires") or {}).get("service") \
+                        if isinstance(pkg.manifest.get("requires"), dict) else None
+                    if isinstance(req, str) and needle in req.lower():
+                        matched.setdefault(pname, f"requires: {req}")
             for name in sorted(matched):
                 meta = packages.get(name) or {}
                 rows.append((f"{entry.name}/{name}", meta.get("kind", "?"),

@@ -112,6 +112,36 @@ def resolve_sensor(ident: str) -> tuple[Entry, Registry, Package]:
     raise RigError(f"install: no profile matches sensor:{ident} in any configured registry")
 
 
+def profile_serves(pkg: Package, svc: str) -> bool:
+    """Does this profile's `requires.service` name <svc>? Unqualified on purpose — `public/ouster`
+    and `internal/ouster` both answer to `ouster`, mirroring unqualified package resolution."""
+    req = (pkg.manifest.get("requires") or {}).get("service") \
+        if isinstance(pkg.manifest.get("requires"), dict) else None
+    return isinstance(req, str) and unqualified(req) == svc
+
+
+def resolve_service_profile(svc: str, pname: str) -> tuple[Entry, Registry, Package]:
+    """`<service>:<profile>` -> the profile NAMED <pname> that serves <svc>. Names are unique per
+    registry, so one registry holds at most one hit; across registries priority order decides —
+    the first registry carrying the named profile answers (same rule as unqualified refs)."""
+    for_service: list[str] = []  # every profile that DOES serve <svc> — the miss message
+    for entry, reg, _ in _each_index(_entries_or_hint()):
+        hit = None
+        for p in reg.packages.values():
+            if p.kind != "profile" or not profile_serves(p, svc):
+                continue
+            for_service.append(f"{entry.name}/{p.name}")
+            if p.name == pname:
+                hit = p
+        if hit is not None:
+            return entry, reg, hit
+    if for_service:
+        raise RigError(f"install: no profile named '{pname}' for service '{svc}' — available: "
+                       f"{', '.join(sorted(set(for_service)))} (rig pkg search {svc}:)")
+    raise RigError(f"install: no configured registry carries a profile for service '{svc}' "
+                   f"(`rig pkg search {svc}:` lists by service; `sensor:<id>` matches hardware ids)")
+
+
 def _resolve_required_service(entry: Entry, reg: Registry, profile: Package) -> tuple[Entry, Package]:
     req = (profile.manifest.get("requires") or {}).get("service") or ""
     match = _CONSTRAINT.match(str(req))
@@ -582,10 +612,23 @@ def _at_locked_commit(entry: Entry, pkg: Package, lock: dict, locked: bool) -> P
 
 
 def install(root: Path, spec: str, *, as_name: str | None = None, locked: bool = False) -> int:
-    """One spec: `sensor:<id>` | `[registry/]profile` | `[registry/]service` | `[registry/]suite`."""
+    """One spec: `sensor:<id>` | `<service>:<profile>` | `[registry/]name[@ver]` (profile, service,
+    or suite)."""
     lock = load_lock(root)
     if spec.startswith("sensor:"):
         entry, reg, pkg = resolve_sensor(spec[len("sensor:"):])
+    elif ":" in spec:
+        svc, _, pname = spec.partition(":")
+        if "/" in spec:
+            raise RigError(f"install: '{spec}' — the service:profile form is unqualified; to "
+                           f"target one registry use the plain ref <registry>/<profile>")
+        if "@" in pname:
+            raise RigError(f"install: '{spec}' — the service:profile form has no versions; pin "
+                           f"one with the explicit ref <registry>/{pname.partition('@')[0]}@X.Y.Z")
+        if not svc or not pname:
+            raise RigError(f"install: '{spec}' — the form is <service>:<profile> "
+                           f"(`rig pkg search {svc or '<service>'}:` lists profiles by service)")
+        entry, reg, pkg = resolve_service_profile(svc, pname)
     else:
         entry, reg, pkg = resolve_ref(spec, history=True)
     pkg = _at_locked_commit(entry, pkg, lock, locked)
