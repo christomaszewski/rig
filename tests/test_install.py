@@ -84,7 +84,7 @@ def _registry_with(repo: pathlib.Path, rev: str) -> pathlib.Path:
         (d / "manifest.yaml").write_text(yaml.safe_dump({
             "kind": "service", "name": svc, "version": "1.2.0",
             "source": {"repo": str(repo), "rev": rev, "path": svc}}))
-    p = reg / "profiles" / "acme-cam"
+    p = reg / "profiles" / "camish" / "acme-cam"
     (p / "config").mkdir(parents=True)
     (p / "manifest.yaml").write_text(yaml.safe_dump({
         "kind": "profile", "name": "acme-cam", "version": "2.0.0",
@@ -176,13 +176,13 @@ def test_profile_install_transitive_and_working_copy():
         assert rc == 0, err
         manifest = load_manifest(root)
         row = next(s for s in manifest.sensors if s.service == "camish")
-        assert row.name == "acme_cam" and row.profile == "testns/acme-cam@2.0.0"
+        assert row.name == "acme_cam" and row.profile == "testns/camish:acme-cam@2.0.0"
         working = root / "config" / "sensors" / "acme_cam.yaml"
         assert "# tuned default" in working.read_text()          # VERBATIM copy — comments survive
         lock = load_lock(root)
-        assert lock["packages"]["testns/acme-cam@2.0.0"]["requires"] == "testns/camish@1.2.0"
+        assert lock["packages"]["testns/camish:acme-cam@2.0.0"]["requires"] == "testns/camish@1.2.0"
         inst = lock["instances"]["acme_cam"]
-        assert inst["profile"] == "testns/acme-cam@2.0.0" and inst["base_sha256"]
+        assert inst["profile"] == "testns/camish:acme-cam@2.0.0" and inst["base_sha256"]
         assert (root / "services" / "camish" / "rigging.yaml").is_file()  # transitive service install
 
 
@@ -259,7 +259,7 @@ def test_pkg_list_shows_installed_users_and_upgrades():
         rc, out, _ = _run("--root", str(root), "pkg", "list")
         assert rc == 0, out
         lines = {l.split()[0]: l for l in out.splitlines() if "/" in l}
-        assert "acme_cam" in lines["testns/acme-cam@2.0.0"]           # profile -> its instance
+        assert "acme_cam" in lines["testns/camish:acme-cam@2.0.0"]           # profile -> its instance
         assert "acme_cam" in lines["testns/camish@1.2.0"]             # service -> instances using it
         assert "routerish" in lines["testns/routerish@1.2.0"]
         assert "acme_cam" in lines["testns/cam-tune@1.0.0"]           # overlay -> bound instance
@@ -283,19 +283,19 @@ def test_locked_reproduces_and_detects_drift():
         with contextlib.redirect_stderr(io.StringIO()):
             init(root2, no_git=True)
         (root2 / "rig.lock").write_text((root / "rig.lock").read_text())
-        rc, _, err = _run("--root", str(root2), "pkg", "install", "testns/acme-cam", "--locked")
+        rc, _, err = _run("--root", str(root2), "pkg", "install", "testns/camish:acme-cam", "--locked")
         assert rc == 0, err
         assert (root / "config" / "sensors" / "acme_cam.yaml").read_text() == \
                (root2 / "config" / "sensors" / "acme_cam.yaml").read_text()  # byte-identical base
         # registry payload drifts under the pin -> --locked refuses
-        payload = reg / "profiles" / "acme-cam" / "config" / "payload.yaml"
+        payload = reg / "profiles" / "camish" / "acme-cam" / "config" / "payload.yaml"
         payload.write_text(payload.read_text() + "usb2: {}\n")
         _run("registry", "index", str(reg))
         root3 = pathlib.Path(tempfile.mkdtemp()) / "veh3"
         with contextlib.redirect_stderr(io.StringIO()):
             init(root3, no_git=True)
         (root3 / "rig.lock").write_text((root / "rig.lock").read_text())
-        rc, _, err = _run("--root", str(root3), "pkg", "install", "testns/acme-cam", "--locked")
+        rc, _, err = _run("--root", str(root3), "pkg", "install", "testns/camish:acme-cam", "--locked")
         assert rc == 1 and "hash" in err
 
 

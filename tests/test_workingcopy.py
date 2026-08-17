@@ -40,13 +40,13 @@ def test_diff_clean_then_local_edit_then_override():
         working.write_text(working.read_text().replace("width: 1280", "width: 640")
                            + "extra: {knob: 7}\n")
         rc, out, _ = _run("--root", str(root), "config", "diff")
-        assert "acme_cam: dirty" in out and "(base: testns/acme-cam@2.0.0)" in out
+        assert "acme_cam: dirty" in out and "(base: testns/camish:acme-cam@2.0.0)" in out
         assert "~ usb.width: 1280 -> 640  [local edit]" in out
         assert "+ extra.knob: 7  [local edit]" in out
         veh = root / "vehicle.yaml"
         veh.write_text(veh.read_text().replace(
-            "profile: testns/acme-cam@2.0.0, enabled",
-            "profile: testns/acme-cam@2.0.0, overrides: {camera: {frame_rate: 15}}, enabled"))
+            "profile: testns/camish:acme-cam@2.0.0, enabled",
+            "profile: testns/camish:acme-cam@2.0.0, overrides: {camera: {frame_rate: 15}}, enabled"))
         rc, out, _ = _run("--root", str(root), "config", "diff", "acme_cam")
         assert "~ camera.frame_rate: -> 15  [override]" in out
 
@@ -69,20 +69,20 @@ def test_upgrade_clean_takes_new_payload_verbatim():
         rc, _, err = _run("--root", str(root), "pkg", "upgrade")
         assert rc == 0 and "up to date" in err
         # registry moves: new version, new payload with a NEW comment
-        mpath = reg / "profiles" / "acme-cam" / "manifest.yaml"
+        mpath = reg / "profiles" / "camish" / "acme-cam" / "manifest.yaml"
         m = yaml.safe_load(mpath.read_text())
         m["version"] = "2.1.0"
         mpath.write_text(yaml.safe_dump(m, sort_keys=False))
-        (reg / "profiles" / "acme-cam" / "config" / "payload.yaml").write_text(
+        (reg / "profiles" / "camish" / "acme-cam" / "config" / "payload.yaml").write_text(
             "# v2.1 default\nservice: camish\ncamera: {type: usb}\nusb: {width: 1920}\n")
         _run("registry", "index", str(reg))
         rc, _, err = _run("--root", str(root), "pkg", "upgrade")
-        assert rc == 0 and "-> testns/acme-cam@2.1.0" in err
+        assert rc == 0 and "-> testns/camish:acme-cam@2.1.0" in err
         assert "# v2.1 default" in working.read_text()            # clean upgrade: comments survive
-        assert "profile: testns/acme-cam@2.1.0" in (root / "vehicle.yaml").read_text()
+        assert "profile: testns/camish:acme-cam@2.1.0" in (root / "vehicle.yaml").read_text()
         lock = load_lock(root)
-        assert "testns/acme-cam@2.1.0" in lock["packages"]
-        assert "testns/acme-cam@2.0.0" not in lock["packages"]
+        assert "testns/camish:acme-cam@2.1.0" in lock["packages"]
+        assert "testns/camish:acme-cam@2.0.0" not in lock["packages"]
 
 
 def test_upgrade_dirty_keeps_local_and_surfaces_conflicts():
@@ -90,11 +90,11 @@ def test_upgrade_dirty_keeps_local_and_surfaces_conflicts():
         root, reg = _world()
         working = _install_acme(root)
         working.write_text(working.read_text().replace("width: 1280", "width: 640"))  # local edit
-        mpath = reg / "profiles" / "acme-cam" / "manifest.yaml"
+        mpath = reg / "profiles" / "camish" / "acme-cam" / "manifest.yaml"
         m = yaml.safe_load(mpath.read_text())
         m["version"] = "3.0.0"
         mpath.write_text(yaml.safe_dump(m, sort_keys=False))
-        (reg / "profiles" / "acme-cam" / "config" / "payload.yaml").write_text(
+        (reg / "profiles" / "camish" / "acme-cam" / "config" / "payload.yaml").write_text(
             "service: camish\ncamera: {type: usb}\nusb: {width: 3840, fps: 30}\n")  # base ALSO moves width
         _run("registry", "index", str(reg))
         rc, _, err = _run("--root", str(root), "pkg", "upgrade", "acme_cam")
@@ -163,7 +163,7 @@ def test_upgrade_repins_profile_required_service():
         assert rc == 0, err
         assert "testns/camish@1.2.0 -> testns/camish@1.3.0" in err
         lock = load_lock(root)
-        assert lock["packages"]["testns/acme-cam@2.0.0"]["requires"] == "testns/camish@1.3.0"
+        assert lock["packages"]["testns/camish:acme-cam@2.0.0"]["requires"] == "testns/camish@1.3.0"
         assert "testns/camish@1.3.0" in lock["packages"]
         vend = yaml.safe_load((root / "services" / "camish" / ".vendored.yaml").read_text())
         assert vend["ref"] == rev
@@ -182,7 +182,7 @@ def test_readd_of_installed_package_errors_early_without_mutation():
         assert now == old_ref                                           # nothing mutated
         rc, _, err = _run("--root", str(root), "pkg", "install", "sensor:acme")
         assert rc == 0, err
-        rc, _, err = _run("--root", str(root), "pkg", "install", "testns/acme-cam")
+        rc, _, err = _run("--root", str(root), "pkg", "install", "testns/camish:acme-cam")
         assert rc == 1 and "pkg upgrade acme_cam" in err                # profile re-add too
 
 
@@ -249,17 +249,17 @@ def test_upgrade_profile_keeps_lock_binding_record():
         root, reg = _world()
         _install_acme(root)
         _run("--root", str(root), "overlay", "apply", "acme_cam", "testns/cam-tune")
-        mpath = reg / "profiles" / "acme-cam" / "manifest.yaml"
+        mpath = reg / "profiles" / "camish" / "acme-cam" / "manifest.yaml"
         m = yaml.safe_load(mpath.read_text())
         m["version"] = "2.1.0"
         mpath.write_text(yaml.safe_dump(m, sort_keys=False))
-        (reg / "profiles" / "acme-cam" / "config" / "payload.yaml").write_text(
+        (reg / "profiles" / "camish" / "acme-cam" / "config" / "payload.yaml").write_text(
             "service: camish\ncamera: {type: usb}\nusb: {width: 1920}\n")
         _run("registry", "index", str(reg))
         rc, _, err = _run("--root", str(root), "pkg", "upgrade")
         assert rc == 0, err
         lock = load_lock(root)
-        assert lock["instances"]["acme_cam"]["profile"] == "testns/acme-cam@2.1.0"
+        assert lock["instances"]["acme_cam"]["profile"] == "testns/camish:acme-cam@2.1.0"
         assert lock["instances"]["acme_cam"]["overlays"] == ["testns/cam-tune@1.0.0"]  # SURVIVES
 
 
@@ -269,7 +269,7 @@ def test_upgrade_failure_rolls_back_everything():
         assert _run("--root", str(root), "add", "testns/routerish")[0] == 0
         _install_acme(root)
         _bump_service(reg, "routerish", "1.3.0", "service: routerish\nname: routerish\nrate: 9\n")
-        mpath = reg / "profiles" / "acme-cam" / "manifest.yaml"   # sabotage AFTER routerish mutates:
+        mpath = reg / "profiles" / "camish" / "acme-cam" / "manifest.yaml"   # sabotage AFTER routerish mutates:
         m = yaml.safe_load(mpath.read_text())                     # profile bumps but payload vanishes
         m["version"] = "3.0.0"
         m["config"]["payload"] = "config/nope.yaml"
@@ -381,7 +381,7 @@ def test_pkg_list_marks_dirty_and_diff_hints_upgrade():
         root, reg = _world()
         working = _install_acme(root)
         working.write_text(working.read_text().replace("width: 1280", "width: 640"))  # dirty
-        mpath = reg / "profiles" / "acme-cam" / "manifest.yaml"    # registry moves, NO upgrade run
+        mpath = reg / "profiles" / "camish" / "acme-cam" / "manifest.yaml"    # registry moves, NO upgrade run
         m = yaml.safe_load(mpath.read_text())
         m["version"] = "2.1.0"
         mpath.write_text(yaml.safe_dump(m, sort_keys=False))
@@ -391,11 +391,11 @@ def test_pkg_list_marks_dirty_and_diff_hints_upgrade():
         assert "acme_cam*" in out                                  # * = local edits
         assert "2.1.0 available" in out and "local edits" in out   # legend included
         rc, out, _ = _run("--root", str(root), "config", "diff", "acme_cam")
-        assert "(base: testns/acme-cam@2.0.0 — 2.1.0 available)" in out
+        assert "(base: testns/camish:acme-cam@2.0.0 — 2.1.0 available)" in out
         pin = root / "config" / ".pins" / "acme_cam.yaml"          # back to clean: pin shown too
         working.write_bytes(pin.read_bytes())
         rc, out, _ = _run("--root", str(root), "config", "diff", "acme_cam")
-        assert "clean (base: testns/acme-cam@2.0.0 — 2.1.0 available)" in out
+        assert "clean (base: testns/camish:acme-cam@2.0.0 — 2.1.0 available)" in out
 
 
 if __name__ == "__main__":

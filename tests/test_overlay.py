@@ -80,7 +80,8 @@ def test_apply_guards():
     with _env(RIG_HOME=tempfile.mkdtemp()):
         root, _ = _world()
         _install_acme(root)
-        rc, _, err = _run("--root", str(root), "overlay", "apply", "acme_cam", "testns/acme-cam")
+        rc, _, err = _run("--root", str(root), "overlay", "apply", "acme_cam",
+                          "testns/camish:acme-cam")
         assert rc == 1 and "not an overlay" in err
         rc, _, err = _run("--root", str(root), "add", "testns/routerish") and (0, "", "")
         rc, _, err = _run("--root", str(root), "overlay", "apply", "routerish", "testns/cam-tune")

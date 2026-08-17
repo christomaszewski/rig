@@ -34,11 +34,11 @@ def _git_world():
 
 
 def _bump_profile(reg, version, payload):
-    mpath = reg / "profiles" / "acme-cam" / "manifest.yaml"
+    mpath = reg / "profiles" / "camish" / "acme-cam" / "manifest.yaml"
     m = yaml.safe_load(mpath.read_text())
     m["version"] = version
     mpath.write_text(yaml.safe_dump(m, sort_keys=False))
-    (reg / "profiles" / "acme-cam" / "config" / "payload.yaml").write_text(payload)
+    (reg / "profiles" / "camish" / "acme-cam" / "config" / "payload.yaml").write_text(payload)
     _run("registry", "index", str(reg))
     _git("add", "-A", cwd=reg)
     _git("commit", "-q", "-m", f"bump {version}", cwd=reg)
@@ -49,20 +49,20 @@ def test_add_historical_version_from_git_history():
     with _env(RIG_HOME=tempfile.mkdtemp()):
         root, reg = _git_world()
         _bump_profile(reg, "2.1.0", "service: camish\ncamera: {type: usb}\nusb: {width: 4096}\n")
-        rc, _, err = _run("--root", str(root), "pkg", "install", "testns/acme-cam@2.0.0")
+        rc, _, err = _run("--root", str(root), "pkg", "install", "testns/camish:acme-cam@2.0.0")
         assert rc == 0, err
         assert "HISTORICAL" in err                        # loud: this is not the current version
         working = (root / "config" / "sensors" / "acme_cam.yaml").read_text()
         assert "width: 1280" in working                   # the OLD payload, byte-faithful
         lock = load_lock(root)
-        assert "testns/acme-cam@2.0.0" in lock["packages"]
-        assert "testns/acme-cam@2.1.0" not in lock["packages"]
+        assert "testns/camish:acme-cam@2.0.0" in lock["packages"]
+        assert "testns/camish:acme-cam@2.1.0" not in lock["packages"]
 
 
 def test_add_version_absent_from_history_errors():
     with _env(RIG_HOME=tempfile.mkdtemp()):
         root, _ = _git_world()
-        rc, _, err = _run("--root", str(root), "pkg", "install", "testns/acme-cam@9.9.9")
+        rc, _, err = _run("--root", str(root), "pkg", "install", "testns/camish:acme-cam@9.9.9")
         assert rc == 1 and "not in the registry's git history" in err
 
 
@@ -70,7 +70,7 @@ def test_add_historical_needs_git_backed_registry():
     with _env(RIG_HOME=tempfile.mkdtemp()):
         from test_install import _world
         root, _ = _world()                                # plain local-dir folder, no .git
-        rc, _, err = _run("--root", str(root), "pkg", "install", "testns/acme-cam@1.9.9")
+        rc, _, err = _run("--root", str(root), "pkg", "install", "testns/camish:acme-cam@1.9.9")
         assert rc == 1 and "git-backed registry" in err
 
 
@@ -90,7 +90,7 @@ def test_locked_reproduces_from_locked_registry_commit():
         working = (root2 / "config" / "sensors" / "acme_cam.yaml").read_text()
         assert "width: 1280" in working                   # byte-identical to the origin install
         lock = load_lock(root2)
-        assert "testns/acme-cam@2.0.0" in lock["packages"]
+        assert "testns/camish:acme-cam@2.0.0" in lock["packages"]
         assert (lock["registries"]["testns"]["commit"]    # the anchor commit was NOT clobbered
                 == load_lock(root)["registries"]["testns"]["commit"])
 

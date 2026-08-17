@@ -56,12 +56,12 @@ def _materialize(toplevel: Path, prefix: str, kind_dir: str, name: str,
                  commit: str) -> Package | None:
     """Extract <kind_dir>/<name>/ as it was at `commit` into a scratch dir and wrap it as a
     Package — the rest of the install machinery then works unchanged."""
-    pkg_rel = f"{prefix}{kind_dir}/{name}"
+    pkg_rel = f"{prefix}{kind_dir}/{name.replace(':', '/')}"  # profile keys project svc:short -> svc/short
     listing = _git(toplevel, "ls-tree", "-r", "--name-only", commit, "--", pkg_rel)
     files = [line for line in listing.stdout.splitlines() if line.strip()]
     if listing.returncode != 0 or not files:
         return None
-    scratch = Path(tempfile.mkdtemp(prefix="rig-history-")) / name
+    scratch = Path(tempfile.mkdtemp(prefix="rig-history-")) / name.replace(":", "--")
     for path in files:
         blob = _read_blob(toplevel, commit, path)
         if blob is None:
@@ -76,7 +76,7 @@ def _materialize(toplevel: Path, prefix: str, kind_dir: str, name: str,
     if not isinstance(manifest, dict):
         return None
     return Package(kind=str(manifest.get("kind") or kind_dir.rstrip("s")),
-                   name=str(manifest.get("name") or name),
+                   name=name,  # the KEY (profiles: service:short) — manifest `name` is the short half
                    version=str(manifest.get("version") or "?"),
                    pkg_dir=scratch, manifest=manifest)
 
@@ -97,7 +97,7 @@ def checkout_pkg(entry: Entry, kind_dir: str, name: str, version: str) -> Packag
     if where is None:
         return None
     toplevel, prefix = where
-    manifest_rel = f"{prefix}{kind_dir}/{name}/manifest.yaml"
+    manifest_rel = f"{prefix}{kind_dir}/{name.replace(':', '/')}/manifest.yaml"
     log = _git(toplevel, "log", "--format=%H", "--", manifest_rel)
     if log.returncode != 0:
         return None

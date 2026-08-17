@@ -45,13 +45,15 @@ def _service(root, name="camera-service", version="1.4.2", **over):
 
 
 def _profile(root, name="siyi-zr30", version="1.0.0", requires="camera-service@^1.4",
-             payload="service: camera-service\ngige: {camera_id: zr30}\n", **over):
+             payload="service: camera-service\ngige: {camera_id: zr30}\n", dir_svc=None, **over):
     m = {"kind": "profile", "name": name, "version": version,
          "provides": {"sensor": [{"model": "SIYI ZR30", "match": ["zr30", "siyi-zr30"]}]},
          "requires": {"service": requires},
          "config": {"payload": "config/payload.yaml"}}
     m.update(over)
-    _pkg(root, "profiles", name, m, {"config/payload.yaml": payload})
+    # schema 2: profiles nest under their target service; dir_svc overrides for placement tests
+    svc = dir_svc or str(requires).rpartition("/")[-1].partition("@")[0]
+    _pkg(root, "profiles", f"{svc}/{name}", m, {"config/payload.yaml": payload})
 
 
 def _overlay(root, name="zr30-gideon", version="1.0.0", targets=None, project="gideon",
@@ -86,7 +88,7 @@ def test_scaffold_is_self_valid_and_complete():
     assert (root / ".gitlab-ci.yml").is_file()  # both CI wrappers ship (OQ-7)
     assert len(list((root / "schemas").glob("*.schema.json"))) == 6
     meta = yaml.safe_load((root / "registry.yaml").read_text())
-    assert meta["namespace"] == "testns" and meta["schema"] == 1
+    assert meta["namespace"] == "testns" and meta["schema"] == 2
 
 
 def test_scaffold_refuses_nonempty_dir():
@@ -106,7 +108,8 @@ def test_full_valid_registry_is_green():
     _overlay(root)
     _pkg(root, "suites", "gideon-boat", {
         "kind": "suite", "name": "gideon-boat", "version": "1.0.0", "project": "gideon",
-        "members": {"profiles": ["testns/siyi-zr30@1.0.0"], "overlays": ["testns/zr30-gideon@1.0.0"],
+        "members": {"profiles": ["testns/camera-service:siyi-zr30@1.0.0"],
+                    "overlays": ["testns/zr30-gideon@1.0.0"],
                     "services": ["other/thing@2.0.0"]}})  # cross-ns: format-checked only
     _reindex(root)
     assert _issues(root) == []
@@ -191,8 +194,9 @@ def test_profile_payload_validates_against_own_schema():
     m = {"kind": "profile", "name": "p", "version": "1.0.0",
          "requires": {"service": "camera-service@^1.4"},
          "config": {"payload": "config/payload.yaml", "overrides_schema": "config/schema.json"}}
-    _pkg(root, "profiles", "p", m, {"config/payload.yaml": "rtsp: {url: x}\n",  # missing `gige`
-                                    "config/schema.json": schema})
+    _pkg(root, "profiles", "camera-service/p", m,
+         {"config/payload.yaml": "rtsp: {url: x}\n",  # missing `gige`
+          "config/schema.json": schema})
     _assert_issue(root, "missing required key `gige`", check_index=False)
 
 
@@ -213,10 +217,39 @@ def test_overlay_rules():
 
 
 def test_name_collision_across_kinds():
-    root = _registry()
+    root = _registry()  # flat kinds still share one key space (profiles are colon-keyed apart)
     _service(root, name="kraken")
-    _profile(root, name="kraken", requires="kraken@^1.4")
+    _overlay(root, name="kraken", targets=[{"service": "kraken"}])
     _assert_issue(root, "unique", check_index=False)
+
+
+def test_profile_placement_must_match_requires():
+    root = _registry()  # dir says gimbal/, requires says camera-service -> placement error
+    _service(root)
+    _profile(root, dir_svc="gimbal")
+    _assert_issue(root, "placement", check_index=False)
+
+
+def test_flat_profile_layout_rejected():
+    root = _registry()
+    _service(root)
+    _pkg(root, "profiles", "old-style", {"kind": "profile", "name": "old-style", "version": "1.0.0",
+                                         "requires": {"service": "camera-service@^1.4"},
+                                         "config": {"payload": "config/payload.yaml"}},
+         {"config/payload.yaml": "a: 1\n"})
+    _assert_issue(root, "flat profile layout", check_index=False)
+
+
+def test_schema_1_registry_refused_with_migration_pointer():
+    root = _registry()
+    meta = yaml.safe_load((root / "registry.yaml").read_text())
+    meta["schema"] = 1
+    (root / "registry.yaml").write_text(yaml.safe_dump(meta))
+    try:
+        load_registry(root, [])
+        raise AssertionError("expected RigError")
+    except RigError as exc:
+        assert "migrate" in str(exc) and "profiles/<service>/<short>/" in str(exc)
 
 
 def test_kind_and_name_must_match_directory():
@@ -240,7 +273,7 @@ def test_index_sensor_tiers_and_projects():
     _overlay(root, project="gideon")
     reg = load_registry(root, [])
     index = generate_index(reg)
-    assert index["sensors"]["zr30"] == [{"profile": "zr30-exact", "tier": "exact"}]
+    assert index["sensors"]["zr30"] == [{"profile": "camera-service:zr30-exact", "tier": "exact"}]
     assert index["sensors"]["usb:2*"][0]["tier"] == "glob"
     assert index["sensors"]["*"][0]["tier"] == "fallback"
     assert index["projects"]["gideon"] == ["zr30-gideon"]

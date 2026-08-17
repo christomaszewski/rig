@@ -65,17 +65,17 @@ def search(query: str) -> int:
                 rows.append((f"{entry.name}/{name}", meta.get("kind", "?"),
                              meta.get("version", "?"), f"project: {tag}"))
     elif ":" in query:  # <service>:[glob] — profiles by required service: "what drives ouster?"
-        from .install import profile_serves
         svc, _, want = query.partition(":")
         for entry, reg, _ in _each_index(entries):
-            for pname in sorted(reg.packages):
-                p = reg.packages[pname]
-                if p.kind != "profile" or not profile_serves(p, svc):
-                    continue
-                if want and not fnmatch.fnmatch(pname, want):
+            for key in sorted(reg.packages):
+                p = reg.packages[key]
+                ksvc, sep, short = key.partition(":")
+                if p.kind != "profile" or ksvc != svc:  # the key's service half IS the target
+                    continue                            # (placement law: dir == requires.service)
+                if want and not fnmatch.fnmatch(short, want):
                     continue
                 req = (p.manifest.get("requires") or {}).get("service")
-                rows.append((f"{entry.name}/{pname}", "profile", p.version, f"requires: {req}"))
+                rows.append((f"{entry.name}/{key}", "profile", p.version, f"requires: {req}"))
     else:
         needle = query.lower()
         for entry, reg, index in _each_index(entries):

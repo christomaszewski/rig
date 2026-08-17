@@ -1,6 +1,6 @@
-"""`<service>:<profile>` porcelain — profiles by required service: resolution (priority order,
-exact name), `rig add`/`pkg add` routing, the `pkg search <service>:` axis, the free-text
-requires axis, and the reserved service-name validation. Run: python3 tests/test_service_profile.py"""
+"""Profile identity = the (service, short) tuple, spelled `service:short` (schema 2): compound
+refs through add/search, priority order, nested layout, foreign-service profiles, reserved
+service names. Run: python3 tests/test_service_profile.py"""
 import contextlib
 import io
 import os
@@ -62,23 +62,26 @@ def _code_repo() -> tuple[pathlib.Path, str]:
     return repo, _git("rev-parse", "HEAD", cwd=repo).stdout.strip()
 
 
-def _registry(ns: str, repo: pathlib.Path, rev: str, profiles: dict[str, str]) -> pathlib.Path:
-    """A registry carrying both services + the given {profile-name: required-service} profiles."""
+def _registry(ns: str, repo: pathlib.Path, rev: str, profiles: dict[str, str],
+              services=("camish", "routerish")) -> pathlib.Path:
+    """A registry carrying `services` + profiles as {short-name: requires-service-constraint};
+    each profile nests under the unqualified service half of its constraint."""
     reg = pathlib.Path(tempfile.mkdtemp()) / ns
     with contextlib.redirect_stderr(io.StringIO()):
         registry_init(reg, namespace=ns)
-    for svc in ("camish", "routerish"):
+    for svc in services:
         d = reg / "services" / svc
         d.mkdir(parents=True)
         (d / "manifest.yaml").write_text(yaml.safe_dump({
             "kind": "service", "name": svc, "version": "1.2.0",
             "source": {"repo": str(repo), "rev": rev, "path": svc}}))
-    for pname, svc in profiles.items():
-        p = reg / "profiles" / pname
+    for short, constraint in profiles.items():
+        svc = constraint.rpartition("/")[-1].partition("@")[0]
+        p = reg / "profiles" / svc / short
         (p / "config").mkdir(parents=True)
         (p / "manifest.yaml").write_text(yaml.safe_dump({
-            "kind": "profile", "name": pname, "version": "1.0.0",
-            "requires": {"service": f"{svc}@^1.0"},
+            "kind": "profile", "name": short, "version": "1.0.0",
+            "requires": {"service": constraint},
             "config": {"payload": "config/payload.yaml"}}))
         (p / "config" / "payload.yaml").write_text(f"service: {svc}\nrate: 9\n")
     assert _run("registry", "index", str(reg))[0] == 0
@@ -95,77 +98,87 @@ def _world(*registries: pathlib.Path) -> pathlib.Path:
     return target
 
 
-def test_add_by_service_profile():
+def test_add_by_compound_ref_all_spellings():
     with _env(RIG_HOME=tempfile.mkdtemp()):
         repo, rev = _code_repo()
-        root = _world(_registry("regone", repo, rev, {"tuned": "camish", "routed": "routerish"}))
-        rc, _, err = _run("--root", str(root), "add", "camish:tuned")
+        root = _world(_registry("regone", repo, rev,
+                                {"tuned": "camish@^1.0", "routed": "routerish@^1.0"}))
+        rc, _, err = _run("--root", str(root), "add", "camish:tuned")   # unqualified
         assert rc == 0, err
         row = next(s for s in load_manifest(root).sensors if s.name == "tuned")
-        assert str(row.profile) == "regone/tuned@1.0.0", row.profile
-        assert (root / "config" / "sensors" / "tuned.yaml").is_file()
-        # the profile's tier follows its SERVICE's declared tier, not the porcelain
-        rc, _, err = _run("--root", str(root), "pkg", "add", "routerish:routed", "--as", "rt")
+        assert str(row.profile) == "regone/camish:tuned@1.0.0", row.profile
+        assert (root / "config" / "sensors" / "tuned.yaml").is_file()   # instance = SHORT name
+        # qualified + versioned spellings are ordinary refs now
+        rc, _, err = _run("--root", str(root), "pkg", "add", "regone/routerish:routed@1.0.0",
+                          "--as", "rt")
         assert rc == 0, err
-        assert (root / "config" / "infra" / "rt.yaml").is_file()
+        assert (root / "config" / "infra" / "rt.yaml").is_file()        # tier follows the service
 
 
 def test_priority_order_decides_across_registries():
     with _env(RIG_HOME=tempfile.mkdtemp()):
         repo, rev = _code_repo()
-        first = _registry("regone", repo, rev, {"tuned": "camish"})
-        second = _registry("regtwo", repo, rev, {"tuned": "camish"})
+        first = _registry("regone", repo, rev, {"tuned": "camish@^1.0"})
+        second = _registry("regtwo", repo, rev, {"tuned": "camish@^1.0"})
         root = _world(second, first)  # regtwo at higher priority
         assert _run("--root", str(root), "add", "camish:tuned")[0] == 0
         row = next(s for s in load_manifest(root).sensors if s.name == "tuned")
         assert str(row.profile).startswith("regtwo/"), row.profile
 
 
-def test_named_miss_lists_available_and_unknown_service_hints():
+def test_miss_lists_profiles_for_the_service():
     with _env(RIG_HOME=tempfile.mkdtemp()):
         repo, rev = _code_repo()
-        root = _world(_registry("regone", repo, rev, {"tuned": "camish"}))
+        root = _world(_registry("regone", repo, rev, {"tuned": "camish@^1.0"}))
         rc, _, err = _run("--root", str(root), "add", "camish:nope")
-        assert rc != 0 and "regone/tuned" in err, err
+        assert rc != 0 and "regone/camish:tuned" in err, err            # what DOES exist, listed
         rc, _, err = _run("--root", str(root), "add", "ghost:tuned")
-        assert rc != 0 and "no configured registry carries a profile for service 'ghost'" in err, err
+        assert rc != 0 and "not found" in err, err                      # nothing to list: plain miss
 
 
-def test_versioned_and_qualified_forms_refused():
+def test_search_service_axis_scans_keys():
     with _env(RIG_HOME=tempfile.mkdtemp()):
         repo, rev = _code_repo()
-        root = _world(_registry("regone", repo, rev, {"tuned": "camish"}))
-        rc, _, err = _run("--root", str(root), "pkg", "add", "camish:tuned@1.0.0")
-        assert rc != 0 and "regone/tuned@X.Y.Z" not in err and "@X.Y.Z" in err, err
-        rc, _, err = _run("--root", str(root), "pkg", "add", "regone/camish:tuned")
-        assert rc != 0 and "unqualified" in err, err
-
-
-def test_search_service_axis():
-    with _env(RIG_HOME=tempfile.mkdtemp()):
-        repo, rev = _code_repo()
-        first = _registry("regone", repo, rev, {"tuned": "camish", "tuned-b": "camish",
-                                                "routed": "routerish"})
-        second = _registry("regtwo", repo, rev, {"tuned": "camish"})
+        first = _registry("regone", repo, rev, {"tuned": "camish@^1.0", "tuned-b": "camish@^1.0",
+                                                "routed": "routerish@^1.0"})
+        second = _registry("regtwo", repo, rev, {"tuned": "camish@^1.0"})
         _world(first, second)
         rc, out, _ = _run("pkg", "search", "camish:")
         assert rc == 0
-        assert "regone/tuned" in out and "regone/tuned-b" in out and "regtwo/tuned" in out
-        assert "routed" not in out
-        rc, out, _ = _run("pkg", "search", "camish:*-b")
-        assert rc == 0 and "regone/tuned-b" in out and "regone/tuned " not in out
+        assert "regone/camish:tuned" in out and "regone/camish:tuned-b" in out
+        assert "regtwo/camish:tuned" in out and "routed" not in out
+        rc, out, _ = _run("pkg", "search", "camish:*-b")                # glob on the SHORT half
+        assert rc == 0 and "camish:tuned-b" in out and "camish:tuned " not in out
         rc, out, _ = _run("pkg", "search", "routerish:")
-        assert rc == 0 and "regone/routed" in out and "tuned" not in out
+        assert rc == 0 and "regone/routerish:routed" in out and "tuned" not in out
         assert _run("pkg", "search", "camish:zzz")[0] == 1
 
 
-def test_freetext_search_surfaces_profiles_by_requires():
+def test_freetext_search_finds_keys_and_requires():
     with _env(RIG_HOME=tempfile.mkdtemp()):
         repo, rev = _code_repo()
-        _world(_registry("regone", repo, rev, {"tuned": "camish"}))
-        rc, out, _ = _run("pkg", "search", "camish")
-        assert rc == 0
-        assert "regone/tuned" in out and "requires: camish@^1.0" in out, out
+        _world(_registry("regone", repo, rev, {"tuned": "camish@^1.0"}))
+        rc, out, _ = _run("pkg", "search", "camish")     # key substring covers profiles now
+        assert rc == 0 and "regone/camish:tuned" in out, out
+        rc, out, _ = _run("pkg", "search", "@^1.0")      # requires axis: needle only in constraint
+        assert rc == 0 and "requires: camish@^1.0" in out, out
+
+
+def test_foreign_service_profile_validates_and_installs():
+    # A profile hosted in one registry targeting a service DEFINED in another: placement uses the
+    # unqualified service name; requires stays fully qualified; install resolves cross-registry.
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        repo, rev = _code_repo()
+        base = _registry("testns", repo, rev, {})
+        org = _registry("orgreg", repo, rev, {"tuned": "testns/camish@^1.2"}, services=())
+        assert _run("registry", "validate", str(org))[0] == 0
+        root = _world(org, base)
+        rc, _, err = _run("--root", str(root), "add", "camish:tuned")
+        assert rc == 0, err
+        row = next(s for s in load_manifest(root).sensors if s.name == "tuned")
+        assert str(row.profile) == "orgreg/camish:tuned@1.0.0", row.profile
+        lock = yaml.safe_load((root / "rig.lock").read_text())
+        assert any(r.startswith("testns/camish@") for r in lock["packages"])  # service from testns
 
 
 def test_service_names_sensor_and_project_are_reserved():
@@ -180,6 +193,17 @@ def test_service_names_sensor_and_project_are_reserved():
             "source": {"repo": "https://example.com/x", "rev": "0" * 40, "path": "."}}))
         rc, _, err = _run("registry", "validate", str(reg))
         assert rc != 0 and "reserved" in err, err
+
+
+def test_promote_short_name_guard():
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        repo, rev = _code_repo()
+        root = _world(_registry("regone", repo, rev, {"tuned": "camish@^1.0"}))
+        assert _run("--root", str(root), "add", "camish:tuned")[0] == 0
+        for bad in ("camish:extra", "a/b", "x@1.0.0"):
+            rc, _, err = _run("--root", str(root), "pkg", "promote", "tuned",
+                              "--kind", "profile", "--name", bad, "--to", "regone")
+            assert rc != 0 and "SHORT half" in err, (bad, err)
 
 
 if __name__ == "__main__":

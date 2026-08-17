@@ -15,5 +15,17 @@ def parse_ref(ref: str) -> tuple[str | None, str, str | None]:
 
 
 def unqualified(ref: str) -> str:
-    """``ns/name@ver`` -> the bare package name."""
+    """``ns/name@ver`` -> the bare package key (profiles: the ``service:short`` compound)."""
     return parse_ref(ref)[1]
+
+
+def split_key(key: str) -> tuple[str | None, str]:
+    """``service:short`` -> (service, short); a plain name -> (None, name)."""
+    svc, sep, short = key.partition(":")
+    return (svc, short) if sep else (None, svc)
+
+
+def short_name(ref: str) -> str:
+    """``[ns/]service:short[@ver]`` -> ``short`` — the display/instance-default half. Non-profile
+    refs pass through as the bare name."""
+    return split_key(unqualified(ref))[1]

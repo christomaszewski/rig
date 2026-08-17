@@ -27,6 +27,7 @@ wedges), and rig prints the push/PR command. Validation failures roll the checko
 from __future__ import annotations
 
 import contextlib
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -37,7 +38,7 @@ from . import RigError
 from .common import eprint, load_yaml
 from .lock import load_lock
 from .manifest import load_manifest
-from .refs import unqualified
+from .refs import short_name, unqualified
 from .registries import Entry, load_entries
 from .registry import validate_registry, write_index, load_registry
 from .workingcopy import promote_delta
@@ -58,7 +59,7 @@ def _existing_manifest(reg_root: Path, kind_dir: str, name: str) -> dict | None:
     """The target package's CURRENT manifest, or None for a fresh name. Re-promotes seed from it
     (carry-forward) instead of rewriting the manifest wholesale — a bump must not strip hand-added
     fields like `provides` match identifiers or `config.overrides_schema`."""
-    manifest = reg_root / kind_dir / name / "manifest.yaml"
+    manifest = reg_root / kind_dir / name.replace(":", "/") / "manifest.yaml"
     return load_yaml(manifest) if manifest.is_file() else None
 
 
@@ -101,7 +102,7 @@ def _requalify(ref: str) -> str:
 
 def _write_pkg(reg_root: Path, kind_dir: str, name: str, manifest: dict,
                payload: dict | None, written: list[Path], backups: dict[Path, Path]) -> None:
-    pkg_dir = reg_root / kind_dir / name
+    pkg_dir = reg_root / kind_dir / name.replace(":", "/")  # profile keys project svc:short -> svc/short
     if pkg_dir.exists() and pkg_dir not in backups:  # a --bump overwrites: keep the original so
         import tempfile                              # rollback can RESTORE it, never delete it
         backup = Path(tempfile.mkdtemp(prefix="rig-promote-")) / name
@@ -197,6 +198,10 @@ def promote(root: Path, names: list[str], *, to: str, all_dirty: bool, name: str
         raise RigError("promote: name instance(s), or pass --all for every dirty instance")
     if name and (len(names) != 1 or suite):
         raise RigError("promote: --name applies to exactly one instance (and never names a suite)")
+    if name and not re.match(r"^[a-z][a-z0-9-]*$", name):
+        raise RigError(f"promote: --name '{name}' must match [a-z][a-z0-9-]* — for profiles it is "
+                       f"the SHORT half only; the service half is derived from the instance "
+                       f"(no '/', ':', or '@')")
     if kind not in (None, "overlay", "profile"):
         raise RigError(f"promote: --kind must be overlay or profile, not '{kind}'")
     if adopt and (all_dirty or suite or len(names) != 1 or kind == "overlay"):
@@ -272,14 +277,17 @@ def promote(root: Path, names: list[str], *, to: str, all_dirty: bool, name: str
                         raise RigError(f"promote: no locked service pin for '{sensor.service}' "
                                        f"— pass --requires <ns/service@X.Y.Z>")
                     req = _requalify(req_lock)  # lock refs carry the ALIAS; manifests want ns
-                # Name: --name > the provenance profile (updating the thing this instance is
-                # PINNED to, not minting a same-named sibling) > the instance name hyphenated.
+                # Identity (schema 2): the key is the (service, short) tuple. The service half is
+                # ALWAYS the instance's own service; --name > the provenance profile's short half
+                # (updating the thing this instance is PINNED to, not minting a same-named
+                # sibling) > the instance name hyphenated supply the short half.
                 if name:
-                    pkg_name = name
+                    short = name
                 elif sensor.profile:
-                    pkg_name = unqualified(str(sensor.profile))
+                    short = short_name(str(sensor.profile))
                 else:
-                    pkg_name = sensor.name.replace("_", "-")
+                    short = sensor.name.replace("_", "-")
+                pkg_name = f"{sensor.service}:{short}"
                 existing = _existing_manifest(reg_root, "profiles", pkg_name)
                 # Auto-bump ONLY when provenance proves this is the package the instance consumes
                 # (alias AND name match the target) — a bare name collision still demands --bump.
@@ -288,13 +296,13 @@ def promote(root: Path, names: list[str], *, to: str, all_dirty: bool, name: str
                 if auto:
                     eprint(f"  {sensor.name}: updating {sensor.profile} — auto-bump")
                 version = _next_version(existing, bump or bool(auto), f"profile '{pkg_name}'")
-                pmanifest: dict = {"kind": "profile", "name": pkg_name, "version": version,
+                pmanifest: dict = {"kind": "profile", "name": short, "version": version,
                                    **_carry_forward(existing, "kind", "name", "version",
                                                    "requires", "config", "provides"),
                                    "requires": {"service": req},
                                    "config": {"payload": "config/payload.yaml"}}
                 if matches:  # --match REPLACES the carried-forward set
-                    pmanifest["provides"] = {"sensor": [{"model": pkg_name, "match": list(matches)}]}
+                    pmanifest["provides"] = {"sensor": [{"model": short, "match": list(matches)}]}
                 elif existing and existing.get("provides"):
                     pmanifest["provides"] = existing["provides"]
                 if existing and (existing.get("config") or {}).get("overrides_schema"):
@@ -453,7 +461,7 @@ def _parent_payload(entry: Entry, name: str, version: str) -> tuple[dict, dict]:
     current = _existing_manifest(entry.root, "profiles", name)
     if current is not None and str(current.get("version")) == version:
         payload_rel = (current.get("config") or {}).get("payload") or "config/payload.yaml"
-        path = entry.root / "profiles" / name / str(payload_rel)
+        path = entry.root / "profiles" / name.replace(":", "/") / str(payload_rel)
         if not path.is_file():
             raise RigError(f"rebase: parent payload missing: {path}")
         return current, load_yaml(path)
@@ -500,7 +508,7 @@ def rebase(name: str, *, to: str, onto: str | None) -> int:
 
     # the three payloads
     payload_rel = (existing.get("config") or {}).get("payload") or "config/payload.yaml"
-    my_path = reg_root / "profiles" / name / str(payload_rel)
+    my_path = reg_root / "profiles" / name.replace(":", "/") / str(payload_rel)
     if not my_path.is_file():
         raise RigError(f"rebase: payload missing: {my_path}")
     mine = _strip_identity(load_yaml(my_path))
@@ -540,7 +548,8 @@ def rebase(name: str, *, to: str, onto: str | None) -> int:
     old_req = (existing.get("requires") or {}).get("service")
     if new_req and str(new_req) != str(old_req):
         eprint(f"  requires adopted from the parent: {old_req} -> {new_req}")
-    pmanifest = {"kind": "profile", "name": name, "version": version,
+    from .refs import split_key
+    pmanifest = {"kind": "profile", "name": split_key(name)[1], "version": version,
                  **_carry_forward(existing, "kind", "name", "version",
                                  "requires", "config", "based_on"),
                  **({"requires": {"service": str(new_req)}} if new_req
@@ -550,7 +559,8 @@ def rebase(name: str, *, to: str, onto: str | None) -> int:
                  "config": existing.get("config") or {"payload": "config/payload.yaml"}}
     written: list[Path] = []
     backups: dict[Path, Path] = {}
-    with _registry_write_session(entry, to, f"rebase-{name}", written, backups, what="rebase"):
+    with _registry_write_session(entry, to, f"rebase-{name.replace(':', '-')}", written, backups,
+                                 what="rebase"):  # git branch names cannot carry ':'
         _write_pkg(reg_root, "profiles", name, pmanifest, merged, written, backups)
         eprint(f"  profile {to}/{name}@{version}: rebased "
                f"{parent_ns}/{parent_name}@{old_ver} -> @{new_ver}"

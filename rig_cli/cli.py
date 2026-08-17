@@ -688,8 +688,10 @@ def build_parser() -> argparse.ArgumentParser:
                     "`rig registry list`; local-dir written in place, git on a promote/ branch)")
     pp.add_argument("--all", action="store_true", dest="all_dirty",
                     help="promote every dirty instance (one overlay each)")
-    pp.add_argument("--name", default=None, help="package name (single instance only; default: "
-                    "the provenance profile's name for --kind profile, else <instance>[-<project>])")
+    pp.add_argument("--name", default=None, help="package name (single instance only). Profiles: "
+                    "the SHORT half only — identity is <service>:<short>, service derived from the "
+                    "instance; default: the provenance profile's short name, else the instance "
+                    "name. Overlays: default <instance>[-<project>]")
     pp.add_argument("--project", default=None, help="project tag (searchable axis; also the "
                     "default name suffix)")
     pp.add_argument("--kind", choices=["overlay", "profile"], default=None,

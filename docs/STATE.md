@@ -1,8 +1,25 @@
 # rig — project state & handoff (resume here)
 
 > Snapshot for picking the project up cold in a new session. Read this first, then `CHEATSHEET.md` /
-> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.1.69**,
-> branch **`main`**, 297 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.2.0**,
+> branch **`main`**, 301 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> **Profile identity = (service, short) tuple — registry schema 2 SHIPPED** (v0.2.0, CLEAN BREAK,
+> no back-compat by user decision — all deployments recreated): a profile's key is
+> `service:short` everywhere (refs `[registry/]camera-service:siyi-zr30[@ver]`, index keys, lock
+> rows, suite members, based_on), projecting to `profiles/<service>/<short>/` on disk — the
+> filesystem enforces tuple uniqueness, so same-short profiles for different services coexist
+> (`ouster:generic` + `sbg:generic`). The path is a PROJECTION of the manifest: `name:` holds the
+> short half, `requires.service` names the parent dir (placement validated; foreign-service
+> profiles use the unqualified name in the path with the qualified pin in requires — validated
+> format-only cross-registry, hard at install, lock records the peer registry commit as before).
+> Promote takes `--name <short>` (validated: no `/ : @` — also fixes an unguarded nested-dir
+> write bug), derives the service half from the instance; rebase takes the compound key. The
+> v0.1.69 `<service>:<profile>` porcelain became the ref grammar itself (versioned + qualified
+> colon refs now legal); `sensor:`/`project:` prefixes stay safe via the reserved-service-name
+> rule. Schema-1 registries are REFUSED with a migration pointer (degrade-not-brick at client:
+> skipped with a warning). Pre-move git history of migrated profiles is unreachable by design
+> (clean break). rig-registry-public migrated locally in the same session (schema: 2, profiles
+> nested, schemas/ regenerated) — PUSH ORDER: rig v0.2.0 release first, then the registry.
 > **`<service>:<profile>` porcelain SHIPPED** (v0.1.69, CHEATSHEET §1.5): profiles addressable by
 > the service they drive — `rig add ouster:generic` installs the profile NAMED generic whose
 > `requires.service` is ouster (unqualified match; exact name ⇒ at most one hit per registry,

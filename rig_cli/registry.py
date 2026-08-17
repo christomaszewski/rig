@@ -22,22 +22,35 @@ from pathlib import Path
 from . import RigError
 from .common import eprint, load_yaml
 
-SCHEMA = 1           # the registry schema version this rig writes
-MAX_SUPPORTED = 1    # the highest schema this rig can read (client-side degrade-not-fail is M2)
+SCHEMA = 2           # the registry schema version this rig writes (2: profiles nest by service)
+MAX_SUPPORTED = 2    # the highest schema this rig can read (client-side degrade-not-fail is M2)
 
 KIND_DIRS = {"service": "services", "profile": "profiles", "overlay": "overlays", "suite": "suites"}
 
 # Package/namespace names are registry identifiers (NOT instance names — those stay ROS-safe
-# with underscores); hyphens are idiomatic here (`camera-service`, `siyi-zr30`).
+# with underscores); hyphens are idiomatic here (`camera-service`, `siyi-zr30`). Profile identity
+# (schema 2) is the TUPLE (target service, short name), spelled `service:short` — the compound
+# key is the package name everywhere (refs, index, lock); on disk it projects to
+# `profiles/<service>/<short>/`, so the filesystem itself enforces tuple uniqueness. The
+# `sensor:`/`project:` porcelain prefixes stay unambiguous because those are reserved service
+# names (v0.1.69).
 _NAME = re.compile(r"^[a-z][a-z0-9-]*$")
+_PROFILE_KEY = re.compile(r"^[a-z][a-z0-9-]*:[a-z][a-z0-9-]*$")
 _VERSION = re.compile(r"^\d+\.\d+\.\d+$")
 _REV = re.compile(r"^[0-9a-f]{40}$|^[0-9a-f]{64}$")            # full git SHA-1 or SHA-256 — never short/branch
 _DIGEST = re.compile(r"@sha256:[0-9a-f]{64}$")
 _CONSTRAINT = re.compile(                                       # requires.service: name@^1.4 / name@1.4.2
     r"^(?:(?P<ns>[a-z][a-z0-9-]*)/)?(?P<name>[a-z][a-z0-9-]*)@(?P<caret>\^?)(?P<ver>\d+\.\d+(?:\.\d+)?)$")
-_QUALIFIED_EXACT = re.compile(                                  # suite members: ns/name@X.Y.Z, nothing less
-    r"^(?P<ns>[a-z][a-z0-9-]*)/(?P<name>[a-z][a-z0-9-]*)@(?P<ver>\d+\.\d+\.\d+)$")
+_QUALIFIED_EXACT = re.compile(                                  # suite members/based_on: ns/name@X.Y.Z
+    r"^(?P<ns>[a-z][a-z0-9-]*)/(?P<name>(?:[a-z][a-z0-9-]*:)?[a-z][a-z0-9-]*)@(?P<ver>\d+\.\d+\.\d+)$")
 _INSTANCE = re.compile(r"^[a-z][a-z0-9_]*$")                    # instance-scoped overlay targets
+
+
+def pkg_path(kind: str, key: str) -> str:
+    """Registry-relative package dir for a key — the ONE place the `service:short` compound
+    projects onto `profiles/<service>/<short>`. Never parse a path back into a key; the key is
+    authoritative and the path is derived."""
+    return f"{KIND_DIRS[kind]}/{key.replace(':', '/')}"
 
 
 @dataclass(frozen=True)
@@ -61,7 +74,10 @@ class Package:
 class Registry:
     root: Path
     meta: dict                      # registry.yaml
-    packages: dict[str, Package]    # bare name -> package; names are unique ACROSS kinds (index keys)
+    packages: dict[str, Package]    # key -> package (profiles: "service:short" compound; other
+    #                                 kinds: bare name); keys are unique ACROSS kinds (index keys).
+    #                                 Package.name IS the key; a profile manifest's `name:` field
+    #                                 holds only the short half (the dir supplies the service).
 
     @property
     def namespace(self) -> str:
@@ -84,7 +100,7 @@ def constraint_satisfied(constraint_ver: str, caret: bool, version: str) -> bool
 def _rel_payload(pkg: Package, raw: object, field: str, issues: list[Issue], *, must_exist: bool = True):
     """Validate a manifest-relative payload/schema path (inside the package dir, no .. / absolute);
     return the resolved Path or None."""
-    where = f"{KIND_DIRS[pkg.kind]}/{pkg.name}/manifest.yaml"
+    where = f"{pkg_path(pkg.kind, pkg.name)}/manifest.yaml"
     if not isinstance(raw, str) or not raw:
         issues.append(Issue(where, f"`{field}` must be a relative path string"))
         return None
@@ -100,7 +116,7 @@ def _rel_payload(pkg: Package, raw: object, field: str, issues: list[Issue], *, 
 
 
 def _load_payload_mapping(pkg: Package, path: Path, field: str, issues: list[Issue]) -> dict | None:
-    where = f"{KIND_DIRS[pkg.kind]}/{pkg.name}/{path.relative_to(pkg.pkg_dir)}"
+    where = f"{pkg_path(pkg.kind, pkg.name)}/{path.relative_to(pkg.pkg_dir)}"
     try:
         data = load_yaml(path)
     except RigError as exc:
@@ -154,12 +170,17 @@ def _validate_service(pkg: Package, reg: Registry, issues: list[Issue]) -> None:
 
 
 def _validate_profile(pkg: Package, reg: Registry, issues: list[Issue]) -> None:
-    where = f"profiles/{pkg.name}/manifest.yaml"
+    where = f"{pkg_path('profile', pkg.name)}/manifest.yaml"
     m = pkg.manifest
     req = (m.get("requires") or {}).get("service") if isinstance(m.get("requires"), dict) else None
     if not isinstance(req, str) or not (match := _CONSTRAINT.match(req)):
         issues.append(Issue(where, f"`requires.service` must be `[ns/]name@[^]X.Y[.Z]`, got {req!r}"))
     else:
+        svc_dir = pkg.name.partition(":")[0]  # placement law: the path is a PROJECTION of the
+        if match["name"] != svc_dir:          # manifest — requires.service names the parent dir
+            issues.append(Issue(where, f"placement: `requires.service` names '{match['name']}' but "
+                                       f"the profile sits under profiles/{svc_dir}/ — the dir must "
+                                       f"be the target service (unqualified)"))
         ref = (f"{match['ns']}/" if match["ns"] else "") + match["name"]
         _check_ref_resolves(ref, "service", reg, where, issues, what="requires.service")
         dep = reg.packages.get(match["name"]) if (not match["ns"] or match["ns"] == reg.namespace) else None
@@ -184,7 +205,7 @@ def _validate_profile(pkg: Package, reg: Registry, issues: list[Issue]) -> None:
             except (OSError, json.JSONDecodeError) as exc:
                 issues.append(Issue(where, f"`config.overrides_schema` is not valid JSON: {exc}"))
                 return
-            _schema_check(payload, schema, f"profiles/{pkg.name} payload", "", issues)
+            _schema_check(payload, schema, f"{pkg_path('profile', pkg.name)} payload", "", issues)
     # Fork-lineage staleness (the profile mirror of overlay authored_against): in-registry
     # parents only — cross-registry parents (the common public-base case) are surfaced
     # consumer-side by `pkg info`. Drift = WARNING; `rig pkg rebase` is the fix.
@@ -329,6 +350,11 @@ def load_registry(root: Path, issues: list[Issue]) -> Registry:
     elif schema > MAX_SUPPORTED:
         raise RigError(f"{root}: registry schema {schema} is newer than this rig understands "
                        f"(max {MAX_SUPPORTED}) — upgrade rig")
+    elif schema < SCHEMA:
+        raise RigError(f"{root}: registry schema {schema} predates this rig (needs {SCHEMA}) — "
+                       f"migrate: nest each profile under its target service "
+                       f"(profiles/<service>/<short>/), set `schema: {SCHEMA}` in registry.yaml, "
+                       f"regenerate index.json")
     ns = meta.get("namespace")
     if not isinstance(ns, str) or not _NAME.match(ns):
         issues.append(Issue("registry.yaml", f"`namespace` must match [a-z][a-z0-9-]*, got {ns!r}"))
@@ -338,11 +364,27 @@ def load_registry(root: Path, issues: list[Issue]) -> Registry:
         kind_dir = root / plural
         if not kind_dir.is_dir():
             continue
-        for pkg_dir in sorted(p for p in kind_dir.iterdir() if p.is_dir()):
-            where = f"{plural}/{pkg_dir.name}/manifest.yaml"
+        if kind == "profile":  # schema 2: profiles/<service>/<short>/ — key = "service:short"
+            found: list[tuple[Path, str]] = []
+            for svc_dir in sorted(p for p in kind_dir.iterdir() if p.is_dir()):
+                if (svc_dir / "manifest.yaml").is_file():
+                    issues.append(Issue(f"{plural}/{svc_dir.name}", "flat profile layout — schema "
+                                        f"{SCHEMA} nests profiles under their target service "
+                                        f"({plural}/<service>/{svc_dir.name}/)"))
+                    continue
+                if not _NAME.match(svc_dir.name):
+                    issues.append(Issue(f"{plural}/{svc_dir.name}",
+                                        "service dir must match [a-z][a-z0-9-]*"))
+                    continue
+                found.extend((p, f"{svc_dir.name}:") for p in sorted(svc_dir.iterdir()) if p.is_dir())
+        else:
+            found = [(p, "") for p in sorted(kind_dir.iterdir()) if p.is_dir()]
+        for pkg_dir, key_prefix in found:
+            rel = str(pkg_dir.relative_to(root))
+            where = f"{rel}/manifest.yaml"
             manifest_path = pkg_dir / "manifest.yaml"
             if not manifest_path.is_file():
-                issues.append(Issue(f"{plural}/{pkg_dir.name}", "missing manifest.yaml"))
+                issues.append(Issue(rel, "missing manifest.yaml"))
                 continue
             try:
                 m = load_yaml(manifest_path)
@@ -355,7 +397,8 @@ def load_registry(root: Path, issues: list[Issue]) -> Registry:
             if name != pkg_dir.name:
                 issues.append(Issue(where, f"`name` ({name!r}) must match the package dir ({pkg_dir.name})"))
             if not isinstance(name, str) or not _NAME.match(name or ""):
-                issues.append(Issue(where, f"`name` must match [a-z][a-z0-9-]*, got {name!r}"))
+                issues.append(Issue(where, f"`name` must match [a-z][a-z0-9-]* (profiles: the "
+                                           f"SHORT name — the service comes from the dir), got {name!r}"))
                 continue
             if kind == "service" and name in ("sensor", "project"):
                 issues.append(Issue(where, f"service name '{name}' is reserved — `{name}:` is a "
@@ -365,13 +408,14 @@ def load_registry(root: Path, issues: list[Issue]) -> Registry:
             if not _VERSION.match(version):
                 issues.append(Issue(where, f"`version` must be exact X.Y.Z, got {version!r}"))
                 continue
-            if name in packages:
-                other = packages[name]
-                issues.append(Issue(where, f"package name '{name}' collides with "
-                                           f"{KIND_DIRS[other.kind]}/{other.name} — names are unique "
-                                           f"across ALL kinds (the index keys by bare name)"))
+            key = key_prefix + name
+            if key in packages:
+                other = packages[key]
+                issues.append(Issue(where, f"package key '{key}' collides with "
+                                           f"{pkg_path(other.kind, other.name)} — keys are unique "
+                                           f"across ALL kinds (the index keys by them)"))
                 continue
-            packages[name] = Package(kind=kind, name=name, version=version, pkg_dir=pkg_dir, manifest=m)
+            packages[key] = Package(kind=kind, name=key, version=version, pkg_dir=pkg_dir, manifest=m)
     return Registry(root=root, meta=meta, packages=packages)
 
 
@@ -412,7 +456,7 @@ def generate_index(reg: Registry) -> dict:
     precedence tier, project tag → overlays/suites. Pure function of the manifests — regenerating
     twice yields identical bytes (CI's staleness check depends on that)."""
     packages = {
-        name: {"kind": p.kind, "version": p.version, "path": f"{KIND_DIRS[p.kind]}/{p.name}"}
+        name: {"kind": p.kind, "version": p.version, "path": pkg_path(p.kind, p.name)}
         for name, p in reg.packages.items()
     }
     sensors: dict[str, list[dict]] = {}

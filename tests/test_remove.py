@@ -58,7 +58,7 @@ def test_service_survives_while_second_instance_remains():
         assert _run("--root", str(root), "pkg", "remove", "acme_cam")[0] == 0
         assert (root / "services" / "camish").exists()                 # cam_b still needs it
         lock = load_lock(root)
-        assert "testns/acme-cam@2.0.0" in lock["packages"]             # profile still used by cam_b
+        assert "testns/camish:acme-cam@2.0.0" in lock["packages"]             # profile still used by cam_b
         assert _run("--root", str(root), "pkg", "remove", "cam_b")[0] == 0
         assert not (root / "services" / "camish").exists()             # last user gone -> GC
 

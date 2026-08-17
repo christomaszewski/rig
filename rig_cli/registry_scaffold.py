@@ -169,7 +169,8 @@ def _schemas() -> dict[str, dict]:
         },
         "profile": {
             "$schema": "https://json-schema.org/draft/2020-12/schema",
-            "title": "profile manifest", "type": "object",
+            "title": "profile manifest (schema 2: lives at profiles/<service>/<short>/; `name` is "
+                     "the SHORT half — the identity is the `service:short` tuple)", "type": "object",
             "required": ["kind", "name", "version", "requires", "config"],
             "properties": {**common, "kind": {"const": "profile"},
                            "provides": {"type": "object", "properties": {
@@ -210,8 +211,8 @@ def _schemas() -> dict[str, dict]:
                            "members": {"type": "object", "additionalProperties": False,
                                        "properties": {k: {"type": "array", "items": {
                                            "type": "string",
-                                           "pattern": "^[a-z][a-z0-9-]*/[a-z][a-z0-9-]*@"
-                                                      r"\d+\.\d+\.\d+$"}}
+                                           "pattern": "^[a-z][a-z0-9-]*/(?:[a-z][a-z0-9-]*:)?"
+                                                      r"[a-z][a-z0-9-]*@\d+\.\d+\.\d+$"}}
                                            for k in ("services", "profiles", "overlays")}}},
         },
         "index": {

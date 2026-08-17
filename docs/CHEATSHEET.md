@@ -78,10 +78,12 @@ rig add public/zenoh-router        # infra from the registry: repo cloned AT THE
                                    #   VENDORED into services/, config from its example, rig.lock written
 rig add sensor:zr30                # match a profile (exact → glob → fallback), install its service
                                    #   transitively, materialize the payload as the EDITABLE config
-rig pkg search ouster:             # profiles by REQUIRED SERVICE, across registries ("what drives
-                                   #   ouster?" — derived from requires.service; `ouster:gen*` globs)
-rig add ouster:generic             # install the profile NAMED generic that drives ouster — exact
-                                   #   name, so priority order alone decides across registries
+rig pkg search ouster:             # profiles for a service, across registries ("what drives
+                                   #   ouster?"); `ouster:gen*` globs the short half
+rig add ouster:generic             # profile identity IS the tuple <service>:<short> (schema 2) —
+                                   #   this is a plain ref: unqualified = priority order, or pin
+                                   #   with <registry>/ouster:generic@1.0.0. On disk the profile
+                                   #   lives at profiles/ouster/generic/ in its registry.
 
 ```
 
@@ -108,7 +110,7 @@ rig pkg promote siyi_zr30 --kind profile --name org-zr30 --to internal --adopt
                                    #   lineage) and ADOPT it: instance re-pins to the fork, render
                                    #   identical — the three-tier shape: public base -> internal org
                                    #   profile -> project overlays bound per deployment
-rig registry sync && rig pkg rebase org-zr30 --to internal
+rig registry sync && rig pkg rebase camera-service:org-zr30 --to internal
                                    # public base moved? three-way the fork onto it (D vs old parent
                                    #   replayed on the new one; conflicts keep YOURS, loudly; old
                                    #   parent payload served from the registry's git history).

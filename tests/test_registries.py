@@ -53,7 +53,7 @@ def _seed_registry(ns="testns", pkgs=True) -> pathlib.Path:
         (d / "manifest.yaml").write_text(yaml.safe_dump({
             "kind": "service", "name": "camera-service", "version": "1.4.2",
             "source": {"repo": "https://example.com/x.git", "rev": "a" * 40}}))
-        p = root / "profiles" / "siyi-zr30"
+        p = root / "profiles" / "camera-service" / "siyi-zr30"
         (p / "config").mkdir(parents=True)
         (p / "manifest.yaml").write_text(yaml.safe_dump({
             "kind": "profile", "name": "siyi-zr30", "version": "1.0.0",
@@ -176,7 +176,7 @@ def test_sync_warns_on_stale_index():
         _run("registry", "add", "testns", "--path", str(reg))
         rc, _, err = _run("registry", "sync")
         assert rc == 0 and "STALE" not in err
-        mpath = reg / "profiles" / "siyi-zr30" / "manifest.yaml"    # a merge whose CI forgot the
+        mpath = reg / "profiles" / "camera-service" / "siyi-zr30" / "manifest.yaml"    # a merge whose CI forgot the
         mpath.write_text(mpath.read_text().replace("1.0.0", "1.0.1"))  # index regen
         rc, _, err = _run("registry", "sync")
         assert rc == 0 and "STALE" in err                           # split-world surfaced at sync
@@ -221,11 +221,11 @@ def test_info_versioned_ref_and_authored_against():
         reg = _seed_registry(ns="testns")
         _add_overlay(reg)
         _run("registry", "add", "testns", "--path", str(reg))
-        rc, out, _ = _run("pkg", "info", "testns/siyi-zr30@0.9.9")   # @version now PARSES
+        rc, out, _ = _run("pkg", "info", "testns/camera-service:siyi-zr30@0.9.9")   # @version now PARSES
         assert rc == 0 and "you asked about @0.9.9" in out and "1.0.0" in out
         rc, out, _ = _run("pkg", "info", "testns/zr30-gideon")
         assert rc == 0 and "authored_against: service: camera-service@1.4.2" in out
-        rc, out, _ = _run("pkg", "info", "testns/siyi-zr30")
+        rc, out, _ = _run("pkg", "info", "testns/camera-service:siyi-zr30")
         assert "requires: None" not in out                   # absent fields stay silent
 
 
@@ -235,14 +235,14 @@ def test_pkg_search_and_info_across_registries():
         reg = _seed_registry(ns="testns")
         _run("registry", "add", "testns", "--path", str(reg))
         rc, out, _ = _run("pkg", "search", "zr30")
-        assert rc == 0 and "testns/siyi-zr30" in out and "profile" in out
+        assert rc == 0 and "testns/camera-service:siyi-zr30" in out and "profile" in out
         rc, out, _ = _run("pkg", "search", "sensor:zr30")
         assert rc == 0 and "match: exact" in out
         rc, out, _ = _run("pkg", "search", "sensor:usb:1234:5678")  # glob identifier covers it
         assert rc == 0 and "match: glob" in out
         rc, out, _ = _run("pkg", "search", "nope-nothing")
         assert rc == 1 and "no matches" in out          # scriptable: no hits = nonzero
-        rc, out, _ = _run("pkg", "info", "testns/siyi-zr30")
+        rc, out, _ = _run("pkg", "info", "testns/camera-service:siyi-zr30")
         assert rc == 0 and "requires: camera-service@^1.4" in out and "SIYI ZR30" in out
         rc, out, _ = _run("pkg", "info", "camera-service")  # unqualified resolves priority order
         assert rc == 0 and "source: https://example.com/x.git" in out
@@ -259,8 +259,8 @@ def test_pkg_search_priority_order_and_shadowing():
         _run("registry", "add", "high", "--path", str(high), "--front")
         rc, out, _ = _run("pkg", "search", "siyi")
         assert rc == 0
-        assert out.index("high/siyi-zr30") < out.index("low/siyi-zr30")  # priority order printed first
-        rc, out, _ = _run("pkg", "info", "siyi-zr30")
+        assert out.index("high/camera-service:siyi-zr30") < out.index("low/camera-service:siyi-zr30")  # priority order printed first
+        rc, out, _ = _run("pkg", "info", "camera-service:siyi-zr30")
         assert rc == 0 and out.splitlines()[0].startswith("high/")
 
 
