@@ -675,21 +675,24 @@ def build_parser() -> argparse.ArgumentParser:
     pp.add_argument("--all", action="store_true", dest="all_dirty",
                     help="promote every dirty instance (one overlay each)")
     pp.add_argument("--name", default=None, help="package name (single instance only; default: "
-                    "<instance>[-<project>])")
+                    "the provenance profile's name for --kind profile, else <instance>[-<project>])")
     pp.add_argument("--project", default=None, help="project tag (searchable axis; also the "
                     "default name suffix)")
-    pp.add_argument("--kind", choices=["overlay", "profile"], default="overlay",
-                    help="overlay = the delta (default); profile = the full effective config "
-                         "(migration path for hand-authored instances)")
+    pp.add_argument("--kind", choices=["overlay", "profile"], default=None,
+                    help="overlay = the delta; profile = the full effective config. Default: "
+                         "overlay for registry-based instances, profile for hand-authored "
+                         "(no pinned base — an overlay is impossible)")
     pp.add_argument("--suite", default=None, metavar="NAME",
                     help="also emit a suite referencing the deployment's profiles + the new "
                          "overlays in binding order")
     pp.add_argument("--bump", action="store_true",
-                    help="the package exists in the target — publish the next patch version")
+                    help="the package exists in the target — publish the next patch version "
+                         "(implied when updating the exact profile the instance is pinned to)")
     pp.add_argument("--target-instance", action="store_true", dest="target_instance",
                     help="scope the overlay to THIS instance name instead of its service")
     pp.add_argument("--match", action="append", default=[], metavar="ID",
-                    help="(--kind profile) hardware match identifier (repeatable)")
+                    help="(--kind profile) hardware match identifier (repeatable; REPLACES the "
+                         "existing package's match set on a re-promote)")
     pp.add_argument("--requires", default=None, metavar="REF",
                     help="(--kind profile) service requirement override (ns/service@X.Y.Z)")
 

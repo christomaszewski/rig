@@ -179,6 +179,122 @@ def test_promote_to_git_registry_branches_and_keeps_cache_clean():
         assert "width: 640" in show
 
 
+# --- update flow: name-from-provenance, auto-bump, carry-forward, inference (v0.1.61) -----------
+
+
+def test_repromote_carries_forward_and_autobumps_on_provenance():
+    # Updating the profile the instance is PINNED to: name defaults from provenance, --bump is
+    # implied, and the existing manifest's provides/overrides_schema survive the rewrite.
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        root, reg = _world()
+        working = _install_acme(root)                       # pins testns/acme-cam@2.0.0
+        mpath = reg / "profiles" / "acme-cam" / "manifest.yaml"
+        m = yaml.safe_load(mpath.read_text())               # hand-add a schema, like a registry author
+        m["config"]["overrides_schema"] = "config/schema.json"
+        mpath.write_text(yaml.safe_dump(m))
+        (reg / "profiles" / "acme-cam" / "config" / "schema.json").write_text('{"type": "object"}')
+        working.write_text(working.read_text().replace("width: 1280", "width: 3840"))
+        rc, _, err = _run("--root", str(root), "pkg", "promote", "acme_cam",
+                          "--kind", "profile", "--to", "testns")   # no --name, no --bump
+        assert rc == 0, err
+        assert "auto-bump" in err
+        m = yaml.safe_load(mpath.read_text())
+        assert m["version"] == "2.0.1"                             # bumped the EXISTING package
+        assert m["provides"]["sensor"][0]["model"] == "ACME Cam"   # carried, not regenerated
+        assert m["provides"]["sensor"][0]["match"] == ["acme", "usb:9999:*"]
+        assert m["config"]["overrides_schema"] == "config/schema.json"
+        payload = yaml.safe_load(
+            (reg / "profiles" / "acme-cam" / "config" / "payload.yaml").read_text())
+        assert payload["usb"]["width"] == 3840
+        # --match REPLACES the carried set (still auto-bumped)
+        rc, _, err = _run("--root", str(root), "pkg", "promote", "acme_cam",
+                          "--kind", "profile", "--to", "testns", "--match", "neo")
+        assert rc == 0, err
+        m = yaml.safe_load(mpath.read_text())
+        assert m["version"] == "2.0.2" and m["provides"]["sensor"][0]["match"] == ["neo"]
+
+
+def test_profile_bump_still_required_without_provenance_match():
+    # A bare NAME collision in a registry the provenance does not point at keeps the guard.
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        root, _ = _world()
+        working = _install_acme(root)
+        internal = _internal()
+        working.write_text(working.read_text() + "extra: 1\n")
+        assert _run("--root", str(root), "pkg", "promote", "acme_cam", "--kind", "profile",
+                    "--name", "acme-cam", "--to", "internal")[0] == 0        # fresh 1.0.0
+        rc, _, err = _run("--root", str(root), "pkg", "promote", "acme_cam", "--kind", "profile",
+                          "--name", "acme-cam", "--to", "internal")
+        assert rc == 1 and "--bump" in err          # provenance says testns/, target is internal/
+        m = yaml.safe_load((internal / "profiles" / "acme-cam" / "manifest.yaml").read_text())
+        assert m["version"] == "1.0.0"              # refusal wrote nothing
+
+
+def test_kind_inferred_profile_for_hand_authored_instance():
+    # No pinned base ⇒ overlay is impossible ⇒ bare promote infers profile, loudly.
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        root, _ = _world()
+        _install_acme(root)                          # routes camish + locks its service pin
+        internal = _internal()
+        (root / "config" / "sensors" / "handy.yaml").write_text(
+            "camera: {type: usb}\nusb: {width: 111}\n")
+        veh = root / "vehicle.yaml"
+        body = veh.read_text()
+        row = next(line for line in body.splitlines() if "name: acme_cam" in line)
+        indent = row[:len(row) - len(row.lstrip())]
+        veh.write_text(body.replace(row, row + "\n" + indent + "- { name: handy, service: camish, "
+                                    "config: config/sensors/handy.yaml, enabled: true, order: 20 }"))
+        rc, _, err = _run("--root", str(root), "pkg", "promote", "handy", "--to", "internal")
+        assert rc == 0, err
+        assert "PROFILE" in err                      # the loud inference note
+        m = yaml.safe_load((internal / "profiles" / "handy" / "manifest.yaml").read_text())
+        assert m["kind"] == "profile" and m["requires"]["service"] == "testns/camish@1.2.0"
+        payload = yaml.safe_load(
+            (internal / "profiles" / "handy" / "config" / "payload.yaml").read_text())
+        assert payload["usb"]["width"] == 111 and "name" not in payload
+        assert _run("registry", "validate", str(internal))[0] == 0
+
+
+def test_alias_neq_namespace_emits_registry_namespace():
+    # Manifests are registry-side documents: refs carry the registry's OWN namespace, never the
+    # consumer's alias (else suite members don't resolve and staleness checks never fire).
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        root, _ = _world()
+        working = _install_acme(root)
+        reg = pathlib.Path(tempfile.mkdtemp()) / "corp-reg"
+        with contextlib.redirect_stderr(io.StringIO()):
+            registry_init(reg, namespace="corp")     # namespace 'corp' …
+        _run("registry", "add", "internal", "--path", str(reg))  # … added under alias 'internal'
+        working.write_text(working.read_text().replace("width: 1280", "width: 640"))
+        rc, _, err = _run("--root", str(root), "pkg", "promote", "--all", "--project", "g",
+                          "--suite", "s", "--to", "internal")
+        assert rc == 0, err
+        s = yaml.safe_load((reg / "suites" / "s" / "manifest.yaml").read_text())
+        assert s["members"]["overlays"] == ["corp/acme-cam-g@1.0.0"]   # namespace, NOT the alias
+        assert s["members"]["profiles"] == ["testns/acme-cam@2.0.0"]   # foreign ref: alias == ns
+        assert _run("registry", "validate", str(reg))[0] == 0
+
+
+def test_failed_repromote_restores_preexisting_package():
+    # Rollback must RESTORE a package that predated this promote — never delete it.
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        root, _ = _world()
+        working = _install_acme(root)
+        internal = _internal()
+        working.write_text(working.read_text() + "extra: 1\n")
+        assert _run("--root", str(root), "pkg", "promote", "acme_cam", "--kind", "profile",
+                    "--name", "keeper", "--to", "internal", "--match", "idA")[0] == 0
+        (internal / "profiles" / "keeper" / "NOTES.md").write_text("precious\n")
+        rc, _, err = _run("--root", str(root), "pkg", "promote", "acme_cam", "--kind", "profile",
+                          "--name", "keeper", "--to", "internal", "--bump",
+                          "--requires", "internal/ghost@9.9.9")   # unresolvable -> validation fails
+        assert rc == 1, "sabotaged promote should fail validation"
+        m = yaml.safe_load((internal / "profiles" / "keeper" / "manifest.yaml").read_text())
+        assert m["version"] == "1.0.0"                            # restored, not deleted
+        assert m["provides"]["sensor"][0]["match"] == ["idA"]
+        assert (internal / "profiles" / "keeper" / "NOTES.md").read_text() == "precious\n"
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

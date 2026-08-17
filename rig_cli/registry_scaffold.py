@@ -195,6 +195,9 @@ def _schemas() -> dict[str, dict]:
                                               "instance": {"type": "string",
                                                            "pattern": "^[a-z][a-z0-9_]*$"}}}},
                            "project": {"type": "string"},
+                           "authored_against": {"type": "object", "properties": {
+                               "service": {"type": "string"},
+                               "profile": {"type": "string"}}},
                            "config": {"type": "object", "required": ["payload"],
                                       "properties": {"payload": relpath}}},
         },

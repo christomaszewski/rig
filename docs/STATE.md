@@ -1,8 +1,14 @@
 # rig — project state & handoff (resume here)
 
 > Snapshot for picking the project up cold in a new session. Read this first, then `CHEATSHEET.md` /
-> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.1.60**,
-> branch **`main`**, 232 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.1.61**,
+> branch **`main`**, 237 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> **Promote update-flow SHIPPED** (v0.1.61): re-promotes carry the existing manifest forward
+> (provides/match/overrides_schema survive a bump; authored_against always re-stamped), the profile
+> name defaults from the row's provenance, bare promote infers `--kind profile` for hand-authored
+> instances (overlay impossible), `--bump` is implied when provenance proves the target IS the
+> pinned package (name collisions still refuse), registry-side refs are requalified
+> alias→namespace, rollback restores (never deletes) pre-existing packages.
 > **Run config snapshots SHIPPED** (v0.1.60, ROADMAP §3c "Config snapshots"): every `rig up` captures
 > the effective config (vehicle.yaml + lock + resolved vars + rendered instance configs) into the open
 > run at `runs/<id>/.rig/config/<digest12>/` (content-addressed, dedup'd) + an `ups:` event log in the
