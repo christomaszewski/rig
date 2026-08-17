@@ -411,6 +411,19 @@ deployment updates + validation ≈ the rest). Requires creating the GitHub repo
 CI checkout secret-free like rig/camera-service).
 
 ## 4. Other tracked items
+- **`rig fleet` verb group** (planned; fleet.yaml shipped as a convention in v0.1.65): GCS-side
+  fan-out over the per-vehicle surface — NEVER a control plane. Invariants: transport is the
+  system's ssh/scp (no stored credentials, no agent, no daemon); the remote end is the
+  artifact's own `./run.sh`/`./rig` at the roster row's path; fail-SOFT per vehicle (an
+  unreachable vehicle mars its row, never aborts the sweep — DDIL); explicit roster only, no
+  discovery; no config side-channel (vars ride `RIG_VAR_*` forwarding and land in run
+  snapshots). Rows are (host, path) pairs — N `localhost` rows with distinct paths = a SIL
+  fleet on one machine (localhost rows skip ssh; a future `fleet doctor` can aggregate
+  host_ports across rows for the cross-deployment clash per-deployment doctor can't see).
+  Phases: `list`/`status`/`sync` (read-only + sealed-run harvest, keyed off the
+  `ended:` ⇔ safe-to-sync manifest contract) → `up --run <label>`/`down [--end-run]`
+  (correlated run labels across the fleet) → `provision`/`deploy` (only once the plumbing has
+  hardened — they touch sudo and fresh machines).
 - **Boot-time bring-up**: a systemd unit running `rig up` (Compose handles per-stack restart thereafter).
 - **ROS `/diagnostics`** as the second health layer in `rig status`.
 - **Host-facing port-clash** extraction for list-structured configs — ✅ done: `host_ports` supports an
@@ -459,6 +472,10 @@ CHEATSHEET §1.5–1.6):
 - **v0.1.62** correctness batch: `pkg upgrade` covers bound overlays (rebound in place) and is
   all-or-nothing (content-level rollback, install too); service pin collisions error; overlay
   binding hygiene; `--locked` verifies `source.rev`; sync warns on a stale index.
+- **v0.1.65** `{{map <list_var> <template_var>}}` (whole-scalar, renders a LIST; template-as-var
+  makes field vs SIL a tiering swap) + derived `fleet_peer_ids` (fleet_ids minus THIS vehicle) —
+  peer endpoints, self excluded, one artifact for all; MAP-aware fleet detection; `rig init`
+  scaffolds the vars/env convention (gcs_ip) and gitignores vehicle.local.yaml + fleet.yaml.
 - **v0.1.64** UX batch: `pkg info @version` + authored_against + local state; dirty markers in
   `pkg list`; upgrade hints in `config diff`; search covers project tags/targets; `overlay
   list` as a status view; `pkg lock` on stdout + overlay payload verification; one parse_ref.

@@ -231,6 +231,100 @@ def test_local_can_set_registry_and_data_dir():
         assert m.data_dir == "/data/bench" and m.vars["data_dir"] == "/data/bench"
 
 
+# --- {{map}} form + fleet_peer_ids derived built-in (v0.1.65) -----------------------------------
+
+
+def test_map_form_primitives():
+    v = {"fleet_ids": [1, 2, 7], "tmpl": "tcp/10.0.0.{}:7447", "csv": "3, 9", "bad_tmpl": "x"}
+    assert substitute_scalar("{{map fleet_ids tmpl}}", v, where="t") == \
+        ["tcp/10.0.0.1:7447", "tcp/10.0.0.2:7447", "tcp/10.0.0.7:7447"]   # ints stringified
+    assert substitute_scalar("{{map csv tmpl}}", v, where="t") == \
+        ["tcp/10.0.0.3:7447", "tcp/10.0.0.9:7447"]                        # comma-string coerced
+    for text, msg in (("{{map fleet_ids nope}}", "unknown var"),
+                      ("{{map nope tmpl}}", "unknown var"),
+                      ("{{map fleet_ids bad_tmpl}}", "placeholder"),
+                      ("prefix {{map fleet_ids tmpl}}", "whole-scalar only")):
+        try:
+            substitute_scalar(text, v, where="t")
+            raise AssertionError(f"expected RigError for {text!r}")
+        except RigError as exc:
+            assert msg in str(exc), f"{text!r}: {exc}"
+    assert referenced_vars({"a": "{{map fleet_peer_ids tmpl}}"}) == {"fleet_peer_ids", "tmpl"}
+
+
+def test_map_form_rejected_in_vars_mapping():
+    try:
+        resolve_map({"peers": "{{map fleet_ids tmpl}}"}, where="vars")
+        raise AssertionError("expected RigError")
+    except RigError as exc:
+        assert "CONFIG files" in str(exc)
+
+
+def test_fleet_peer_ids_derivation_and_typing():
+    # int-vs-str across sources: YAML id 7 must exclude "7" and 7 alike.
+    root = _deployment("vehicle: t\nvehicle_id: 7\nvars: {fleet_ids: ['7', 8, 9]}\nsensors: []\n")
+    with _env(RIG_VEHICLE_LOCAL=_NO_MACHINE, RIG_VEHICLE_ID=None):
+        m = load_manifest(root)
+        assert m.vars["fleet_peer_ids"] == [8, 9]           # self excluded; native types kept
+    with _env(RIG_VEHICLE_LOCAL=_NO_MACHINE, RIG_VEHICLE_ID="8"):
+        assert load_manifest(root).vars["fleet_peer_ids"] == ["7", 9]  # shell id (str) excludes int 8
+    # shell-supplied comma string works end to end
+    with _env(RIG_VEHICLE_LOCAL=_NO_MACHINE, RIG_VEHICLE_ID=None, RIG_VAR_fleet_ids="7,8"):
+        assert load_manifest(root).vars["fleet_peer_ids"] == ["8"]
+    # no fleet_ids -> derived var absent (unknown-var error on reference, house style)
+    bare = _deployment("vehicle: t\nvehicle_id: 7\nsensors: []\n")
+    with _env(RIG_VEHICLE_LOCAL=_NO_MACHINE, RIG_VEHICLE_ID=None):
+        assert "fleet_peer_ids" not in load_manifest(bare).vars
+    # unprovisioned (no vehicle_id) -> absent, never a self-including list
+    unprov = _deployment('vehicle: t\nvehicle_id: "{{vehicle_id}}"\n'
+                         "vars: {fleet_ids: [1, 2]}\nsensors: []\n")
+    with _env(RIG_VEHICLE_LOCAL=_NO_MACHINE, RIG_VEHICLE_ID=None, RIG_VEHICLE_NAME=None):
+        assert "fleet_peer_ids" not in load_manifest(unprov).vars
+    # explicit operator override wins (setdefault)
+    over = _deployment("vehicle: t\nvehicle_id: 7\n"
+                       "vars: {fleet_ids: [7, 8], fleet_peer_ids: [99]}\nsensors: []\n")
+    with _env(RIG_VEHICLE_LOCAL=_NO_MACHINE, RIG_VEHICLE_ID=None):
+        assert load_manifest(over).vars["fleet_peer_ids"] == [99]
+
+
+def test_map_form_rejected_in_env_and_manifest_fields():
+    root = _deployment("vehicle: t\nvehicle_id: 7\n"
+                       "vars: {fleet_ids: [7, 8], tmpl: 'tcp/{}'}\n"
+                       'env: {PEERS: "{{map fleet_peer_ids tmpl}}"}\nsensors: []\n')
+    with _env(RIG_VEHICLE_LOCAL=_NO_MACHINE, RIG_VEHICLE_ID=None):
+        try:
+            load_manifest(root)
+            raise AssertionError("expected RigError")
+        except RigError as exc:
+            assert "CONFIG files" in str(exc)
+
+
+def test_map_renders_peer_endpoints_excluding_self():
+    root = _deployment(
+        """
+        vehicle: t
+        vehicle_id: 3
+        vars:
+          fleet_ids: [3, 9]
+          peer_endpoint: tcp/10.0.0.{}:7447
+        sensors:
+          - {name: router, service: zenoh-router, config: config/sensors/router.yaml}
+        """,
+        files={"config/sensors/router.yaml":
+               'service: zenoh-router\nname: router\n'
+               'connect: "{{map fleet_peer_ids peer_endpoint}}"\n'})
+    with _env(RIG_VEHICLE_LOCAL=_NO_MACHINE, RIG_VEHICLE_ID=None, RIG_VAR_peer_endpoint=None):
+        m = materialize_manifest(load_manifest(root), root)
+        cfg = yaml.safe_load(pathlib.Path(m.sensors[0].config).read_text())
+        assert cfg["connect"] == ["tcp/10.0.0.9:7447"]      # a real LIST, self excluded
+    # THE SIL swap: same deployment, ports instead of IPs, via the shell tier
+    with _env(RIG_VEHICLE_LOCAL=_NO_MACHINE, RIG_VEHICLE_ID=None,
+              RIG_VAR_peer_endpoint="tcp/127.0.0.1:744{}"):
+        m = materialize_manifest(load_manifest(root), root)
+        cfg = yaml.safe_load(pathlib.Path(m.sensors[0].config).read_text())
+        assert cfg["connect"] == ["tcp/127.0.0.1:7449"]
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

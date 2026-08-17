@@ -170,7 +170,9 @@ Per-vehicle values flow through `{{var}}` markers (never `${VAR}` — that's com
 manifest scalars may reference `{{vehicle_id}}`, `vars:` entries, etc., resolved at render from
 shell (`RIG_VAR_*`) > `vehicle.local.yaml` > `/etc/rig/vehicle.local.yaml` > `vehicle.yaml`
 defaults. A self-marker (`vehicle_id: "{{vehicle_id}}"`) makes the value MANDATORY per vehicle.
-An `env:` map exports extra (interpolated) variables to every launcher. CHEATSHEET §1.6.
+An `env:` map exports extra (interpolated) variables to every launcher. One mapping form,
+`{{map <list_var> <template_var>}}`, builds lists (e.g. zenoh peer endpoints from
+`{{fleet_peer_ids}}` — the fleet minus THIS vehicle, derived). CHEATSHEET §1.6.
 
 ### `services.yaml` (catalog)
 Maps each `service` routing key to its repo `path` (resolved relative to this repo). The key may differ

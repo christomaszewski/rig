@@ -43,7 +43,8 @@ _VEHICLE_HEAD = """\
 # vehicle.yaml — vehicle identity, fleet-wide settings, shared infra, and sensors.
 vehicle: {name}
 vehicle_id: {vehicle_id}           # identity; decides the ROS domain (override via ros.domain_id) + exported as
-                        #   VEHICLE_ID. (Planned: fleet mode resolves this on-vehicle from a host file/env.)
+                        #   VEHICLE_ID. Fleet artifacts resolve it on-vehicle (`rig provision`
+                        #   writes /etc/rig/vehicle.local.yaml; RIG_VEHICLE_ID overrides).
 ros:
   # domain_id: 0        # defaults to vehicle_id
   rmw: rmw_zenoh_cpp    # rmw_zenoh needs a zenoh-router in infra: (below); use rmw_fastrtps_cpp for DDS
@@ -52,6 +53,13 @@ images:
   registry: ""          # where stacks pull images from (e.g. devbox:5000); empty = local images
   tag: ""               # e.g. jp7 (the target's JetPack) -> RIG_IMAGE_TAG for platform-specific composes
 data_dir: ""            # host dir for recordings/logs/outputs -> RIG_DATA_DIR (e.g. /data); empty = none
+# vars:                 # fleet/per-vehicle values -> {{{{var}}}} in any config (CHEATSHEET §1.6);
+#   gcs_ip: 10.0.0.10   #   override per vehicle/test via vehicle.local.yaml or RIG_VAR_<name>
+#   fleet_ids: [1, 2]   #   rig derives {{{{fleet_peer_ids}}}} = fleet_ids minus THIS vehicle's id
+#   peer_endpoint: tcp/10.0.0.{{}}:7447   # a config key then maps ids -> endpoints, self excluded:
+#                       #   connect: "{{{{map fleet_peer_ids peer_endpoint}}}}"
+# env:                  # exported to launchers after interpolation (for compose ${{GCS_IP}} refs):
+#   GCS_IP: "{{{{gcs_ip}}}}"
 """
 
 _SERVICES_EMPTY = """\
@@ -365,7 +373,9 @@ def init(target: Path, *, vehicle_id: int = 1, infra: list[str] | None = None,
     (target / "vehicle.yaml").write_text(_vehicle_yaml(target.name, vehicle_id, infra_rows, menu))
     (target / "services.yaml").write_text(_services_yaml(services))
     (target / "README.md").write_text(_README.format(name=target.name))
-    (target / ".gitignore").write_text("var/\n.venv/\n__pycache__/\n*.pyc\n.DS_Store\n")
+    (target / ".gitignore").write_text(  # vehicle.local.yaml + fleet.yaml are OPERATIONAL state
+        "var/\n.venv/\n__pycache__/\n*.pyc\n.DS_Store\n"     # (bench identity / test-day roster)
+        "vehicle.local.yaml\nfleet.yaml\n")                  # — committed only by choice
     (target / "config" / "sensors" / ".gitkeep").write_text("")
     (target / "config" / "infra" / ".gitkeep").write_text("")
     (target / "config" / "autonomy" / ".gitkeep").write_text("")

@@ -592,12 +592,18 @@ def is_fleet(root: Path) -> bool:
 
 
 def fleet_refs(root: Path) -> set[str]:
-    from .interpolate import MARKER
-    refs: set[str] = set(MARKER.findall((root / "vehicle.yaml").read_text()))
+    from .interpolate import MAP, MARKER
+
+    def _scan(text: str) -> set[str]:
+        # MARKER does not match `{{map a b}}` — a map-ONLY deployment must still read as fleet,
+        # so both of the form's var names are harvested too.
+        return set(MARKER.findall(text)) | {g for m in MAP.finditer(text) for g in m.groups()}
+
+    refs: set[str] = _scan((root / "vehicle.yaml").read_text())
     cfg = root / "config"
     if cfg.is_dir():
         for path in sorted(cfg.rglob("*.yaml")):
-            refs |= set(MARKER.findall(path.read_text()))
+            refs |= _scan(path.read_text())
     return refs
 
 
@@ -656,8 +662,8 @@ def bake_fleet(root: Path, tag: str, *, registry: str | None = None,
         return value is not None and not (isinstance(value, str) and name in MARKER.findall(value))
 
     mandatory = sorted(r for r in refs
-                       if r != "ros_domain_id"  # always derived — never needs supplying
-                       and r not in defaults and not _provided_literally(r))
+                       if r not in ("ros_domain_id", "fleet_peer_ids")  # always derived —
+                       and r not in defaults and not _provided_literally(r))  # never supplied
     lines = ["# vehicle.local.yaml — THIS vehicle's identity + values. Write it ONCE per vehicle:",
              "#   sudo ./provision.sh --id <N> --name <name> [--var k=v ...]",
              "# (or by hand at /etc/rig/vehicle.local.yaml). This example lists every var the",

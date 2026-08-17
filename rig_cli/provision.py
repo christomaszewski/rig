@@ -51,7 +51,8 @@ def _show(root: Path | None) -> int:
     except RigError as exc:
         eprint(f"  deployment at {root}: NOT satisfied — {exc}")
         return 1
-    known = set(manifest.vars) | {"ros_domain_id"}
+    known = set(manifest.vars) | {"ros_domain_id", "fleet_peer_ids"}  # both DERIVED — the
+    #                          latter only materializes once vehicle_id + fleet_ids are provided
     unmet = sorted((set(refs) - known) | set(manifest.missing_identity))
     if unmet:
         eprint(f"  deployment at {root}: NOT satisfied — missing: {', '.join(unmet)}")

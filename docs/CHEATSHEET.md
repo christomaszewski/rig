@@ -132,14 +132,32 @@ vehicle: "{{vehicle}}"            # self-marker = supplied PER VEHICLE, mandator
                                   # QUOTE markers that START a value (bare {{ is YAML mapping syntax);
                                   #   mid-string markers (rtsp://10.{{vehicle_id}}.80) are fine unquoted
 vehicle_id: "{{vehicle_id}}"
-vars: {rtsp_port: 8554}           # fleet defaults; vars may chain: ip: 10.160.{{vehicle_id}}.25
-env:  {SIYI_IP: "10.160.{{vehicle_id}}.25"}   # exported to every launcher via the fleet env
-# config/sensors/zr30.yaml:  url: rtsp://10.160.{{vehicle_id}}.80:{{rtsp_port}}/main
+vars:
+  rtsp_port: 8554                 # fleet defaults; vars may chain: ip: 10.160.{{vehicle_id}}.25
+  gcs_ip: 10.160.1.10             # ground-station IP (CONVENTION): {{gcs_ip}} in configs, ${GCS_IP}
+  fleet_ids: [1, 2, 7]            #   in composes via env: below. rig derives {{fleet_peer_ids}} =
+  peer_endpoint: tcp/10.160.1.{}:7447   #   fleet_ids minus THIS vehicle's id.
+env:
+  SIYI_IP: "10.160.{{vehicle_id}}.25"   # exported to every launcher via the fleet env
+  GCS_IP: "{{gcs_ip}}"
+# config/sensors/zr30.yaml:   url: rtsp://10.160.{{vehicle_id}}.80:{{rtsp_port}}/main
+# config/infra/zenoh.yaml:    connect: "{{map fleet_peer_ids peer_endpoint}}"
+#   {{map <list_var> <template_var>}} (whole-scalar only) renders a LIST — one template expansion
+#   per element, {} as the placeholder. SIL on one box? swap the TEMPLATE, not the config:
+#   RIG_VAR_peer_endpoint='tcp/127.0.0.1:744{}' ./run.sh up   # ports instead of IPs, self excluded
 ```
 
 Sources, most-specific wins: shell (`RIG_VEHICLE_ID`, `RIG_VAR_<name>`) > `vehicle.local.yaml`
 beside vehicle.yaml (bench trees) > **`/etc/rig/vehicle.local.yaml`** (THE machine's identity) >
-vehicle.yaml. Unknown var = hard error listing what's available.
+vehicle.yaml. Unknown var = hard error listing what's available. Test-day values ride the shell
+tier (`RIG_VAR_fleet_ids=1,2,7` — comma strings coerce to lists) and land in every run's config
+snapshot, so per-run fleet composition is recorded per vehicle automatically.
+
+**Fleet roster (GCS-side, convention):** `fleet.yaml` beside the deployment on the GCS box —
+`{fleet: <name>, gcs_ip: …, vehicles: [{id, name, host, path}]}` — is OPERATIONAL state
+(gitignored by init; commit it only by choice). Vehicles never read it; it's the input for the
+`rig fleet` verb group (planned: list/status/sync → up/down — see ROADMAP). N `localhost` rows
+with different paths describe a SIL fleet on one machine.
 
 `rig bake` detects markers automatically (no flag): a templated deployment bakes a **fleet
 artifact** — unresolved configs, no compose-only form, rendered on-vehicle by the bundled rig

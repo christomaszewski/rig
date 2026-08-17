@@ -99,6 +99,69 @@ def test_fleet_bake_stages_unresolved_and_flags_reject():
         assert rc == 1 and "per-vehicle" in err
 
 
+def _map_deployment() -> pathlib.Path:
+    """A deployment whose ONLY templating is the {{map …}} form — the fleet-detection blind spot
+    (MARKER alone does not match it)."""
+    root = pathlib.Path(tempfile.mkdtemp()) / "veh"
+    (root / "config" / "infra").mkdir(parents=True)
+    (root / "vehicle.yaml").write_text(textwrap.dedent("""\
+        vehicle: swarm
+        vehicle_id: 3
+        vars:
+          fleet_ids: [3, 9]
+          peer_endpoint: tcp/10.0.0.{}:7447
+        infra:
+          - {name: router, service: routersvc, config: config/infra/router.yaml}
+        """))
+    (root / "config" / "infra" / "router.yaml").write_text(
+        'service: routersvc\nname: router\nconnect: "{{map fleet_peer_ids peer_endpoint}}"\n')
+    svc = pathlib.Path(tempfile.mkdtemp()) / "routersvc"
+    svc.mkdir(parents=True)
+    (svc / "rigging.yaml").write_text("service: routersvc\nlauncher: router-up\ntier: infra\n"
+                                      "launch_surface: [router-up]\n")
+    (svc / "router-up").write_text("#!/bin/sh\n")
+    (svc / "router-up").chmod(0o755)
+    (root / "services.yaml").write_text(f"services:\n  routersvc: {{ path: {svc} }}\n")
+    return root
+
+
+def test_map_only_deployment_is_fleet():
+    root = _map_deployment()
+    assert is_fleet(root)                                     # MAP args harvested — never a
+    assert {"fleet_peer_ids", "peer_endpoint"} <= fleet_refs(root)  # silently-resolved bake
+    with _env(RIG_VEHICLE_LOCAL=str(pathlib.Path(tempfile.mkdtemp()) / "none.yaml")):
+        rc, _, err = _run("--root", str(root), "artifact", "bake", "--tag", "m1")
+        assert rc == 0, err
+        example = (root / "var" / "bake" / "m1" / "vehicle.local.example.yaml").read_text()
+        # the DERIVED var must never be demanded from the operator; the template var shows as
+        # optional with its fleet default
+        assert not any("fleet_peer_ids" in line and "REQUIRED" in line
+                       for line in example.splitlines())
+        assert "peer_endpoint" in example and "optional" in example
+
+
+def test_one_artifact_two_vehicles_peer_exclusion():
+    root = _map_deployment()
+    with _env(RIG_VEHICLE_LOCAL=str(pathlib.Path(tempfile.mkdtemp()) / "none.yaml")):
+        rc, _, err = _run("--root", str(root), "artifact", "bake", "--tag", "m2")
+        assert rc == 0, err
+    artifact = root / "var" / "artifacts" / "m2.tar.gz"
+    peers = {}
+    for vid in (3, 9):
+        vehicle_home = pathlib.Path(tempfile.mkdtemp())
+        with tarfile.open(artifact) as tf:
+            tf.extractall(vehicle_home, filter="data")
+        tree = vehicle_home / "m2"
+        machine = vehicle_home / "machine.yaml"
+        machine.write_text(f"vehicle: skiff-{vid:02d}\nvehicle_id: {vid}\n")
+        with _env(RIG_VEHICLE_LOCAL=str(machine)):
+            mm = materialize_manifest(load_manifest(tree), tree)
+            cfg = yaml.safe_load(pathlib.Path(mm.sensors[0].config).read_text())
+            peers[vid] = cfg["connect"]
+    assert peers == {3: ["tcp/10.0.0.9:7447"], 9: ["tcp/10.0.0.3:7447"]}  # ONE artifact,
+    #                                                             each vehicle excludes ITSELF
+
+
 def test_one_artifact_two_vehicles():
     root = _fleet_deployment()
     with _env(RIG_VEHICLE_LOCAL=str(pathlib.Path(tempfile.mkdtemp()) / "none.yaml")):

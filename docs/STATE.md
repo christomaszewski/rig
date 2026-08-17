@@ -1,8 +1,17 @@
 # rig — project state & handoff (resume here)
 
 > Snapshot for picking the project up cold in a new session. Read this first, then `CHEATSHEET.md` /
-> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.1.64**,
-> branch **`main`**, 263 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.1.65**,
+> branch **`main`**, 271 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> **`{{map}}` + fleet peers SHIPPED** (v0.1.65, CHEATSHEET §1.6): `{{map <list_var>
+> <template_var>}}` (whole-scalar, renders a LIST; the template being a VAR makes field vs SIL a
+> tiering swap — `tcp/10.160.1.{}:7447` vs `RIG_VAR_peer_endpoint=tcp/127.0.0.1:744{}`) + the
+> derived built-in `fleet_peer_ids` (`fleet_ids` minus THIS vehicle_id, string-normalized) —
+> zenoh peer endpoints from one fleet artifact, each vehicle excluding itself. MAP-aware fleet
+> detection (a map-only deployment still bakes FLEET); map forms hard-error outside configs.
+> `rig init` now scaffolds the vars/env convention (gcs_ip worked example) and gitignores
+> vehicle.local.yaml + fleet.yaml; the GCS-side fleet.yaml roster is documented (the `rig fleet`
+> verb group is a ROADMAP §4 item with settled invariants).
 > **pkg UX batch SHIPPED** (v0.1.64): `pkg info` parses `@version`, prints `authored_against`
 > and the local install state; `pkg list` marks dirty instances (`*`) next to the upgrade
 > column; `config diff` shows the pin + "X.Y.Z available" on both dirty and clean lines;

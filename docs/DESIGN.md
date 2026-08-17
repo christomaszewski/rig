@@ -112,6 +112,12 @@ the bundled rig. The working-copy machinery (pins/diff/promote/upgrade) operates
 so registry profiles and overlays carry markers untouched: the template is the intent, the
 resolution is per-vehicle.
 
+v0.1.65 widens substitution with ONE mapping form: `{{map <list_var> <template_var>}}`
+(whole-scalar only, renders a list; both args are var names so field vs SIL is a template-var
+swap through the normal tiering) plus the derived built-in `fleet_peer_ids` (`fleet_ids` minus
+THIS `vehicle_id`) — peer endpoints from a fleet roster, self excluded, one artifact for all.
+Still no arithmetic, no conditionals, no nesting.
+
 ## Status & roadmap
 
 Implemented (see `ROADMAP.md` for the per-version log): manifest/catalog/descriptor loaders with

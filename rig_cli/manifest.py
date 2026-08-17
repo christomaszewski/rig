@@ -18,7 +18,7 @@ from pathlib import Path
 
 from . import RigError
 from .common import load_yaml
-from .interpolate import MARKER, resolve_map, substitute_scalar
+from .interpolate import MAP, MARKER, resolve_map, substitute_scalar
 
 # THE machine's identity file — a property of the vehicle computer, not of any deployment tree
 # (the boot-time systemd unit and an ssh operator must see the same vehicle_id, so this is
@@ -280,12 +280,27 @@ def load_manifest(root: Path) -> Manifest:
     )
     ctx.setdefault("vehicle", vehicle)
     ctx["ros_domain_id"] = ros.domain_id
+    # Derived built-in (like ros_domain_id, computed AFTER the fixpoint — so it cannot be
+    # referenced by other vars:): the fleet minus THIS vehicle, for {{map fleet_peer_ids <tmpl>}}
+    # peer-endpoint construction. String-normalized comparison: YAML gives ints, the shell tier
+    # gives strings, and `7` vs "7" must exclude either way. Unprovisioned box (no vehicle_id):
+    # stays absent, so a premature reference errors loudly instead of including self.
+    if "fleet_ids" in ctx and "vehicle_id" in ctx:
+        ids = ctx["fleet_ids"]
+        if isinstance(ids, str):  # RIG_VAR_fleet_ids=1,2,7
+            ids = [part.strip() for part in ids.split(",") if part.strip()]
+        if isinstance(ids, (list, tuple)):
+            me = str(ctx["vehicle_id"]).strip()
+            ctx.setdefault("fleet_peer_ids", [i for i in ids if str(i).strip() != me])
 
     unresolved: list[str] = list(missing)  # identity keys first, then any manifest scalar whose
     #                                        vars nothing provides — loading stays LAZY throughout;
     #                                        require_identity gates the commands that CONSUME them
 
     def _lazy(value, label: str):
+        if isinstance(value, str) and MAP.search(value):  # a literal {{map …}} reaching a driver
+            raise RigError(f"{label}: the {{{{map …}}}} form renders in CONFIG files only — "
+                           f"manifest fields and env: values take plain {{{{var}}}} markers")
         if isinstance(value, str) and MARKER.search(value):
             try:
                 return substitute_scalar(value, ctx, where=label)
@@ -314,6 +329,10 @@ def load_manifest(root: Path) -> Manifest:
             raise RigError(f"env: '{key}' collides with a rig-owned variable — rig sets it from "
                            f"the manifest; use the manifest field instead")
         resolved_value = _lazy(value, f"env.{key}")
+        if isinstance(resolved_value, (list, tuple, dict)):
+            raise RigError(f"env: '{key}' interpolates to a {type(resolved_value).__name__} — "
+                           f"exported environment values must be scalars (the {{{{map …}}}} form "
+                           f"belongs in config files)")
         if resolved_value is not None or not isinstance(value, str):
             extra_env[key] = resolved_value if resolved_value is not None else value
 

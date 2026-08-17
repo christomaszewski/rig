@@ -37,6 +37,17 @@ def test_init_seeds_vehicle_name_and_id_from_args():
     assert "vehicle: skiff1" in body and "vehicle_id: 7" in body
 
 
+def test_init_scaffolds_vars_convention_and_gitignores_operational_files():
+    target = pathlib.Path(tempfile.mkdtemp()) / "skiff2"
+    init(target, no_git=True)
+    body = (target / "vehicle.yaml").read_text()
+    assert "# vars:" in body and "gcs_ip" in body               # the convention is VISIBLE
+    assert "{{map fleet_peer_ids peer_endpoint}}" in body       # worked example, format-escaped
+    assert "Planned" not in body                                # fleet mode shipped; comment fixed
+    ignored = (target / ".gitignore").read_text()
+    assert "vehicle.local.yaml" in ignored and "fleet.yaml" in ignored  # operational state
+
+
 def _rig_infra_ws() -> pathlib.Path:
     """A workspace with a rig-infra-style checkout beside the target: zenoh-router + both bag loggers
     (which collide on instance name `bag_logger`, like the real ones)."""
