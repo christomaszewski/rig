@@ -98,6 +98,16 @@ rig pkg promote siyi_zr30 --kind profile --to internal
                                    # UPDATE the profile the instance is pinned to: name defaults from
                                    #   provenance, --bump implied, provides/match CARRIED FORWARD.
                                    #   Hand-authored instance (no pin)? bare promote infers profile.
+rig pkg promote siyi_zr30 --kind profile --name org-zr30 --to internal --adopt
+                                   # FORK the public base into an org profile (records based_on
+                                   #   lineage) and ADOPT it: instance re-pins to the fork, render
+                                   #   identical — the three-tier shape: public base -> internal org
+                                   #   profile -> project overlays bound per deployment
+rig registry sync && rig pkg rebase org-zr30 --to internal
+                                   # public base moved? three-way the fork onto it (D vs old parent
+                                   #   replayed on the new one; conflicts keep YOURS, loudly; old
+                                   #   parent payload served from the registry's git history).
+                                   #   Deployments then follow with plain `rig pkg upgrade`.
 rig pkg upgrade                    # registry moved? three-way merge: new base ⊕ your edits, conflicts
                                    #   loud; bound overlays rebind IN PLACE (order kept). All-or-nothing:
                                    #   a mid-sweep failure rolls the whole tree + lock back

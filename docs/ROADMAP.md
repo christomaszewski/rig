@@ -475,6 +475,14 @@ CHEATSHEET §1.5–1.6):
 - **v0.1.62** correctness batch: `pkg upgrade` covers bound overlays (rebound in place) and is
   all-or-nothing (content-level rollback, install too); service pin collisions error; overlay
   binding hygiene; `--locked` verifies `source.rev`; sync warns on a stale index.
+- **v0.1.67** profile lineage: forks record `based_on:` (parent@ver, namespace-qualified);
+  `pkg rebase` three-ways a fork onto its parent's current version (old parent payload from
+  registry git history; conflicts keep yours, loudly; requires adopted + re-qualified);
+  `promote --adopt` closes the profile round-trip (re-pin + reset + unbind, render identical —
+  a hand-authored instance GAINS provenance); `pkg list` ROLE column (active vs
+  `dependency of <profile>`); `pkg info` shows lineage + a rebase hint when the parent moved;
+  registry validate warns on in-registry parent drift.
+- **v0.1.66** `rig fleet` — see §4 (fan-out verbs, SIL fleets, status --format json).
 - **v0.1.65** `{{map <list_var> <template_var>}}` (whole-scalar, renders a LIST; template-as-var
   makes field vs SIL a tiering swap) + derived `fleet_peer_ids` (fleet_ids minus THIS vehicle) —
   peer endpoints, self excluded, one artifact for all; MAP-aware fleet detection; `rig init`

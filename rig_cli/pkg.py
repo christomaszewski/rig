@@ -140,16 +140,28 @@ def list_installed(root) -> int:
             return "gone from registry"
         return "" if current == pinned else f"{current} available"
 
-    rows = [("PACKAGE", "KIND", "USED BY", "UPGRADE")]
-    for ref in sorted(packages):
-        info_ = packages[ref] or {}
-        kind = str(info_.get("kind", "?"))
-        rows.append((ref, kind, users(ref, kind), registry_current(ref)))
+    def role(ref: str, kind: str) -> str:
+        """active = something you CHOSE (a pinned profile, a bound overlay, an installed suite,
+        a bare-service instance's service); dependency = pulled in by a profile's requires."""
+        if kind != "service":
+            return "active"
+        bare = unqualified(ref)
+        if any(s.service == bare and not s.profile for s in manifest.sensors):
+            return "active"
+        holder = next((r for r, info in packages.items()
+                       if (info or {}).get("kind") == "profile"
+                       and unqualified(str(info.get("requires") or "")) == bare), None)
+        return f"dependency of {holder}" if holder else "active"
+
+    rows = [("PACKAGE", "KIND", "ROLE", "USED BY", "UPGRADE")]
+    body = [(ref, str((packages[ref] or {}).get("kind", "?"))) for ref in sorted(packages)]
+    for ref, kind in sorted(body, key=lambda rk: (role(*rk).startswith("dependency"), rk[0])):
+        rows.append((ref, kind, role(ref, kind), users(ref, kind), registry_current(ref)))
     print_table(rows)
     notes = []
-    if any("*" in r[2] for r in rows[1:]):
+    if any("*" in r[3] for r in rows[1:]):
         notes.append("* = local edits (upgrade three-way-merges them, local wins)")
-    if any(r[3] for r in rows[1:]):
+    if any(r[4] for r in rows[1:]):
         notes.append("`rig registry sync && rig pkg upgrade` updates — profiles/services "
                      "three-way, bound overlays rebound in place")
     if notes:
@@ -190,6 +202,8 @@ def info(ref: str, root=None) -> int:
                 print(f"  sensor: {block.get('model', '?')}  match: {', '.join(block.get('match', []))}")
             if (m.get("requires") or {}).get("service"):
                 print(f"  requires: {m['requires']['service']}")
+            if isinstance(m.get("based_on"), str):
+                print(f"  based_on: {m['based_on']}{_parent_freshness(m['based_on'], name, entry.name)}")
             print(f"  payload: {(m.get('config') or {}).get('payload')}")
         elif pkg.kind == "overlay":
             targets = ["{}={}".format(*next(iter(t.items())))
@@ -209,6 +223,25 @@ def info(ref: str, root=None) -> int:
         return 0
     raise RigError(f"pkg info: '{ref}' not found in any configured registry "
                    f"(synced? rig registry sync)")
+
+
+def _parent_freshness(based_on: str, fork_name: str, fork_alias: str) -> str:
+    """The consumer half of fork lineage: the parent's ns is a NAMESPACE — find the entry that
+    declares it (fail-soft: offline/unsynced parents just show the bare stamp) and say when it
+    has moved past the stamped version."""
+    ns, pname, pinned = parse_ref(based_on)
+    for entry in load_entries():
+        try:
+            reg, index = open_registry(entry)
+        except RigError:
+            continue
+        if reg.namespace != ns and entry.name != ns:
+            continue
+        current = ((index.get("packages") or {}).get(pname) or {}).get("version")
+        if current and current != pinned:
+            return (f"  ({current} available — rig pkg rebase {fork_name} --to {fork_alias})")
+        return ""
+    return ""
 
 
 def _print_local_state(root, ns: str, name: str) -> None:

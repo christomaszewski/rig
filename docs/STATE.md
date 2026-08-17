@@ -1,8 +1,16 @@
 # rig — project state & handoff (resume here)
 
 > Snapshot for picking the project up cold in a new session. Read this first, then `CHEATSHEET.md` /
-> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.1.66**,
-> branch **`main`**, 278 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.1.67**,
+> branch **`main`**, 286 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> **Profile lineage SHIPPED** (v0.1.67, the three-tier workflow: public base → internal org
+> profile → project overlays): fork promotes stamp `based_on: parent@ver`; `rig pkg rebase
+> <fork> --to <reg>` three-ways the fork onto the parent's current version (old parent payload
+> from registry git history, conflicts keep yours loudly, requires adopted + re-qualified);
+> `promote --kind profile --adopt` closes the profile round-trip (instance re-pins to the fork,
+> working+pin reset, overlays unbound — render identical; hand-authored instances GAIN
+> provenance); `pkg list` gained a ROLE column (active vs dependency-of); `pkg info` shows
+> lineage + a rebase hint; consumers follow rebases with plain `pkg upgrade`.
 > **`rig fleet` verb group SHIPPED** (v0.1.66, CHEATSHEET §1.6 + ROADMAP §4):
 > list/status/sync/up/down — the GCS-side ssh loop automated, never a control plane. New
 > `rig status --format json` machine contract; correlated run labels (`fleet up --run X`);

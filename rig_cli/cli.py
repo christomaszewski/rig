@@ -706,6 +706,20 @@ def build_parser() -> argparse.ArgumentParser:
                          "existing package's match set on a re-promote)")
     pp.add_argument("--requires", default=None, metavar="REF",
                     help="(--kind profile) service requirement override (ns/service@X.Y.Z)")
+    pp.add_argument("--adopt", action="store_true",
+                    help="(--kind profile, one instance) after publishing, re-pin the instance "
+                         "onto the new profile: working+pin reset to the payload, overrides "
+                         "dropped, overlays unbound (baked in) — render identical, provenance "
+                         "now the fork (the profile `--clear-local`)")
+    pr = pkgsub.add_parser("rebase", help="three-way a FORKED profile onto its parent's current "
+                                          "version (based_on lineage; conflicts keep YOURS, "
+                                          "loudly) — registry-side, write+validate only")
+    pr.add_argument("name", help="the fork's package name in the target registry")
+    pr.add_argument("--to", required=True, metavar="REGISTRY",
+                    help="the registry carrying the fork (local-dir in place, git on a "
+                         "promote/ branch)")
+    pr.add_argument("--onto", default=None, metavar="PARENT[@VER]",
+                    help="rebase onto this parent version (default: the parent's current)")
 
     flc = argparse.ArgumentParser(add_help=False)  # shared fleet flags — after the verb
     flc.add_argument("--fleet", default=None, metavar="PATH",
@@ -852,8 +866,10 @@ def main(argv=None) -> int:
                         root, args.names, to=args.to, all_dirty=args.all_dirty, name=args.name,
                         project=args.project, kind=args.kind, suite=args.suite, bump=args.bump,
                         target_instance=args.target_instance, matches=args.match,
-                        requires=args.requires)
+                        requires=args.requires, adopt=args.adopt)
                 return workingcopy_mod.relock(root)
+            if args.pkg_cmd == "rebase":  # registry-side: no deployment involved
+                return promote_mod.rebase(args.name, to=args.to, onto=args.onto)
             return cmd_pkg(args)  # search/info consult ~/.rig only
         if args.cmd == "setup":  # host/user environment — the one command whose object is the HOST
             return registries_mod.setup(shell=args.shell, no_default_registry=args.no_default_registry,

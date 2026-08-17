@@ -295,6 +295,202 @@ def test_failed_repromote_restores_preexisting_package():
         assert (internal / "profiles" / "keeper" / "NOTES.md").read_text() == "precious\n"
 
 
+# --- fork lineage: based_on, pkg rebase, --adopt (v0.1.67) --------------------------------------
+
+
+def _fork_org_cam(root):
+    """Install acme (pinned testns/acme-cam@2.0.0), dirty it, fork it into internal/org-cam."""
+    working = _install_acme(root)
+    internal = _internal()
+    working.write_text(working.read_text().replace("width: 1280", "width: 2048"))
+    rc, _, err = _run("--root", str(root), "pkg", "promote", "acme_cam", "--kind", "profile",
+                      "--name", "org-cam", "--to", "internal")
+    assert rc == 0, err
+    return working, internal
+
+
+def _bump_parent(reg, version, payload):
+    mpath = reg / "profiles" / "acme-cam" / "manifest.yaml"
+    m = yaml.safe_load(mpath.read_text())
+    m["version"] = version
+    mpath.write_text(yaml.safe_dump(m, sort_keys=False))
+    (reg / "profiles" / "acme-cam" / "config" / "payload.yaml").write_text(payload)
+    _run("registry", "index", str(reg))
+
+
+def _gitify(reg):
+    """A local-dir registry that IS a git checkout — history serves old parent versions
+    (the capability-detected dev workflow rebase relies on)."""
+    _git("init", "-q", cwd=reg)
+    _git("add", "-A", cwd=reg)
+    _git("commit", "-q", "-m", "seed", cwd=reg)
+
+
+def _commit(reg, msg):
+    _git("add", "-A", cwd=reg)
+    _git("commit", "-q", "-m", msg, cwd=reg)
+
+
+def test_fork_promote_stamps_based_on_and_self_repromote_keeps_it():
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        root, _ = _world()
+        working, internal = _fork_org_cam(root)
+        m = yaml.safe_load((internal / "profiles" / "org-cam" / "manifest.yaml").read_text())
+        assert m["based_on"] == "testns/acme-cam@2.0.0"           # the FORK records its parent
+        working.write_text(working.read_text() + "extra: 1\n")    # self re-promote of the fork
+        rc, _, err = _run("--root", str(root), "pkg", "promote", "acme_cam", "--kind", "profile",
+                          "--name", "org-cam", "--to", "internal", "--bump")
+        assert rc == 0, err
+        m = yaml.safe_load((internal / "profiles" / "org-cam" / "manifest.yaml").read_text())
+        assert m["version"] == "1.0.1"
+        assert m["based_on"] == "testns/acme-cam@2.0.0"           # baseline moves only on rebase
+
+
+def test_rebase_three_ways_onto_new_parent():
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        root, reg = _world()
+        _gitify(reg)                                              # parent history must survive bumps
+        _fork_org_cam(root)                                       # fork changed usb.width -> 2048
+        _bump_parent(reg, "2.1.0",                                # parent adds fps, keeps width
+                     "# v2.1\nservice: camish\ncamera: {type: usb}\nusb: {width: 1280, fps: 30}\n")
+        _commit(reg, "bump 2.1.0")
+        rc, _, err = _run("pkg", "rebase", "org-cam", "--to", "internal")
+        assert rc == 0, err
+        internal_root = [e for e in __import__("rig_cli.registries", fromlist=["load_entries"])
+                         .load_entries() if e.name == "internal"][0].root
+        m = yaml.safe_load((internal_root / "profiles" / "org-cam" / "manifest.yaml").read_text())
+        assert m["version"] == "1.0.1"
+        assert m["based_on"] == "testns/acme-cam@2.1.0"           # baseline advanced
+        payload = yaml.safe_load(
+            (internal_root / "profiles" / "org-cam" / "config" / "payload.yaml").read_text())
+        assert payload["usb"] == {"width": 2048, "fps": 30}       # parent's new key + MY width
+        assert _run("registry", "validate", str(internal_root))[0] == 0
+
+
+def test_rebase_conflict_keeps_yours_loudly():
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        root, reg = _world()
+        _gitify(reg)
+        _fork_org_cam(root)                                       # fork: width 2048
+        _bump_parent(reg, "3.0.0",                                # parent ALSO moves width
+                     "service: camish\ncamera: {type: usb}\nusb: {width: 4096}\n")
+        _commit(reg, "bump 3.0.0")
+        rc, _, err = _run("pkg", "rebase", "org-cam", "--to", "internal")
+        assert rc == 0, err
+        assert "CONFLICT usb.width" in err and "keeping yours: 2048" in err
+        internal_root = [e for e in __import__("rig_cli.registries", fromlist=["load_entries"])
+                         .load_entries() if e.name == "internal"][0].root
+        payload = yaml.safe_load(
+            (internal_root / "profiles" / "org-cam" / "config" / "payload.yaml").read_text())
+        assert payload["usb"]["width"] == 2048                    # ours, kept
+
+
+def test_rebase_guards():
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        root, reg = _world()
+        rc, _, err = _run("pkg", "rebase", "acme-cam", "--to", "testns")
+        assert rc == 1 and "no based_on lineage" in err           # the fixture profile: no fork
+        # old parent version vanished from a NON-git registry -> the clear history error
+        _fork_org_cam(root)
+        _bump_parent(reg, "2.2.0", "service: camish\ncamera: {type: usb}\nusb: {width: 9}\n")
+        rc, _, err = _run("pkg", "rebase", "org-cam", "--to", "internal")
+        assert rc == 1 and "git history cannot serve it" in err
+
+
+def test_adopt_closes_the_profile_round_trip():
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        root, _ = _world()
+        working = _install_acme(root)
+        internal = _internal()
+        _run("--root", str(root), "overlay", "apply", "acme_cam", "testns/cam-tune")
+        working.write_text(working.read_text().replace("width: 1280", "width: 640"))
+        before = _rendered(root)
+        rc, _, err = _run("--root", str(root), "pkg", "promote", "acme_cam", "--kind", "profile",
+                          "--name", "org-cam", "--to", "internal", "--adopt")
+        assert rc == 0, err
+        assert "ADOPTED internal/org-cam@1.0.0" in err
+        assert _rendered(root) == before                          # THE round-trip law
+        from rig_cli.manifest import load_manifest
+        sensor = next(s for s in load_manifest(root).sensors if s.name == "acme_cam")
+        assert sensor.profile == "internal/org-cam@1.0.0"         # provenance = the fork now
+        assert not sensor.overlays and not sensor.overrides       # baked in + dropped
+        rc, out, _ = _run("--root", str(root), "config", "diff", "acme_cam")
+        assert "clean" in out
+        lock = yaml.safe_load((root / "rig.lock").read_text())
+        assert "internal/org-cam@1.0.0" in lock["packages"]
+        assert "testns/cam-tune@1.0.0" not in lock["packages"]    # unbound + GC'd
+        rc, out, _ = _run("--root", str(root), "pkg", "list")
+        row = next(line for line in out.splitlines() if "internal/org-cam" in line)
+        assert "active" in row and "acme_cam" in row              # visible as THE active package
+        svc_row = next(line for line in out.splitlines() if "testns/camish" in line)
+        assert "dependency of" in svc_row                         # its service = a dependency
+
+
+def test_adopt_guards_and_hand_authored_gains_provenance():
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        root, _ = _world()
+        working = _install_acme(root)
+        internal = _internal()
+        working.write_text(working.read_text() + "extra: 1\n")
+        rc, _, err = _run("--root", str(root), "pkg", "promote", "acme_cam",
+                          "--to", "internal", "--adopt")          # would emit an OVERLAY
+        assert rc == 1 and "--adopt" in err
+        # hand-authored instance: bare promote infers profile; --adopt writes provenance
+        (root / "config" / "sensors" / "handy.yaml").write_text(
+            "camera: {type: usb}\nusb: {width: 111}\n")
+        veh = root / "vehicle.yaml"
+        row = next(line for line in veh.read_text().splitlines() if "name: acme_cam" in line)
+        indent = row[:len(row) - len(row.lstrip())]
+        veh.write_text(veh.read_text().replace(
+            row, row + "\n" + indent + "- { name: handy, service: camish, "
+            "config: config/sensors/handy.yaml, enabled: true, order: 30 }"))
+        rc, _, err = _run("--root", str(root), "pkg", "promote", "handy",
+                          "--to", "internal", "--adopt")
+        assert rc == 0, err
+        from rig_cli.manifest import load_manifest
+        sensor = next(s for s in load_manifest(root).sensors if s.name == "handy")
+        assert sensor.profile == "internal/handy@1.0.0"           # provenance from NOTHING
+        assert (root / "config" / ".pins" / "handy.yaml").is_file()
+        rc, _, err = _run("--root", str(root), "pkg", "lock")
+        assert rc == 0, err                                       # anchors coherent
+
+
+def test_rebase_then_consumer_upgrade_round_trip():
+    # The full three-tier loop: fork adopted -> parent moves -> rebase -> the deployment
+    # follows with the NORMAL upgrade flow (nothing new to learn on the consumer side).
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        root, reg = _world()
+        _gitify(reg)
+        working = _install_acme(root)
+        internal = _internal()
+        working.write_text(working.read_text().replace("width: 1280", "width: 2048"))
+        assert _run("--root", str(root), "pkg", "promote", "acme_cam", "--kind", "profile",
+                    "--name", "org-cam", "--to", "internal", "--adopt")[0] == 0
+        _bump_parent(reg, "2.1.0",
+                     "service: camish\ncamera: {type: usb}\nusb: {width: 1280, fps: 30}\n")
+        _commit(reg, "bump 2.1.0")
+        assert _run("pkg", "rebase", "org-cam", "--to", "internal")[0] == 0
+        rc, _, err = _run("--root", str(root), "pkg", "upgrade", "acme_cam")
+        assert rc == 0, err
+        assert "internal/org-cam@1.0.0 -> internal/org-cam@1.0.1" in err
+        data = yaml.safe_load(working.read_text())
+        assert data["usb"] == {"width": 2048, "fps": 30}          # org width + parent's new key
+        rc, out, _ = _run("--root", str(root), "config", "diff", "acme_cam")
+        assert "clean" in out                                     # delta-free after the follow
+
+
+def test_pkg_info_shows_lineage_and_freshness():
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        root, reg = _world()
+        _fork_org_cam(root)
+        rc, out, _ = _run("pkg", "info", "internal/org-cam")
+        assert rc == 0 and "based_on: testns/acme-cam@2.0.0" in out
+        assert "available" not in out                             # parent unchanged: no hint
+        _bump_parent(reg, "2.5.0", "service: camish\ncamera: {type: usb}\nusb: {width: 1}\n")
+        rc, out, _ = _run("pkg", "info", "internal/org-cam")
+        assert "2.5.0 available" in out and "pkg rebase org-cam" in out
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

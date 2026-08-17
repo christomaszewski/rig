@@ -180,6 +180,7 @@ def _schemas() -> dict[str, dict]:
                                                             "items": {"type": "string"}}}}}}},
                            "requires": {"type": "object", "required": ["service"],
                                         "properties": {"service": {"type": "string"}}},
+                           "based_on": {"type": "string"},
                            "config": {"type": "object", "required": ["payload"],
                                       "properties": {"payload": relpath,
                                                      "overrides_schema": relpath}}},

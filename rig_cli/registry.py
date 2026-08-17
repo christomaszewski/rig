@@ -185,6 +185,19 @@ def _validate_profile(pkg: Package, reg: Registry, issues: list[Issue]) -> None:
                 issues.append(Issue(where, f"`config.overrides_schema` is not valid JSON: {exc}"))
                 return
             _schema_check(payload, schema, f"profiles/{pkg.name} payload", "", issues)
+    # Fork-lineage staleness (the profile mirror of overlay authored_against): in-registry
+    # parents only — cross-registry parents (the common public-base case) are surfaced
+    # consumer-side by `pkg info`. Drift = WARNING; `rig pkg rebase` is the fix.
+    based_on = m.get("based_on")
+    if isinstance(based_on, str):
+        match = _QUALIFIED_EXACT.match(based_on)
+        if match and match["ns"] == reg.namespace:
+            parent = reg.packages.get(match["name"])
+            if parent is not None and parent.kind == "profile" and parent.version != match["ver"]:
+                issues.append(Issue(where, f"based on {based_on}; this registry now carries "
+                                           f"{parent.name}@{parent.version} — "
+                                           f"`rig pkg rebase {pkg.name}` follows the parent",
+                                    level="warning"))
 
 
 def _validate_overlay(pkg: Package, reg: Registry, issues: list[Issue]) -> None:

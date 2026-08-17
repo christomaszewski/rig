@@ -26,6 +26,7 @@ wedges), and rig prints the push/PR command. Validation failures roll the checko
 """
 from __future__ import annotations
 
+import contextlib
 import shutil
 import subprocess
 from pathlib import Path
@@ -123,15 +124,84 @@ def _carry_forward(existing: dict | None, *generated: str) -> dict:
             if k not in generated and k != "authored_against"}
 
 
+@contextlib.contextmanager
+def _registry_write_session(entry: Entry, to: str, branch_name: str, written: list[Path],
+                            backups: dict[Path, Path], what: str = "promote"):
+    """The write+validate publish envelope shared by promote and rebase: branch (git targets) →
+    yield (the caller writes packages) → validate SCOPED to what was written → index →
+    commit + switch back (git) or in-place note — with the restore-not-delete rollback on ANY
+    failure, and backup scratch dirs cleaned either way."""
+    reg_root = entry.root
+    prior_branch = branch = None
+    if entry.type == "git":
+        prior_branch = _git(reg_root, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip() or "main"
+        if _git(reg_root, "status", "--porcelain").stdout.strip():
+            raise RigError(f"{what}: the '{to}' cache at {reg_root} has uncommitted changes — "
+                           f"clean it (or remove it and re-sync) first")
+        branch = f"promote/{branch_name}"
+        if _git(reg_root, "switch", "-c", branch).returncode != 0:
+            raise RigError(f"{what}: branch {branch} already exists in the '{to}' cache — "
+                           f"push or delete it first")
+    try:
+        yield
+        _, issues = validate_registry(reg_root, check_index=False)
+        ours = {str(p.relative_to(reg_root)) for p in written}
+        errors = [i for i in issues if i.level == "error"
+                  and any(i.where == rel or i.where.startswith(rel + "/") for rel in ours)]
+        foreign = [i for i in issues if i.level == "error" and i not in errors]
+        if foreign:  # pre-existing breakage is not THIS write's fault — surface, don't block
+            eprint(f"rig: note: '{to}' has {len(foreign)} pre-existing validation error(s) "
+                   f"unrelated to this {what} (rig registry validate shows them)")
+        if errors:
+            details = "; ".join(f"{i.where}: {i.message}" for i in errors[:3])
+            raise RigError(f"{what}: the emitted packages do not validate — {details}")
+        write_index(load_registry(reg_root, []))
+        if entry.type == "git":
+            _git(reg_root, "add", "-A")
+            msg = f"{what}: {', '.join(p.name for p in written)}"
+            commit = _git(reg_root, "commit", "-q", "-m", msg)
+            if commit.returncode != 0:
+                commit = _git(reg_root, "-c", "user.name=rig", "-c", "user.email=rig@localhost",
+                              "commit", "-q", "-m", msg)
+            if commit.returncode != 0:
+                raise RigError(f"{what}: git commit failed in the cache checkout")
+            _git(reg_root, "switch", "-q", prior_branch)
+            eprint(f"rig pkg {what}: committed on '{branch}' in the '{to}' cache — publish with:")
+            eprint(f"  git -C {reg_root} push origin {branch}   (then PR/merge, then "
+                   f"rig registry sync)")
+        else:
+            eprint(f"rig pkg {what}: written + validated in place at {reg_root} — commit/PR "
+                   f"with plain git when ready")
+    except BaseException:
+        if entry.type == "git" and branch:
+            _git(reg_root, "reset", "--hard", "-q")
+            _git(reg_root, "clean", "-fdq")
+            _git(reg_root, "switch", "-q", prior_branch)
+            _git(reg_root, "branch", "-D", branch)
+        else:
+            for pkg_dir in written:  # fresh dirs removed; pre-existing packages RESTORED
+                shutil.rmtree(pkg_dir, ignore_errors=True)
+                if pkg_dir in backups:
+                    shutil.copytree(backups[pkg_dir], pkg_dir)
+        raise
+    finally:
+        for backup in backups.values():
+            shutil.rmtree(backup.parent, ignore_errors=True)
+
+
 def promote(root: Path, names: list[str], *, to: str, all_dirty: bool, name: str | None,
             project: str | None, kind: str | None, suite: str | None, bump: bool,
-            target_instance: bool, matches: list[str], requires: str | None) -> int:
+            target_instance: bool, matches: list[str], requires: str | None,
+            adopt: bool = False) -> int:
     if bool(names) == all_dirty:
         raise RigError("promote: name instance(s), or pass --all for every dirty instance")
     if name and (len(names) != 1 or suite):
         raise RigError("promote: --name applies to exactly one instance (and never names a suite)")
     if kind not in (None, "overlay", "profile"):
         raise RigError(f"promote: --kind must be overlay or profile, not '{kind}'")
+    if adopt and (all_dirty or suite or len(names) != 1 or kind == "overlay"):
+        raise RigError("promote: --adopt re-pins ONE named instance onto its freshly published "
+                       "PROFILE (the overlay analogue is `overlay apply --clear-local`)")
 
     entry = _target_entry(to)
     reg_root = entry.root
@@ -139,14 +209,6 @@ def promote(root: Path, names: list[str], *, to: str, all_dirty: bool, name: str
         raise RigError(f"promote: registry '{to}' is not synced/reachable at {reg_root}")
     manifest = load_manifest(root)
     lock = load_lock(root)
-
-    # Git-type target: work on a promote branch in the cache; NEVER leave it checked out.
-    prior_branch = None
-    if entry.type == "git":
-        prior_branch = _git(reg_root, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip() or "main"
-        if _git(reg_root, "status", "--porcelain").stdout.strip():
-            raise RigError(f"promote: the '{to}' cache at {reg_root} has uncommitted changes — "
-                           f"clean it (or remove it and re-sync) first")
 
     chosen = []
     for sensor in manifest.sensors:
@@ -175,17 +237,16 @@ def promote(root: Path, names: list[str], *, to: str, all_dirty: bool, name: str
     if not chosen:
         eprint("rig pkg promote: nothing dirty — no packages to emit")
         return 0
+    if adopt and chosen[0][2] != "profile":
+        raise RigError("promote: --adopt needs --kind profile (this promote would emit an "
+                       "overlay — its round-trip is `overlay apply --clear-local`)")
 
     written: list[Path] = []
     backups: dict[Path, Path] = {}  # pre-existing pkg dir -> pristine copy (rollback restores)
     new_overlays: list[str] = []
-    branch = None
-    try:
-        if entry.type == "git":
-            branch = f"promote/{suite or name or chosen[0][0].name}"
-            if _git(reg_root, "switch", "-c", branch).returncode != 0:
-                raise RigError(f"promote: branch {branch} already exists in the '{to}' cache — "
-                               f"push or delete it first")
+    adoptions: list[tuple] = []     # (sensor, pkg_name, version, payload, req_lock)
+    with _registry_write_session(entry, to, suite or name or chosen[0][0].name,
+                                 written, backups):
         target_ns = load_registry(reg_root, []).namespace
 
         for sensor, delta, skind in chosen:
@@ -201,15 +262,16 @@ def promote(root: Path, names: list[str], *, to: str, all_dirty: bool, name: str
                     payload = {k: v for k, v in load_yaml(sensor.config).items() if k != "name"}
                     payload = deep_merge(payload, overrides)
                 payload.setdefault("service", sensor.service)
-                req = requires
-                if req is None:
-                    pin = next((ref for ref, info in (lock.get("packages") or {}).items()
-                                if info.get("kind") == "service"
-                                and unqualified(ref) == sensor.service), None)
-                    req = _requalify(pin) if pin else None  # lock refs carry the ALIAS
-                if req is None:
-                    raise RigError(f"promote: no locked service pin for '{sensor.service}' — pass "
-                                   f"--requires <ns/service@X.Y.Z>")
+                if requires is not None:
+                    req_lock = req = requires   # explicit ref: emitted verbatim
+                else:
+                    req_lock = next((ref for ref, info in (lock.get("packages") or {}).items()
+                                     if info.get("kind") == "service"
+                                     and unqualified(ref) == sensor.service), None)
+                    if req_lock is None:
+                        raise RigError(f"promote: no locked service pin for '{sensor.service}' "
+                                       f"— pass --requires <ns/service@X.Y.Z>")
+                    req = _requalify(req_lock)  # lock refs carry the ALIAS; manifests want ns
                 # Name: --name > the provenance profile (updating the thing this instance is
                 # PINNED to, not minting a same-named sibling) > the instance name hyphenated.
                 if name:
@@ -237,8 +299,17 @@ def promote(root: Path, names: list[str], *, to: str, all_dirty: bool, name: str
                     pmanifest["provides"] = existing["provides"]
                 if existing and (existing.get("config") or {}).get("overrides_schema"):
                     pmanifest["config"]["overrides_schema"] = existing["config"]["overrides_schema"]
+                # Lineage: a FORK (provenance points at a DIFFERENT package than the one being
+                # written) records its parent — `pkg rebase` three-ways against it later. Self
+                # re-promotes ride _carry_forward (the parent baseline only moves on rebase).
+                if sensor.profile and str(sensor.profile).partition("@")[0] != f"{to}/{pkg_name}":
+                    pmanifest["based_on"] = _requalify(str(sensor.profile))
                 _write_pkg(reg_root, "profiles", pkg_name, pmanifest, payload, written, backups)
-                eprint(f"  profile {target_ns}/{pkg_name}@{version} <- {sensor.name}")
+                eprint(f"  profile {target_ns}/{pkg_name}@{version} <- {sensor.name}"
+                       + (f" (based_on {pmanifest['based_on']})" if pmanifest.get("based_on")
+                          else ""))
+                if adopt:
+                    adoptions.append((sensor, pkg_name, version, payload, req_lock))
             else:
                 if delta is None or not delta:
                     continue
@@ -298,46 +369,191 @@ def promote(root: Path, names: list[str], *, to: str, all_dirty: bool, name: str
             eprint(f"  suite {target_ns}/{suite}@{version} ({len(profiles)} profile(s), "
                    f"{len(bound)} overlay(s) in binding order)")
 
-        _, issues = validate_registry(reg_root, check_index=False)
-        ours = {str(p.relative_to(reg_root)) for p in written}
-        errors = [i for i in issues if i.level == "error"
-                  and any(i.where == rel or i.where.startswith(rel + "/") for rel in ours)]
-        foreign = [i for i in issues if i.level == "error" and i not in errors]
-        if foreign:  # pre-existing breakage is not THIS promote's fault — surface, don't block
-            eprint(f"rig: note: '{to}' has {len(foreign)} pre-existing validation error(s) "
-                   f"unrelated to this promote (rig registry validate shows them)")
-        if errors:
-            details = "; ".join(f"{i.where}: {i.message}" for i in errors[:3])
-            raise RigError(f"promote: the emitted packages do not validate — {details}")
-        write_index(load_registry(reg_root, []))
+    # Registry write committed/validated — the deployment-side half of the round-trip runs
+    # only now (a failed publish must never touch the deployment; a failed adoption leaves
+    # the published package published, loudly).
+    for sensor, pkg_name, version, payload, req_lock in adoptions:
+        _adopt_instance(root, entry, sensor, pkg_name, version, payload, req_lock)
+    return 0
 
-        if entry.type == "git":
-            _git(reg_root, "add", "-A")
-            commit = _git(reg_root, "commit", "-q", "-m", f"promote: {', '.join(p.name for p in written)}")
-            if commit.returncode != 0:
-                commit = _git(reg_root, "-c", "user.name=rig", "-c", "user.email=rig@localhost",
-                              "commit", "-q", "-m", f"promote: {', '.join(p.name for p in written)}")
-            if commit.returncode != 0:
-                raise RigError("promote: git commit failed in the cache checkout")
-            _git(reg_root, "switch", "-q", prior_branch)
-            eprint(f"rig pkg promote: committed on '{branch}' in the '{to}' cache — publish with:")
-            eprint(f"  git -C {reg_root} push origin {branch}   (then PR/merge, then rig registry sync)")
-        else:
-            eprint(f"rig pkg promote: written + validated in place at {reg_root} — commit/PR with "
-                   f"plain git when ready")
-    except BaseException:
-        if entry.type == "git" and branch:
-            _git(reg_root, "reset", "--hard", "-q")
-            _git(reg_root, "clean", "-fdq")
-            _git(reg_root, "switch", "-q", prior_branch)
-            _git(reg_root, "branch", "-D", branch)
-        else:
-            for pkg_dir in written:  # fresh dirs are removed; pre-existing packages are RESTORED
-                shutil.rmtree(pkg_dir, ignore_errors=True)  # (a failed --bump must not delete them)
-                if pkg_dir in backups:
-                    shutil.copytree(backups[pkg_dir], pkg_dir)
-        raise
-    finally:
-        for backup in backups.values():
-            shutil.rmtree(backup.parent, ignore_errors=True)
+
+def _adopt_instance(root: Path, entry: Entry, sensor, pkg_name: str, version: str,
+                    payload: dict, req_lock: str) -> None:
+    """--adopt: the profile round-trip's second half (the `--clear-local` of profiles). The
+    payload IS the instance's current effective config, so re-pinning the row to the fork,
+    resetting working+pin to the payload, dropping overrides, and UNBINDING overlays (their
+    content is baked in — bound they would double-apply) provably reproduces the render."""
+    from .install import registry_commit
+    from .lock import record_instance, record_package, record_registry, save_lock, sha256_file
+    from .overlay import edit_row
+    from .resolve import overlay_payload_path
+
+    fork_ref = f"{entry.name}/{pkg_name}@{version}"  # the CONSUMER-side (alias) spelling
+    body = yaml.safe_dump(payload, sort_keys=False, default_flow_style=False)
+    old_overlays = list(sensor.overlays)
+
+    def mutate(row: dict) -> None:
+        row["profile"] = fork_ref
+        row.pop("overrides", None)
+        row.pop("overlays", None)
+
+    try:
+        edit_row(root, sensor.name, mutate)
+    except RigError as exc:
+        eprint(f"  {sensor.name}: --adopt SKIPPED (the package is published) — {exc}")
+        return
+    Path(sensor.config).write_text(body)  # working copy = the pristine payload, diff-clean
+    pin = root / "config" / ".pins" / f"{sensor.name}.yaml"
+    pin.parent.mkdir(parents=True, exist_ok=True)
+    pin.write_text(body)
+    lock = load_lock(root)
+    from .manifest import load_manifest
+    remaining = load_manifest(root).sensors
+    for ref in old_overlays:  # last binding gone -> drop the payload copy + lock row
+        if not any(ref in s.overlays for s in remaining):
+            overlay_payload_path(root, ref).unlink(missing_ok=True)
+            (lock.get("packages") or {}).pop(ref, None)
+    record_package(lock, fork_ref, {"kind": "profile", "payload_sha256": sha256_file(pin),
+                                    "requires": req_lock})
+    record_instance(lock, sensor.name, profile=fork_ref, base_sha256=sha256_file(pin),
+                    overlays=[])
+    record_registry(lock, entry.name, rtype=entry.type, location=entry.location,
+                    commit=registry_commit(entry))
+    save_lock(root, lock)
+    eprint(f"  {sensor.name}: ADOPTED {fork_ref} — row re-pinned, working+pin reset to the "
+           f"payload, overrides dropped"
+           + (f", {len(old_overlays)} overlay(s) unbound (content baked in)" if old_overlays
+              else "") + "; render identical (round-trip law)")
+
+
+# --- pkg rebase: move a FORK onto its parent's current version --------------------------------
+
+def _entry_for_namespace(ns: str) -> Entry:
+    """based_on refs carry the registry's NAMESPACE (registry-side documents); consumers know
+    registries by ALIAS. Map ns -> the configured entry whose registry declares it (fail-soft
+    per entry — an unreachable registry must not mask the right one), alias-match fallback."""
+    fallback = None
+    for entry in load_entries():
+        try:
+            if load_registry(entry.root, []).namespace == ns:
+                return entry
+        except RigError:
+            pass
+        if entry.name == ns:
+            fallback = entry
+    if fallback is not None:
+        return fallback
+    raise RigError(f"rebase: no configured registry declares namespace '{ns}' "
+                   f"(rig registry list; the parent must be synced/added)")
+
+
+def _parent_payload(entry: Entry, name: str, version: str) -> tuple[dict, dict]:
+    """(manifest, payload) of profiles/<name> at `version` — directly when the registry
+    currently carries it, else from git history (v0.1.63; capability-detected)."""
+    current = _existing_manifest(entry.root, "profiles", name)
+    if current is not None and str(current.get("version")) == version:
+        payload_rel = (current.get("config") or {}).get("payload") or "config/payload.yaml"
+        path = entry.root / "profiles" / name / str(payload_rel)
+        if not path.is_file():
+            raise RigError(f"rebase: parent payload missing: {path}")
+        return current, load_yaml(path)
+    from .history import checkout_pkg
+    pkg = checkout_pkg(entry, "profiles", name, version)
+    if pkg is None:
+        raise RigError(f"rebase: '{entry.name}/{name}' does not carry @{version} and its git "
+                       f"history cannot serve it — the three-way needs the OLD parent payload "
+                       f"(git-backed registries keep every past version)")
+    payload_rel = (pkg.manifest.get("config") or {}).get("payload") or "config/payload.yaml"
+    path = pkg.pkg_dir / str(payload_rel)
+    if not path.is_file():
+        raise RigError(f"rebase: parent payload missing at the historical version: {payload_rel}")
+    return pkg.manifest, load_yaml(path)
+
+
+def rebase(name: str, *, to: str, onto: str | None) -> int:
+    """`rig pkg rebase <name> --to <registry> [--onto parent[@ver]]` — three-way the fork onto
+    its parent's current (or named) version: D = diff(old parent, fork payload), result =
+    new parent ⊕ D, conflicts (parent ALSO changed the key) kept OURS, loudly. Publishes a new
+    version with `based_on` advanced and `requires` adopted from the new parent. Registry-side
+    only (no deployment); consumers follow with `registry sync && pkg upgrade`."""
+    from .refs import parse_ref
+    from .resolve import deep_merge, structural_diff
+    from .workingcopy import _dig, _flat, _strip_identity
+
+    entry = _target_entry(to)
+    reg_root = entry.root
+    if not (reg_root / "registry.yaml").is_file():
+        raise RigError(f"rebase: registry '{to}' is not synced/reachable at {reg_root}")
+    name = parse_ref(name)[1]  # tolerate ns/name[@ver] spellings — the --to registry is the home
+    existing = _existing_manifest(reg_root, "profiles", name)
+    if existing is None:
+        raise RigError(f"rebase: no profile '{name}' in '{to}'")
+    based_on = str(existing.get("based_on") or "")
+    if not based_on:
+        raise RigError(f"rebase: '{to}/{name}' has no based_on lineage — not a fork (promote "
+                       f"from an instance pinned to its parent records it, or add "
+                       f"`based_on: <ns>/<parent>@<ver>` to the manifest by hand)")
+    parent_ns, parent_name, old_ver = parse_ref(based_on)
+    if not parent_ns or not old_ver:
+        raise RigError(f"rebase: based_on '{based_on}' is not a fully-qualified exact ref")
+    parent_entry = _entry_for_namespace(parent_ns)
+
+    # the three payloads
+    payload_rel = (existing.get("config") or {}).get("payload") or "config/payload.yaml"
+    my_path = reg_root / "profiles" / name / str(payload_rel)
+    if not my_path.is_file():
+        raise RigError(f"rebase: payload missing: {my_path}")
+    mine = _strip_identity(load_yaml(my_path))
+    _, old_parent = _parent_payload(parent_entry, parent_name, old_ver)
+    old_parent = _strip_identity(old_parent)
+    if onto is not None:
+        onto_ns, onto_name, onto_ver = parse_ref(onto)
+        if (onto_ns and onto_ns != parent_ns) or (onto_name != parent_name):
+            raise RigError(f"rebase: --onto must name the parent '{parent_ns}/{parent_name}', "
+                           f"not '{onto}'")
+    else:
+        onto_ver = None
+    new_parent_manifest = _existing_manifest(parent_entry.root, "profiles", parent_name)
+    if new_parent_manifest is None:
+        raise RigError(f"rebase: parent '{parent_ns}/{parent_name}' is gone from its registry")
+    new_ver = onto_ver or str(new_parent_manifest.get("version"))
+    if new_ver == old_ver:
+        eprint(f"rig pkg rebase: '{to}/{name}' is already based on "
+               f"{parent_ns}/{parent_name}@{old_ver} — nothing to do")
+        return 0
+    new_parent_manifest, new_parent = _parent_payload(parent_entry, parent_name, new_ver)
+    new_parent = _strip_identity(new_parent)
+
+    # three-way: MINE wins on conflicts, loudly (the upgrade discipline, dict-level)
+    mine_delta = structural_diff(old_parent, mine)
+    parent_delta = structural_diff(old_parent, new_parent)
+    conflicts = sorted(set(dict(_flat(mine_delta))) & set(dict(_flat(parent_delta))))
+    merged = deep_merge(new_parent, mine_delta)
+    for path in conflicts:
+        eprint(f"    CONFLICT {path}: parent {_dig(old_parent, path)!r} -> "
+               f"{_dig(new_parent, path)!r}, keeping yours: {_dig(mine, path)!r}")
+
+    version = _next_version(existing, True, f"profile '{name}'")
+    new_req = (new_parent_manifest.get("requires") or {}).get("service")
+    if new_req and "/" not in str(new_req):  # parent-registry-RELATIVE constraint: qualify it,
+        new_req = f"{parent_ns}/{new_req}"   # or it cannot resolve from the fork's registry
+    old_req = (existing.get("requires") or {}).get("service")
+    if new_req and str(new_req) != str(old_req):
+        eprint(f"  requires adopted from the parent: {old_req} -> {new_req}")
+    pmanifest = {"kind": "profile", "name": name, "version": version,
+                 **_carry_forward(existing, "kind", "name", "version",
+                                 "requires", "config", "based_on"),
+                 **({"requires": {"service": str(new_req)}} if new_req
+                    else ({"requires": existing["requires"]} if existing.get("requires")
+                          else {})),
+                 "based_on": f"{parent_ns}/{parent_name}@{new_ver}",
+                 "config": existing.get("config") or {"payload": "config/payload.yaml"}}
+    written: list[Path] = []
+    backups: dict[Path, Path] = {}
+    with _registry_write_session(entry, to, f"rebase-{name}", written, backups, what="rebase"):
+        _write_pkg(reg_root, "profiles", name, pmanifest, merged, written, backups)
+        eprint(f"  profile {to}/{name}@{version}: rebased "
+               f"{parent_ns}/{parent_name}@{old_ver} -> @{new_ver}"
+               + (f" ({len(conflicts)} conflict(s), yours kept)" if conflicts else ""))
+    eprint("rig pkg rebase: consumers follow with `rig registry sync && rig pkg upgrade`")
     return 0
