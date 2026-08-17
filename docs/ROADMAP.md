@@ -459,6 +459,9 @@ CHEATSHEET §1.5–1.6):
 - **v0.1.62** correctness batch: `pkg upgrade` covers bound overlays (rebound in place) and is
   all-or-nothing (content-level rollback, install too); service pin collisions error; overlay
   binding hygiene; `--locked` verifies `source.rev`; sync warns on a stale index.
+- **v0.1.64** UX batch: `pkg info @version` + authored_against + local state; dirty markers in
+  `pkg list`; upgrade hints in `config diff`; search covers project tags/targets; `overlay
+  list` as a status view; `pkg lock` on stdout + overlay payload verification; one parse_ref.
 - **v0.1.63** **git history as the version archive** (capability-detected, read-only): the
   "ONE current version" model keeps the index simple while git-type caches — FULL clones —
   carry every past version. `pkg add ns/name@<old>` resolves from history (`git log`/`git

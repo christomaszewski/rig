@@ -16,6 +16,7 @@ import shlex
 import subprocess
 from pathlib import Path
 
+from .refs import unqualified
 from .common import eprint
 from .descriptor import Descriptor
 from .manifest import Manifest
@@ -45,7 +46,7 @@ def _resolve_build_cwd(service: str, desc: Descriptor, root: Path | None):
         from .lock import load_lock
         packages = load_lock(root).get("packages") or {}
     ref = next((r for r, info in packages.items() if (info or {}).get("kind") == "service"
-                and r.rpartition("/")[-1].split("@")[0] == service), None)
+                and unqualified(r) == service), None)
     source = (packages.get(ref) or {}).get("source") if ref else None
     if not source:
         return None, (f"'{head}' not found under {desc.repo} — vendored surfaces carry launch "

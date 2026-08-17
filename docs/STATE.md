@@ -1,8 +1,15 @@
 # rig — project state & handoff (resume here)
 
 > Snapshot for picking the project up cold in a new session. Read this first, then `CHEATSHEET.md` /
-> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.1.63**,
-> branch **`main`**, 257 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.1.64**,
+> branch **`main`**, 263 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> **pkg UX batch SHIPPED** (v0.1.64): `pkg info` parses `@version`, prints `authored_against`
+> and the local install state; `pkg list` marks dirty instances (`*`) next to the upgrade
+> column; `config diff` shows the pin + "X.Y.Z available" on both dirty and clean lines;
+> free-text `pkg search` covers project tags and overlay targets, prints a header, exits 1 on
+> no matches; `overlay list` is a status view (newer-version / masked-keys / missing-payload);
+> `pkg lock` reports to stdout and verifies bound overlay payload copies; one `parse_ref`
+> helper (rig_cli/refs.py) replaced ~15 hand-rolled ref splits.
 > **Git history = the registry version archive SHIPPED** (v0.1.63, ROADMAP §5): git-backed
 > registries serve PAST versions read-only from the full-clone cache (`pkg add ns/name@old`,
 > `git log`/`git show`, no checkout/tags), and `--locked` re-resolves packages at the locked

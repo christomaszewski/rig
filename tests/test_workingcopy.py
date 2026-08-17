@@ -190,12 +190,12 @@ def test_relock_verifies_anchors():
     with _env(RIG_HOME=tempfile.mkdtemp()):
         root, _ = _world()
         _install_acme(root)
-        rc, _, err = _run("--root", str(root), "pkg", "lock")
-        assert rc == 0 and "all anchors verified" in err
+        rc, out, _ = _run("--root", str(root), "pkg", "lock")
+        assert rc == 0 and "all anchors verified" in out   # report verb -> stdout
         pin = root / "config" / ".pins" / "acme_cam.yaml"
         pin.write_text(pin.read_text() + "# tampered\n")
-        rc, _, err = _run("--root", str(root), "pkg", "lock")
-        assert rc == 1 and "edited" in err
+        rc, out, _ = _run("--root", str(root), "pkg", "lock")
+        assert rc == 1 and "edited" in out
 
 
 # --- upgrade correctness batch (v0.1.62): overlays, rollback, collisions, --locked -------------
@@ -305,9 +305,9 @@ def test_relock_self_heals_legacy_empty_anchor():
         lock = load_lock(root)
         lock.setdefault("instances", {})["handy"] = {"base_sha256": ""}  # pre-v0.1.62 poison
         save_lock(root, lock)
-        rc, _, err = _run("--root", str(root), "pkg", "lock")
-        assert rc == 0, err
-        assert "dropping it" in err
+        rc, out, _ = _run("--root", str(root), "pkg", "lock")
+        assert rc == 0, out
+        assert "dropping it" in out                        # report verb -> stdout
         assert "handy" not in (load_lock(root).get("instances") or {})
 
 
@@ -359,6 +359,43 @@ def test_install_failure_rolls_back_single_package():
         assert not (root / "rig.lock").exists()                    # no half-locked state
         assert "camish" not in ((root / "services.yaml").read_text()
                                 if (root / "services.yaml").exists() else "")
+
+
+# --- UX batch (v0.1.64): dirty markers, upgrade hints ------------------------------------------
+
+
+def test_relock_verifies_overlay_payload_copies():
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        root, _ = _world()
+        _install_acme(root)
+        _run("--root", str(root), "overlay", "apply", "acme_cam", "testns/cam-tune")
+        assert _run("--root", str(root), "pkg", "lock")[0] == 0
+        copy = root / "config" / ".overlays" / "testns--cam-tune--1.0.0.yaml"
+        copy.write_text(copy.read_text() + "# tampered\n")
+        rc, out, _ = _run("--root", str(root), "pkg", "lock")
+        assert rc == 1 and "payload copy no longer matches" in out
+
+
+def test_pkg_list_marks_dirty_and_diff_hints_upgrade():
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        root, reg = _world()
+        working = _install_acme(root)
+        working.write_text(working.read_text().replace("width: 1280", "width: 640"))  # dirty
+        mpath = reg / "profiles" / "acme-cam" / "manifest.yaml"    # registry moves, NO upgrade run
+        m = yaml.safe_load(mpath.read_text())
+        m["version"] = "2.1.0"
+        mpath.write_text(yaml.safe_dump(m, sort_keys=False))
+        _run("registry", "index", str(reg))
+        rc, out, _ = _run("--root", str(root), "pkg", "list")
+        assert rc == 0
+        assert "acme_cam*" in out                                  # * = local edits
+        assert "2.1.0 available" in out and "local edits" in out   # legend included
+        rc, out, _ = _run("--root", str(root), "config", "diff", "acme_cam")
+        assert "(base: testns/acme-cam@2.0.0 — 2.1.0 available)" in out
+        pin = root / "config" / ".pins" / "acme_cam.yaml"          # back to clean: pin shown too
+        working.write_bytes(pin.read_bytes())
+        rc, out, _ = _run("--root", str(root), "config", "diff", "acme_cam")
+        assert "clean (base: testns/acme-cam@2.0.0 — 2.1.0 available)" in out
 
 
 if __name__ == "__main__":

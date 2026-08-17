@@ -331,9 +331,8 @@ def cmd_artifact_list(args, root: Path) -> int:
         rows.append((tag, str(meta.get("vehicle", "?")), str(meta.get("created", "?")),
                      str(meta.get("pinning", "?")), str((meta.get("parent") or {}).get("tag", "—")),
                      f"{size_mb:,.0f}M" if size_mb >= 1 else f"{path.stat().st_size / 1e3:.0f}K"))
-    widths = [max(len(r[i]) for r in rows) for i in range(len(rows[0]))]
-    for r in rows:
-        print("  ".join(cell.ljust(widths[i]) for i, cell in enumerate(r)))
+    from .common import print_table
+    print_table(rows)
     return 0
 
 
@@ -361,7 +360,12 @@ def cmd_registry(args) -> int:
 def cmd_pkg(args) -> int:
     if args.pkg_cmd == "search":
         return pkg_mod.search(args.query)
-    return pkg_mod.info(args.ref)
+    try:  # inside a deployment, info also reports the local install state — outside, it's silent
+        root = (args.root or find_root()).resolve()
+        root = root if (root / "vehicle.yaml").exists() else None
+    except RigError:
+        root = None
+    return pkg_mod.info(args.ref, root=root)
 
 
 def cmd_build(args, root: Path) -> int:

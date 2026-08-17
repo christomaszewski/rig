@@ -36,6 +36,7 @@ from . import RigError
 from .common import eprint, load_yaml
 from .lock import load_lock
 from .manifest import load_manifest
+from .refs import unqualified
 from .registries import Entry, load_entries
 from .registry import validate_registry, write_index, load_registry
 from .workingcopy import promote_delta
@@ -204,7 +205,7 @@ def promote(root: Path, names: list[str], *, to: str, all_dirty: bool, name: str
                 if req is None:
                     pin = next((ref for ref, info in (lock.get("packages") or {}).items()
                                 if info.get("kind") == "service"
-                                and ref.rpartition("/")[-1].split("@")[0] == sensor.service), None)
+                                and unqualified(ref) == sensor.service), None)
                     req = _requalify(pin) if pin else None  # lock refs carry the ALIAS
                 if req is None:
                     raise RigError(f"promote: no locked service pin for '{sensor.service}' — pass "
@@ -214,7 +215,7 @@ def promote(root: Path, names: list[str], *, to: str, all_dirty: bool, name: str
                 if name:
                     pkg_name = name
                 elif sensor.profile:
-                    pkg_name = str(sensor.profile).rpartition("/")[-1].split("@")[0]
+                    pkg_name = unqualified(str(sensor.profile))
                 else:
                     pkg_name = sensor.name.replace("_", "-")
                 existing = _existing_manifest(reg_root, "profiles", pkg_name)
@@ -251,7 +252,7 @@ def promote(root: Path, names: list[str], *, to: str, all_dirty: bool, name: str
                 if not (reg_root / "services" / sensor.service / "manifest.yaml").is_file():
                     pin = next((ref for ref, info in (lock.get("packages") or {}).items()
                                 if info.get("kind") == "service"
-                                and ref.rpartition("/")[-1].split("@")[0] == sensor.service), None)
+                                and unqualified(ref) == sensor.service), None)
                     if pin:
                         svc_target = _requalify(pin.split("@", 1)[0])  # ns/name, registry-side
                 # Provenance stamp (staleness tier 1): what this delta was authored against —
@@ -260,7 +261,7 @@ def promote(root: Path, names: list[str], *, to: str, all_dirty: bool, name: str
                 authored = {}
                 svc_pin = next((r for r, info in (lock.get("packages") or {}).items()
                                 if info.get("kind") == "service"
-                                and r.rpartition("/")[-1].split("@")[0] == sensor.service), None)
+                                and unqualified(r) == sensor.service), None)
                 if svc_pin:
                     authored["service"] = _requalify(svc_pin)
                 if sensor.profile:

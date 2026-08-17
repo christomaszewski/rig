@@ -182,6 +182,53 @@ def test_sync_warns_on_stale_index():
         assert rc == 0 and "STALE" in err                           # split-world surfaced at sync
 
 
+def _add_overlay(reg, name="zr30-gideon", project="gideon"):
+    o = reg / "overlays" / name
+    (o / "config").mkdir(parents=True)
+    (o / "manifest.yaml").write_text(yaml.safe_dump({
+        "kind": "overlay", "name": name, "version": "1.1.0",
+        "targets": [{"service": "camera-service"}], "project": project,
+        "authored_against": {"service": "camera-service@1.4.2"},
+        "config": {"payload": "config/delta.yaml"}}))
+    (o / "config" / "delta.yaml").write_text("rtsp: {url: y}\n")
+    _run("registry", "index", str(reg))
+
+
+def test_parse_ref_shapes():
+    from rig_cli.refs import parse_ref, unqualified
+    assert parse_ref("public/cam@1.2.3") == ("public", "cam", "1.2.3")
+    assert parse_ref("cam@1.2.3") == (None, "cam", "1.2.3")
+    assert parse_ref("public/cam") == ("public", "cam", None)
+    assert parse_ref("cam") == (None, "cam", None)
+    assert unqualified("public/cam@1.2.3") == "cam"
+
+
+def test_search_covers_project_tags_and_targets_with_header():
+    with _env(RIG_HOME=_home()):
+        _run("setup", "--no-default-registry")
+        reg = _seed_registry(ns="testns")
+        _add_overlay(reg)
+        _run("registry", "add", "testns", "--path", str(reg))
+        rc, out, _ = _run("pkg", "search", "gideon")        # free text hits the PROJECT tag
+        assert rc == 0 and "testns/zr30-gideon" in out and "PACKAGE" in out  # header row
+        rc, out, _ = _run("pkg", "search", "camera-service")
+        assert rc == 0 and "testns/zr30-gideon" in out      # overlays found by TARGET too
+
+
+def test_info_versioned_ref_and_authored_against():
+    with _env(RIG_HOME=_home()):
+        _run("setup", "--no-default-registry")
+        reg = _seed_registry(ns="testns")
+        _add_overlay(reg)
+        _run("registry", "add", "testns", "--path", str(reg))
+        rc, out, _ = _run("pkg", "info", "testns/siyi-zr30@0.9.9")   # @version now PARSES
+        assert rc == 0 and "you asked about @0.9.9" in out and "1.0.0" in out
+        rc, out, _ = _run("pkg", "info", "testns/zr30-gideon")
+        assert rc == 0 and "authored_against: service: camera-service@1.4.2" in out
+        rc, out, _ = _run("pkg", "info", "testns/siyi-zr30")
+        assert "requires: None" not in out                   # absent fields stay silent
+
+
 def test_pkg_search_and_info_across_registries():
     with _env(RIG_HOME=_home()):
         _run("setup", "--no-default-registry")
@@ -194,7 +241,7 @@ def test_pkg_search_and_info_across_registries():
         rc, out, _ = _run("pkg", "search", "sensor:usb:1234:5678")  # glob identifier covers it
         assert rc == 0 and "match: glob" in out
         rc, out, _ = _run("pkg", "search", "nope-nothing")
-        assert rc == 0 and "no matches" in out
+        assert rc == 1 and "no matches" in out          # scriptable: no hits = nonzero
         rc, out, _ = _run("pkg", "info", "testns/siyi-zr30")
         assert rc == 0 and "requires: camera-service@^1.4" in out and "SIYI ZR30" in out
         rc, out, _ = _run("pkg", "info", "camera-service")  # unqualified resolves priority order

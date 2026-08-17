@@ -228,9 +228,8 @@ def list_registries() -> int:
         except RigError:
             state, count = ("NOT SYNCED" if entry.type == "git" else "DEGRADED"), "—"
         rows.append((str(i), entry.name, entry.type, entry.location, state, count))
-    widths = [max(len(r[i]) for r in rows) for i in range(len(rows[0]))]
-    for r in rows:
-        print("  ".join(cell.ljust(widths[i]) for i, cell in enumerate(r)))
+    from .common import print_table
+    print_table(rows)
     return 0
 
 

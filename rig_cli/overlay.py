@@ -23,6 +23,7 @@ from .common import eprint, load_yaml
 from .install import qualified, registry_commit, resolve_ref
 from .lock import load_lock, record_instance, record_package, record_registry, save_lock, sha256_file
 from .manifest import Sensor, load_manifest
+from .refs import unqualified
 from .resolve import overlay_payload_path
 
 _ROW_KEY_ORDER = ("name", "service", "config", "profile", "overlays", "overrides", "enabled", "order")
@@ -116,7 +117,7 @@ def _warn_authored_against(lock: dict, pkg, service: str) -> None:
         return
     mine = next((r for r, info in (lock.get("packages") or {}).items()
                  if (info or {}).get("kind") == "service"
-                 and r.rpartition("/")[-1].split("@")[0] == service), None)
+                 and unqualified(r) == service), None)
     if mine and "@" in str(stamp) and mine.split("@")[-1] != str(stamp).split("@")[-1]:
         eprint(f"  WARNING: '{pkg.name}' was authored against {stamp} but this deployment pins "
                f"{mine} — re-verify the delta's keys against the current config surface")
@@ -245,9 +246,56 @@ def reorder(root: Path, instance: str, refs: list[str]) -> int:
     return 0
 
 
+def _binding_status(root: Path, sensor: Sensor, ref: str, currents: dict) -> str:
+    """Annotations for one binding: payload copy present? newer version synced? keys masked by
+    local state? — `overlay list` as a status view, not a bare enumeration. Fail-soft on
+    registry state (listing must work offline)."""
+    from .refs import parse_ref
+    notes = []
+    copy = overlay_payload_path(root, ref)
+    if not copy.is_file():
+        notes.append("payload copy MISSING (re-apply)")
+    ns, name, pinned = parse_ref(ref)
+    if ns not in currents:
+        from .registries import load_entries, open_registry
+        currents[ns] = None
+        entry = next((e for e in load_entries() if e.name == ns), None)
+        if entry is not None:
+            try:
+                currents[ns] = open_registry(entry)[1].get("packages") or {}
+            except RigError:
+                pass
+    current = ((currents[ns] or {}).get(name) or {}).get("version")
+    if current and current != pinned:
+        notes.append(f"{current} available (pkg upgrade rebinds)")
+    if copy.is_file():
+        from .workingcopy import local_delta
+        state = local_delta(root, sensor)
+        if state:
+            local_paths = set(_flat_paths(state[0])) | set(_flat_paths(state[1]))
+            masked = local_paths & set(_flat_paths(_strip(load_yaml(copy))))
+            if masked:
+                notes.append(f"{len(masked)} key(s) masked by local")
+    return f"   [{'; '.join(notes)}]" if notes else ""
+
+
+def _strip(data: dict) -> dict:
+    return {k: v for k, v in (data or {}).items() if k not in ("name", "service")}
+
+
+def _flat_paths(patch: dict, prefix: str = ""):
+    for key, value in (patch or {}).items():
+        path = f"{prefix}.{key}" if prefix else str(key)
+        if isinstance(value, dict) and value:
+            yield from _flat_paths(value, path)
+        else:
+            yield path
+
+
 def list_bindings(root: Path, instance: str | None) -> int:
     manifest = load_manifest(root)
     shown = 0
+    currents: dict = {}  # ns -> index packages (one registry open per ns, fail-soft)
     for sensor in manifest.sensors:
         if instance and sensor.name != instance:
             continue
@@ -259,7 +307,7 @@ def list_bindings(root: Path, instance: str | None) -> int:
             continue
         print(f"{sensor.name}:")
         for i, ref in enumerate(sensor.overlays, 1):
-            print(f"  {i}. {ref}")
+            print(f"  {i}. {ref}{_binding_status(root, sensor, ref, currents)}")
     if not shown:
         print("no overlay bindings in this deployment")
     return 0

@@ -46,3 +46,13 @@ def eprint(*args, **kwargs) -> None:
     """Print to stderr (stdout stays clean for machine-readable output)."""
     kwargs.setdefault("file", sys.stderr)
     print(*args, **kwargs)
+
+
+def print_table(rows: list[tuple]) -> None:
+    """Aligned columns to stdout — the one table renderer (pkg list/search, registry list,
+    artifact list all draw the same shape)."""
+    if not rows:
+        return
+    widths = [max(len(r[i]) for r in rows) for i in range(len(rows[0]))]
+    for r in rows:
+        print("  ".join(cell.ljust(widths[i]) for i, cell in enumerate(r)).rstrip())

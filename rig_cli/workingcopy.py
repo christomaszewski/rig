@@ -24,6 +24,7 @@ from .install import qualified, registry_commit
 from .lock import load_lock, record_instance, record_package, record_registry, save_lock, sha256_file
 from .manifest import Manifest, Sensor, load_manifest
 from .pkg import _each_index, _entries_or_hint
+from .refs import unqualified
 from .resolve import deep_merge, overlay_payload_path, structural_diff
 
 PINS_DIR = "config/.pins"
@@ -93,12 +94,34 @@ def promote_delta(root: Path, sensor: Sensor) -> dict | None:
     return structural_diff(base, final)
 
 
+def _provenance_note(sensor: Sensor, currents: dict) -> str:
+    """`(base: ns/x@1.0.0 — 1.1.0 available)` — the pin, plus an upgrade hint when the synced
+    registry has moved past it. Fail-soft on registry state (diff must work offline)."""
+    if not sensor.profile:
+        return ""
+    from .refs import parse_ref
+    ns, name, pinned = parse_ref(str(sensor.profile))
+    if ns not in currents:
+        currents[ns] = None
+        from .registries import load_entries, open_registry
+        entry = next((e for e in load_entries() if e.name == ns), None)
+        if entry is not None:
+            try:
+                currents[ns] = open_registry(entry)[1].get("packages") or {}
+            except RigError:
+                pass
+    current = ((currents[ns] or {}).get(name) or {}).get("version")
+    hint = f" — {current} available" if current and current != pinned else ""
+    return f" (base: {sensor.profile}{hint})"
+
+
 def cmd_diff(args, root: Path) -> int:
     """`rig config diff [names]` — which instances are dirty vs their pinned base, per key."""
     manifest: Manifest = load_manifest(root)  # RAW rows — the working files, not the rendered output
     lock = load_lock(root)
     chosen = manifest.select(args.names, enabled_only=False)
     dirty = 0
+    currents: dict = {}  # ns -> index packages, opened once, fail-soft
     for sensor in chosen:
         state = local_delta(root, sensor)
         if state is None:
@@ -113,12 +136,11 @@ def cmd_diff(args, root: Path) -> int:
         masked = set(dict(_flat(delta))) | set(dict(_flat(overrides)))
         if not delta and not overrides:
             if args.names:
-                print(f"{sensor.name}: clean")
+                print(f"{sensor.name}: clean{_provenance_note(sensor, currents)}")
                 _print_overlay_attribution(root, sensor, masked)
             continue
         dirty += 1
-        provenance = f" (base: {sensor.profile})" if sensor.profile else ""
-        print(f"{sensor.name}: dirty{provenance}")
+        print(f"{sensor.name}: dirty{_provenance_note(sensor, currents)}")
         _print_overlay_attribution(root, sensor, masked)
         base = _strip_identity(load_yaml(pin_path(root, sensor.name)))
         for path, value in sorted(_flat(delta)):
@@ -236,7 +258,7 @@ def upgrade(root: Path, names: list[str]) -> int:
 
     def service_ref_for(service_name: str) -> str | None:
         hits = [r for r, info in packages.items()
-                if info.get("kind") == "service" and r.rpartition("/")[-1].split("@")[0] == service_name]
+                if info.get("kind") == "service" and unqualified(r) == service_name]
         return hits[0] if hits else None
 
     try:
@@ -398,33 +420,47 @@ def _rewrite_row_profile(root: Path, instance: str, new_ref: str) -> None:
 
 
 def relock(root: Path) -> int:
-    """`rig pkg lock` — re-verify every instance anchor against its pin copy and rewrite rig.lock
-    deterministically. Catches hand-edited pins and normalizes the file."""
+    """`rig pkg lock` — re-verify every instance anchor against its pin copy AND every bound
+    overlay's payload copy against its locked hash, then rewrite rig.lock deterministically.
+    A report verb: findings go to STDOUT (machine-consumable), like the other list/diff verbs."""
     lock = load_lock(root)
     manifest = load_manifest(root)
     problems = 0
     for name, row in sorted((lock.get("instances") or {}).items()):
         pin = pin_path(root, name)
         if not any(s.name == name for s in manifest.sensors):
-            eprint(f"  {name}: in rig.lock but not in vehicle.yaml — removing the stale anchor")
+            print(f"  {name}: in rig.lock but not in vehicle.yaml — removing the stale anchor")
             del lock["instances"][name]
             continue
         if not row.get("base_sha256"):  # legacy: overlay apply once synthesized pin-less anchors
-            eprint(f"  {name}: anchor has no base hash (pin-less instance) — dropping it "
-                   f"(bindings live in vehicle.yaml; anchors are for pinned bases only)")
+            print(f"  {name}: anchor has no base hash (pin-less instance) — dropping it "
+                  f"(bindings live in vehicle.yaml; anchors are for pinned bases only)")
             del lock["instances"][name]
             continue
         if not pin.is_file():
             problems += 1
-            eprint(f"  {name}: missing {PINS_DIR}/{name}.yaml (the pristine base copy) — re-install "
-                   f"to re-anchor")
+            print(f"  {name}: missing {PINS_DIR}/{name}.yaml (the pristine base copy) — re-install "
+                  f"to re-anchor")
             continue
         got = sha256_file(pin)
         if got != row.get("base_sha256"):
             problems += 1
-            eprint(f"  {name}: pin copy hash {got[:12]}… != lock {str(row.get('base_sha256'))[:12]}… "
-                   f"— the pin was edited; restore it or re-install")
+            print(f"  {name}: pin copy hash {got[:12]}… != lock {str(row.get('base_sha256'))[:12]}… "
+                  f"— the pin was edited; restore it or re-install")
+    bound = {o for s in manifest.sensors for o in s.overlays}
+    for ref, info_ in sorted((lock.get("packages") or {}).items()):
+        if (info_ or {}).get("kind") != "overlay" or ref not in bound:
+            continue
+        copy = overlay_payload_path(root, ref)
+        want = (info_ or {}).get("payload_sha256")
+        if not copy.is_file():
+            problems += 1
+            print(f"  {ref}: bound but its payload copy is missing (config/.overlays/) — re-apply")
+        elif want and sha256_file(copy) != want:
+            problems += 1
+            print(f"  {ref}: payload copy no longer matches rig.lock — it was edited by hand; "
+                  f"re-apply the overlay (edits belong in the working config or a new version)")
     save_lock(root, lock)
-    eprint(f"rig pkg lock: rewritten deterministically"
-           + (f" — {problems} problem(s) above" if problems else ", all anchors verified"))
+    print(f"rig pkg lock: rewritten deterministically"
+          + (f" — {problems} problem(s) above" if problems else ", all anchors verified"))
     return 1 if problems else 0

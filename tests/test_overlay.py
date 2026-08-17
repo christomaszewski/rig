@@ -230,6 +230,26 @@ def test_remove_ambiguous_versions_errors():
         assert rc == 1 and "ambiguous" in err and "fully-qualified" in err
 
 
+def test_overlay_list_is_a_status_view():
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        root, reg = _world()
+        working = _install_acme(root)
+        _run("--root", str(root), "overlay", "apply", "acme_cam", "testns/cam-tune")
+        working.write_text(working.read_text().replace("width: 1280", "width: 640"))  # masks usb.width
+        mpath = reg / "overlays" / "cam-tune" / "manifest.yaml"    # registry moves, NO upgrade run
+        m = yaml.safe_load(mpath.read_text())
+        m["version"] = "1.1.0"
+        mpath.write_text(yaml.safe_dump(m, sort_keys=False))
+        _run("registry", "index", str(reg))
+        rc, out, _ = _run("--root", str(root), "overlay", "list", "acme_cam")
+        assert rc == 0, out
+        assert "1.1.0 available" in out                            # upgrade signal
+        assert "1 key(s) masked by local" in out                   # usb.width: local beats overlay
+        (root / "config" / ".overlays" / "testns--cam-tune--1.0.0.yaml").unlink()
+        rc, out, _ = _run("--root", str(root), "overlay", "list", "acme_cam")
+        assert "payload copy MISSING" in out
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

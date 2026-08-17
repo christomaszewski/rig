@@ -10,7 +10,8 @@ from __future__ import annotations
 import fnmatch
 
 from . import RigError
-from .common import eprint
+from .common import eprint, print_table
+from .refs import parse_ref, unqualified
 from .registries import Entry, load_entries, open_registry
 
 _TIER_ORDER = {"exact": 0, "glob": 1, "fallback": 2}
@@ -40,7 +41,7 @@ def _sensor_hits(index: dict, ident: str) -> list[tuple[str, str]]:
     glob keys that fnmatch it, then the '*' fallback."""
     hits: list[tuple[str, str]] = []
     for key, rows in (index.get("sensors") or {}).items():
-        if key == ident or (key != ident and fnmatch.fnmatch(ident, key)):
+        if fnmatch.fnmatch(ident, key):  # exact keys have no glob chars, so this covers ==
             hits.extend((row["profile"], row["tier"]) for row in rows)
     return sorted(set(hits), key=lambda h: (_TIER_ORDER.get(h[1], 3), h[0]))
 
@@ -65,22 +66,29 @@ def search(query: str) -> int:
                              meta.get("version", "?"), f"project: {tag}"))
     else:
         needle = query.lower()
-        for entry, _, index in _each_index(entries):
+        for entry, reg, index in _each_index(entries):
             packages = index.get("packages") or {}
-            matched = {n for n in packages if needle in n.lower()}
+            matched = {n: "" for n in packages if needle in n.lower()}
             for key, hit_rows in (index.get("sensors") or {}).items():
                 if needle in key.lower():
-                    matched.update(row["profile"] for row in hit_rows)
+                    matched.update((row["profile"], f"match: {key}") for row in hit_rows)
+            for tag, names in (index.get("projects") or {}).items():
+                if needle in tag.lower():
+                    matched.update((n, f"project: {tag}") for n in names)
+            for pname, pkg in reg.packages.items():  # overlays by TARGET: "what tunes camish?"
+                if pkg.kind == "overlay" and any(
+                        needle in str(v).lower() for t in (pkg.manifest.get("targets") or [])
+                        if isinstance(t, dict) for v in t.values()):
+                    matched.setdefault(pname, f"targets: {needle}")
             for name in sorted(matched):
                 meta = packages.get(name) or {}
                 rows.append((f"{entry.name}/{name}", meta.get("kind", "?"),
-                             meta.get("version", "?"), ""))
+                             meta.get("version", "?"), matched[name]))
     if not rows:
         print(f"no matches for '{query}'")
-        return 0
-    widths = [max(len(r[i]) for r in rows) for i in range(4)]
-    for r in rows:  # priority order is preserved: higher-priority registries printed first
-        print("  ".join(cell.ljust(widths[i]) for i, cell in enumerate(r)).rstrip())
+        return 1
+    # priority order is preserved: higher-priority registries printed first
+    print_table([("PACKAGE", "KIND", "VERSION", "NOTE")] + rows)
     return 0
 
 
@@ -99,22 +107,28 @@ def list_installed(root) -> int:
         return 0
     manifest = load_manifest(root)
     entries = {e.name: e for e in load_entries()}
+    from .workingcopy import local_delta
+    dirty = set()
+    for s in manifest.sensors:  # `*` = local edits — exactly what upgrade will three-way
+        state = local_delta(root, s)
+        if state and (state[0] or state[1]):
+            dirty.add(s.name)
 
     def users(ref: str, kind: str) -> str:
-        name = ref.rpartition("/")[-1].split("@")[0]
+        name = unqualified(ref)
         if kind == "service":
             hits = [s.name for s in manifest.sensors if s.service == name]
         elif kind == "profile":
             hits = [s.name for s in manifest.sensors
-                    if s.profile and s.profile.rpartition("/")[-1].split("@")[0] == name]
+                    if s.profile and unqualified(s.profile) == name]
         else:  # overlay: bound instances
             hits = [s.name for s in manifest.sensors if any(o == ref for o in s.overlays)]
-        return ", ".join(hits) or ("(dependency)" if kind == "service" else "—")
+        marked = [h + ("*" if h in dirty else "") for h in hits]
+        return ", ".join(marked) or ("(dependency)" if kind == "service" else "—")
 
     def registry_current(ref: str) -> str:
-        ns, _, rest = ref.partition("/")
-        name, _, pinned = rest.partition("@")
-        entry = entries.get(ns)
+        ns, name, pinned = parse_ref(ref)
+        entry = entries.get(ns or "")
         if entry is None:
             return "registry gone"
         try:
@@ -131,17 +145,21 @@ def list_installed(root) -> int:
         info_ = packages[ref] or {}
         kind = str(info_.get("kind", "?"))
         rows.append((ref, kind, users(ref, kind), registry_current(ref)))
-    widths = [max(len(r[i]) for r in rows) for i in range(len(rows[0]))]
-    for r in rows:
-        print("  ".join(cell.ljust(widths[i]) for i, cell in enumerate(r)).rstrip())
+    print_table(rows)
+    notes = []
+    if any("*" in r[2] for r in rows[1:]):
+        notes.append("* = local edits (upgrade three-way-merges them, local wins)")
     if any(r[3] for r in rows[1:]):
-        print("\n(`rig registry sync && rig pkg upgrade` updates; local edits are three-way-merged)")
+        notes.append("`rig registry sync && rig pkg upgrade` updates — profiles/services "
+                     "three-way, bound overlays rebound in place")
+    if notes:
+        print("\n" + "\n".join(f"({n})" for n in notes))
     return 0
 
 
-def info(ref: str) -> int:
+def info(ref: str, root=None) -> int:
     entries = _entries_or_hint()
-    ns, _, name = ref.rpartition("/")
+    ns, name, asked = parse_ref(ref)   # pkg info accepts @version like every other verb
     if ns:
         entries = [e for e in entries if e.name == ns]
         if not entries:
@@ -152,7 +170,12 @@ def info(ref: str) -> int:
             continue
         m = pkg.manifest
         print(f"{entry.name}/{pkg.name}  {pkg.kind}  {pkg.version}")
+        if asked and asked != pkg.version:
+            print(f"  (you asked about @{asked} — the registry carries ONE current version; "
+                  f"git-backed registries serve @{asked} via `rig pkg add {entry.name}/{name}"
+                  f"@{asked}`)")
         print(f"  registry: {entry.name} ({entry.type}) at {entry.root}")
+        _print_local_state(root, entry.name, name)
         if pkg.kind == "service":
             source, image = m.get("source") or {}, m.get("image") or {}
             if source:
@@ -165,7 +188,8 @@ def info(ref: str) -> int:
         elif pkg.kind == "profile":
             for block in (m.get("provides") or {}).get("sensor") or []:
                 print(f"  sensor: {block.get('model', '?')}  match: {', '.join(block.get('match', []))}")
-            print(f"  requires: {(m.get('requires') or {}).get('service')}")
+            if (m.get("requires") or {}).get("service"):
+                print(f"  requires: {m['requires']['service']}")
             print(f"  payload: {(m.get('config') or {}).get('payload')}")
         elif pkg.kind == "overlay":
             targets = ["{}={}".format(*next(iter(t.items())))
@@ -173,6 +197,9 @@ def info(ref: str) -> int:
             print(f"  targets: {', '.join(targets) or '?'}")
             if m.get("project"):
                 print(f"  project: {m['project']}")
+            stamp = m.get("authored_against") or {}
+            if stamp:  # the staleness provenance (v0.1.59) — finally visible to consumers
+                print("  authored_against: " + ", ".join(f"{k}: {v}" for k, v in stamp.items()))
             print(f"  delta: {(m.get('config') or {}).get('payload')}")
         elif pkg.kind == "suite":
             members = m.get("members") or {}
@@ -182,3 +209,17 @@ def info(ref: str) -> int:
         return 0
     raise RigError(f"pkg info: '{ref}' not found in any configured registry "
                    f"(synced? rig registry sync)")
+
+
+def _print_local_state(root, ns: str, name: str) -> None:
+    """One line on THIS deployment's relationship to the package (silent outside a deployment)."""
+    if root is None:
+        return
+    from .lock import load_lock
+    try:
+        packages = load_lock(root).get("packages") or {}
+    except RigError:
+        return
+    mine = [r for r in packages if parse_ref(r)[:2] == (ns, name)]
+    if mine:
+        print(f"  installed here: {mine[0]}")

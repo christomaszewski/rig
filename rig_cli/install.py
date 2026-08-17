@@ -34,6 +34,7 @@ from .init import _append_services_line, _append_tier_row, _safe_name
 from .lock import load_lock, record_instance, record_package, record_registry, save_lock, sha256_file
 from .manifest import load_manifest
 from .pkg import _each_index, _entries_or_hint, _sensor_hits
+from .refs import unqualified
 from .registries import Entry, rig_home
 from .registry import Package, Registry, _CONSTRAINT, constraint_satisfied
 from .vendor import vendor
@@ -235,7 +236,7 @@ def _install_service(root: Path, entry: Entry, pkg: Package, lock: dict, *, lock
     _check_locked(lock, ref, locked=locked, source=source)
     other = [r for r, info in (lock.get("packages") or {}).items()
              if (info or {}).get("kind") == "service" and r != ref
-             and r.rpartition("/")[-1].split("@")[0] == pkg.name]
+             and unqualified(r) == pkg.name]
     if other and not allow_repin:
         raise RigError(f"install: service '{pkg.name}' is locked at {other[0]} but this install "
                        f"needs {ref} — a service is SHARED by every instance using it; move the "
@@ -278,7 +279,7 @@ def _materialize_instance(root: Path, *, svc: str, desc, instance: str | None, b
     if instance:
         name = instance
     elif profile_ref:  # default: the profile name, made ROS-safe (siyi-zr30 -> siyi_zr30)
-        name = _safe_name(profile_ref.rpartition("/")[-1].split("@", 1)[0])
+        name = _safe_name(unqualified(profile_ref))
     elif embedded:  # profile-less service whose example is a NAMED config — honor its name
         name = embedded
     else:
@@ -461,12 +462,12 @@ def _gc_service(root: Path, lock: dict, svc: str) -> None:
     if any(s.service == svc for s in load_manifest(root).sensors):
         return
     still_required = any(
-        str(info.get("requires") or "").rpartition("/")[-1].split("@")[0] == svc
+        unqualified(str(info.get("requires") or "")) == svc
         for info in packages.values() if info.get("kind") == "profile")
     if still_required:
         return
     refs = [r for r, info in packages.items()
-            if info.get("kind") == "service" and r.rpartition("/")[-1].split("@")[0] == svc]
+            if info.get("kind") == "service" and unqualified(r) == svc]
     if not refs:
         return  # not a registry package (workspace-wired) — never GC'd
     vendored = root / "services" / svc
@@ -494,8 +495,8 @@ def remove(root: Path, specs: list[str], *, purge_config: bool = False) -> int:
         manifest = load_manifest(root)
         sensor = next((s for s in manifest.sensors if s.name == spec), None)
         if sensor is None:
-            bare = spec.rpartition("/")[-1].split("@")[0]
-            refs = [r for r in packages if r.rpartition("/")[-1].split("@")[0] == bare]
+            bare = unqualified(spec)
+            refs = [r for r in packages if unqualified(r) == bare]
             if not refs:
                 raise RigError(f"remove: '{spec}' is neither an instance nor an installed package "
                                f"(rig pkg list shows both)")
@@ -504,7 +505,7 @@ def remove(root: Path, specs: list[str], *, purge_config: bool = False) -> int:
                 users = [s.name for s in manifest.sensors if s.service == bare]
             elif kind == "profile":
                 users = [s.name for s in manifest.sensors
-                         if s.profile and s.profile.rpartition("/")[-1].split("@")[0] == bare]
+                         if s.profile and unqualified(s.profile) == bare]
             else:
                 users = [s.name for s in manifest.sensors if any(o == ref for o in s.overlays)]
             if users:
@@ -600,7 +601,7 @@ def install(root: Path, spec: str, *, as_name: str | None = None, locked: bool =
         rows = load_manifest(root).sensors
         if pkg.kind == "profile":
             held = [s.name for s in rows
-                    if s.profile and s.profile.rpartition("/")[-1].split("@")[0] == pkg.name]
+                    if s.profile and unqualified(s.profile) == pkg.name]
         else:
             held = [s.name for s in rows if s.service == pkg.name]
         if held:
