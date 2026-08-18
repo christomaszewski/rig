@@ -118,6 +118,51 @@ def _world():
     return target, reg
 
 
+def test_fetch_initializes_submodules():
+    # Driver source arriving via submodule: the pinned checkout must init it recursively (rig
+    # build runs in this tree; the superproject commit pins submodule revs, so exact-pin holds
+    # transitively). Launch surfaces stay submodule-free by design — this is about source.
+    with _env(RIG_HOME=tempfile.mkdtemp(), GIT_CONFIG_COUNT="1",
+              GIT_CONFIG_KEY_0="protocol.file.allow", GIT_CONFIG_VALUE_0="always"):
+        sub = pathlib.Path(tempfile.mkdtemp()) / "driver-core"
+        sub.mkdir(parents=True)
+        (sub / "core.txt").write_text("upstream\n")
+        _git("init", "-q", cwd=sub)
+        _git("add", "-A", cwd=sub)
+        _git("commit", "-q", "-m", "core", cwd=sub)
+        repo = pathlib.Path(tempfile.mkdtemp()) / "subbed"
+        (repo / "config").mkdir(parents=True)
+        (repo / "rigging.yaml").write_text(
+            "service: subbed\nlauncher: subbed-up\ntier: sensor\n"
+            "examples: [config/subbed.example.yaml]\nlaunch_surface: [subbed-up]\n")
+        (repo / "subbed-up").write_text("#!/bin/sh\n")
+        (repo / "subbed-up").chmod(0o755)
+        (repo / "config" / "subbed.example.yaml").write_text("service: subbed\nrate: 1\n")
+        _git("init", "-q", cwd=repo)
+        _git("submodule", "add", str(sub), "vendor/core", cwd=repo)
+        _git("add", "-A", cwd=repo)
+        _git("commit", "-q", "-m", "code", cwd=repo)
+        rev = _git("rev-parse", "HEAD", cwd=repo).stdout.strip()
+        reg = pathlib.Path(tempfile.mkdtemp()) / "subreg"
+        with contextlib.redirect_stderr(io.StringIO()):
+            registry_init(reg, namespace="subreg")
+        d = reg / "services" / "subbed"
+        d.mkdir(parents=True)
+        (d / "manifest.yaml").write_text(yaml.safe_dump({
+            "kind": "service", "name": "subbed", "version": "1.0.0",
+            "source": {"repo": str(repo), "rev": rev}}))
+        assert _run("registry", "index", str(reg))[0] == 0
+        _run("setup", "--no-default-registry")
+        assert _run("registry", "add", "subreg", "--path", str(reg))[0] == 0
+        root = pathlib.Path(tempfile.mkdtemp()) / "veh"
+        with contextlib.redirect_stderr(io.StringIO()):
+            init(root, no_git=True)
+        rc, _, err = _run("--root", str(root), "pkg", "add", "subreg/subbed")
+        assert rc == 0, err
+        cache = pathlib.Path(os.environ["RIG_HOME"]) / "cache" / "src" / f"subbed-{rev[:12]}"
+        assert (cache / "vendor" / "core" / "core.txt").read_text() == "upstream\n"
+
+
 def test_pkg_add_is_canonical_and_install_is_alias():
     with _env(RIG_HOME=tempfile.mkdtemp()):
         root, _ = _world()

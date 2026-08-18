@@ -162,6 +162,13 @@ def _fetch_source(name: str, source: dict) -> Path:
     if head != rev:  # the cache dir is rev-keyed, so this only fires on tampering/corruption
         raise RigError(f"install {name}: source cache at {dest} is at {head[:12]}…, expected "
                        f"{rev[:12]}… — remove the dir and retry")
+    if (dest / ".gitmodules").is_file():  # driver source via submodules: the superproject commit
+        sub = git("submodule", "update", "--init", "--recursive", "--quiet")  # pins their revs —
+        if sub.returncode != 0:           # exact-pin transitively. No-op when already initialized
+            detail = (sub.stderr or "").strip().splitlines()
+            raise RigError(f"install {name}: submodule init failed at {rev[:12]}… "
+                           f"({detail[-1] if detail else 'git error'}) — are the submodule URLs "
+                           f"reachable from this machine?")
     service_dir = dest / str(source["path"]) if source.get("path") else dest
     if not service_dir.is_dir():
         raise RigError(f"install {name}: source.path '{source.get('path')}' not in the repo")
