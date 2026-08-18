@@ -242,9 +242,12 @@ def promote(root: Path, names: list[str], *, to: str, all_dirty: bool, name: str
     if unknown:
         raise RigError(f"promote: unknown instance(s): {', '.join(sorted(unknown))}")
     if not chosen:
-        eprint("rig pkg promote: nothing dirty — no packages to emit")
-        return 0
-    if adopt and chosen[0][2] != "profile":
+        if not suite:
+            eprint("rig pkg promote: nothing dirty — no packages to emit")
+            return 0
+        eprint("rig pkg promote: nothing dirty — emitting the suite alone "
+               "(pinned profiles + existing bindings)")
+    if adopt and chosen and chosen[0][2] != "profile":
         raise RigError("promote: --adopt needs --kind profile (this promote would emit an "
                        "overlay — its round-trip is `overlay apply --clear-local`)")
 
@@ -370,6 +373,9 @@ def promote(root: Path, names: list[str], *, to: str, all_dirty: bool, name: str
             for sensor in manifest.sensors:  # existing bindings first, manifest order; then new
                 bound.extend(r for r in (_requalify(o) for o in sensor.overlays) if r not in bound)
             bound.extend(o for o in new_overlays if o not in bound)
+            if not profiles and not bound:
+                raise RigError("promote: the suite would be EMPTY — no pinned profiles or bound "
+                               "overlays to reference (pin/install something first)")
             smanifest = {"kind": "suite", "name": suite, "version": version,
                          **_carry_forward(existing, "kind", "name", "version",
                                          "project", "members"),

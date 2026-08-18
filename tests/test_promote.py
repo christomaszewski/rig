@@ -125,6 +125,34 @@ def test_promote_all_suite_and_fresh_install_reproduces():
         assert list(sensor.overlays) == ["internal/acme-cam-gideon@1.0.0"]
 
 
+def test_suite_alone_when_nothing_dirty():
+    # An all-clean deployment (everything adopted/pinned): --all --suite emits the PINS-ONLY
+    # suite instead of exiting "nothing dirty" (v0.2.2); an empty deployment still refuses.
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        root, _ = _world()
+        _install_acme(root)                              # pinned, untouched — nothing dirty
+        internal = _internal()
+        rc, _, err = _run("--root", str(root), "pkg", "promote", "--all",
+                          "--suite", "boat", "--project", "g", "--to", "internal")
+        assert rc == 0, err
+        s = yaml.safe_load((internal / "suites" / "boat" / "manifest.yaml").read_text())
+        assert s["members"]["profiles"] == ["testns/camish:acme-cam@2.0.0"]
+        assert s["members"]["overlays"] == []
+        assert _run("registry", "validate", str(internal))[0] == 0
+        root2 = pathlib.Path(tempfile.mkdtemp()) / "veh2"  # fresh vehicle reproduces from pins
+        with contextlib.redirect_stderr(io.StringIO()):
+            init(root2, no_git=True)
+        rc, _, err = _run("--root", str(root2), "pkg", "install", "internal/boat")
+        assert rc == 0, err
+        assert _rendered(root2) == _rendered(root)
+        root3 = pathlib.Path(tempfile.mkdtemp()) / "veh3"  # nothing installed: suite would be empty
+        with contextlib.redirect_stderr(io.StringIO()):
+            init(root3, no_git=True)
+        rc, _, err = _run("--root", str(root3), "pkg", "promote", "--all",
+                          "--suite", "s", "--to", "internal")
+        assert rc == 1 and "EMPTY" in err, err
+
+
 def test_suite_install_rolls_back_midplan():
     with _env(RIG_HOME=tempfile.mkdtemp()):
         root, _ = _world()
