@@ -1,8 +1,12 @@
 # rig — project state & handoff (resume here)
 
 > Snapshot for picking the project up cold in a new session. Read this first, then `CHEATSHEET.md` /
-> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.2.0**,
-> branch **`main`**, 301 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.2.1**,
+> branch **`main`**, 302 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> **`--adopt` implies `--kind profile`** (v0.2.1): bare `promote <instance> --adopt` no longer
+> errors on instances with a pinned base (service-example anchored or profile-pinned) — the flag
+> is profile-only, so it IS the kind choice; a dirty pinned instance fork-adopts with the short
+> name defaulted from provenance. Explicit `--kind overlay --adopt` still refuses.
 > **Profile identity = (service, short) tuple — registry schema 2 SHIPPED** (v0.2.0, CLEAN BREAK,
 > no back-compat by user decision — all deployments recreated): a profile's key is
 > `service:short` everywhere (refs `[registry/]camera-service:siyi-zr30[@ver]`, index keys, lock

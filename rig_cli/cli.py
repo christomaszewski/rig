@@ -712,7 +712,7 @@ def build_parser() -> argparse.ArgumentParser:
     pp.add_argument("--requires", default=None, metavar="REF",
                     help="(--kind profile) service requirement override (ns/service@X.Y.Z)")
     pp.add_argument("--adopt", action="store_true",
-                    help="(--kind profile, one instance) after publishing, re-pin the instance "
+                    help="(one instance; implies --kind profile) after publishing, re-pin the instance "
                          "onto the new profile: working+pin reset to the payload, overrides "
                          "dropped, overlays unbound (baked in) — render identical, provenance "
                          "now the fork (the profile `--clear-local`)")

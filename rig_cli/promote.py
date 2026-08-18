@@ -222,7 +222,9 @@ def promote(root: Path, names: list[str], *, to: str, all_dirty: bool, name: str
         delta = promote_delta(root, sensor)
         if names:  # explicitly named: a missing base or clean state is an ERROR, not a skip
             skind = kind
-            if skind is None:  # infer only where it's unambiguous: no pinned base ⇒ overlay is
+            if skind is None and adopt:  # --adopt is profile-only — the flag IS the kind choice
+                skind = "profile"
+            elif skind is None:  # infer only where it's unambiguous: no pinned base ⇒ overlay is
                 skind = "overlay" if delta is not None else "profile"  # IMPOSSIBLE, profile it is
                 if skind == "profile":
                     eprint(f"  {sensor.name}: promoting as PROFILE (hand-authored — no registry "

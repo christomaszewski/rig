@@ -432,8 +432,17 @@ def test_adopt_guards_and_hand_authored_gains_provenance():
         working = _install_acme(root)
         internal = _internal()
         working.write_text(working.read_text() + "extra: 1\n")
+        # bare --adopt implies --kind profile (v0.2.1): a dirty PINNED instance fork-adopts with
+        # the short name defaulted from provenance, instead of erroring "would emit an overlay"
         rc, _, err = _run("--root", str(root), "pkg", "promote", "acme_cam",
-                          "--to", "internal", "--adopt")          # would emit an OVERLAY
+                          "--to", "internal", "--adopt")
+        assert rc == 0, err
+        assert "ADOPTED internal/camish:acme-cam@1.0.0" in err
+        m = yaml.safe_load((internal / "profiles" / "camish" / "acme-cam" / "manifest.yaml").read_text())
+        assert m["based_on"] == "testns/camish:acme-cam@2.0.0"
+        # the EXPLICIT overlay+adopt combination still refuses
+        rc, _, err = _run("--root", str(root), "pkg", "promote", "acme_cam", "--kind", "overlay",
+                          "--to", "internal", "--adopt")
         assert rc == 1 and "--adopt" in err
         # hand-authored instance: bare promote infers profile; --adopt writes provenance
         (root / "config" / "sensors" / "handy.yaml").write_text(
@@ -453,6 +462,26 @@ def test_adopt_guards_and_hand_authored_gains_provenance():
         assert (root / "config" / ".pins" / "handy.yaml").is_file()
         rc, _, err = _run("--root", str(root), "pkg", "lock")
         assert rc == 0, err                                       # anchors coherent
+
+
+def test_adopt_implies_profile_for_example_anchored_instance():
+    # `rig add <service>` pins the vendored example as the base, so bare promote infers OVERLAY —
+    # but --adopt is profile-only, so it implies the kind instead of erroring (v0.2.1).
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        root, _ = _world()
+        internal = _internal()
+        assert _run("--root", str(root), "pkg", "add", "testns/camish")[0] == 0
+        working = root / "config" / "sensors" / "camish.yaml"
+        working.write_text(working.read_text() + "extra: 1\n")
+        rc, _, err = _run("--root", str(root), "pkg", "promote", "camish",
+                          "--to", "internal", "--adopt", "--name", "generic")
+        assert rc == 0, err
+        assert "ADOPTED internal/camish:generic@1.0.0" in err
+        m = yaml.safe_load((internal / "profiles" / "camish" / "generic" / "manifest.yaml").read_text())
+        assert m["kind"] == "profile" and "based_on" not in m      # example base: a ROOT, no lineage
+        payload = yaml.safe_load(
+            (internal / "profiles" / "camish" / "generic" / "config" / "payload.yaml").read_text())
+        assert payload["extra"] == 1 and payload["camera"] == {"type": "usb"}  # base ⊕ edits
 
 
 def test_rebase_then_consumer_upgrade_round_trip():
