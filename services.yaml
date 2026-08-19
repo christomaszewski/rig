@@ -13,3 +13,4 @@ services:
   novatel:     { path: ../novatel }
   sbg:         { path: ../sbg_driver }
   ouster:      { path: ../ouster }
+  mavlink-router: { path: ../mavlink-router-rig }  # MAVLink hub (tier: infra)

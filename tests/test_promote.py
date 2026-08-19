@@ -323,6 +323,101 @@ def test_failed_repromote_restores_preexisting_package():
         assert (internal / "profiles" / "camish" / "keeper" / "NOTES.md").read_text() == "precious\n"
 
 
+def _dev_service(name="devsvc", subdir=None):
+    """A dev service checkout with a bare `origin` it has pushed to — the publishable shape.
+    Returns (route_path, head_sha, origin_path)."""
+    repo = pathlib.Path(tempfile.mkdtemp()) / name
+    d = repo / subdir if subdir else repo
+    (d / "config").mkdir(parents=True)
+    (d / "rigging.yaml").write_text(
+        f"service: {name}\nlauncher: {name}-up\ntier: sensor\n"
+        f"examples: [config/{name}.example.yaml]\nlaunch_surface: [{name}-up]\n")
+    (d / f"{name}-up").write_text("#!/bin/sh\n")
+    (d / f"{name}-up").chmod(0o755)
+    (d / "config" / f"{name}.example.yaml").write_text(f"service: {name}\nrate: 1\n")
+    _git("init", "-q", cwd=repo)
+    _git("add", "-A", cwd=repo)
+    _git("commit", "-q", "-m", "dev", cwd=repo)
+    origin = pathlib.Path(tempfile.mkdtemp()) / f"{name}.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(origin)], capture_output=True)
+    _git("remote", "add", "origin", str(origin), cwd=repo)
+    _git("push", "-q", "-u", "origin", "HEAD", cwd=repo)
+    return d, _git("rev-parse", "HEAD", cwd=repo).stdout.strip(), origin
+
+
+def test_promote_kind_service_publishes_code_pointer():
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        root, _ = _world()
+        internal = _internal()
+        route, head, origin = _dev_service()
+        assert _run("--root", str(root), "add", str(route))[0] == 0   # wires the services.yaml route
+        rc, _, err = _run("--root", str(root), "pkg", "promote", "devsvc", "--kind", "service",
+                          "--to", "internal", "--version", "0.1.0")
+        assert rc == 0, err
+        m = yaml.safe_load((internal / "services" / "devsvc" / "manifest.yaml").read_text())
+        assert m == {"kind": "service", "name": "devsvc", "version": "0.1.0",
+                     "source": {"repo": str(origin), "rev": head}}
+        assert _run("registry", "validate", str(internal))[0] == 0
+        # re-publish same version refuses; --bump carries hand-added fields forward
+        rc, _, err = _run("--root", str(root), "pkg", "promote", "devsvc", "--kind", "service",
+                          "--to", "internal", "--version", "0.1.0")
+        assert rc == 1 and "--bump" in err
+        m["platforms"] = ["linux/arm64"]  # registry-author hand edit
+        (internal / "services" / "devsvc" / "manifest.yaml").write_text(yaml.safe_dump(m))
+        rc, _, err = _run("--root", str(root), "pkg", "promote", "devsvc", "--kind", "service",
+                          "--to", "internal", "--bump")
+        assert rc == 0, err
+        m2 = yaml.safe_load((internal / "services" / "devsvc" / "manifest.yaml").read_text())
+        assert m2["version"] == "0.1.1" and m2["platforms"] == ["linux/arm64"]
+
+
+def test_promote_kind_service_guards():
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        root, _ = _world()
+        _internal()
+        route, _, _ = _dev_service()
+        assert _run("--root", str(root), "add", str(route))[0] == 0
+        # dirty checkout refuses
+        (route / "extra.txt").write_text("wip\n")
+        rc, _, err = _run("--root", str(root), "pkg", "promote", "devsvc", "--kind", "service",
+                          "--to", "internal")
+        assert rc == 1 and "uncommitted" in err
+        # committed but UNPUSHED refuses
+        _git("add", "-A", cwd=route)
+        _git("commit", "-q", "-m", "wip", cwd=route)
+        rc, _, err = _run("--root", str(root), "pkg", "promote", "devsvc", "--kind", "service",
+                          "--to", "internal")
+        assert rc == 1 and "push it" in err
+        _git("push", "-q", "origin", "HEAD", cwd=route)
+        assert _run("--root", str(root), "pkg", "promote", "devsvc", "--kind", "service",
+                    "--to", "internal", "--version", "0.1.0")[0] == 0
+        # config-flags don't apply to a code pointer; vendored routes are not publishable
+        rc, _, err = _run("--root", str(root), "pkg", "promote", "devsvc", "--kind", "service",
+                          "--to", "internal", "--match", "x")
+        assert rc == 1 and "CODE POINTER" in err
+        _install_acme(root)   # camish routes to the VENDORED surface
+        rc, _, err = _run("--root", str(root), "pkg", "promote", "camish", "--kind", "service",
+                          "--to", "internal")
+        assert rc == 1 and "VENDORED" in err
+        # --version outside --kind service refuses
+        rc, _, err = _run("--root", str(root), "pkg", "promote", "acme_cam", "--kind", "profile",
+                          "--to", "internal", "--version", "2.0.0")
+        assert rc == 1 and "--kind service only" in err
+
+
+def test_promote_kind_service_collection_repo_stamps_path():
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        root, _ = _world()
+        internal = _internal()
+        route, head, origin = _dev_service(name="colsvc", subdir="drivers/colsvc")
+        assert _run("--root", str(root), "add", str(route))[0] == 0
+        rc, _, err = _run("--root", str(root), "pkg", "promote", "colsvc", "--kind", "service",
+                          "--to", "internal", "--version", "0.1.0")
+        assert rc == 0, err
+        m = yaml.safe_load((internal / "services" / "colsvc" / "manifest.yaml").read_text())
+        assert m["source"] == {"repo": str(origin), "rev": head, "path": "drivers/colsvc"}
+
+
 # --- fork lineage: based_on, pkg rebase, --adopt (v0.1.67) --------------------------------------
 
 

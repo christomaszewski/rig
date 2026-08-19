@@ -1,8 +1,14 @@
 # rig — project state & handoff (resume here)
 
 > Snapshot for picking the project up cold in a new session. Read this first, then `CHEATSHEET.md` /
-> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.2.3**,
-> branch **`main`**, 304 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.2.4**,
+> branch **`main`**, 307 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> **`promote --kind service` SHIPPED** (v0.2.4): publish a routed dev checkout's CODE POINTER
+> (origin URL + HEAD; `source.path` derived for collection repos) — the dev-loop counterpart of
+> the repo-side registry-release CI job. Guards: clean tree, HEAD on a remote-tracking ref,
+> vendored routes refused; `--version X.Y.Z` (service-kind only) or `--bump`; carry-forward of
+> hand-added manifest fields (platforms etc.). Scaffold CONTRIBUTING template caught up to
+> schema 2 (tuple identity, placement law, reserved names, submodule note).
 > **Submodule-carrying services** (v0.2.3): `_fetch_source` now runs `git submodule update
 > --init --recursive` on pinned checkouts when `.gitmodules` exists (build-time source only —
 > launch surfaces stay submodule-free by design); the superproject commit pins submodule revs,

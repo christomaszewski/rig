@@ -190,10 +190,81 @@ def _registry_write_session(entry: Entry, to: str, branch_name: str, written: li
             shutil.rmtree(backup.parent, ignore_errors=True)
 
 
+def _promote_service(root: Path, spec: str, *, to: str, bump: bool,
+                     version: str | None) -> int:
+    """`promote <instance|service> --kind service`: publish the service's CODE POINTER — the
+    dev-loop counterpart of the repo-side registry-release CI job. Everything comes from the
+    routed checkout (rigging.yaml is the naming authority; git supplies repo/rev), never from
+    deployment config. Guards: clean tree, HEAD present on a remote-tracking ref (consumers
+    must be able to clone the pin), route must be a real checkout — not a vendored surface."""
+    from .catalog import load_catalog
+
+    entry = _target_entry(to)
+    reg_root = entry.root
+    if not (reg_root / "registry.yaml").is_file():
+        raise RigError(f"promote: registry '{to}' is not synced/reachable at {reg_root}")
+    manifest = load_manifest(root)
+    svc = next((s.service for s in manifest.sensors if s.name == spec), spec)
+    route = load_catalog(root).get(svc)
+    if route is None:
+        raise RigError(f"promote: no services.yaml route for '{svc}' — pass an instance name or "
+                       f"a routed service name (services.yaml keys)")
+    checkout = route.path
+    try:
+        if checkout.resolve().is_relative_to((root / "services").resolve()):
+            raise RigError(f"promote: '{svc}' routes to the VENDORED launch surface "
+                           f"({checkout}) — publishing a service needs its development checkout "
+                           f"(route services.yaml at the repo, or publish from the repo's own "
+                           f"registry-release CI)")
+    except AttributeError:  # is_relative_to: py3.9+; deployments run 3.9+, belt-and-braces
+        pass
+
+    def git(*args):
+        return subprocess.run(["git", "-C", str(checkout), *args], capture_output=True, text=True)
+
+    toplevel = git("rev-parse", "--show-toplevel").stdout.strip()
+    if not toplevel:
+        raise RigError(f"promote: '{svc}' route {checkout} is not a git checkout — a service "
+                       f"manifest pins repo+rev; there is nothing to pin here")
+    if git("status", "--porcelain").stdout.strip():
+        raise RigError(f"promote: the '{svc}' checkout at {checkout} has uncommitted changes — "
+                       f"commit (or ignore) them first; the pin must be reproducible")
+    head = git("rev-parse", "HEAD").stdout.strip()
+    url = git("remote", "get-url", "origin").stdout.strip()
+    if not url:
+        raise RigError(f"promote: the '{svc}' checkout has no `origin` remote — consumers clone "
+                       f"`source.repo`, so push the repo somewhere reachable first")
+    if not git("branch", "-r", "--contains", head).stdout.strip():
+        raise RigError(f"promote: HEAD {head[:12]}… is not on any remote-tracking ref — push it "
+                       f"first (consumers must be able to fetch the pinned rev from {url})")
+
+    from .descriptor import load_descriptor
+    desc = load_descriptor(svc, checkout)  # cross-checks rigging.yaml `service:` == the route key
+    rel = str(checkout.resolve().relative_to(Path(toplevel).resolve()))
+    existing = _existing_manifest(reg_root, "services", svc)
+    if version is not None and existing and not bump:
+        if str(existing.get("version")) == version:
+            raise RigError(f"promote: service '{svc}' already exists at {version} — pass --bump "
+                           f"or a new --version")
+    ver = version or _next_version(existing, bump, f"service '{svc}'")
+    smanifest = {"kind": "service", "name": svc, "version": ver,
+                 **_carry_forward(existing, "kind", "name", "version", "source"),
+                 "source": {"repo": url, "rev": head,
+                            **({"path": rel} if rel not in (".", "") else {})}}
+    written: list[Path] = []
+    backups: dict[Path, Path] = {}
+    with _registry_write_session(entry, to, f"publish-{svc}", written, backups):
+        _write_pkg(reg_root, "services", svc, smanifest, None, written, backups)
+        eprint(f"  service {_namespace_of(to)}/{svc}@{ver} <- {checkout} "
+               f"(rev {head[:12]}…{f', path {rel}' if rel not in ('.', '') else ''})")
+    _ = desc  # loaded for its cross-checks; the manifest carries no descriptor fields
+    return 0
+
+
 def promote(root: Path, names: list[str], *, to: str, all_dirty: bool, name: str | None,
             project: str | None, kind: str | None, suite: str | None, bump: bool,
             target_instance: bool, matches: list[str], requires: str | None,
-            adopt: bool = False) -> int:
+            adopt: bool = False, version: str | None = None) -> int:
     if bool(names) == all_dirty:
         raise RigError("promote: name instance(s), or pass --all for every dirty instance")
     if name and (len(names) != 1 or suite):
@@ -202,8 +273,20 @@ def promote(root: Path, names: list[str], *, to: str, all_dirty: bool, name: str
         raise RigError(f"promote: --name '{name}' must match [a-z][a-z0-9-]* — for profiles it is "
                        f"the SHORT half only; the service half is derived from the instance "
                        f"(no '/', ':', or '@')")
-    if kind not in (None, "overlay", "profile"):
-        raise RigError(f"promote: --kind must be overlay or profile, not '{kind}'")
+    if kind not in (None, "overlay", "profile", "service"):
+        raise RigError(f"promote: --kind must be overlay, profile, or service, not '{kind}'")
+    if version is not None and not re.match(r"^\d+\.\d+\.\d+$", version):
+        raise RigError(f"promote: --version must be exact X.Y.Z, got '{version}'")
+    if kind == "service":
+        if len(names) != 1 or all_dirty or suite or adopt or name or matches or requires \
+                or target_instance or project:
+            raise RigError("promote --kind service: exactly one instance/service name, plus "
+                           "--to/--bump/--version only — a service manifest is a CODE POINTER "
+                           "(rigging.yaml names it; config flags don't apply)")
+        return _promote_service(root, names[0], to=to, bump=bump, version=version)
+    if version is not None:
+        raise RigError("promote: --version applies to --kind service only (overlay/profile "
+                       "versions follow --bump)")
     if adopt and (all_dirty or suite or len(names) != 1 or kind == "overlay"):
         raise RigError("promote: --adopt re-pins ONE named instance onto its freshly published "
                        "PROFILE (the overlay analogue is `overlay apply --clear-local`)")

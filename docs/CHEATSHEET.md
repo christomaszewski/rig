@@ -110,6 +110,9 @@ rig pkg promote siyi_zr30 --kind profile --name org-zr30 --to internal --adopt
                                    #   lineage) and ADOPT it: instance re-pins to the fork, render
                                    #   identical — the three-tier shape: public base -> internal org
                                    #   profile -> project overlays bound per deployment
+rig pkg promote my_driver --kind service --to internal --version 0.1.0
+                                   # publish the routed DEV CHECKOUT's code pointer (origin URL +
+                                   #   pushed HEAD; clean tree enforced) — registry-release sans CI
 rig registry sync && rig pkg rebase camera-service:org-zr30 --to internal
                                    # public base moved? three-way the fork onto it (D vs old parent
                                    #   replayed on the new one; conflicts keep YOURS, loudly; old

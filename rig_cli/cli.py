@@ -694,9 +694,11 @@ def build_parser() -> argparse.ArgumentParser:
                     "name. Overlays: default <instance>[-<project>]")
     pp.add_argument("--project", default=None, help="project tag (searchable axis; also the "
                     "default name suffix)")
-    pp.add_argument("--kind", choices=["overlay", "profile"], default=None,
-                    help="overlay = the delta; profile = the full effective config. Default: "
-                         "overlay for registry-based instances, profile for hand-authored "
+    pp.add_argument("--kind", choices=["overlay", "profile", "service"], default=None,
+                    help="overlay = the delta; profile = the full effective config; service = "
+                         "the routed checkout's CODE POINTER (repo+rev from git — the dev-loop "
+                         "counterpart of registry-release CI). Default: overlay for "
+                         "registry-based instances, profile for hand-authored "
                          "(no pinned base — an overlay is impossible)")
     pp.add_argument("--suite", default=None, metavar="NAME",
                     help="also emit a suite referencing the deployment's profiles + the new "
@@ -704,6 +706,9 @@ def build_parser() -> argparse.ArgumentParser:
     pp.add_argument("--bump", action="store_true",
                     help="the package exists in the target — publish the next patch version "
                          "(implied when updating the exact profile the instance is pinned to)")
+    pp.add_argument("--version", default=None, metavar="X.Y.Z", dest="pkg_version",
+                    help="(--kind service) explicit version to publish (default: 1.0.0 fresh, "
+                         "--bump patch otherwise)")
     pp.add_argument("--target-instance", action="store_true", dest="target_instance",
                     help="scope the overlay to THIS instance name instead of its service")
     pp.add_argument("--match", action="append", default=[], metavar="ID",
@@ -871,7 +876,7 @@ def main(argv=None) -> int:
                         root, args.names, to=args.to, all_dirty=args.all_dirty, name=args.name,
                         project=args.project, kind=args.kind, suite=args.suite, bump=args.bump,
                         target_instance=args.target_instance, matches=args.match,
-                        requires=args.requires, adopt=args.adopt)
+                        requires=args.requires, adopt=args.adopt, version=args.pkg_version)
                 return workingcopy_mod.relock(root)
             if args.pkg_cmd == "rebase":  # registry-side: no deployment involved
                 return promote_mod.rebase(args.name, to=args.to, onto=args.onto)
