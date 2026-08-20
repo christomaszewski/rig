@@ -119,6 +119,15 @@ def test_removed_instance_is_readdable():
         assert any(s.name == "acme_cam" for s in load_manifest(root).sensors)
 
 
+def test_rm_is_a_permanent_alias():
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        root, _ = _world()
+        assert _run("--root", str(root), "pkg", "add", "sensor:acme")[0] == 0
+        rc, _, err = _run("--root", str(root), "pkg", "rm", "acme_cam")
+        assert rc == 0, err
+        assert not any(s.name == "acme_cam" for s in load_manifest(root).sensors)
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

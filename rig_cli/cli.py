@@ -729,9 +729,10 @@ def build_parser() -> argparse.ArgumentParser:
                          "(@old is installable: pkg add ref@version)")
     pkgsub.add_parser("list", help="THIS deployment's installed packages (from rig.lock): kind, "
                                    "which instances use each, upgrades available")
-    prm = pkgsub.add_parser("remove", help="undo pkg add: remove instance(s) (row, bindings, clean "
-                                           "config, anchors) and GC unused services — bring the "
-                                           "instance DOWN first")
+    prm = pkgsub.add_parser("remove", aliases=["rm"],
+                            help="undo pkg add: remove instance(s) (row, bindings, clean "
+                                 "config, anchors) and GC unused services — bring the "
+                                 "instance DOWN first (`rm` is a permanent alias)")
     prm.add_argument("specs", nargs="+", metavar="INSTANCE|PACKAGE",
                      help="instance name(s); a package name works for instance-less dependencies")
     prm.add_argument("--purge-config", action="store_true", dest="purge_config",
@@ -986,7 +987,7 @@ def main(argv=None) -> int:
             return fleet_mod.cmd_sync(fleet, args.names, label=args.label, into=args.into,
                                       jobs=args.jobs)
         if args.cmd == "pkg":
-            if args.pkg_cmd in ("add", "install", "remove", "upgrade", "lock", "promote",
+            if args.pkg_cmd in ("add", "install", "remove", "rm", "upgrade", "lock", "promote",
                                 "list", "save"):
                 root = (args.root or find_root()).resolve()
                 if not (root / "vehicle.yaml").exists():
@@ -995,7 +996,7 @@ def main(argv=None) -> int:
                 if args.pkg_cmd in ("add", "install"):  # install = permanent alias; ONE grammar
                     return route_add(root, args.spec, as_name=args.as_name,  # with `rig add`
                                      tier=args.tier, locked=args.locked)
-                if args.pkg_cmd == "remove":
+                if args.pkg_cmd in ("remove", "rm"):  # rm = permanent alias
                     return install_mod.remove(root, args.specs, purge_config=args.purge_config)
                 if args.pkg_cmd == "list":
                     return pkg_mod.list_installed(root)
