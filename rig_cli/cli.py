@@ -58,6 +58,15 @@ def _load(root: Path, *, identity: bool = True,
             raise RigError(f"sensor '{sensor.name}': service '{sensor.service}' not in services.yaml")
         if sensor.service not in descriptors:
             descriptors[sensor.service] = load_descriptor(sensor.service, catalog[sensor.service].path)
+    # Legacy platform-in-the-tag conflation: still honored EXACTLY as before (no composition, no
+    # RIG_TARGET_PLATFORM), but deprecated — say so on every deployment-scoped command. Data-driven:
+    # rig hardcodes no platform names; the in-use riggings' build matrices define them.
+    if manifest.platform is None and manifest.image_tag:
+        owners = sorted(s for s, d in descriptors.items() if manifest.image_tag in d.build_platforms)
+        if owners:
+            eprint(f"rig: DEPRECATED — images.tag '{manifest.image_tag}' is a platform name (declared "
+                   f"by {', '.join(owners)}); declare `platform: {manifest.image_tag}` and let "
+                   f"images.tag carry the version (pulls compose to <tag>-<platform>)")
     return manifest, catalog, descriptors
 
 
@@ -419,7 +428,8 @@ def cmd_build(args, root: Path) -> int:
         eprint("rig build: note — images.registry/tag are per-vehicle and unresolved here; "
                "building without a push target unless --registry/--tag are passed")
     return build_mod.build(manifest, descriptors, registry=args.registry, tag=args.tag,
-                           dry_run=args.dry_run, jobs=args.jobs, root=root)
+                           dry_run=args.dry_run, jobs=args.jobs, root=root,
+                           platform=args.platform)
 
 
 def cmd_bake(args, root: Path) -> int:
@@ -641,6 +651,9 @@ def build_parser() -> argparse.ArgumentParser:
     bld = sub.add_parser("build", help="build/push or mirror each service's images into the registry")
     bld.add_argument("--registry", default=None, help="target registry (overrides vehicle.yaml images.registry)")
     bld.add_argument("--tag", default=None, help="tag to pass to each service's build command")
+    bld.add_argument("--platform", default=None,
+                     help="hardware/OS target (overrides vehicle.yaml `platform:`) — matrix services "
+                          "build/push the composed <tag>-<platform> and get RIG_TARGET_PLATFORM")
     bld.add_argument("-j", "--jobs", type=int, default=1, metavar="N",
                      help="build/mirror up to N services concurrently (output grouped per service)")
     bld.add_argument("--dry-run", action="store_true")
@@ -929,6 +942,9 @@ def build_parser() -> argparse.ArgumentParser:
     pv.add_argument("--name", default=None, help="vehicle name")
     pv.add_argument("--var", action="append", default=[], metavar="k=v",
                     help="per-vehicle var (repeatable; lowercase names)")
+    pv.add_argument("--platform", default=None,
+                    help="THIS machine's hardware/OS target (e.g. jp7) -> RIG_TARGET_PLATFORM; "
+                         "matrix services pull <tag>-<platform>")
     pv.add_argument("--force", action="store_true",
                     help="allow CHANGING an existing identity (renames compose projects — "
                          "bring the vehicle down first)")
@@ -1032,7 +1048,8 @@ def main(argv=None) -> int:
             root = (args.root or find_root()).resolve()
             return provision_mod.provision(
                 root if (root / "vehicle.yaml").exists() else None,
-                vehicle_id=args.vehicle_id, name=args.name, set_vars=args.var, force=args.force)
+                vehicle_id=args.vehicle_id, name=args.name, set_vars=args.var,
+                platform=args.platform, force=args.force)
         root = (args.root or find_root()).resolve()
         if args.cmd == "add":  # edits the deployment files themselves — routes its own manifest load
             return cmd_add(args, root)

@@ -26,10 +26,10 @@ from .interpolate import MAP, MARKER, resolve_map, substitute_scalar
 MACHINE_LOCAL_DEFAULT = "/etc/rig/vehicle.local.yaml"
 # The only keys a vehicle-local file may carry: the per-host knobs that genuinely vary across a
 # fleet. Never sensor rows — a local file silently flipping stacks makes fleet debugging miserable.
-LOCAL_KEYS = {"vehicle", "vehicle_id", "vars", "env", "data_dir", "images"}
+LOCAL_KEYS = {"vehicle", "vehicle_id", "vars", "env", "data_dir", "images", "platform"}
 # Env keys rig owns end-to-end (fleet_env sets them; an `env:` map may not shadow them).
 RIG_OWNED_ENV = {"VEHICLE_ID", "ROS_DOMAIN_ID", "RMW_IMPLEMENTATION", "RIG_IMAGE_REGISTRY",
-                 "RIG_IMAGE_TAG", "RIG_DATA_DIR", "COMPOSE_PROJECT_NAME"}
+                 "RIG_IMAGE_TAG", "RIG_TARGET_PLATFORM", "RIG_DATA_DIR", "COMPOSE_PROJECT_NAME"}
 
 
 @dataclass(frozen=True)
@@ -66,7 +66,10 @@ class Manifest:
     sensors: list[Sensor]            # infra + sensor + autonomy entries combined (each carries its `tier`)
     image_registry: str | None = None  # fleet-wide registry stacks pull from (None = local images)
     vehicle_id: object = None        # int|str; decides the ROS domain + exported as VEHICLE_ID
-    image_tag: str | None = None     # fleet-wide image tag (e.g. a JetPack platform jp7); -> RIG_IMAGE_TAG
+    image_tag: str | None = None     # fleet-wide image tag (a VERSION, e.g. v1.3.0); -> RIG_IMAGE_TAG.
+    #                                  Legacy: a platform name here (jp7) still works, deprecated.
+    platform: str | None = None      # THIS host's hardware/OS target (e.g. jp7) -> RIG_TARGET_PLATFORM;
+    #                                  matrix services pull <tag>-<platform> (see dispatch.service_env)
     data_dir: str | None = None      # host dir for recordings/logs/outputs; -> RIG_DATA_DIR
     vars: dict = field(default_factory=dict)      # resolved {{var}} context (built-ins + vars:)
     extra_env: dict = field(default_factory=dict)  # `env:` map, interpolated — fleet_env exports it
@@ -254,8 +257,9 @@ def load_manifest(root: Path) -> Manifest:
     eff_vehicle = _effective("vehicle", sources, data.get("vehicle"))
     eff_id = _effective("vehicle_id", sources, data.get("vehicle_id"))
     eff_data_dir = _effective("data_dir", sources, data.get("data_dir"))
+    eff_platform = _effective("platform", sources, data.get("platform"))
     missing = tuple(key for key, eff in (("vehicle", eff_vehicle), ("vehicle_id", eff_id),
-                                         ("data_dir", eff_data_dir))
+                                         ("data_dir", eff_data_dir), ("platform", eff_platform))
                     if _missing_mandatory(key, eff, data.get(key)))
 
     merged_vars: dict = {}
@@ -318,6 +322,14 @@ def load_manifest(root: Path) -> Manifest:
     if data_dir is not None:
         ctx["data_dir"] = data_dir
 
+    # The HOST's hardware/OS target (jp7): a per-host fact, so the vehicle-local tier can carry it
+    # per machine. Resolved value joins the var context — configs may CONSUME {{platform}}, they
+    # never declare it (portability across vehicles).
+    eff_platform = _lazy(eff_platform, "platform")
+    platform = (str(eff_platform or "").strip()) or None
+    if platform is not None:
+        ctx["platform"] = platform
+
     base_images = data.get("images") or {}
     eff_images = {}
     for sub in ("registry", "tag"):
@@ -351,6 +363,6 @@ def load_manifest(root: Path) -> Manifest:
     return Manifest(vehicle=vehicle, ros=ros,
                     sensors=infra + sensors + autonomy,
                     image_registry=eff_images["registry"], vehicle_id=vehicle_id,
-                    image_tag=eff_images["tag"],
+                    image_tag=eff_images["tag"], platform=platform,
                     data_dir=data_dir, vars=ctx, extra_env=extra_env,
                     missing_identity=tuple(unresolved))

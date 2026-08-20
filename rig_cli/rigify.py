@@ -264,6 +264,11 @@ def rigify(target: Path, *, service: str | None = None, tier: str | None = None)
         hints.append("# mirror: []                        # third-party images to copy into the fleet registry")
     hints.append("# build: { command: tools/build-images.sh, images: [@SVC@] }   # build+push your OWN images"
                  .replace("@SVC@", svc))
+    hints.append("# build: { command: ..., images: [...], platforms: [jp7, jp6] }   # hw/OS-dependent image "
+                 "sets: rig composes pulls as <tag>-<platform>")
+    hints.append("# platform: { auto_detect: /etc/nv_tegra_release, override_env: @ENVP@_PLATFORM }   "
+                 "# standalone host probe + the env override the launcher honors"
+                 .replace("@ENVP@", svc.replace("-", "_").upper()))
     if f.host_ports:
         hints.append(f"# host_ports: []                    # dotted config paths to ports "
                      f"{sorted(set(f.host_ports))} above — doctor flags clashes")

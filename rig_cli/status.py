@@ -12,7 +12,7 @@ import subprocess
 from dataclasses import dataclass
 
 from .descriptor import Descriptor
-from .dispatch import launcher_cmd
+from .dispatch import launcher_cmd, service_env
 from .manifest import Sensor
 
 
@@ -68,8 +68,9 @@ def gather(pairs: list[tuple[Sensor, Descriptor]], env: dict[str, str]) -> list[
     rows: list[Row] = []
     for sensor, desc in pairs:
         cmd = launcher_cmd(sensor, desc, "status", ["--format", "json"])
-        try:
-            proc = subprocess.run(cmd, env=env, cwd=str(desc.repo), capture_output=True, text=True)
+        try:  # platform routing: same per-service env view as up/config
+            proc = subprocess.run(cmd, env=service_env(env, desc), cwd=str(desc.repo),
+                                  capture_output=True, text=True)
             containers = _parse_ps(proc.stdout)
         except Exception:
             containers = []

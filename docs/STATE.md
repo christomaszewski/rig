@@ -201,7 +201,10 @@ deployment artifacts. See `DESIGN.md`.
 
 ## The fleet env rig injects into every launcher (the contract)
 
-`ROS_DOMAIN_ID`, `RMW_IMPLEMENTATION`, `VEHICLE_ID`, `RIG_IMAGE_REGISTRY`, `RIG_IMAGE_TAG` (e.g. `jp7`),
+`ROS_DOMAIN_ID`, `RMW_IMPLEMENTATION`, `VEHICLE_ID`, `RIG_IMAGE_REGISTRY`, `RIG_IMAGE_TAG` (a VERSION,
+e.g. `v1.3.0` — composed per-service to `<tag>-<platform>` for build-matrix services, v0.2.14),
+`RIG_TARGET_PLATFORM` (the host's declared hw/OS target from vehicle.yaml `platform:`, e.g. `jp7`;
+also mirrored into each service's declared `platform.override_env`, e.g. `CAM_PLATFORM`),
 `RIG_DATA_DIR` (recordings/logs host dir), and per-call `COMPOSE_PROJECT_NAME=<name>-vehicle-<vehicle_id>`.
 A launcher's compose opts into each (`${RIG_IMAGE_REGISTRY:+…}`, `:${RIG_IMAGE_TAG:-latest}`,
 `${RIG_DATA_DIR}/…`), and a launcher honors `COMPOSE_PROJECT_NAME` by **not** passing `-p`.
@@ -211,7 +214,8 @@ A launcher's compose opts into each (`${RIG_IMAGE_REGISTRY:+…}`, `:${RIG_IMAGE
 - Lifecycle `up/down(--purge)/status/logs/config/doctor`; tiered ordering (infra → sensors → autonomy;
   down reversed, so autonomy stops FIRST); tier-aware output ("2 sensors + 2 infra + 1 autonomy").
 - `vehicle.yaml`: `vehicle_id` (→ ROS domain + `VEHICLE_ID`), `ros{rmw,distro}`, `images{registry,tag}`,
-  `data_dir`, `infra:`, `sensors:`, `autonomy:`. Config overrides + nameless profiles (deep-merge).
+  `platform` (→ `RIG_TARGET_PLATFORM`, v0.2.14), `data_dir`, `infra:`, `sensors:`, `autonomy:`.
+  Config overrides + nameless profiles (deep-merge).
 - `doctor`: one-distro check, launcher-present, host-port clash (enabled-aware `plugins[name=x,enabled=true].params.port`
   selector), **non-ROS-safe name warning** (hyphens → invalid ROS namespace; sensor + autonomy tiers),
   zenoh-router guardrail, autonomy-with-no-enabled-sensors warning ("a brain with no eyes").

@@ -17,8 +17,15 @@ ros:
 # RIG_IMAGE_REGISTRY and each service's compose prefixes its own repo:tag. `rig bake` pins digests on top.
 images:
   registry: ""                 # e.g. devbox:5000  -> RIG_IMAGE_REGISTRY (composes prefix their repo)
-  tag: ""                      # e.g. jp7 (the Orin's JetPack) -> RIG_IMAGE_TAG; platform-specific composes
-                               #   pull <repo>:<tag>. rig build defaults its --tag to this.
+  tag: ""                      # a VERSION, e.g. v1.3.0 -> RIG_IMAGE_TAG. rig build defaults its --tag
+                               #   to this. (Legacy: a platform name here, e.g. jp7, still works with
+                               #   `platform:` unset — deprecated.)
+
+# THIS host's hardware/OS target (e.g. jp7 = JetPack 7 userspace) -> RIG_TARGET_PLATFORM. Services that
+# declare a build matrix (rigging.yaml build.platforms) pull <image>:<tag>-<platform> and get their
+# declared override env (e.g. CAM_PLATFORM) set to it — declared beats the launcher's host auto-detect.
+# A per-host fact: /etc/rig/vehicle.local.yaml may carry it (sudo rig provision --platform jp7).
+platform: ""                   # e.g. jp7; empty = platform-independent deployment (or legacy tag above)
 
 # Host dir for recordings/logs/outputs, exported as RIG_DATA_DIR; stacks write under it (an absolute host
 # path, so bake leaves it literal instead of relativizing outputs into the artifact). e.g. /data

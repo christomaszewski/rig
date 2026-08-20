@@ -199,9 +199,10 @@ pinned ref must be one the vehicle can reach**:
   `enabled: false`) for a DDS RMW or a ROS-less vehicle.
 - **Vehicle identity**: `vehicle_id` decides the ROS domain (explicit `ros.domain_id` overrides) and is
   exported to every stack as `VEHICLE_ID` (alongside `ROS_DOMAIN_ID`/`RMW_IMPLEMENTATION`/`RIG_IMAGE_REGISTRY`/`RIG_IMAGE_TAG`).
-- **Fleet image tag**: `images.tag` in vehicle.yaml (e.g. the Orin's JetPack `jp7`) → `RIG_IMAGE_TAG`;
-  platform-specific composes pull `<repo>:<tag>`, and `rig build` defaults its `--tag` to it. Platform-agnostic
-  services (dashboard) just ignore it.
+- **Fleet image tag**: `images.tag` in vehicle.yaml → `RIG_IMAGE_TAG`; composes pull `<repo>:<tag>`, and
+  `rig build` defaults its `--tag` to it. Platform-agnostic services (dashboard) just ignore it.
+  (Since v0.2.14 the tag means VERSION only — the hardware target moved to the first-class `platform:`
+  field, §7; a platform-valued tag remains the deprecated legacy spelling.)
 - **Zenoh guardrail**: `rig doctor` warns if `ros.rmw` is zenoh but no zenoh router is declared in `infra:`.
 - **`templates/zenoh-router/`**: a ready-to-use shared router service (rigging.yaml + launcher + compose,
   host net :7447). Point `services.yaml` at it + add an `infra:` entry; adjust the image/command for your
@@ -519,3 +520,20 @@ in DESIGN.md; workflows in CHEATSHEET §1.5 + RUNBOOK "registry maintainer loop"
   save's inverse (the delta returns as local edits, render byte-identical).
 - **v0.2.9** `pkg info --versions` (history enumeration), `pkg upgrade --dry-run` (real sweep,
   rolled back), docs sweep.
+
+## 7. First-class platform targeting — ✅ implemented (v0.2.14)
+
+`images.tag` used to multiplex WHICH RELEASE and WHICH HARDWARE (camera-service's jp6/jp7 image
+sets — same arch, different userspace), so a version pin and a platform declaration were mutually
+exclusive. Plan doc: `rig-platform-plan.md` (untracked); design summary in DESIGN.md §"Platform
+targeting".
+
+- **v0.2.14** the `platform:` host field (vehicle.yaml + the vehicle-local tier; `{{platform}}`
+  joins the var context; self-marker = mandatory-from-local; `rig provision --platform`);
+  descriptor `build.platforms` matrix + `platform.{auto_detect,override_env}`;
+  `RIG_TARGET_PLATFORM` export + per-service override_env mirror (declared beats auto-detect);
+  composed `<tag>-<platform>` pull refs for matrix services (tag = VERSION only; bake/lock/pull
+  inherit — one digest per host's resolved ref); `rig build` passes the composed tag + platform
+  env (`--platform` override); certify's `platform` check (every matrix entry renders anywhere,
+  pulls its composed tag, differs from the first entry); doctor platform/matrix validation;
+  deprecated-but-working legacy path for platform-valued tags (data-driven detection).

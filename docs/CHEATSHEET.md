@@ -50,7 +50,12 @@ cd my-vehicle
 # vehicle.yaml — identity + fleet env + the stacks:
 #   vehicle: my-vehicle        vehicle_id: 7            # -> ROS domain 7, VEHICLE_ID=7
 #   ros:    { rmw: rmw_zenoh_cpp, distro: lyrical }     # zenoh rmw ⇒ declare a zenoh-router in infra:
-#   images: { registry: "<IP>:5000", tag: "jp7" }       # ONE tag per vehicle (the platform, e.g. JetPack)
+#   images: { registry: "<IP>:5000", tag: "v1.3.0" }    # tag = VERSION -> RIG_IMAGE_TAG (legacy: a bare
+#                                                        #   platform tag still works, deprecated)
+#   platform: jp7                                        # THIS host's hw/OS target -> RIG_TARGET_PLATFORM;
+#                                                        #   matrix services pull <image>:<tag>-<platform>
+#                                                        #   (per-host: /etc/rig may carry it — `rig
+#                                                        #   provision --platform jp7`)
 #   data_dir: /home/<user>/logs                          # recordings/logs land here (RIG_DATA_DIR)
 #   infra:   [ {name: zenoh-router, ...order: 0}, {name: dashboard, ...order: 5} ]     # up FIRST
 #   sensors: [ {name: cam_usb, ...order: 10}, {name: cam_rtsp, ...order: 20} ]
@@ -302,8 +307,10 @@ rig build -j 3                                # per unique service: build+push (
 curl -s http://<dev-box-ip>:5000/v2/_catalog  # expect every repo the composes will pull
 ```
 
-Tags: `rig build` tags with `images.tag` (jp7) and certify's tag check guarantees the composes pull the
-same — build/pull agreement is enforced, not hoped.
+Tags: `rig build` tags with `images.tag` — COMPOSED to `<tag>-<platform>` for services declaring a
+`build.platforms` matrix (vehicle.yaml `platform:` or `--platform`; the build also gets
+RIG_TARGET_PLATFORM + the service's override env) — and certify's tag/platform checks guarantee the
+composes pull the same per matrix entry — build/pull agreement is enforced, not hoped.
 
 ## 4 — bake a deployable artifact
 
@@ -366,7 +373,9 @@ Teardown: `./run.sh down` (volumes survive); final removal `rig down --purge`. D
   in vehicle.yaml. A baked artifact also pins that host, so fix vehicle.yaml *before* you bake.
 - Registry trust is needed on **both** machines, **with the port** — a bare IP doesn't match `IP:5000`.
 - **MERGE** the Jetson's `daemon.json` — overwriting drops the `nvidia` runtime the camera needs.
-- One `images.tag` per vehicle: platform-agnostic services must still *pull* that tag (certify enforces).
+- One `images.tag` (version) + one `platform:` per host: platform-agnostic services pull `:<tag>`,
+  matrix services pull `:<tag>-<platform>` (certify enforces both). A platform-valued tag with no
+  `platform:` is the deprecated legacy spelling.
 - The registry must keep its volume between `rig build` and the vehicle's first pull (digests die with it).
 - The baked tree runs the compose-only scripts, not the vendored launchers — those may carry `build:`.
 - ROS 2 names: no hyphens, no leading digits — the instance name becomes a ROS namespace.

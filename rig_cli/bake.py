@@ -391,7 +391,9 @@ def _compose_only(manifest, descriptors, env, staging: Path, images: dict, *, pi
         config = staging / "config" / "sensors" / f"{sensor.name}.yaml"
         cmd = [str(launcher), str(config), *desc.verb_args("config")]
         try:
-            proc = subprocess.run(cmd, env=env, cwd=str(repo), capture_output=True, text=True)
+            from .dispatch import service_env  # platform routing: composed tag + override_env, same as up
+            proc = subprocess.run(cmd, env=service_env(env, desc), cwd=str(repo),
+                                  capture_output=True, text=True)
             if proc.returncode != 0 or not proc.stdout.strip():
                 eprint(f"  compose-only: skip {sensor.name} (launcher config failed: "
                        f"{(proc.stderr or '').strip()[:140]})")
@@ -482,6 +484,8 @@ def bake(root: Path, manifest, catalog, descriptors, env, tag: str, *, registry:
     eff_registry = registry or manifest.image_registry
     if eff_registry or manifest.image_tag:
         veh["images"] = {k: v for k, v in (("registry", eff_registry), ("tag", manifest.image_tag)) if v}
+    if manifest.platform:  # the host's declared target — a rig re-run on the unbaked tree must
+        veh["platform"] = manifest.platform  # export the same RIG_TARGET_PLATFORM / composed tags
     if manifest.data_dir:
         veh["data_dir"] = manifest.data_dir
     if tier_rows["infra"]:
@@ -546,6 +550,7 @@ def bake(root: Path, manifest, catalog, descriptors, env, tag: str, *, registry:
         "rig_version": __version__,
         "registry": registry or manifest.image_registry,
         "image_tag": manifest.image_tag,
+        "platform": manifest.platform,
         "data_dir": manifest.data_dir,
         "pinning": "tag+bundle" if bundle else "digest",
         "sensors": [s.name for s in manifest.sensors],

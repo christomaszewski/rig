@@ -96,6 +96,47 @@ def collect(
         else:
             issues.append(Issue(OK, f"single ROS distro: {only}"))
 
+    # Platform targeting: `platform:` is the host's declared hardware/OS target; a service's
+    # build.platforms is its matrix. The declared platform must be IN each in-use matrix (a typo'd
+    # platform means composed <tag>-<platform> refs that don't exist); a matrix service with no
+    # declared platform falls back to the launcher's host auto-detection (works on the vehicle
+    # itself, wrong on a dev box) and pulls unqualified tags. images.tag carrying a platform NAME is
+    # the legacy conflation — deprecated, still honored when no platform: is declared.
+    matrix_svcs = {s: d for s, d in descriptors.items() if d.build_platforms}
+    if manifest.platform:
+        for svc, desc in matrix_svcs.items():
+            if manifest.platform not in desc.build_platforms:
+                issues.append(Issue(ERROR, f"platform '{manifest.platform}' is not in {svc}'s build "
+                                           f"matrix {desc.build_platforms} — its composed pull ref "
+                                           f"<image>:<tag>-{manifest.platform} cannot exist"))
+        if manifest.image_tag and any(manifest.image_tag in d.build_platforms
+                                      for d in descriptors.values()):
+            issues.append(Issue(WARN, f"images.tag '{manifest.image_tag}' is a platform name while "
+                                      f"`platform: {manifest.platform}` is declared — the tag should "
+                                      f"be a VERSION now (composed refs would read "
+                                      f"'{manifest.image_tag}-{manifest.platform}')"))
+        if matrix_svcs and not any(i.level == ERROR and "build matrix" in i.message for i in issues):
+            issues.append(Issue(OK, f"platform '{manifest.platform}' -> RIG_TARGET_PLATFORM · composed "
+                                    f"<tag>-{manifest.platform} tags for: {', '.join(sorted(matrix_svcs))}"))
+    else:
+        legacy = {s: d for s, d in descriptors.items()
+                  if manifest.image_tag and manifest.image_tag in d.build_platforms}
+        if legacy:
+            issues.append(Issue(WARN, f"DEPRECATED — images.tag '{manifest.image_tag}' is a platform "
+                                      f"name ({', '.join(sorted(legacy))} declare it in build."
+                                      f"platforms); declare `platform: {manifest.image_tag}` and let "
+                                      f"images.tag carry the version (composed pulls: <tag>-<platform>)"))
+        for svc, desc in matrix_svcs.items():
+            if svc in legacy:
+                continue
+            issues.append(Issue(WARN, f"{svc} declares a platform matrix {desc.build_platforms} but "
+                                      f"no `platform:` is declared — rendering falls back to the "
+                                      f"launcher's host auto-detection"
+                                      + (f" ({desc.platform_auto_detect})" if desc.platform_auto_detect
+                                         else "")
+                                      + " and pulls carry no platform suffix; set `platform:` in "
+                                        "vehicle.yaml (or /etc/rig/vehicle.local.yaml)"))
+
     # Launchers present + executable.
     for svc, desc in descriptors.items():
         lp = desc.launcher_path

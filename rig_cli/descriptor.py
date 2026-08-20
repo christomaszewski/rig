@@ -7,6 +7,7 @@ logical verbs (e.g. gige-up takes compose subcommands, so status -> "ps").
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -52,6 +53,14 @@ class Descriptor:
     build_command: str | None = None             # `rig build` runs this: <command> <registry> [tag]
     build_images: list[str] = field(default_factory=list)  # image repos the build produces (certify checks
     #                                              the compose pulls them as :RIG_IMAGE_TAG — build/pull agreement)
+    build_platforms: list[str] = field(default_factory=list)  # the build MATRIX (e.g. [jp7, jp6]): distinct
+    #                                              image sets per hardware/OS target. Presence makes the
+    #                                              service platform-dependent: rig composes its pull tag as
+    #                                              <tag>-<platform> and certify checks each entry renders.
+    platform_auto_detect: str | None = None      # the launcher's standalone host probe (e.g.
+    #                                              /etc/nv_tegra_release) — informational; declared wins
+    platform_override_env: str | None = None     # env var the launcher honors as platform override (e.g.
+    #                                              CAM_PLATFORM) — rig mirrors RIG_TARGET_PLATFORM into it
     mirror: list[str] = field(default_factory=list)  # third-party images to copy into the registry
     tier: str = "sensor"         # optional hint: "infra" = shared, up-first (dashboard, routers, loggers);
     #                              "autonomy" = graph consumer, up-last / down-first (planners, SLAM)
@@ -106,15 +115,39 @@ def load_descriptor(service: str, repo: Path) -> Descriptor:
     if tier not in ("sensor", "infra", "autonomy"):  # a typo must not silently demote a service to sensor
         raise RigError(f"{path}: tier must be 'infra', 'sensor', or 'autonomy', not '{tier}'")
 
-    build_raw = data.get("build")  # `build: <cmd>` or `build: { command: <cmd>, images: [...] }`
+    build_raw = data.get("build")  # `build: <cmd>` or `build: { command: <cmd>, images: [...], platforms: [...] }`
     build_images: list[str] = []
+    build_platforms: list[str] = []
     if isinstance(build_raw, str):
         build_command = build_raw
     elif isinstance(build_raw, dict):
         build_command = build_raw.get("command")
         build_images = list(build_raw.get("images") or [])
+        build_platforms = [str(p) for p in (build_raw.get("platforms") or [])]
     else:
         build_command = None
+    for p in build_platforms:  # platform names suffix image tags — they must be tag-safe fragments
+        if not re.match(r"^[A-Za-z0-9][A-Za-z0-9._-]*$", p):
+            raise RigError(f"{path}: build.platforms entry '{p}' is not a valid image-tag fragment "
+                           f"([A-Za-z0-9][A-Za-z0-9._-]*)")
+
+    platform_raw = data.get("platform") or {}  # `platform: { auto_detect: <path>, override_env: <VAR> }`
+    if not isinstance(platform_raw, dict):
+        raise RigError(f"{path}: `platform` must be a mapping with auto_detect/override_env")
+    unknown = set(platform_raw) - {"auto_detect", "override_env"}
+    if unknown:  # a typo here silently breaks the routing standard — fail loudly
+        raise RigError(f"{path}: platform: unknown key(s) {', '.join(sorted(unknown))} — it carries "
+                       f"only auto_detect, override_env")
+    override_env = platform_raw.get("override_env")
+    if override_env is not None:
+        override_env = str(override_env)
+        if not re.match(r"^[A-Z][A-Z0-9_]*$", override_env):
+            raise RigError(f"{path}: platform.override_env '{override_env}' — env names are "
+                           f"UPPERCASE [A-Z][A-Z0-9_]*")
+        from .manifest import RIG_OWNED_ENV
+        if override_env in RIG_OWNED_ENV:
+            raise RigError(f"{path}: platform.override_env '{override_env}' collides with a rig-owned "
+                           f"variable — declare the service's OWN env name (e.g. CAM_PLATFORM)")
 
     return Descriptor(
         service=service,
@@ -126,6 +159,10 @@ def load_descriptor(service: str, repo: Path) -> Descriptor:
         host_ports=list(data.get("host_ports") or []),
         build_command=build_command,
         build_images=build_images,
+        build_platforms=build_platforms,
+        platform_auto_detect=(str(platform_raw["auto_detect"]) if platform_raw.get("auto_detect")
+                              else None),
+        platform_override_env=override_env,
         mirror=list(data.get("mirror") or []),
         tier=tier,
         examples=examples,

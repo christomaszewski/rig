@@ -31,6 +31,7 @@ def fleet_env(manifest: Manifest) -> dict[str, str]:
     for key, value in (("VEHICLE_ID", manifest.vehicle_id),
                        ("RIG_IMAGE_REGISTRY", manifest.image_registry),
                        ("RIG_IMAGE_TAG", manifest.image_tag),
+                       ("RIG_TARGET_PLATFORM", manifest.platform),
                        ("RIG_DATA_DIR", manifest.data_dir)):
         if value not in (None, ""):
             env[key] = str(value)
@@ -40,6 +41,34 @@ def fleet_env(manifest: Manifest) -> dict[str, str]:
     # interpolated; collisions with the rig-owned keys above were rejected at manifest load).
     env.update({key: str(value) for key, value in manifest.extra_env.items()})
     return env
+
+
+def service_env(env: dict[str, str], desc: Descriptor) -> dict[str, str]:
+    """The per-SERVICE view of the fleet env, applied to every launcher invocation (up/down/config/
+    pull/status, bake's compose capture, certify). When the vehicle declares a platform
+    (RIG_TARGET_PLATFORM is exported):
+
+    - the service's declared `platform.override_env` (e.g. CAM_PLATFORM) is set to the same value —
+      the vehicle.yaml declaration is authoritative; a launcher's own auto-detect stays the
+      standalone/no-rig fallback (declared-wins: bake renders on dev boxes that aren't the target);
+    - a service with a build MATRIX (`build.platforms`) gets the COMPOSED image tag,
+      `RIG_IMAGE_TAG=<tag>-<platform>` (bare `<platform>` when no tag is set), so its compose pulls
+      e.g. cam-core:v1.3.0-jp7 — `images.tag` itself means VERSION only. jp6/jp7 are both arm64
+      (userspace differs), so the tag must carry the platform; multi-arch manifests can't.
+
+    No platform declared: the env passes through untouched (the legacy platform-valued
+    `images.tag: jp7` keeps behaving exactly as before).
+    """
+    platform = env.get("RIG_TARGET_PLATFORM")
+    if not platform:
+        return env
+    out = dict(env)
+    if desc.platform_override_env:
+        out[desc.platform_override_env] = platform
+    if desc.build_platforms:
+        tag = env.get("RIG_IMAGE_TAG")
+        out["RIG_IMAGE_TAG"] = f"{tag}-{platform}" if tag else platform
+    return out
 
 
 def launcher_cmd(sensor: Sensor, desc: Descriptor, verb: str, extra: list[str] | None = None) -> list[str]:
@@ -67,14 +96,16 @@ def run(
     capture: bool = False,
 ) -> subprocess.CompletedProcess:
     # rig owns the compose project name (containers = <project>-<compose-service>-N). A launcher honors
-    # COMPOSE_PROJECT_NAME unless it overrides with `-p` (see the launcher contract).
-    env = {**env, "COMPOSE_PROJECT_NAME": project_name(sensor.name, env.get("VEHICLE_ID"))}
+    # COMPOSE_PROJECT_NAME unless it overrides with `-p` (see the launcher contract). The platform
+    # routing (override_env mirror + composed per-platform tag) is per-service too.
+    env = {**service_env(env, desc), "COMPOSE_PROJECT_NAME": project_name(sensor.name, env.get("VEHICLE_ID"))}
     pretty = " ".join(shlex.quote(part) for part in cmd)
     if dry_run:
         envline = (f"COMPOSE_PROJECT_NAME={env['COMPOSE_PROJECT_NAME']} "
                    f"ROS_DOMAIN_ID={env['ROS_DOMAIN_ID']} RMW_IMPLEMENTATION={env['RMW_IMPLEMENTATION']}")
-        for key in ("VEHICLE_ID", "RIG_IMAGE_REGISTRY", "RIG_IMAGE_TAG", "RIG_DATA_DIR"):
-            if env.get(key):
+        for key in ("VEHICLE_ID", "RIG_IMAGE_REGISTRY", "RIG_IMAGE_TAG", "RIG_TARGET_PLATFORM",
+                    "RIG_DATA_DIR", desc.platform_override_env or ""):
+            if key and env.get(key):
                 envline += f" {key}={env[key]}"
         eprint(f"  {sensor.name} [{sensor.service}]  (cwd={desc.repo})")
         eprint(f"    {envline} \\")

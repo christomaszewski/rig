@@ -44,6 +44,9 @@ template — it adapts to each via `rigging.yaml`'s `verbs` map (e.g. cam-up tak
 - **Fleet ROS env.** rig exports one `ROS_DOMAIN_ID` + `RMW_IMPLEMENTATION` before each launcher call; the
   launchers pass them into their containers, so every stack shares one DDS graph. Topics are namespaced
   `/<name>/…`.
+- **Platform targeting.** vehicle.yaml `platform:` (a HOST fact) → `RIG_TARGET_PLATFORM` + each service's
+  declared `platform.override_env`; services with a `build.platforms` matrix pull the composed
+  `<image>:<tag>-<platform>`. `images.tag` means VERSION only. (Full section below.)
 - **Status/health.** rig calls each launcher's `status` (`ps --format json`) and rolls a project up to one
   row: healthy iff every *healthchecked* container is healthy and all are running (a plugin without a probe
   doesn't drag the sensor to "unknown"). ROS `/diagnostics` aggregation is a planned second layer.
@@ -146,6 +149,43 @@ CHEATSHEET §1.5 "the daily loop", RUNBOOK "registry maintainer loop"):
   byte-identically (deltas recomputed against the base, never patch-composed), and
   discard/yank move it back (the un-save fix-up re-anchors the cwd deployment with the delta
   as local edits again).
+
+## Platform targeting (v0.2.14)
+
+`images.tag` used to multiplex two orthogonal dimensions — WHICH RELEASE and WHICH HARDWARE
+(camera-service ships distinct jp6/jp7 image sets: both arm64, differing in userspace — l4t base +
+nvidia runtime vs ubuntu 24.04 + runc/CDI). You could not pin `v1.3.0` and declare `jp7` at once, and
+cam-up carried the scar tissue ("is RIG_IMAGE_TAG a platform name?"). Now the two are first-class:
+
+- **`platform:` is a HOST fact** — top-level in vehicle.yaml, sibling of `data_dir`. In rig's model
+  vehicle.yaml plus the vehicle-local tier IS the per-host declaration: `/etc/rig/vehicle.local.yaml`
+  may carry it per machine (`sudo rig provision --platform jp7`), a self-marker
+  (`platform: "{{platform}}"`) makes it mandatory-from-local for fleet artifacts, and the resolved
+  value joins the var context so configs may CONSUME `{{platform}}`. Never declared in sensor/instance
+  configs or profiles — those stay portable across vehicles.
+- **Services declare their dependency** in rigging.yaml: `build.platforms: [jp7, jp6]` (the build
+  matrix — absence = platform-independent) and `platform: {auto_detect: <probe>, override_env:
+  CAM_PLATFORM}` (the launcher's standalone host probe, and the env var it honors as override).
+- **Routing**: `fleet_env` exports `RIG_TARGET_PLATFORM` (rig-owned, popped when undeclared) and
+  every launcher invocation (up/config/pull/status, bake's compose capture, certify, build) also gets
+  the service's `override_env` set to the same value. **Declared wins** over the launcher's
+  auto-detect — bake renders on dev boxes that aren't the target; `auto_detect` remains the
+  standalone/no-rig fallback.
+- **Composed refs**: for a matrix service the per-service env carries `RIG_IMAGE_TAG=<tag>-<platform>`
+  (bare `<platform>` when no tag — the platform's moving head), so its compose pulls
+  `cam-core:v1.3.0-jp7`. The launcher contract is unchanged (composes still pull `:${RIG_IMAGE_TAG}`);
+  bake/pull/lock inherit the composed refs (one digest per host's resolved ref). NOT multi-arch
+  manifest lists: jp6/jp7 are the same arch, the tag must carry the platform. `rig build` passes the
+  composed tag as the existing `<cmd> <registry> [tag]` second arg plus the platform env
+  (`--platform` overrides, like `--registry`/`--tag`).
+- **certify** runs the suite AS the first matrix entry (tag agreement expects the composed
+  `certify-tag-x-<p>`) and adds a `platform` check: every other matrix entry must render on any host,
+  pull built images as its composed tag, and differ from the first entry's render (byte-identical =
+  the launcher host-probed). This makes the routing a standard, not a convention.
+- **Migration**: a platform-valued `images.tag` with no `platform:` behaves EXACTLY as before (no
+  composition, no export) plus a deprecation warning — data-driven (the in-use riggings' matrices
+  define what counts as a platform name; rig hardcodes none). `doctor`: ERROR when the declared
+  platform isn't in a service's matrix; WARN for matrix-without-platform and tag-is-a-platform cases.
 
 ## Status & roadmap
 

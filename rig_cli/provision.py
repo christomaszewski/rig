@@ -63,8 +63,8 @@ def _show(root: Path | None) -> int:
 
 
 def provision(root: Path | None, *, vehicle_id: str | None, name: str | None,
-              set_vars: list[str], force: bool) -> int:
-    if vehicle_id is None and name is None and not set_vars:
+              set_vars: list[str], platform: str | None = None, force: bool) -> int:
+    if vehicle_id is None and name is None and not set_vars and platform is None:
         return _show(root)
 
     target = _target()
@@ -87,6 +87,11 @@ def provision(root: Path | None, *, vehicle_id: str | None, name: str | None,
                 raise RigError(f"provision: --var takes name=value with a lowercase name, got '{pair}'")
             merged[key] = int(value) if value.isdigit() else value
         data["vars"] = merged
+    if platform is not None:  # a HOST fact, so the machine file is its natural home; tag-safe:
+        if not re.match(r"^[A-Za-z0-9][A-Za-z0-9._-]*$", platform):  # it suffixes image tags
+            raise RigError(f"provision: --platform must be a valid image-tag fragment "
+                           f"([A-Za-z0-9][A-Za-z0-9._-]*), got '{platform}'")
+        data["platform"] = platform
 
     for key in ("vehicle", "vehicle_id"):  # re-identification gate — orphaned-containers warning
         if key in existing and existing.get(key) != data.get(key) and not force:
@@ -106,5 +111,6 @@ def provision(root: Path | None, *, vehicle_id: str | None, name: str | None,
         raise RigError(f"provision: cannot write {target} — run with sudo")
     eprint(f"rig provision: {target} written — vehicle "
            f"'{data.get('vehicle', '?')}' id {data.get('vehicle_id', '?')}"
+           + (f", platform {data['platform']}" if data.get("platform") else "")
            + (f", vars: {', '.join(sorted(data.get('vars') or {}))}" if data.get("vars") else ""))
     return 0

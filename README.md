@@ -124,10 +124,12 @@ CHEATSHEET §1.6 has the full lifecycle.
 `doctor` checks the *vehicle* (manifest composition); **`certify` checks a *service*** — it runs the
 launcher's `config` verb under poison env values (`certify.invalid:5000`, `certify-tag-x`, instance
 `certifyname0`) and asserts the contract held: project name honored (no `-p`), images pulled from
-`RIG_IMAGE_REGISTRY`, built images pulled as `:RIG_IMAGE_TAG` (build/pull agreement), fleet ROS env
-reaching containers unmangled, deterministic output, identity fully derived from the config `name`, clean
-stdout, parseable `status`. Run it in a deployment (`rig certify [name…]`, or `rig doctor --deep`) or in a
-service repo's CI with no deployment at all:
+`RIG_IMAGE_REGISTRY`, built images pulled as `:RIG_IMAGE_TAG` (build/pull agreement; composed
+`<tag>-<platform>` for services declaring a `build.platforms` matrix), the declared platform honored
+(`RIG_TARGET_PLATFORM`/override env — every matrix entry must render on any host, never host-probe),
+fleet ROS env reaching containers unmangled, deterministic output, identity fully derived from the config
+`name`, clean stdout, parseable `status`. Run it in a deployment (`rig certify [name…]`, or
+`rig doctor --deep`) or in a service repo's CI with no deployment at all:
 
 ```bash
 rig certify --repo . --config core-driver/config/usb-real.yaml          # the service's own CI gate
@@ -238,6 +240,11 @@ launch_surface:                              # the minimal file set `rig vendor`
   - docker/compose/compose.deploy.yaml
 # build: { command: tools/build-images.sh, images: [novatel] }   # `rig build` runs `<cmd> <registry> [tag]`
 #                                            #   (ROS_DISTRO exported from vehicle.yaml ros.distro)
+# build: { command: ..., images: [...], platforms: [jp7, jp6] }   # a build MATRIX: distinct image sets per
+#                                            #   hardware/OS target — rig composes pulls as <tag>-<platform>
+# platform: { auto_detect: /etc/nv_tegra_release, override_env: CAM_PLATFORM }  # the launcher's standalone
+#                                            #   host probe + the env var it honors; rig mirrors the vehicle's
+#                                            #   declared `platform:` into it (RIG_TARGET_PLATFORM sibling)
 # mirror: [eclipse/zenoh:1.2.1]              # third-party images `rig build` copies into the registry
 external_volumes: ["novatel_{name}_data"]    # optional: GC'd by `rig down --purge` (final teardown only)
 host_ports: ["plugins[name=webrtc-bridge,enabled=true].params.port"]  # optional: rig validates these don't clash

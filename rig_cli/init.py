@@ -51,7 +51,10 @@ ros:
   distro: lyrical
 images:
   registry: ""          # where stacks pull images from (e.g. devbox:5000); empty = local images
-  tag: ""               # e.g. jp7 (the target's JetPack) -> RIG_IMAGE_TAG for platform-specific composes
+  tag: ""               # a VERSION (e.g. v1.3.0) -> RIG_IMAGE_TAG; rig build defaults --tag to it
+platform: ""            # THIS host's hardware/OS target (e.g. jp7) -> RIG_TARGET_PLATFORM; services
+                        #   with a build matrix pull <image>:<tag>-<platform>. Per-host fact —
+                        #   /etc/rig/vehicle.local.yaml may carry it (rig provision --platform)
 data_dir: ""            # host dir for recordings/logs/outputs -> RIG_DATA_DIR (e.g. /data); empty = none
 # vars:                 # per-DEPLOYMENT {{{{var}}}} defaults (CHEATSHEET §1.6); FLEET values
 #   gcs_ip: 10.0.0.10   #   ({{{{fleet_ids}}}} derived from the roster, {{{{gcs_ip}}}}, {{{{fleet_mode}}}},

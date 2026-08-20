@@ -58,16 +58,35 @@ def _resolve_build_cwd(service: str, desc: Descriptor, root: Path | None):
                  f"({str(source.get('rev'))[:12]}…)")
 
 
-def _build_env(distro: str | None):
+def _build_env(distro: str | None, desc: Descriptor | None = None, platform: str | None = None):
     """Env for a service's build command: vehicle.yaml `ros.distro` rides along as ROS_DISTRO, so a
     base-image build (rig-infra's fleet-ros) bakes the SAME distro the vehicle declares — the
-    router/session version-match must not depend on the operator remembering an env var. None (no
-    declared distro) inherits the caller's env untouched."""
-    return {**os.environ, "ROS_DISTRO": distro} if distro else None
+    router/session version-match must not depend on the operator remembering an env var. A declared
+    platform rides the same way for platform-sensitive services (RIG_TARGET_PLATFORM + the service's
+    own override_env), so a matrix build selects the DECLARED variant, not the build box's. None
+    (nothing to add) inherits the caller's env untouched."""
+    extra: dict[str, str] = {}
+    if distro:
+        extra["ROS_DISTRO"] = distro
+    if platform and desc is not None and (desc.build_platforms or desc.platform_override_env):
+        extra["RIG_TARGET_PLATFORM"] = platform
+        if desc.platform_override_env:
+            extra[desc.platform_override_env] = platform
+    return {**os.environ, **extra} if extra else None
 
 
-def _distro_note(distro: str | None) -> str:
-    return f" ROS_DISTRO={distro}" if distro else ""
+def _service_tag(desc: Descriptor, tag: str | None, platform: str | None) -> str | None:
+    """The tag arg a service's build command gets: for a matrix service with a declared platform,
+    the COMPOSED `<tag>-<platform>` (bare `<platform>` with no tag) — push exactly what the vehicle's
+    composed pull ref will ask for. Mirrors dispatch.service_env's pull-side composition."""
+    if desc.build_platforms and platform:
+        return f"{tag}-{platform}" if tag else platform
+    return tag
+
+
+def _distro_note(distro: str | None, platform: str | None = None) -> str:
+    return (f" ROS_DISTRO={distro}" if distro else "") + \
+           (f" RIG_TARGET_PLATFORM={platform}" if platform else "")
 
 
 def _mirror_steps(img: str, target: str):
@@ -75,7 +94,8 @@ def _mirror_steps(img: str, target: str):
     return [["docker", "pull", img], ["docker", "tag", img, target], ["docker", "push", target]]
 
 
-def _one_captured(service: str, desc: Descriptor, cwd: Path, reg, tag, distro: str | None):
+def _one_captured(service: str, desc: Descriptor, cwd: Path, reg, tag, distro: str | None,
+                  platform: str | None):
     """Concurrent worker: run a service's build + mirrors, capturing output. Returns (service, rc, text)."""
     log: list[str] = []
     rc = 0
@@ -88,9 +108,10 @@ def _one_captured(service: str, desc: Descriptor, cwd: Path, reg, tag, distro: s
         return p.returncode
 
     if desc.build_command:
-        cmd, args = _build_cmd(desc, cwd, reg, tag)
-        log.append(f"$ {desc.build_command} {' '.join(args)}  (cwd={cwd}){_distro_note(distro)}")
-        if run(cmd, run_cwd=str(cwd), env=_build_env(distro)):
+        cmd, args = _build_cmd(desc, cwd, reg, _service_tag(desc, tag, platform))
+        note = _distro_note(distro, platform if desc.build_platforms else None)
+        log.append(f"$ {desc.build_command} {' '.join(args)}  (cwd={cwd}){note}")
+        if run(cmd, run_cwd=str(cwd), env=_build_env(distro, desc, platform)):
             rc = 1
             log.append("  build FAILED")
     for img in desc.mirror:
@@ -108,9 +129,11 @@ def _one_captured(service: str, desc: Descriptor, cwd: Path, reg, tag, distro: s
 
 
 def build(manifest: Manifest, descriptors: dict[str, Descriptor], *, registry: str | None,
-          tag: str | None, dry_run: bool, jobs: int = 1, root: Path | None = None) -> int:
+          tag: str | None, dry_run: bool, jobs: int = 1, root: Path | None = None,
+          platform: str | None = None) -> int:
     reg = registry or manifest.image_registry
-    tag = tag or manifest.image_tag  # default the build tag to vehicle.yaml images.tag (e.g. jp7)
+    tag = tag or manifest.image_tag  # default the build tag to vehicle.yaml images.tag (a version)
+    platform = platform or manifest.platform  # matrix services build/push <tag>-<platform>
     services = [s for s in dict.fromkeys(x.service for x in manifest.sensors)  # unique, manifest order
                 if (d := descriptors.get(s)) and (d.build_command or d.mirror)]
     if not services:
@@ -144,11 +167,19 @@ def build(manifest: Manifest, descriptors: dict[str, Descriptor], *, registry: s
         if distro and d.build_command and d.ros_distro and d.ros_distro != distro:
             eprint(f"rig build: WARNING — {s} declares ros_distro '{d.ros_distro}' but vehicle.yaml "
                    f"ros.distro is '{distro}'; the build gets ROS_DISTRO={distro} and will bake THAT")
+        # A matrix service built with no declared platform pushes an UNQUALIFIED tag — the vehicle's
+        # composed pull ref (<tag>-<platform>) will never find it. (A platform-valued legacy tag is
+        # exempt: it behaves exactly as before the platform field existed.)
+        if (d.build_command and d.build_platforms and not platform
+                and tag not in d.build_platforms):
+            eprint(f"rig build: WARNING — {s} declares a platform matrix {d.build_platforms} but no "
+                   f"platform is declared (vehicle.yaml `platform:` or --platform); pushing "
+                   f"':{tag or 'latest'}' which composed pulls won't find")
 
     if jobs > 1 and len(services) > 1 and not dry_run:  # concurrent: capture + print grouped per service
         eprint(f"rig build: {len(services)} services, up to {jobs} concurrent (output grouped per service)")
         with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as ex:
-            futures = [ex.submit(_one_captured, s, descriptors[s], cwds[s], reg, tag, distro)
+            futures = [ex.submit(_one_captured, s, descriptors[s], cwds[s], reg, tag, distro, platform)
                        for s in services]
             for fut in concurrent.futures.as_completed(futures):
                 svc, rc1, out = fut.result()
@@ -159,9 +190,11 @@ def build(manifest: Manifest, descriptors: dict[str, Descriptor], *, registry: s
     for s in services:  # sequential: live-streamed
         desc = descriptors[s]
         if desc.build_command:
-            cmd, args = _build_cmd(desc, cwds[s], reg, tag)
-            eprint(f"build {s}: {desc.build_command} {' '.join(args)}  (cwd={cwds[s]}){_distro_note(distro)}")
-            if not dry_run and subprocess.run(cmd, cwd=str(cwds[s]), env=_build_env(distro)).returncode:
+            cmd, args = _build_cmd(desc, cwds[s], reg, _service_tag(desc, tag, platform))
+            note = _distro_note(distro, platform if desc.build_platforms else None)
+            eprint(f"build {s}: {desc.build_command} {' '.join(args)}  (cwd={cwds[s]}){note}")
+            if not dry_run and subprocess.run(cmd, cwd=str(cwds[s]),
+                                              env=_build_env(distro, desc, platform)).returncode:
                 rc = 1
                 eprint(f"  build {s} FAILED")
         for img in desc.mirror:

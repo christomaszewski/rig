@@ -67,9 +67,23 @@ DEFAULTS = {
 }
 
 
-def make_service(**tokens) -> pathlib.Path:
+# The matrix variant: two platform builds (alpha/beta) + the override env the launcher honors.
+# The conformant form surfaces $FAK_PLATFORM in the rendered output (an overlay-selection stand-in)
+# and pulls :$RIG_IMAGE_TAG — which certify composes to certify-tag-x-<platform> per matrix entry.
+RIGGING_MATRIX = RIGGING.replace(
+    "build: { command: build.sh, images: [fak-core] }",
+    "build: { command: build.sh, images: [fak-core], platforms: [alpha, beta] }",
+) + "platform: { auto_detect: /etc/fak_release, override_env: FAK_PLATFORM }\n"
+
+MATRIX_ENV = ("    environment:\n"
+              "      ROS_DOMAIN_ID: \"$ROS_DOMAIN_ID\"\n"
+              "      RMW_IMPLEMENTATION: $RMW_IMPLEMENTATION\n"
+              "      FAK_PLATFORM: $FAK_PLATFORM")
+
+
+def make_service(rigging: str = RIGGING, **tokens) -> pathlib.Path:
     repo = pathlib.Path(tempfile.mkdtemp(prefix="certify-fixture-"))
-    (repo / "rigging.yaml").write_text(RIGGING)
+    (repo / "rigging.yaml").write_text(rigging)
     body = SCRIPT
     for key, value in {**DEFAULTS, **tokens}.items():
         body = body.replace(key, value)
@@ -160,6 +174,46 @@ def test_repo_dir_bind_warns():
     checks = certify_target(load_descriptor("fak", repo), cfg, dict(os.environ))
     assert {c.name for c in checks if c.level == "WARN"} == {"binds"}
     assert not {c.name for c in checks if c.level == "ERROR"}
+
+
+def test_matrix_conformant_launcher_is_green_including_platform():
+    # The suite runs AS platforms[0] (alpha): tag agreement expects the COMPOSED certify-tag-x-alpha,
+    # and the platform check renders beta too — different tag + FAK_PLATFORM in the output = honored.
+    checks, errors, warns, oks = run_certify(make_service(RIGGING_MATRIX, **{"@ENVBLOCK@": MATRIX_ENV}))
+    assert not errors, f"matrix fixture failed: {[(c.name, c.detail) for c in checks if c.level == 'ERROR']}"
+    assert {"tag", "platform", "determinism", "identity"} <= oks
+
+
+def test_matrix_hardcoded_platform_tag_fails_platform_check():
+    # Simulates a host-probing launcher: it always picks alpha's tag. Passes the main suite (which
+    # runs as alpha) but the beta render still pulls :certify-tag-x-alpha -> platform ERROR.
+    repo = make_service(RIGGING_MATRIX, **{
+        "@ENVBLOCK@": MATRIX_ENV,
+        "@IMAGE@": "$RIG_IMAGE_REGISTRY/fak-core:certify-tag-x-alpha",
+    })
+    _, errors, _, _ = run_certify(repo)
+    assert errors == {"platform"}
+
+
+def test_matrix_platform_blind_launcher_fails_identical_renders():
+    # Ignores the platform entirely (hardcoded tag, no FAK_PLATFORM in the output): alpha and beta
+    # renders are byte-identical — proof the declared platform never reached the rendering.
+    repo = make_service(RIGGING_MATRIX, **{"@IMAGE@": "$RIG_IMAGE_REGISTRY/fak-core:certify-tag-x-alpha"})
+    checks, errors, _, _ = run_certify(repo)
+    assert "platform" in errors
+    details = " ".join(c.detail for c in checks if c.name == "platform")
+    assert "byte-identical" in details
+
+
+def test_matrix_platform_that_cannot_render_fails():
+    # A launcher that bails on any platform but the (simulated) host's breaks declared-wins: bake
+    # renders on dev boxes that aren't the target, so every matrix entry must render anywhere.
+    prelude = '    if [ "$FAK_PLATFORM" != "alpha" ]; then echo "unsupported platform" >&2; exit 3; fi'
+    checks, errors, _, _ = run_certify(make_service(RIGGING_MATRIX, **{
+        "@ENVBLOCK@": MATRIX_ENV, "@PRELUDE@": prelude}))
+    assert errors == {"platform"}
+    details = " ".join(c.detail for c in checks if c.name == "platform")
+    assert "fails to render" in details
 
 
 def test_repo_mode_defaults_to_the_declared_example():

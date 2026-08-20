@@ -23,7 +23,7 @@ export REGISTRY="192.168.1.50:5000"     # dev box LAN IP:5000 (reachable from th
                                         #   vehicle.yaml below — rig reads the registry from THERE (or a
                                         #   `--registry` flag), never from this shell var.
 export ORIN="orin"                       # ssh target (e.g. user@192.168.1.60)
-export JETPACK="jp7"                     # the Orin's JetPack: jp7 or jp6
+export JETPACK="jp7"                     # the Orin's JetPack: jp7 or jp6 -> vehicle.yaml `platform:`
 CAMERA_URL="https://github.com/christomaszewski/camera-service.git"   # public
 DASHBOARD_URL="git@github.com:christomaszewski/dashboard.git"         # NOT yet published — see §2
 ```
@@ -71,7 +71,10 @@ ros:
   distro: lyrical
 images:
   registry: "$REGISTRY"       # -> RIG_IMAGE_REGISTRY (composes prefix their repo)
-  tag: "$JETPACK"             # -> RIG_IMAGE_TAG; platform-specific composes pull <repo>:<tag>; rig build uses it
+  tag: ""                     # a VERSION (e.g. v1.3.0) -> RIG_IMAGE_TAG; empty = the platform's moving
+                              #   head for matrix services. NEVER the platform itself anymore.
+platform: "$JETPACK"          # THIS host's target -> RIG_TARGET_PLATFORM (+ CAM_PLATFORM for the camera);
+                              #   matrix services pull <image>:<tag>-<platform> (bare <platform> w/o tag)
 infra:
   - { name: zenoh-router, service: zenoh-router, config: config/infra/zenoh-router.yaml, enabled: true, order: 0 }
   - { name: dashboard,    service: dashboard,    config: config/infra/dashboard.yaml,    enabled: true, order: 5 }
@@ -138,7 +141,9 @@ EOF
 ```bash
 rig doctor          # -> rig doctor: orin-test — 2 sensors + 2 infra, 0 error(s); no zenoh warning (router present)
 rig certify         # each launcher honors the contract: project name, registry/tag, ROS env, determinism, identity
-rig up --dry-run    # zenoh-router -> dashboard -> cam_usb -> cam_rtsp; VEHICLE_ID=7, RIG_IMAGE_TAG=jp7 on each
+rig up --dry-run    # zenoh-router -> dashboard -> cam_usb -> cam_rtsp; VEHICLE_ID=7 on each;
+                    #   RIG_TARGET_PLATFORM=jp7 fleet-wide, CAM_PLATFORM=jp7 + composed RIG_IMAGE_TAG=jp7
+                    #   on the camera stacks (tag-less: the platform IS the moving head)
 ```
 
 ## 5 — Build + push images
@@ -191,19 +196,25 @@ docker rm -f registry                                      # stop the dev-box re
 
 ## Notes & prerequisites
 
-**Platform image tag (`images.tag`).** It's a *vehicle-level* property (the Orin's JetPack), so it lives in
-`vehicle.yaml`, not the per-sensor config. rig exports it as `RIG_IMAGE_TAG`, and every service follows it:
-the camera pulls `cam-core:${RIG_IMAGE_TAG}` (and selects the matching runtime overlay from it), the
-dashboard falls back through it (`RIG_IMAGE_TAG` → `DASH_IMAGE_TAG` → `arm64`), and `rig build` defaults its
-`--tag` to it — so build + pull agree on `<image>:jp7` everywhere. `rig certify`'s **tag check enforces**
-this build/pull agreement per launcher. Only the zenoh-router ignores the tag (it pulls the mirrored
-`eclipse/zenoh:latest`).
+**Platform (`platform:`) vs version (`images.tag`).** Two orthogonal *host-level* properties, both in
+`vehicle.yaml` (never the per-sensor config). `platform: jp7` is the hardware/OS target — rig exports it
+as `RIG_TARGET_PLATFORM` and mirrors it into each service's declared override env (`CAM_PLATFORM` for the
+camera, which selects the matching runtime overlay — `docker-compose.jp7.yml`, runc + CDI NVENC).
+`images.tag` is the release version — rig exports it as `RIG_IMAGE_TAG`, COMPOSED to `<tag>-<platform>`
+for services declaring a build matrix (`cam-core:v1.3.0-jp7`; a bare `jp7` when the tag is empty), passed
+through untouched for the rest (the dashboard falls back `RIG_IMAGE_TAG` → `DASH_IMAGE_TAG` → `arm64`).
+`rig build` passes the same composed tag to each build command, so build + pull agree everywhere;
+`rig certify`'s **tag and platform checks enforce** the agreement per launcher and per matrix entry. Only
+the zenoh-router ignores the tag (it pulls the mirrored `eclipse/zenoh:latest`). *Legacy:* `images.tag:
+jp7` with `platform:` unset still behaves exactly as before (deprecation warning; declare `platform:`).
 
-**The baked compose-only form is correct for the target, by design.** cam-up treats `RIG_IMAGE_TAG` as the
-authoritative platform — image tag AND the `docker-compose.jp7.yml` overlay (runc + CDI NVENC) — and its
-`config` verb never probes the host, so a bake on the dev box captures exactly what the Orin needs.
-(`rig certify --emit` on both machines + `--diff` proves it: identical output.) `python3-yaml` on the Orin
-is still recommended — it enables the bundled rig's verbs (`./rig doctor`, field re-bakes) — but it is no
+**The baked compose-only form is correct for the target, by design.** The vehicle.yaml `platform:`
+declaration is authoritative — cam-up honors `CAM_PLATFORM`/`RIG_TARGET_PLATFORM` over its own host
+probe (`/etc/nv_tegra_release` remains the standalone/no-rig fallback), and its `config` verb never
+probes the host under rig, so a bake on the dev box captures exactly what the Orin needs.
+(`rig certify --emit` on both machines + `--diff` proves it: identical output; the certify `platform`
+check proves every matrix entry renders declared-wins.) `python3-yaml` on the Orin is still
+recommended — it enables the bundled rig's verbs (`./rig doctor`, field re-bakes) — but it is no
 longer needed for platform correctness.
 
 **Multi-instance safety.** Each camera entry has a unique `name` → its own compose project

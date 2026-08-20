@@ -9,7 +9,13 @@ that cannot occur in real life (``certify.invalid:5000``, ``certify-tag-x``, ins
   - project-name     the compose project is COMPOSE_PROJECT_NAME (a launcher must not pass `-p`)
   - registry         images are pulled from RIG_IMAGE_REGISTRY (ERROR for images the service builds or
                      mirrors; WARN otherwise — upstream pulls work only on an internet-connected vehicle)
-  - tag              any image the service *builds* is pulled as `:RIG_IMAGE_TAG` (build/pull agreement)
+  - tag              any image the service *builds* is pulled as `:RIG_IMAGE_TAG` (build/pull agreement;
+                     for a service declaring `build.platforms` the expected tag is the COMPOSED
+                     `<RIG_IMAGE_TAG>-<platform>` — the same env rig exports at up time)
+  - platform         a service declaring a build matrix must honor the DECLARED platform
+                     (RIG_TARGET_PLATFORM / its `platform.override_env`): every matrix entry renders
+                     on THIS host, pulls built images as the composed per-platform tag, and two
+                     different entries render differently (identical output = host-probing)
   - ros-env          ROS_DOMAIN_ID / RMW_IMPLEMENTATION reach some container (ROS services only)
   - volumes          rigging.yaml `external_volumes` patterns match the compose's external volumes
   - determinism      same config + same env -> byte-identical output (no timestamps, no host probing)
@@ -39,6 +45,7 @@ from . import RigError
 from .bake import _repo_of, _service_images, _services
 from .common import eprint, load_yaml
 from .descriptor import Descriptor
+from .dispatch import service_env
 from .manifest import project_name
 from .status import _parse_ps
 
@@ -69,9 +76,14 @@ class Check:
     detail: str = ""
 
 
-def _poison_env(base_env: dict[str, str], name: str) -> dict[str, str]:
-    """The fleet env rig would export, with every contract variable set to its poison value."""
-    return {
+def _poison_env(base_env: dict[str, str], name: str, desc: Descriptor | None = None,
+                platform: str | None = None) -> dict[str, str]:
+    """The fleet env rig would export, with every contract variable set to its poison value. For a
+    platform-targeted run the env goes through the SAME per-service composition rig applies at up
+    time (dispatch.service_env): RIG_TARGET_PLATFORM set, override_env mirrored, and — for a matrix
+    service — RIG_IMAGE_TAG composed to `<POISON_TAG>-<platform>`. Platform values are the
+    descriptor's REAL matrix entries (a launcher legitimately validates them), not poison."""
+    env = {
         **base_env,
         "ROS_DOMAIN_ID": POISON_VID,
         "RMW_IMPLEMENTATION": POISON_RMW,
@@ -81,6 +93,18 @@ def _poison_env(base_env: dict[str, str], name: str) -> dict[str, str]:
         "RIG_DATA_DIR": POISON_DATA,
         "COMPOSE_PROJECT_NAME": project_name(name, POISON_VID),
     }
+    env.pop("RIG_TARGET_PLATFORM", None)  # never inherit a real one from the caller's shell
+    if desc is not None and platform:
+        env["RIG_TARGET_PLATFORM"] = platform
+        env = service_env(env, desc)
+    return env
+
+
+def _mistagged(compose: dict, desc: Descriptor, want_tag: str) -> list[str]:
+    """Built-image refs whose tag isn't the (possibly platform-composed) RIG_IMAGE_TAG."""
+    built = set(desc.build_images)
+    return [ref for ref in _service_images(compose).values()
+            if _ref_parts(ref)[0] in built and _ref_parts(ref)[1] != want_tag]
 
 
 def _write_named_config(base: dict, name: str, service: str, tmp: Path) -> Path:
@@ -159,10 +183,15 @@ def certify_target(desc: Descriptor, config_path: Path, base_env: dict[str, str]
         return [Check(ERROR, "launcher", f"not executable: {lp}")]
 
     base_cfg = load_yaml(config_path)
+    # A matrix service runs the whole suite AS its first declared platform (the env rig would
+    # actually export); the remaining entries are exercised by the `platform` check below.
+    matrix = desc.build_platforms
+    plat = matrix[0] if matrix else None
+    want_tag = f"{POISON_TAG}-{plat}" if plat else POISON_TAG
     with tempfile.TemporaryDirectory(prefix="rig-certify-") as td:
         tmp = Path(td)
         cfg_a = _write_named_config(base_cfg, NAME_A, desc.service, tmp)
-        env_a = _poison_env(base_env, NAME_A)
+        env_a = _poison_env(base_env, NAME_A, desc, plat)
         run_a = _run_launcher(desc, cfg_a, desc.verb_args("config"), env_a)
 
         # discipline: rc 0, stdout parses as compose YAML, no junk top-level keys (= chatter on stdout).
@@ -204,7 +233,7 @@ def certify_target(desc: Descriptor, config_path: Path, base_env: dict[str, str]
             repo, tag = _ref_parts(ref)
             if not ref.startswith(POISON_REGISTRY + "/"):
                 (unprefixed_owned if repo in owned else unprefixed_other).append(ref)
-            if repo in set(desc.build_images) and tag != POISON_TAG:
+            if repo in set(desc.build_images) and tag != want_tag:
                 mistagged.append(ref)
         if unprefixed_owned:
             fail("registry", f"images the service builds/mirrors are not pulled from RIG_IMAGE_REGISTRY: "
@@ -215,8 +244,9 @@ def certify_target(desc: Descriptor, config_path: Path, base_env: dict[str, str]
             checks.append(Check(WARN, "registry", f"upstream image(s) not under RIG_IMAGE_REGISTRY (needs "
                                                   f"an internet-connected vehicle): {unprefixed_other}"))
         if mistagged:
-            fail("tag", f"built image(s) pulled with a tag other than RIG_IMAGE_TAG ('{POISON_TAG}') — "
-                        f"`rig build` pushes what the compose won't find: {mistagged}")
+            composed = f" (composed as <RIG_IMAGE_TAG>-{plat} for this build matrix)" if plat else ""
+            fail("tag", f"built image(s) pulled with a tag other than RIG_IMAGE_TAG ('{want_tag}')"
+                        f"{composed} — `rig build` pushes what the compose won't find: {mistagged}")
         elif desc.build_images:
             ok("tag")
 
@@ -288,7 +318,8 @@ def certify_target(desc: Descriptor, config_path: Path, base_env: dict[str, str]
 
         # identity: rename the instance -> every trace of the old name disappears from the output.
         cfg_b = _write_named_config(base_cfg, NAME_B, desc.service, tmp)
-        run_b = _run_launcher(desc, cfg_b, desc.verb_args("config"), _poison_env(base_env, NAME_B))
+        run_b = _run_launcher(desc, cfg_b, desc.verb_args("config"),
+                              _poison_env(base_env, NAME_B, desc, plat))
         if run_b.returncode != 0:
             fail("identity", f"`config` failed for a renamed instance (exit {run_b.returncode})")
         elif NAME_A in run_b.stdout:
@@ -308,6 +339,43 @@ def certify_target(desc: Descriptor, config_path: Path, base_env: dict[str, str]
                 ok("status")
             except Exception:  # noqa: BLE001
                 fail("status", f"`status --format json` stdout is not JSON: {run_s.stdout.strip()[:120]!r}")
+
+        # platform: the DECLARED platform must win over host probing. Every remaining matrix entry
+        # must render on THIS host (bake renders on dev boxes that aren't the target), pull built
+        # images as the composed per-platform tag, and differ from the first entry's render —
+        # byte-identical output means the launcher ignored the declared platform. This is what makes
+        # the RIG_TARGET_PLATFORM/override_env routing a standard instead of a convention.
+        if matrix:
+            plat_fail = False
+            for alt in matrix[1:]:
+                run_p = _run_launcher(desc, cfg_a, desc.verb_args("config"),
+                                      _poison_env(base_env, NAME_A, desc, alt))
+                if run_p.returncode != 0:
+                    plat_fail = True
+                    fail("platform", f"declared platform '{alt}' fails to render (exit "
+                                     f"{run_p.returncode}) — every build.platforms entry must render "
+                                     f"on any host: {(run_p.stderr or '').strip()[:160]}")
+                    continue
+                try:
+                    compose_p = yaml.safe_load(run_p.stdout)
+                except yaml.YAMLError:
+                    compose_p = None
+                if not (isinstance(compose_p, dict) and compose_p.get("services")):
+                    plat_fail = True
+                    fail("platform", f"platform '{alt}': `config` stdout is not a compose document")
+                    continue
+                bad = _mistagged(compose_p, desc, f"{POISON_TAG}-{alt}")
+                if bad:
+                    plat_fail = True
+                    fail("platform", f"platform '{alt}': built image(s) not pulled as the composed "
+                                     f"':{POISON_TAG}-{alt}': {bad}")
+                if run_p.stdout == run_a.stdout:
+                    plat_fail = True
+                    hint = (f"/{desc.platform_override_env}" if desc.platform_override_env else "")
+                    fail("platform", f"renders for '{plat}' and '{alt}' are byte-identical — the "
+                                     f"launcher ignores RIG_TARGET_PLATFORM{hint} (host-probing?)")
+            if not plat_fail:
+                ok("platform")
 
         if emit is not None:
             normalized = run_a.stdout.replace(str(desc.repo), "${REPO}").replace(str(tmp), "${TMP}")
