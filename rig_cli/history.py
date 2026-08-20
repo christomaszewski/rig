@@ -144,6 +144,35 @@ def previous_version(entry: Entry, kind_dir: str, name: str, current: str) -> st
     return None
 
 
+def list_versions(entry: Entry, kind_dir: str, name: str) -> list[tuple[str, str, str]] | None:
+    """[(version, date, short_sha)] newest-first, distinct versions only — `pkg info
+    --versions`. None without git history (local-dir folders keep 'current version only')."""
+    where = _git_prefix(entry)
+    if where is None:
+        return None
+    toplevel, prefix = where
+    manifest_rel = f"{prefix}{kind_dir}/{name.replace(':', '/')}/manifest.yaml"
+    log = _git(toplevel, "log", "--format=%H %cs", "--", manifest_rel)
+    if log.returncode != 0:
+        return None
+    rows: list[tuple[str, str, str]] = []
+    seen: set[str] = set()
+    for line in log.stdout.splitlines():
+        commit, _, date = line.strip().partition(" ")
+        blob = _read_blob(toplevel, commit, manifest_rel)
+        if blob is None:
+            continue
+        try:
+            doc = yaml.safe_load(blob.decode()) or {}
+        except (UnicodeDecodeError, yaml.YAMLError):
+            continue
+        version = str(doc.get("version") or "")
+        if version and version not in seen:
+            seen.add(version)
+            rows.append((version, date, commit[:7]))
+    return rows
+
+
 def kind_dir_of(kind: str) -> str:
     return {"service": "services", "profile": "profiles",
             "overlay": "overlays", "suite": "suites"}.get(kind, kind + "s")

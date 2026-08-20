@@ -217,13 +217,15 @@ def _three_way(root: Path, sensor: Sensor, new_base_path: Path) -> list[str]:
     return conflicts
 
 
-def upgrade(root: Path, names: list[str]) -> int:
+def upgrade(root: Path, names: list[str], dry_run: bool = False) -> int:
     """`rig pkg upgrade [instance…]` — re-pin EVERY registry package this deployment uses: profile
     instances (three-way payload merge, local wins), bare service instances (three-way against the
     new vendored example), bound overlays (payload rebound in place — order is semantic), the
     services themselves (refetch + re-vendor at the new pin, including a profile's required
     service), and instance-less service dependencies. All-or-nothing: any failure mid-sweep rolls
-    the tree AND the lock back (a half-upgraded deployment fails `pkg lock` on every instance)."""
+    the tree AND the lock back (a half-upgraded deployment fails `pkg lock` on every instance).
+    ``--dry-run`` runs the REAL sweep — three-ways, conflict surfacing, everything — then rolls
+    it back unconditionally: a full-fidelity preview, not a resolution guess."""
     from .install import _install_service, _rollback, _snapshot
 
     manifest = load_manifest(root)
@@ -269,6 +271,12 @@ def upgrade(root: Path, names: list[str]) -> int:
         eprint("rig pkg upgrade: failed mid-sweep — rolled back (configs, pins, vehicle.yaml, "
                "services/, rig.lock all restored)")
         raise
+    if dry_run:
+        _rollback(root, snap)
+        eprint(f"rig pkg upgrade (dry-run): {changed} change(s) previewed above — everything "
+               f"rolled back, nothing written" if changed else
+               "rig pkg upgrade (dry-run): everything current")
+        return 0
     if changed:
         save_lock(root, lock)
         load_manifest(root)  # the gate: the deployment must still load

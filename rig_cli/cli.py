@@ -408,7 +408,7 @@ def cmd_pkg(args) -> int:
         root = root if (root / "vehicle.yaml").exists() else None
     except RigError:
         root = None
-    return pkg_mod.info(args.ref, root=root)
+    return pkg_mod.info(args.ref, root=root, versions=args.versions)
 
 
 def cmd_build(args, root: Path) -> int:
@@ -724,6 +724,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="only this registry's packages")
     pi = pkgsub.add_parser("info", help="one package's manifest highlights + provenance")
     pi.add_argument("ref", help="[registry/]name")
+    pi.add_argument("--versions", action="store_true",
+                    help="list every published version from the registry's git history "
+                         "(@old is installable: pkg add ref@version)")
     pkgsub.add_parser("list", help="THIS deployment's installed packages (from rig.lock): kind, "
                                    "which instances use each, upgrades available")
     prm = pkgsub.add_parser("remove", help="undo pkg add: remove instance(s) (row, bindings, clean "
@@ -752,6 +755,9 @@ def build_parser() -> argparse.ArgumentParser:
                                            "versions — three-way merge, local edits win, conflicts "
                                            "surfaced")
     pu.add_argument("names", nargs="*", help="instance name(s); default: every profile instance")
+    pu.add_argument("--dry-run", action="store_true",
+                    help="run the REAL sweep (three-ways, conflicts) then roll everything back "
+                         "— a full-fidelity preview")
     pkgsub.add_parser("lock", help="re-verify every instance anchor and rewrite rig.lock "
                                    "deterministically")
     psv = pkgsub.add_parser("save", help="publish this deployment's local edits as the next "
@@ -992,7 +998,7 @@ def main(argv=None) -> int:
                 if args.pkg_cmd == "list":
                     return pkg_mod.list_installed(root)
                 if args.pkg_cmd == "upgrade":
-                    return workingcopy_mod.upgrade(root, args.names)
+                    return workingcopy_mod.upgrade(root, args.names, dry_run=args.dry_run)
                 if args.pkg_cmd == "save":
                     from . import save as save_mod
                     return save_mod.save(root, args.spec, dry_run=args.dry_run)

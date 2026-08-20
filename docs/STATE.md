@@ -1,8 +1,32 @@
 # rig — project state & handoff (resume here)
 
 > Snapshot for picking the project up cold in a new session. Read this first, then `CHEATSHEET.md` /
-> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.2.4**,
-> branch **`main`**, 307 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.2.9**,
+> branch **`main`**, 335 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> **The QoL & registry-currency layer SHIPPED** (v0.2.5–0.2.9, plan doc `rig-qol-plan.md`,
+> untracked by request; CHEATSHEET §1.5 "the daily loop", RUNBOOK "registry maintainer loop"):
+> - **v0.2.5 discovery & inventory**: no-arg `pkg search` = the catalog (+`--kind`/`--registry`);
+>   ONE add grammar under both spellings (`pkg add` takes paths/workspace names; dir-AND-registry
+>   ambiguity = hard error, `./`/`@ver` escape); `pkg list` = the FULL inventory (path-added +
+>   vendored services as local/unpublished rows — the promotion worklist).
+> - **v0.2.6 currency**: `pkg outdated` (drift report across all four kinds, FIX column names
+>   repin/rebase, exit 1 on drift, `--quiet`, `--registry NAME|DIR`); `registry sync` prints a
+>   package-level delta digest on ff-pulls; ONE namespace resolver
+>   (`registries.resolve_namespace/current_version_of`).
+> - **v0.2.7 `pkg repin`**: advance declared dependency PINS registry-side (profile requires —
+>   caret keeps its caret; overlay authored_against re-stamp, fresh-stamps pre-v0.1.59 packages,
+>   warn-only vanished-key check via history; suites refresh EVERY member — the registry law pins
+>   in-registry members at head); payloads stay rebase's job; `--dry-run`.
+> - **v0.2.8 `pkg save` + the publish tail**: save = update-in-place porcelain (top-of-stack:
+>   bound overlay first — delta recomputed against the pre-overlay base, never patch-composed —
+>   else pinned profile via the adopt flow; routed services save their code pointer with a
+>   "code only" note); `registry pending|push|discard` (promote/* only, system git, `--pr` =
+>   PR creation via gh/glab, discard re-anchors the cwd deployment) and `pkg yank <ref> --from`
+>   (previous restored from git history / first publish removed) — both run save's inverse:
+>   the delta comes back as LOCAL edits, render byte-identical either direction.
+> - **v0.2.9 polish**: `pkg info --versions` (git-history enumeration — @old was installable,
+>   now discoverable), `pkg upgrade --dry-run` (the REAL sweep, rolled back — full-fidelity
+>   preview), docs sweep.
 > **`promote --kind service` SHIPPED** (v0.2.4): publish a routed dev checkout's CODE POINTER
 > (origin URL + HEAD; `source.path` derived for collection repos) — the dev-loop counterpart of
 > the repo-side registry-release CI job. Guards: clean tree, HEAD on a remote-tracking ref,

@@ -227,3 +227,23 @@ See the services' example configs.
   done). It has no public git remote yet — get the repo from its maintainer.
 - Images must be **arm64** (the Orin) and reachable in the registry; the Orin caches them after the first
   pull, so it runs offline thereafter — or use `rig bake --bundle-images` to skip the registry entirely.
+
+## Registry maintainer loop (rig ≥ v0.2.9)
+
+Keeping a program registry current — run from any machine with the registries configured:
+
+```bash
+rig registry sync                  # ff-pull; prints the package-level delta digest (what moved)
+rig pkg outdated                   # dependency drift across all registries: FIX column names the
+                                   #   repair verb; exit 1 on drift, so a cron/CI sweep is one line
+rig pkg repin <pkg> --to internal  # advance declared pins to current (next patch version)
+rig pkg rebase <fork> --to internal# ...or three-way a fork's PAYLOAD onto its moved parent
+rig registry pending               # what's awaiting publish (promote/* branches in the caches)
+rig registry push internal --all --pr   # publish via YOUR git + gh/glab (PR creation only)
+```
+
+Mistakes are cheap to retract: `rig registry discard internal <branch>` (unpushed — the cwd
+deployment is re-anchored render-identically, your edits back as local), `rig pkg yank <pkg>
+--from internal` (already current/merged — previous version restored from git history; a first
+publish is removed). Both print what they re-anchored. Deployments elsewhere follow with
+`rig registry sync && rig pkg upgrade` (preview first with `--dry-run`).

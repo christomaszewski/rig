@@ -128,15 +128,54 @@ rig pkg add internal/zr30-gideon@1.0.0
                                    #   reproduction reproduces even after the registry moves
 ```
 
+**The daily loop (rig ≥ v0.2.9): discover, save, stay current, publish, undo.**
+
+```bash
+rig pkg search                     # no query = the WHOLE catalog (--kind overlay, --registry public)
+rig pkg list                       # the FULL inventory: registry packages + upgrade state, PLUS
+                                   #   path-added/vendored services as local/unpublished rows —
+                                   #   the promotion worklist
+rig pkg add ../my-driver           # local paths work here too — ONE grammar with `rig add`
+                                   #   (dir AND registry ref both live = hard error; ./ or @ver escapes)
+rig pkg info internal/ouster:generic --versions
+                                   # every published version from git history (@old is installable)
+rig pkg save siyi_zr30             # publish local edits into the package they CAME FROM + re-anchor
+                                   #   clean, render identical: bound overlay first (top of the
+                                   #   stack), else the pinned profile. save = update in place;
+                                   #   promote = something NEW (fork/kind/suite). Never pushes.
+rig pkg save camera-service        # a routed dev checkout's CODE pointer (next version @ HEAD);
+                                   #   prints which instance configs still carry unsaved edits
+rig pkg outdated                   # registry-authoring currency: profile requires/based_on, overlay
+                                   #   authored_against, suite members vs current — FIX column names
+                                   #   the repair; exit 1 on drift (--quiet for cron)
+rig pkg repin ouster:generic --to internal
+                                   # advance declared PINS to current + next patch version (payloads
+                                   #   untouched — that's rebase); suites refresh every member
+rig pkg upgrade --dry-run          # the REAL sweep (three-ways, conflicts) then rolled back — a
+                                   #   full-fidelity preview
+rig registry sync                  # now prints the package-level delta digest (what moved upstream)
+rig registry pending               # unpublished promote/* branches across the caches, with commands
+rig registry push internal --all --pr
+                                   # push via YOUR git (promote/* only, never the default branch);
+                                   #   --pr creates the PR via your gh/glab when installed
+rig registry discard internal promote/save-zr30-gideon
+                                   # pre-push undo: branch deleted AND this deployment re-anchored —
+                                   #   your changes come back as LOCAL edits, render identical
+rig pkg yank ouster:generic --from internal
+                                   # retract the CURRENT version (previous restored from history; a
+                                   #   first publish is removed) — same render-preserving un-save
+```
+
 Registries: `rig registry init <dir>` scaffolds a new one (usable immediately via
 `rig registry add internal --path <dir>`; push it to GitHub/GitLab later — CI wrappers included).
 `--front` makes a dev checkout shadow `public` for unqualified names. `rig.lock` records every pin +
 hash; `rig pkg add <ref> --locked` reproduces byte-identical configs on a second machine.
 
 Canonical grouped commands (old flat spellings stay as permanent aliases): `config show|render|diff` ·
-`run new|end|list` · `registry init|add|remove|list|sync|validate|index` · `pkg
-search|info|list|add|remove|upgrade|lock|promote` · `overlay apply|remove|reorder|list` · `service
-rigify|vendor|certify` · `artifact bake|unbake|list` · `image build|pull`.
+`run new|end|list` · `registry init|add|remove|list|sync|pending|push|discard|validate|index` · `pkg
+search|info|list|outdated|add|remove|upgrade|lock|save|promote|repin|rebase|yank` · `overlay
+apply|remove|reorder|list` · `service rigify|vendor|certify` · `artifact bake|unbake|list` ·
+`image build|pull`.
 
 Airgap: `sync` → `install` → `rig pull` → `rig bake --bundle-images` — the deployment is
 self-contained after install (vendored surfaces + materialized configs); the registry cache is only

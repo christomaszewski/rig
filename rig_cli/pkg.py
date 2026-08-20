@@ -263,7 +263,7 @@ def list_installed(root) -> int:
     return 0
 
 
-def info(ref: str, root=None) -> int:
+def info(ref: str, root=None, versions: bool = False) -> int:
     entries = _entries_or_hint()
     ns, name, asked = parse_ref(ref)   # pkg info accepts @version like every other verb
     if ns:
@@ -314,6 +314,17 @@ def info(ref: str, root=None) -> int:
             for plural in ("services", "profiles", "overlays"):
                 for ref_ in members.get(plural) or []:
                     print(f"  member: {ref_}")
+        if versions:  # the v0.1.63 archive made @old INSTALLABLE; this makes it DISCOVERABLE
+            from .history import kind_dir_of, list_versions
+            rows = list_versions(entry, kind_dir_of(pkg.kind), name)
+            if rows is None:
+                print("  versions: current only — no git history (git-backed registries keep "
+                      "every past version)")
+            else:
+                print("  versions:")
+                for v, date, sha in rows:
+                    mark = "  <- current" if v == pkg.version else ""
+                    print(f"    {v}  {date}  {sha}{mark}")
         return 0
     raise RigError(f"pkg info: '{ref}' not found in any configured registry "
                    f"(synced? rig registry sync)")

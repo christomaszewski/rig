@@ -197,6 +197,51 @@ def test_list_is_the_full_inventory():
         assert local_i > reg_i                                          # local rows sort together, last
 
 
+def test_info_versions_from_git_history():
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        _, _, reg = _world()
+        rc, out, _ = _run("pkg", "info", "testns/camish:acme-cam", "--versions")
+        assert rc == 0 and "current only — no git history" in out       # non-git degrade
+        _git("init", "-q", cwd=reg)
+        _git("add", "-A", cwd=reg)
+        _git("commit", "-q", "-m", "v2.0.0", cwd=reg)
+        mpath = reg / "profiles" / "camish" / "acme-cam" / "manifest.yaml"
+        m = yaml.safe_load(mpath.read_text())
+        m["version"] = "2.1.0"
+        mpath.write_text(yaml.safe_dump(m))
+        _run("registry", "index", str(reg))
+        _git("add", "-A", cwd=reg)
+        _git("commit", "-q", "-m", "v2.1.0", cwd=reg)
+        rc, out, _ = _run("pkg", "info", "testns/camish:acme-cam", "--versions")
+        assert rc == 0, out
+        assert "2.1.0" in out and "<- current" in out
+        assert "2.0.0" in out                                           # history discoverable
+        assert out.index("2.1.0") < out.index("2.0.0")                  # newest first
+
+
+def test_upgrade_dry_run_previews_and_rolls_back():
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        _, veh, reg = _world()
+        assert _run("--root", str(veh), "pkg", "add", "sensor:acme")[0] == 0
+        mpath = reg / "profiles" / "camish" / "acme-cam" / "manifest.yaml"
+        m = yaml.safe_load(mpath.read_text())
+        m["version"] = "2.1.0"
+        mpath.write_text(yaml.safe_dump(m))
+        payload = reg / "profiles" / "camish" / "acme-cam" / "config" / "payload.yaml"
+        payload.write_text(payload.read_text() + "extra: 1\n")
+        _run("registry", "index", str(reg))
+        before = sorted((str(p), p.read_bytes()) for p in veh.rglob("*") if p.is_file())
+        rc, _, err = _run("--root", str(veh), "pkg", "upgrade", "--dry-run")
+        assert rc == 0, err
+        assert "rolled back, nothing written" in err
+        after = sorted((str(p), p.read_bytes()) for p in veh.rglob("*") if p.is_file())
+        assert before == after                                          # byte-identical tree
+        rc, _, err = _run("--root", str(veh), "pkg", "upgrade")         # the real one applies
+        assert rc == 0, err
+        lock = yaml.safe_load((veh / "rig.lock").read_text())
+        assert "testns/camish:acme-cam@2.1.0" in lock["packages"]
+
+
 if __name__ == "__main__":
     failed = 0
     for name, fn in sorted(globals().items()):
