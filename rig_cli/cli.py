@@ -494,7 +494,7 @@ def build_parser() -> argparse.ArgumentParser:
                "  rig config   show | render          rig run      new | end | list\n"
                "  rig registry init | add | remove | list | sync | validate | index\n"
                "  rig pkg      search | info | list | outdated | add | remove | upgrade | lock | "
-               "promote | rebase\n"
+               "promote | repin | rebase\n"
                "  rig overlay  apply | remove | reorder | list     rig setup (first-run host setup)\n"
                "  rig service  rigify | vendor | certify\n"
                "  rig artifact bake | unbake | list   rig image    build | pull\n"
@@ -765,6 +765,22 @@ def build_parser() -> argparse.ArgumentParser:
                          "(CI sweeping its own tree); default: all configured")
     po.add_argument("--quiet", action="store_true",
                     help="hide INFO rows (caret-still-covering, unresolvable namespaces)")
+    prp = pkgsub.add_parser("repin", help="advance a package's DECLARED dependency pins to "
+                                          "registry-current and publish the next patch version "
+                                          "(profile requires / overlay authored_against / suite "
+                                          "members) — pins only; payload reconciliation is "
+                                          "`pkg rebase`")
+    prp.add_argument("ref", help="the package in the target registry (profiles: the "
+                                 "<service>:<short> key, or the short half when unambiguous)")
+    prp.add_argument("--to", required=True, metavar="REGISTRY",
+                     help="the registry carrying the package (local-dir in place, git on a "
+                          "promote/ branch)")
+    prp.add_argument("--dep", default=None, metavar="[ns/]name[@ver]",
+                     help="advance the NAMED dependency to this exact version (mainly for "
+                          "cross-registry deps — in-registry pins must sit at head to "
+                          "validate; suite siblings still refresh to current)")
+    prp.add_argument("--dry-run", action="store_true",
+                     help="print the resulting manifest changes; write nothing")
     pr = pkgsub.add_parser("rebase", help="three-way a FORKED profile onto its parent's current "
                                           "version (based_on lineage; conflicts keep YOURS, "
                                           "loudly) — registry-side, write+validate only")
@@ -924,6 +940,9 @@ def main(argv=None) -> int:
                 return workingcopy_mod.relock(root)
             if args.pkg_cmd == "rebase":  # registry-side: no deployment involved
                 return promote_mod.rebase(args.name, to=args.to, onto=args.onto)
+            if args.pkg_cmd == "repin":  # registry-side pin advance
+                from . import repin as repin_mod
+                return repin_mod.repin(args.ref, to=args.to, dep=args.dep, dry_run=args.dry_run)
             if args.pkg_cmd == "outdated":  # registry-side, report-only
                 from . import outdated as outdated_mod
                 return outdated_mod.outdated(args.refs, registry=args.registry, quiet=args.quiet)

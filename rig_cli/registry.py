@@ -258,9 +258,9 @@ def _validate_overlay(pkg: Package, reg: Registry, issues: list[Issue]) -> None:
             dep = reg.packages.get(match["name"])
             if dep is not None and dep.kind == "service" and dep.version != match["ver"]:
                 issues.append(Issue(where, f"authored against {authored['service']}; this registry "
-                                           f"now carries {dep.name}@{dep.version} — re-verify the "
-                                           f"delta's keys against the newer config surface, then "
-                                           f"bump authored_against", level="warning"))
+                                           f"now carries {dep.name}@{dep.version} — "
+                                           f"`rig pkg repin {m.get('name')}` re-stamps it "
+                                           f"(delta keys checked, warn-only)", level="warning"))
 
 
 def _validate_suite(pkg: Package, reg: Registry, issues: list[Issue]) -> None:
