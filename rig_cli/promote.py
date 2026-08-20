@@ -140,7 +140,8 @@ def _write_pkg(reg_root: Path, kind_dir: str, name: str, manifest: dict,
         backups[pkg_dir] = backup
     (pkg_dir / "config").mkdir(parents=True, exist_ok=True)
     if payload is not None:
-        payload_path = pkg_dir / "config" / ("delta.yaml" if kind_dir == "overlays" else "payload.yaml")
+        payload_path = pkg_dir / "config" / {"overlays": "delta.yaml",
+                                             "vehicles": "vehicle.yaml"}.get(kind_dir, "payload.yaml")
         if isinstance(payload, bytes):  # verbatim: the working file's bytes, comments intact
             payload_path.write_bytes(payload)
         else:
@@ -322,14 +323,70 @@ def _promote_service(root: Path, spec: str, *, to: str, bump: bool,
     return 0
 
 
+def _capture_vehicle(root: Path, lock: dict, new_overlay_rows: dict[str, str] | None = None) -> dict:
+    """The vehicle payload: the origin vehicle.yaml in TEMPLATE form. Identity that must be
+    distinct per host (vehicle/vehicle_id) becomes self-markers; fleet DEFAULTS (platform,
+    data_dir, images, ros, vars, env) pass through literal — the vehicle-local tier overrides
+    them per host. Rows: refs requalified to registry namespaces and VERSION-STRIPPED (the
+    suite's members are the only pin authority); config paths canonicalized; rows with no
+    registry provenance are warned and omitted (nothing can materialize them). Re-serialized —
+    vehicle.yaml comments do not survive capture (documented v1 concession)."""
+    raw = load_yaml(root / "vehicle.yaml")
+    payload: dict = {}
+    for key, value in raw.items():
+        if key in ("infra", "sensors", "autonomy"):
+            continue  # rows handled below, in tier order
+        if key in ("vehicle", "vehicle_id"):
+            payload[key] = value if (isinstance(value, str) and f"{{{{{key}}}}}" in value) \
+                else f"{{{{{key}}}}}"  # literal identity -> self-marker (mandatory per host)
+        else:
+            payload[key] = value
+    service_pins = {unqualified(r): r for r, info in (lock.get("packages") or {}).items()
+                    if (info or {}).get("kind") == "service"}
+    for tier in ("infra", "sensors", "autonomy"):
+        rows_out = []
+        for row in raw.get(tier) or []:
+            if not isinstance(row, dict) or not (row.get("name") and row.get("service")):
+                continue
+            if not row.get("profile") and row["service"] not in service_pins:
+                eprint(f"  WARNING: row '{row['name']}' ({row['service']}) has no registry "
+                       f"provenance (no profile, no service pin) — omitted from the vehicle "
+                       f"plan; adopt it first (rig pkg promote {row['service']} --kind service "
+                       f"--adopt)")
+                continue
+            out = dict(row)
+            out["config"] = f"config/{tier}/{row['name']}.yaml"  # canonical: where install writes
+            if row.get("profile"):
+                out["profile"] = _requalify(str(row["profile"])).partition("@")[0]
+            overlays = [_requalify(str(o)).partition("@")[0] for o in row.get("overlays") or []]
+            # An overlay THIS promote just emitted from the row's dirty delta isn't bound at
+            # origin yet — the plan row must still carry it (appended LAST: apply-order parity),
+            # or the tuning never lands on a fresh vehicle.
+            fresh = (new_overlay_rows or {}).get(str(row["name"]))
+            if fresh and fresh not in overlays:
+                overlays.append(fresh)
+            if overlays:
+                out["overlays"] = overlays
+            rows_out.append(out)
+        if rows_out:
+            payload[tier] = rows_out
+    return payload
+
+
 def promote(root: Path, names: list[str], *, to: str, all_dirty: bool, name: str | None,
             project: str | None, kind: str | None, suite: str | None, bump: bool,
             target_instance: bool, matches: list[str], requires: str | None,
-            adopt: bool = False, version: str | None = None) -> int:
+            adopt: bool = False, version: str | None = None,
+            vehicle: str | None = None) -> int:
     if bool(names) == all_dirty:
         raise RigError("promote: name instance(s), or pass --all for every dirty instance")
     if name and (len(names) != 1 or suite):
         raise RigError("promote: --name applies to exactly one instance (and never names a suite)")
+    if vehicle and not suite:
+        raise RigError("promote: --vehicle rides the suite capture (--suite <name>) — a vehicle "
+                       "package is a suite's instance plan, never published alone")
+    if vehicle and not re.match(r"^[a-z][a-z0-9-]*$", vehicle):
+        raise RigError(f"promote: --vehicle '{vehicle}' must match [a-z][a-z0-9-]*")
     if name and not re.match(r"^[a-z][a-z0-9-]*$", name):
         raise RigError(f"promote: --name '{name}' must match [a-z][a-z0-9-]* — for profiles it is "
                        f"the SHORT half only; the service half is derived from the instance "
@@ -398,6 +455,8 @@ def promote(root: Path, names: list[str], *, to: str, all_dirty: bool, name: str
     written: list[Path] = []
     backups: dict[Path, Path] = {}  # pre-existing pkg dir -> pristine copy (rollback restores)
     new_overlays: list[str] = []
+    new_overlay_rows: dict[str, str] = {}  # instance -> UNVERSIONED ref of its just-emitted overlay
+    #                                        (the vehicle plan's row must carry the tuning too)
     adoptions: list[tuple] = []     # (sensor, pkg_name, version, payload, req_lock)
     with _registry_write_session(entry, to, suite or name or chosen[0][0].name,
                                  written, backups):
@@ -511,6 +570,7 @@ def promote(root: Path, names: list[str], *, to: str, all_dirty: bool, name: str
                              "config": {"payload": "config/delta.yaml"}}
                 _write_pkg(reg_root, "overlays", pkg_name, omanifest, delta, written, backups)
                 new_overlays.append(f"{target_ns}/{pkg_name}@{version}")
+                new_overlay_rows[sensor.name] = f"{target_ns}/{pkg_name}"
                 eprint(f"  overlay {target_ns}/{pkg_name}@{version} <- {sensor.name} "
                        f"({len(delta)} top-level key(s))")
 
@@ -523,11 +583,26 @@ def promote(root: Path, names: list[str], *, to: str, all_dirty: bool, name: str
             for sensor in manifest.sensors:  # existing bindings first, manifest order; then new
                 bound.extend(r for r in (_requalify(o) for o in sensor.overlays) if r not in bound)
             bound.extend(o for o in new_overlays if o not in bound)
+            # The vehicle plan's name resolves FIRST — it changes the services-member rules
+            # below. A suite already carrying a plan re-captures it under the same name even
+            # without --vehicle: carrying a stale pin forward would fail the head law, and
+            # silently DROPPING the plan would be lossy.
+            vehicle_name = vehicle
+            if not vehicle_name:
+                prior = ((existing or {}).get("members") or {}).get("vehicles") or []
+                if prior:
+                    vehicle_name = unqualified(str(prior[0]))
+                    eprint(f"  note: suite '{suite}' carries vehicle plan '{vehicle_name}' — "
+                           f"re-capturing it from the current vehicle.yaml (pass --vehicle to "
+                           f"rename)")
             # Bare (service-backed) instances: nothing above recreates them — a profile member
             # materializes ITS instance at install, so a profile-less row needs a `services:`
             # member (install materializes one from the service's example) or its promoted
             # overlay can never bind on a fresh vehicle ("no instance created by this suite
             # matches its targets"). The member is the row's LOCK service pin, requalified.
+            # Plan-less only: skip a service a profile member covers (auto-materialization would
+            # duplicate the instance). WITH a plan, rows drive materialization — no duplication
+            # hazard, and closure REQUIRES the member for every bare row.
             profile_services = {split_key(parse_ref(p)[1])[0] for p in profiles}
             services: list[str] = []
             for sensor in manifest.sensors:
@@ -542,7 +617,7 @@ def promote(root: Path, names: list[str], *, to: str, all_dirty: bool, name: str
                            f"(adopt the service first: rig pkg promote {sensor.service} "
                            f"--kind service --adopt)")
                     continue
-                if sensor.service in profile_services:
+                if sensor.service in profile_services and not vehicle_name:
                     eprint(f"  note: bare instance '{sensor.name}' — a profile member already "
                            f"covers {sensor.service}; not adding a services: member (it would "
                            f"duplicate the instance on install)")
@@ -555,14 +630,34 @@ def promote(root: Path, names: list[str], *, to: str, all_dirty: bool, name: str
                 raise RigError("promote: the suite would be EMPTY — no pinned profiles, bound "
                                "overlays, or service-backed instances to reference "
                                "(pin/install something first)")
+            # The vehicle plan: emitted TOGETHER with the suite (the only authoring path — the
+            # combined capture is the one moment rows and members are closed by construction).
+            vmember = []
+            if vehicle_name:
+                vpayload = _capture_vehicle(root, lock, new_overlay_rows)
+                vexisting = _existing_manifest(reg_root, "vehicles", vehicle_name)
+                vversion = _next_version(vexisting, bump, f"vehicle '{vehicle_name}'")
+                vmanifest = {"kind": "vehicle", "name": vehicle_name, "version": vversion,
+                             **_carry_forward(vexisting, "kind", "name", "version",
+                                             "project", "config"),
+                             **({"project": project} if project else {}),
+                             "config": {"payload": "config/vehicle.yaml"}}
+                _write_pkg(reg_root, "vehicles", vehicle_name, vmanifest, vpayload,
+                           written, backups)
+                vmember = [f"{target_ns}/{vehicle_name}@{vversion}"]
+                nrows = sum(len(vpayload.get(t) or []) for t in ("infra", "sensors", "autonomy"))
+                eprint(f"  vehicle {target_ns}/{vehicle_name}@{vversion} <- vehicle.yaml "
+                       f"(template, {nrows} row(s))")
             smanifest = {"kind": "suite", "name": suite, "version": version,
                          **_carry_forward(existing, "kind", "name", "version",
                                          "project", "members"),
                          **({"project": project} if project else {}),
-                         "members": {**({"services": services} if services else {}),
+                         "members": {**({"vehicles": vmember} if vmember else {}),
+                                     **({"services": services} if services else {}),
                                      "profiles": profiles, "overlays": bound}}
             _write_pkg(reg_root, "suites", suite, smanifest, None, written, backups)
             eprint(f"  suite {target_ns}/{suite}@{version} ("
+                   + (f"vehicle plan, " if vmember else "")
                    + (f"{len(services)} service(s), " if services else "")
                    + f"{len(profiles)} profile(s), {len(bound)} overlay(s) in binding order)")
 

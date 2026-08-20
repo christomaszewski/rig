@@ -564,3 +564,25 @@ targeting".
   enforces closure: an in-registry overlay member whose service targets no profile/service
   member covers is an ERROR at publish/CI time (instance-scoped-only overlays warn — suite
   installs create default-named instances).
+
+## 10. The `vehicle` kind — ✅ implemented (v0.2.17)
+
+Suites reproduce the package layer only — default instance names, one instance per profile,
+service-wide overlay binding, no vehicle.yaml composition. Plan doc: `rig-vehicle-kind-plan.md`
+(untracked).
+
+- **v0.2.17** kind `vehicle` — a suite's instance PLAN: a TEMPLATE-form vehicle.yaml
+  (`vehicles/<name>/config/vehicle.yaml`). Captured ONLY with the suite
+  (`promote --all --suite S --vehicle V` — the one moment rows and members close by
+  construction; a suite already carrying a plan re-captures it by name on later promotes),
+  installed ONLY through the suite (standalone add refused), into an EMPTY deployment. Rows
+  drive the install: custom names, order, enabled, tier placement, per-row overlay bindings in
+  row order — plus N instances per profile, previously impossible. Identity that must be
+  DISTINCT per host (`vehicle`/`vehicle_id`) is markers-or-absent (validate ERROR on literals);
+  fleet DEFAULTS (`platform`, `data_dir`, `images`, `ros`, `vars`, `env`) stay literal — the
+  vehicle-local tier overrides per host, and the target's pre-install identity survives the
+  plan verbatim. Row refs are UNVERSIONED (the suite's members are the only pin authority —
+  repin untouched); validate enforces plan closure both directions (row ref without member =
+  ERROR; member no row references = dead-weight WARN). An overlay emitted by the same promote
+  is folded into its source row. `repin <suite>` refreshes the vehicle member; direct vehicle
+  repin is refused (re-capture is the update path).

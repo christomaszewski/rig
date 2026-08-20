@@ -99,7 +99,7 @@ def _sweep_package(qual: str, pkg, reg, alias: str) -> list[tuple]:
                         f"pkg repin {pkg.name} --to {alias}")
     elif pkg.kind == "suite":
         members = m.get("members") if isinstance(m.get("members"), dict) else {}
-        for plural in ("services", "profiles", "overlays"):
+        for plural in ("vehicles", "services", "profiles", "overlays"):
             for ref in members.get(plural) or []:
                 mmatch = _QUALIFIED_EXACT.match(str(ref))
                 if mmatch:

@@ -27,6 +27,8 @@ import re
 import subprocess
 from pathlib import Path
 
+import yaml
+
 from . import RigError
 from .common import eprint, load_yaml
 from .descriptor import load_descriptor
@@ -288,8 +290,11 @@ def _install_service(root: Path, entry: Entry, pkg: Package, lock: dict, *, lock
 
 
 def _materialize_instance(root: Path, *, svc: str, desc, instance: str | None, base_src: Path,
-                          profile_ref: str | None, lock: dict, enabled: bool) -> str:
-    """Write the working config + the vehicle.yaml row + the lock anchor for one new instance."""
+                          profile_ref: str | None, lock: dict, enabled: bool,
+                          tier: str | None = None, order: int | None = None) -> str:
+    """Write the working config + the vehicle.yaml row + the lock anchor for one new instance.
+    `tier`/`order` override the descriptor-derived tier and next-available order — the
+    vehicle-plan install path places rows exactly where the plan says."""
     manifest = load_manifest(root)
     base_data = load_yaml(base_src) if base_src.suffix == ".yaml" else {}
     embedded = str(base_data.get("name") or "") if isinstance(base_data, dict) else ""
@@ -311,7 +316,8 @@ def _materialize_instance(root: Path, *, svc: str, desc, instance: str | None, b
         raise RigError(f"install: instance name '{name}' already exists in vehicle.yaml — "
                        f"pass --as <name> (duplicate hardware needs distinct names; updating an "
                        f"existing instance is `rig pkg upgrade {name}`)")
-    tier = desc.tier if desc.tier in ("infra", "autonomy") else "sensor"
+    if tier not in ("infra", "sensor", "autonomy"):
+        tier = desc.tier if desc.tier in ("infra", "autonomy") else "sensor"
     sub = {"infra": "infra", "sensor": "sensors", "autonomy": "autonomy"}[tier]
     dest = root / "config" / sub / f"{name}.yaml"
     if dest.exists():
@@ -330,7 +336,8 @@ def _materialize_instance(root: Path, *, svc: str, desc, instance: str | None, b
     pin.parent.mkdir(parents=True, exist_ok=True)
     pin.write_bytes(dest.read_bytes())  # the PRISTINE base copy — config diff/pkg upgrade anchor on it
     base_sha = sha256_file(dest)
-    order = _next_order(root, tier)
+    if order is None:
+        order = _next_order(root, tier)
     profile_part = f"profile: {profile_ref}, " if profile_ref else ""
     row = (f"- {{ name: {name}, service: {svc}, config: config/{sub}/{name}.yaml, "
            f"{profile_part}enabled: {str(bool(enabled)).lower()}, order: {order} }}")
@@ -374,17 +381,149 @@ def _rollback(root: Path, snap: dict) -> None:
                 shutil.rmtree(sub, ignore_errors=True)
 
 
+def _member_pkg(member) -> tuple:
+    """Resolve one suite member ref; ERROR unless the exact pin is the registry's current
+    version (the head law — repin refreshes stale suites)."""
+    m_entry, m_reg, m_pkg = resolve_ref(str(member).split("@", 1)[0])
+    if m_pkg.version != str(member).rpartition("@")[-1]:
+        raise RigError(f"suite member {member}: registry carries {m_pkg.version} — the "
+                       f"exact pin is uninstallable at this sync state")
+    return m_entry, m_reg, m_pkg
+
+
+def _write_vehicle_settings(root: Path, plan: dict) -> None:
+    """The plan's vehicle-level settings become the target's vehicle.yaml — IDENTITY excepted:
+    the target's pre-install literal `vehicle`/`vehicle_id` fill the plan's marker slots
+    (identity belongs to the target/host tiers; the package neither overwrites nor erases it —
+    with no target literal the marker stays and the provision hint applies). Row sections are
+    omitted here; materialization appends each plan row."""
+    existing = load_yaml(root / "vehicle.yaml") if (root / "vehicle.yaml").is_file() else {}
+    doc: dict = {}
+    for key, value in plan.items():
+        if key in ("infra", "sensors", "autonomy"):
+            continue
+        if key in ("vehicle", "vehicle_id"):
+            prior = existing.get(key)
+            marker = isinstance(value, str) and f"{{{{{key}}}}}" in value
+            prior_literal = prior is not None and not (isinstance(prior, str)
+                                                      and f"{{{{{key}}}}}" in prior)
+            doc[key] = prior if (marker and prior_literal) else value
+        else:
+            doc[key] = value
+    (root / "vehicle.yaml").write_text(
+        "# vehicle.yaml — written by `rig pkg add` from the suite's vehicle plan. Identity stays\n"
+        "# THIS machine's (vehicle-local tier / `rig provision` supply it per host).\n"
+        + yaml.safe_dump(doc, sort_keys=False, default_flow_style=False))
+
+
+def _install_planned(root: Path, suite_ref: str, plan: dict, v_entry, v_pkg, v_payload: Path,
+                     members: dict, *, locked: bool) -> None:
+    """The vehicle-plan install: members are the SOURCES (fetched/vendored/pinned, never
+    auto-instantiated), the plan's rows are the INSTANCES — their names, tier placement, order,
+    enabled flags, overrides, and per-row overlay bindings in row order."""
+    from .overlay import apply as overlay_apply, edit_row
+    _write_vehicle_settings(root, plan)
+    service_descs: dict[str, object] = {}
+    for member in members.get("services") or []:
+        m_entry, _, m_pkg = _member_pkg(member)
+        lock = load_lock(root)
+        service_descs[m_pkg.name] = _install_service(root, m_entry, m_pkg, lock, locked=locked)
+        save_lock(root, lock)
+    profile_bases: dict[str, tuple] = {}  # member name -> (ref, payload_path, service, desc)
+    for member in members.get("profiles") or []:
+        m_entry, m_reg, m_pkg = _member_pkg(member)
+        lock = load_lock(root)
+        prepped = _prep_profile(root, m_entry, m_reg, m_pkg, lock, locked=locked)
+        save_lock(root, lock)
+        profile_bases[m_pkg.name] = prepped
+        service_descs.setdefault(prepped[2], prepped[3])
+    overlay_refs: dict[str, str] = {}  # member name -> consumer-alias ref for overlay apply
+    for member in members.get("overlays") or []:
+        m_entry, _, m_pkg = _member_pkg(member)
+        overlay_refs[m_pkg.name] = f"{m_entry.name}/{m_pkg.name}"
+    lock = load_lock(root)  # the plan itself is provenance
+    record_package(lock, qualified(v_entry, v_pkg),
+                   {"kind": "vehicle", "payload_sha256": sha256_file(v_payload)})
+    save_lock(root, lock)
+
+    tier_of = {"infra": "infra", "sensors": "sensor", "autonomy": "autonomy"}
+    for section in ("infra", "sensors", "autonomy"):
+        for row in plan.get(section) or []:
+            if not isinstance(row, dict) or not (row.get("name") and row.get("service")):
+                continue
+            name = str(row["name"])
+            if row.get("profile"):
+                pname = unqualified(str(row["profile"]))
+                if pname not in profile_bases:
+                    raise RigError(f"suite {suite_ref}: plan row '{name}' references profile "
+                                   f"'{row['profile']}' with no matching member — the suite is "
+                                   f"not closed (registry validate reports this)")
+                pref, base_src, svc_name, desc = profile_bases[pname]
+            else:
+                svc_name = str(row["service"])
+                desc = service_descs.get(svc_name)
+                if desc is None:
+                    raise RigError(f"suite {suite_ref}: bare plan row '{name}' needs a services: "
+                                   f"member for '{svc_name}' — the suite is not closed")
+                examples = [e for e in (root / "services" / svc_name / x for x in desc.examples)
+                            if e.is_file()]
+                if not examples:
+                    raise RigError(f"suite {suite_ref}: plan row '{name}': service '{svc_name}' "
+                                   f"declares no example config at this pin — nothing to "
+                                   f"materialize the row from")
+                pref, base_src = None, examples[0]
+            lock = load_lock(root)
+            _materialize_instance(root, svc=svc_name, desc=desc, instance=name,
+                                  base_src=base_src, profile_ref=pref, lock=lock,
+                                  enabled=bool(row.get("enabled", True)),
+                                  tier=tier_of[section],
+                                  order=(int(row["order"]) if row.get("order") is not None
+                                         else None))
+            save_lock(root, lock)
+            if isinstance(row.get("overrides"), dict) and row["overrides"]:
+                edit_row(root, name, lambda r, o=dict(row["overrides"]): r.update(overrides=o))
+            for oref in row.get("overlays") or []:
+                oname = unqualified(str(oref))
+                if oname not in overlay_refs:
+                    raise RigError(f"suite {suite_ref}: plan row '{name}': overlay '{oref}' has "
+                                   f"no matching member — the suite is not closed")
+                overlay_apply(root, name, overlay_refs[oname])
+    load_manifest(root)  # the gate: the planned deployment must load (uniqueness, cross-checks)
+
+
 def _install_suite(root: Path, entry: Entry, pkg: Package, *, locked: bool) -> int:
     """Atomic (OQ-9, plan-validate-then-write approximated as all-or-rollback): resolve and install
     every member; ANY failure restores vehicle.yaml/services.yaml/rig.lock and removes every file
-    this install created — the deployment is untouched or fully installed, never half."""
+    this install created — the deployment is untouched or fully installed, never half. A suite
+    carrying a vehicle member installs PLAN-DRIVEN (rows decide instances) into an empty
+    deployment; without one, the classic path runs (default names, one instance per profile)."""
     from .overlay import apply as overlay_apply
     members = pkg.manifest.get("members") or {}
     ref = qualified(entry, pkg)
-    eprint(f"rig install: suite {ref}")
+    vmembers = members.get("vehicles") or []
+    if len(vmembers) > 1:
+        raise RigError(f"suite {ref}: carries {len(vmembers)} vehicle members — at most one "
+                       f"(the instance plan)")
+    plan = v_entry = v_pkg = v_payload = None
+    if vmembers:
+        v_entry, _, v_pkg = _member_pkg(vmembers[0])
+        vrel = (v_pkg.manifest.get("config") or {}).get("payload") or "config/vehicle.yaml"
+        v_payload = v_pkg.pkg_dir / str(vrel)
+        plan = load_yaml(v_payload)
+        if not isinstance(plan, dict):
+            raise RigError(f"suite member {vmembers[0]}: vehicle payload is not a mapping")
+    eprint(f"rig install: suite {ref}" + (" — vehicle plan drives the rows" if plan else ""))
     snap = _snapshot(root)
     before_names = {s.name for s in load_manifest(root).sensors}
+    if plan is not None and before_names:
+        raise RigError(f"suite {ref} carries a vehicle plan — it installs into an EMPTY "
+                       f"deployment (this one has: {', '.join(sorted(before_names))}); "
+                       f"use a fresh `rig init` tree")
     try:
+        if plan is not None:
+            _install_planned(root, ref, plan, v_entry, v_pkg, v_payload, members, locked=locked)
+            eprint(f"rig install: suite {ref} complete")
+            return 0
         for member in members.get("services") or []:
             m_entry, _, m_pkg = resolve_ref(str(member).split("@", 1)[0])
             if m_pkg.version != str(member).rpartition("@")[-1]:
@@ -682,6 +821,30 @@ def _at_locked_commit(entry: Entry, pkg: Package, lock: dict, locked: bool) -> P
     return hist
 
 
+def _prep_profile(root: Path, entry: Entry, reg, pkg: Package, lock: dict,
+                  *, locked: bool) -> tuple[str, Path, str, object]:
+    """Everything a profile install does EXCEPT materializing an instance: verify the payload,
+    fetch/vendor/route the required service, record the lock rows. Returns
+    (qualified_ref, payload_path, service_name, descriptor) — the pieces materialization needs.
+    Shared by plain install (one default instance) and the vehicle-plan path (N named rows)."""
+    ref = qualified(entry, pkg)
+    payload_rel = (pkg.manifest.get("config") or {}).get("payload")
+    payload_path = pkg.pkg_dir / str(payload_rel)
+    if not payload_path.is_file():
+        raise RigError(f"install: {ref} payload missing in the synced registry: {payload_rel}")
+    _check_locked(lock, ref, locked=locked, payload_sha=sha256_file(payload_path))
+    svc_entry, service = _resolve_required_service(entry, reg, pkg)
+    service = _at_locked_commit(svc_entry, service, lock, locked)
+    desc = _install_service(root, svc_entry, service, lock, locked=locked)
+    eprint(f"rig install: {ref} (requires {qualified(svc_entry, service)})")
+    record_package(lock, ref, {"kind": "profile", "payload_sha256": sha256_file(payload_path),
+                               "requires": qualified(svc_entry, service)})
+    if not (locked and entry.name in (lock.get("registries") or {})):
+        record_registry(lock, entry.name, rtype=entry.type, location=entry.location,
+                        commit=registry_commit(entry))
+    return ref, payload_path, service.name, desc
+
+
 def install(root: Path, spec: str, *, as_name: str | None = None, locked: bool = False) -> int:
     """One spec: `sensor:<id>` | `[registry/]key[@ver]` — where a profile's key IS the
     `service:short` tuple, so `ouster:generic`, `internal/ouster:generic@1.0.0`, and plain
@@ -705,6 +868,9 @@ def install(root: Path, spec: str, *, as_name: str | None = None, locked: bool =
     if pkg.kind == "overlay":
         raise RigError(f"install: '{pkg.name}' is an overlay — overlays are BOUND to an instance "
                        f"(rig overlay apply), not installed standalone")
+    if pkg.kind == "vehicle":
+        raise RigError(f"install: '{pkg.name}' is a vehicle plan — it installs only through the "
+                       f"suite that references it (rig pkg add <ns>/<suite>)")
 
     # Updating, not installing? Catch it BEFORE anything mutates (a failed re-add used to leave a
     # re-vendored services/ dir behind) and point at the right verb.
@@ -723,22 +889,9 @@ def install(root: Path, spec: str, *, as_name: str | None = None, locked: bool =
     snap = _snapshot(root)  # any failure past here rolls the tree back — no leaked vendor/route
     try:
         if pkg.kind == "profile":
-            ref = qualified(entry, pkg)
-            payload_rel = (pkg.manifest.get("config") or {}).get("payload")
-            payload_path = pkg.pkg_dir / str(payload_rel)
-            if not payload_path.is_file():
-                raise RigError(f"install: {ref} payload missing in the synced registry: {payload_rel}")
-            _check_locked(lock, ref, locked=locked, payload_sha=sha256_file(payload_path))
-            svc_entry, service = _resolve_required_service(entry, reg, pkg)
-            service = _at_locked_commit(svc_entry, service, lock, locked)
-            desc = _install_service(root, svc_entry, service, lock, locked=locked)
-            eprint(f"rig install: {ref} (requires {qualified(svc_entry, service)})")
-            record_package(lock, ref, {"kind": "profile", "payload_sha256": sha256_file(payload_path),
-                                       "requires": qualified(svc_entry, service)})
-            if not (locked and entry.name in (lock.get("registries") or {})):
-                record_registry(lock, entry.name, rtype=entry.type, location=entry.location,
-                                commit=registry_commit(entry))
-            _materialize_instance(root, svc=service.name, desc=desc, instance=as_name,
+            ref, payload_path, service_name, desc = _prep_profile(root, entry, reg, pkg, lock,
+                                                                  locked=locked)
+            _materialize_instance(root, svc=service_name, desc=desc, instance=as_name,
                                   base_src=payload_path, profile_ref=ref, lock=lock, enabled=True)
         else:  # bare service: base config = its declared example at the pinned rev
             ref = qualified(entry, pkg)

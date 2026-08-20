@@ -25,7 +25,8 @@ from .common import eprint, load_yaml
 SCHEMA = 2           # the registry schema version this rig writes (2: profiles nest by service)
 MAX_SUPPORTED = 2    # the highest schema this rig can read (client-side degrade-not-fail is M2)
 
-KIND_DIRS = {"service": "services", "profile": "profiles", "overlay": "overlays", "suite": "suites"}
+KIND_DIRS = {"service": "services", "profile": "profiles", "overlay": "overlays", "suite": "suites",
+             "vehicle": "vehicles"}
 
 # Package/namespace names are registry identifiers (NOT instance names — those stay ROS-safe
 # with underscores); hyphens are idiomatic here (`camera-service`, `siyi-zr30`). Profile identity
@@ -263,6 +264,56 @@ def _validate_overlay(pkg: Package, reg: Registry, issues: list[Issue]) -> None:
                                            f"(delta keys checked, warn-only)", level="warning"))
 
 
+_VEHICLE_TIERS = ("infra", "sensors", "autonomy")
+
+
+def _vehicle_rows(payload: dict):
+    """(tier_key, row) pairs from a vehicle payload's tier sections."""
+    for tier in _VEHICLE_TIERS:
+        for row in payload.get(tier) or []:
+            if isinstance(row, dict):
+                yield tier, row
+
+
+def _validate_vehicle(pkg: Package, reg: Registry, issues: list[Issue]) -> None:
+    """kind `vehicle` — a suite's instance PLAN: a TEMPLATE-form vehicle.yaml. Identity that is
+    NECESSARILY DISTINCT per host (vehicle, vehicle_id) must be markers-or-absent — a shared
+    literal means colliding ROS domains and compose projects. Fleet DEFAULTS (platform,
+    data_dir, images, ros, vars, env) may be literal: the vehicle-local tier overrides them
+    per host. Row refs are UNVERSIONED — the referencing suite's members are the only pin
+    authority (payload pins would drift from member pins the moment repin runs)."""
+    where = f"vehicles/{pkg.name}/manifest.yaml"
+    cfg = pkg.manifest.get("config") if isinstance(pkg.manifest.get("config"), dict) else {}
+    payload_rel = cfg.get("payload") or "config/vehicle.yaml"
+    path = pkg.pkg_dir / str(payload_rel)
+    if not path.is_file():
+        issues.append(Issue(where, f"vehicle payload missing: {payload_rel}"))
+        return
+    try:
+        payload = load_yaml(path)
+    except RigError as exc:
+        issues.append(Issue(where, f"vehicle payload does not parse: {exc}"))
+        return
+    if not isinstance(payload, dict):
+        issues.append(Issue(where, "vehicle payload must be a mapping (a template vehicle.yaml)"))
+        return
+    for key in ("vehicle", "vehicle_id"):
+        value = payload.get(key)
+        if value is not None and not (isinstance(value, str) and f"{{{{{key}}}}}" in value):
+            issues.append(Issue(where, f"payload `{key}: {value!r}` is a LITERAL — per-host "
+                                       f"identity must be a self-marker (\"{{{{{key}}}}}\") or "
+                                       f"absent; a shared literal collides ROS domains and "
+                                       f"compose projects across the fleet"))
+    for tier, row in _vehicle_rows(payload):
+        label = f"{tier} row '{row.get('name', '?')}'"
+        if not (row.get("name") and row.get("service")):
+            issues.append(Issue(where, f"{label}: needs `name` and `service`"))
+        for ref in [row.get("profile"), *(row.get("overlays") or [])]:
+            if isinstance(ref, str) and "@" in ref:
+                issues.append(Issue(where, f"{label}: ref '{ref}' is VERSIONED — vehicle rows "
+                                           f"are unversioned; the suite's members carry the pins"))
+
+
 def _validate_suite(pkg: Package, reg: Registry, issues: list[Issue]) -> None:
     where = f"suites/{pkg.name}/manifest.yaml"
     m = pkg.manifest
@@ -272,10 +323,13 @@ def _validate_suite(pkg: Package, reg: Registry, issues: list[Issue]) -> None:
     if not isinstance(members, dict):
         issues.append(Issue(where, "`members` must be a mapping of services/profiles/overlays lists"))
         return
-    kind_of = {"services": "service", "profiles": "profile", "overlays": "overlay"}
+    kind_of = {"services": "service", "profiles": "profile", "overlays": "overlay",
+               "vehicles": "vehicle"}
     unknown = set(members) - set(kind_of)
     if unknown:
         issues.append(Issue(where, f"unknown member kinds: {', '.join(sorted(unknown))} (no nested suites)"))
+    if len(members.get("vehicles") or []) > 1:
+        issues.append(Issue(where, "a suite carries at most ONE vehicle member (the instance plan)"))
     for plural, kind in kind_of.items():
         for ref in members.get(plural) or []:
             match = _QUALIFIED_EXACT.match(str(ref))
@@ -292,11 +346,57 @@ def _validate_suite(pkg: Package, reg: Registry, issues: list[Issue]) -> None:
                     issues.append(Issue(where, f"member '{ref}' pins {match['ver']} but this registry "
                                                f"carries {dep.version}"))
 
+    # Plan-driven closure (vehicle member present): the payload's rows drive the install, so
+    # every row ref must resolve to a member (else install cannot build the row), and members no
+    # row references are dead weight. The plan and members are emitted together by promote —
+    # this check is the CI backstop for hand-edits and partial republishes.
+    from .refs import split_key, unqualified
+    vref = (members.get("vehicles") or [None])[0]
+    vmatch = _QUALIFIED_EXACT.match(str(vref)) if vref else None
+    vpkg = reg.packages.get(vmatch["name"]) if vmatch and vmatch["ns"] == reg.namespace else None
+    if vpkg is not None and vpkg.kind == "vehicle":
+        vcfg = vpkg.manifest.get("config") if isinstance(vpkg.manifest.get("config"), dict) else {}
+        try:
+            payload = load_yaml(vpkg.pkg_dir / str(vcfg.get("payload") or "config/vehicle.yaml"))
+        except RigError:
+            payload = None  # the vehicle's own validation reports it
+        if isinstance(payload, dict):
+            by_kind = {plural: {_QUALIFIED_EXACT.match(str(r))["name"]
+                                for r in members.get(plural) or []
+                                if _QUALIFIED_EXACT.match(str(r))}
+                       for plural in ("services", "profiles", "overlays")}
+            referenced: set[str] = set()
+            for tier, row in _vehicle_rows(payload):
+                label = f"vehicle plan row '{row.get('name', '?')}'"
+                profile = row.get("profile")
+                if isinstance(profile, str):
+                    name = unqualified(profile)
+                    referenced.add(name)
+                    if name not in by_kind["profiles"]:
+                        issues.append(Issue(where, f"{label}: profile '{profile}' is not a "
+                                                   f"member — install cannot build the row"))
+                elif str(row.get("service") or "") not in by_kind["services"]:
+                    issues.append(Issue(where, f"{label}: bare row needs a services: member for "
+                                               f"'{row.get('service')}' — install cannot build it"))
+                else:
+                    referenced.add(str(row["service"]))
+                for oref in row.get("overlays") or []:
+                    name = unqualified(str(oref))
+                    referenced.add(name)
+                    if name not in by_kind["overlays"]:
+                        issues.append(Issue(where, f"{label}: overlay '{oref}' is not a member — "
+                                                   f"install cannot bind it"))
+            for plural in ("services", "profiles", "overlays"):
+                for name in sorted(by_kind[plural] - referenced):
+                    issues.append(Issue(where, f"member '{name}' ({plural.rstrip('s')}) is not "
+                                               f"referenced by any vehicle plan row — dead weight",
+                                        level="warning"))
+        return  # rows drive binding — the service-target coverage check below is for plan-less suites
+
     # Coverage: every overlay member must be BINDABLE at install — a suite binds its overlays
     # only onto instances the suite itself creates (profile members; service members via their
     # example). An overlay whose targets no member covers is the guaranteed install-time failure
     # "no instance created by this suite matches its targets" — catch it at publish/CI instead.
-    from .refs import split_key
     covered = set()
     for plural in ("services", "profiles"):
         for ref in members.get(plural) or []:
@@ -326,7 +426,8 @@ def _validate_suite(pkg: Package, reg: Registry, issues: list[Issue]) -> None:
 
 
 _VALIDATORS = {"service": _validate_service, "profile": _validate_profile,
-               "overlay": _validate_overlay, "suite": _validate_suite}
+               "overlay": _validate_overlay, "suite": _validate_suite,
+               "vehicle": _validate_vehicle}
 
 
 # --- minimal JSON-Schema subset (profile payload vs its own overrides_schema) ------------------

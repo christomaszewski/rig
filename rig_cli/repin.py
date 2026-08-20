@@ -66,6 +66,10 @@ def repin(ref: str, *, to: str, dep: str | None = None, dry_run: bool = False) -
     if pkg.kind == "service":
         raise RigError("repin: a service's dependency is its CODE — publish a new pin with "
                        "`rig pkg promote --kind service` (or the repo's registry-release CI)")
+    if pkg.kind == "vehicle":
+        raise RigError("repin: a vehicle plan's rows are UNVERSIONED (its suite's members carry "
+                       "the pins) — re-capture it with `rig pkg promote --all --suite <s> "
+                       "--vehicle <name>`, and repin the SUITE to refresh member pins")
 
     existing = _existing_manifest(reg_root, pkg.kind + "s", name) or {}
     changes: list[str] = []       # human lines: "dep old -> new"
@@ -247,7 +251,7 @@ def _repin_suite(reg, name, existing, dep_name, dep_ver, changes) -> tuple[dict,
     if members is None:
         raise RigError(f"repin: suite '{name}' has no members mapping")
     new_members: dict = {}
-    for plural in ("services", "profiles", "overlays"):
+    for plural in ("vehicles", "services", "profiles", "overlays"):
         refreshed = []
         for ref in members.get(plural) or []:
             mmatch = _QUALIFIED_EXACT.match(str(ref))

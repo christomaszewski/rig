@@ -103,9 +103,13 @@ rig pkg promote siyi_zr30 --name zr30-gideon --project gideon --to internal
                                    #   (write+validate; publish = plain git push/PR, printed for you)
 rig registry sync && rig overlay apply siyi_zr30 internal/zr30-gideon --clear-local
                                    # same render, tuning now VERSIONED (local always beats overlays)
-rig pkg promote --all --project gideon --suite gideon-boat --to internal
-                                   # whole-deployment capture: overlays + a suite; a fresh vehicle
-                                   #   reproduces it with `rig pkg add internal/gideon-boat`
+rig pkg promote --all --project gideon --suite gideon-boat --vehicle gideon --to internal
+                                   # whole-deployment capture: overlays + a suite + (--vehicle,
+                                   #   v0.2.17) the instance PLAN — a template vehicle.yaml whose
+                                   #   rows carry YOUR names/order/enabled/tiers/bindings. A fresh
+                                   #   (EMPTY) vehicle reproduces it with `rig pkg add
+                                   #   internal/gideon-boat`; identity stays per-host, fleet
+                                   #   defaults (platform, images, data_dir) travel literal
 rig pkg save siyi_zr30             # CANONICAL update-in-place (v0.2.8): publish the edits into the
                                    #   package the instance is pinned to + re-anchor clean, render
                                    #   identical — bound overlay first (top of stack), else profile.

@@ -76,7 +76,8 @@ template — it adapts to each via `rigging.yaml`'s `verbs` map (e.g. cam-up tak
 
 ## The package-registry layer (v0.1.35–v0.1.44)
 
-Services, sensor **profiles**, config **overlays**, and **suites** publish to git-repo registries
+Services, sensor **profiles**, config **overlays**, **suites**, and **vehicles** (v0.2.17: a
+suite's instance PLAN — a template vehicle.yaml) publish to git-repo registries
 (`registry.yaml` + `<kind>s/<name>/manifest.yaml` + a GENERATED `index.json`; validation lives in
 rig itself — `rig registry validate` — with thin GHA/GitLab CI wrappers). The public seed registry:
 **https://github.com/christomaszewski/rig-registry-public** (namespace `public`). Client side:
@@ -102,7 +103,12 @@ Key design points (full decision log: the registry plan document):
   `--locked` reproduces byte-identically. Suites install atomically (any failure rolls the
   deployment back untouched) and are CLOSED (v0.2.16): promote captures bare service-backed
   instances as `services:` members, and validate rejects an overlay member no profile/service
-  member can create an instance for.
+  member can create an instance for. A suite may carry ONE `vehicle` member (v0.2.17): a
+  template vehicle.yaml whose rows DRIVE the install — custom names/order/enabled/tiers,
+  per-row overlay bindings, N instances per profile; identity stays per-host (markers
+  enforced), fleet defaults (platform, images, data_dir…) travel literal, row refs are
+  unversioned (members alone carry pins). Captured only with its suite
+  (`promote --all --suite S --vehicle V`), installed only through it, into an empty deployment.
 - **rig never pushes implicitly**: every authoring verb writes + validates into a registry
   checkout (git targets get a local commit on a `promote/` branch); publishing is plain git, or
   the explicit `rig registry push` (v0.2.8 — SYSTEM git, `promote/*` branches only, never the

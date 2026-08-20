@@ -752,7 +752,8 @@ def build_parser() -> argparse.ArgumentParser:
                                           "qualified, priority order")
     ps.add_argument("query", nargs="?", default="",
                     help="omit to list every package in every configured registry")
-    ps.add_argument("--kind", choices=["service", "profile", "overlay", "suite"], default=None,
+    ps.add_argument("--kind", choices=["service", "profile", "overlay", "suite", "vehicle"],
+                    default=None,
                     help="only this package kind (composes with any query form)")
     ps.add_argument("--registry", default=None, metavar="NAME",
                     help="only this registry's packages")
@@ -829,6 +830,10 @@ def build_parser() -> argparse.ArgumentParser:
                     "name. Overlays: default <instance>[-<project>]")
     pp.add_argument("--project", default=None, help="project tag (searchable axis; also the "
                     "default name suffix)")
+    pp.add_argument("--vehicle", default=None, metavar="NAME",
+                    help="(with --suite) also capture vehicle.yaml as a `vehicle` package — the "
+                         "suite's instance PLAN: names/order/tiers/bindings reproduce on a fresh "
+                         "deployment (identity stays per-host; row refs unversioned)")
     pp.add_argument("--kind", choices=["overlay", "profile", "service"], default=None,
                     help="overlay = the delta; profile = the full effective config; service = "
                          "the routed checkout's CODE POINTER (repo+rev from git — the dev-loop "
@@ -1047,7 +1052,8 @@ def main(argv=None) -> int:
                         root, args.names, to=args.to, all_dirty=args.all_dirty, name=args.name,
                         project=args.project, kind=args.kind, suite=args.suite, bump=args.bump,
                         target_instance=args.target_instance, matches=args.match,
-                        requires=args.requires, adopt=args.adopt, version=args.pkg_version)
+                        requires=args.requires, adopt=args.adopt, version=args.pkg_version,
+                        vehicle=args.vehicle)
                 return workingcopy_mod.relock(root)
             if args.pkg_cmd == "rebase":  # registry-side: no deployment involved
                 return promote_mod.rebase(args.name, to=args.to, onto=args.onto)
