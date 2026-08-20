@@ -83,8 +83,8 @@ def test_package_form_guards_and_dependency_removal():
         rc, _, err = _run("--root", str(root), "pkg", "remove", "testns/camish")
         assert rc == 1 and "used by" in err and "acme_cam" in err      # in-use package refused
         rc, _, err = _run("--root", str(root), "pkg", "remove", "ghost-pkg")
-        assert rc == 1 and "neither an instance nor an installed package" in err
-        # a hand-wired instance is refused (no registry provenance)
+        assert rc == 1 and "neither an instance" in err
+        # a hand-wired instance removes too (v0.2.11+): row dropped, config KEPT (no pin)
         (root / "config" / "sensors").mkdir(parents=True, exist_ok=True)
         (root / "config" / "sensors" / "handmade.yaml").write_text(
             "service: camish\nname: handmade\n")
@@ -94,7 +94,10 @@ def test_package_form_guards_and_dependency_removal():
             "sensors:\n  - { name: handmade, service: camish, config: config/sensors/handmade.yaml, "
             "enabled: true, order: 99 }", 1))
         rc, _, err = _run("--root", str(root), "pkg", "remove", "handmade")
-        assert rc == 1 and "hand-wired" in err
+        assert rc == 0, err
+        assert "hand-wired" in err
+        assert not any(s.name == "handmade" for s in load_manifest(root).sensors)
+        assert (root / "config" / "sensors" / "handmade.yaml").is_file()   # kept: no pin to prove clean
 
 
 def test_remove_unlinks_stale_render():
@@ -117,6 +120,61 @@ def test_removed_instance_is_readdable():
         rc, _, err = _run("--root", str(root), "pkg", "add", "sensor:acme")   # full round trip
         assert rc == 0, err
         assert any(s.name == "acme_cam" for s in load_manifest(root).sensors)
+
+
+def _local_service(name: str, tier: str = "sensor") -> pathlib.Path:
+    base = pathlib.Path(tempfile.mkdtemp())
+    d = base / name
+    (d / "config").mkdir(parents=True)
+    (d / "rigging.yaml").write_text(
+        f"service: {name}\nlauncher: {name}-up\ntier: {tier}\n"
+        f"examples: [config/{name}.example.yaml]\nlaunch_surface: [{name}-up]\n")
+    (d / f"{name}-up").write_text("#!/bin/sh\n")
+    (d / f"{name}-up").chmod(0o755)
+    (d / "config" / f"{name}.example.yaml").write_text(
+        f"service: {name}\nname: {name.replace('-', '_')}\nrate: 1\n")
+    return d
+
+
+def test_remove_local_menu_service_by_name():
+    # the F8 inverse: `pkg add <path>` (sensor tier -> menu row only) undone by `pkg rm <svc>`
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        root, _ = _world()
+        d = _local_service("barish")
+        assert _run("--root", str(root), "pkg", "add", str(d))[0] == 0
+        assert "barish" in (root / "services.yaml").read_text()
+        assert "service: barish" in (root / "vehicle.yaml").read_text()   # the menu comment
+        rc, _, err = _run("--root", str(root), "pkg", "rm", "barish")
+        assert rc == 0, err
+        assert "barish" not in (root / "services.yaml").read_text()       # route gone
+        assert "service: barish" not in (root / "vehicle.yaml").read_text()  # menu comment gone
+        assert (root / "config" / "sensors" / "barish.yaml").is_file()    # config KEPT by default
+        assert "kept" in err and "--purge-config" in err
+        d2 = _local_service("purgish")
+        assert _run("--root", str(root), "pkg", "add", str(d2))[0] == 0
+        rc, _, err = _run("--root", str(root), "pkg", "rm", "purgish", "--purge-config")
+        assert rc == 0, err
+        assert not (root / "config" / "sensors" / "purgish.yaml").exists()
+        assert d.is_dir() and d2.is_dir()                                 # checkouts NEVER touched
+
+
+def test_remove_local_enabled_instance_gcs_the_route():
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        root, _ = _world()
+        d = _local_service("routerish-loc", tier="infra")                 # infra -> ENABLED row
+        assert _run("--root", str(root), "pkg", "add", str(d))[0] == 0
+        assert any(s.service == "routerish-loc" for s in load_manifest(root).sensors)
+        # service-form refuses while the instance uses it
+        rc, _, err = _run("--root", str(root), "pkg", "rm", "routerish-loc")
+        assert rc == 1 and "used by instance" in err
+        instance = next(s.name for s in load_manifest(root).sensors
+                        if s.service == "routerish-loc")
+        rc, _, err = _run("--root", str(root), "pkg", "rm", instance)     # hand-wired row removes
+        assert rc == 0, err
+        assert "hand-wired" in err
+        assert not any(s.service == "routerish-loc" for s in load_manifest(root).sensors)
+        assert "routerish-loc" not in (root / "services.yaml").read_text()  # route GC'd with it
+        assert d.is_dir()
 
 
 def test_rm_is_a_permanent_alias():

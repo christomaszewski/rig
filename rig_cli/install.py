@@ -457,6 +457,57 @@ def _delete_row(root: Path, instance: str) -> bool:
     return True
 
 
+def _menu_lines(root: Path, svc: str) -> list[tuple[int, str]]:
+    """Generated commented MENU rows for a service in vehicle.yaml, as (line index, line)."""
+    veh = root / "vehicle.yaml"
+    if not veh.is_file():
+        return []
+    return [(i, line) for i, line in enumerate(veh.read_text().splitlines())
+            if re.match(r"^\s*#\s*- \{.*\bservice: " + re.escape(svc) + r"[,}]", line)]
+
+
+def _drop_menu_lines(root: Path, svc: str) -> None:
+    hits = [i for i, _ in _menu_lines(root, svc)]
+    if not hits:
+        return
+    veh = root / "vehicle.yaml"
+    lines = veh.read_text().splitlines()
+    for i in reversed(hits):
+        del lines[i]
+    new = "\n".join(lines) + "\n"
+    import yaml as _yaml
+    _yaml.safe_load(new)  # belt: never write a file that will not parse
+    veh.write_text(new)
+    eprint(f"  {len(hits)} commented menu row(s) for '{svc}' removed from vehicle.yaml")
+
+
+def _remove_local_service(root: Path, svc: str, *, purge_config: bool) -> None:
+    """Undo a PATH/workspace add for a service with no lock rows: drop the generated route and
+    menu comment(s); a vendored copy under services/ is deleted, the checkout the route pointed
+    at is NEVER touched. Copied menu configs are kept unless --purge-config (they may carry
+    authored content rig can't distinguish from the example)."""
+    import shutil
+    configs = []
+    for _, line in _menu_lines(root, svc):  # find the copied configs before the comments go
+        found = re.search(r"\bconfig: ([^,}\s]+)", line)
+        if found:
+            configs.append(root / found.group(1))
+    _drop_menu_lines(root, svc)
+    _drop_route(root, svc)
+    vendored = root / "services" / svc
+    if (vendored / ".vendored.yaml").exists():
+        shutil.rmtree(vendored)
+        eprint(f"  service '{svc}': vendored copy removed")
+    for cfg in configs:
+        if cfg.is_file():
+            if purge_config:
+                cfg.unlink()
+                eprint(f"  {cfg.relative_to(root)}: deleted (--purge-config)")
+            else:
+                eprint(f"  kept {cfg.relative_to(root)} — --purge-config deletes it")
+    eprint(f"  service '{svc}': local route removed (re-add with rig pkg add <path>)")
+
+
 def _drop_route(root: Path, svc: str) -> None:
     svc_path = root / "services.yaml"
     if not svc_path.is_file():
@@ -500,11 +551,14 @@ def _gc_service(root: Path, lock: dict, svc: str) -> None:
 
 
 def remove(root: Path, specs: list[str], *, purge_config: bool = False) -> int:
-    """`rig pkg remove <instance…|package>` — the inverse of `pkg add`. Instance form removes the
-    row, bindings, anchors, and (when clean vs its pin) the working config; dependency services
-    are GC'd. Package form removes an instance-less dependency service, and refuses (listing the
-    instances) when anything still uses the package. rig only edits files: bring the instance
-    DOWN first — a removed row orphans running containers from rig's view."""
+    """`rig pkg remove <instance…|package|service>` — the inverse of `pkg add`, for EVERY add
+    form. Instance form removes the row, bindings, anchors, and (when clean vs its pin) the
+    working config; dependency services are GC'd; hand-wired rows are removed too (config kept
+    — no pin to prove it clean — unless --purge-config). Package form removes an instance-less
+    dependency, and a LOCALLY-ROUTED service name (path/workspace add) drops the route, the
+    generated menu comments, and any vendored copy — never the checkout itself. Both forms
+    refuse (listing the instances) while anything still uses the target. rig only edits files:
+    bring the instance DOWN first — a removed row orphans running containers from rig's view."""
     lock = load_lock(root)
     packages = lock.setdefault("packages", {})
     anchors = lock.setdefault("instances", {})
@@ -515,8 +569,21 @@ def remove(root: Path, specs: list[str], *, purge_config: bool = False) -> int:
             bare = unqualified(spec)
             refs = [r for r in packages if unqualified(r) == bare]
             if not refs:
-                raise RigError(f"remove: '{spec}' is neither an instance nor an installed package "
-                               f"(rig pkg list shows both)")
+                from .catalog import load_catalog
+                try:
+                    catalog = load_catalog(root)
+                except RigError:
+                    catalog = {}
+                if bare in catalog:  # a LOCAL route (path/workspace add, no lock rows) — undo it
+                    users = [s.name for s in manifest.sensors if s.service == bare]
+                    if users:
+                        raise RigError(f"remove: '{bare}' is used by instance"
+                                       f"{'s' if len(users) > 1 else ''} {', '.join(users)} — "
+                                       f"remove those instead (rig pkg remove {users[0]})")
+                    _remove_local_service(root, bare, purge_config=purge_config)
+                    continue
+                raise RigError(f"remove: '{spec}' is neither an instance, an installed package, "
+                               f"nor a routed service (rig pkg list shows all three)")
             ref, kind = refs[0], (packages[refs[0]] or {}).get("kind")
             if kind == "service":
                 users = [s.name for s in manifest.sensors if s.service == bare]
@@ -537,8 +604,9 @@ def remove(root: Path, specs: list[str], *, purge_config: bool = False) -> int:
             continue
 
         if sensor.name not in anchors and not sensor.profile:
-            raise RigError(f"remove: '{spec}' is hand-wired (no registry provenance) — delete its "
-                           f"row and config yourself; rig pkg remove only undoes rig pkg add")
+            eprint(f"  '{spec}' is hand-wired (no registry provenance): removing the row; the "
+                   f"working config has no pin to prove it clean, so it is kept unless "
+                   f"--purge-config")
         eprint(f"remove: make sure '{spec}' is DOWN first (`rig down {spec}`) — a removed row "
                f"orphans any running containers from rig's view")
         if not _delete_row(root, sensor.name):
@@ -571,6 +639,19 @@ def remove(root: Path, specs: list[str], *, purge_config: bool = False) -> int:
             if not others:
                 packages.pop(str(sensor.profile), None)
         _gc_service(root, lock, sensor.service)
+        if not any((packages[r] or {}).get("kind") == "service"
+                   and unqualified(r) == sensor.service for r in packages):
+            from .catalog import load_catalog
+            try:
+                routed = sensor.service in load_catalog(root)
+            except RigError:
+                routed = False
+            # LOCAL service (no lock row): GC the route once nothing references it — no rows
+            # left and no menu comments still offering it (mirror of the registry GC).
+            if routed and not any(s.service == sensor.service
+                                  for s in load_manifest(root).sensors) \
+                    and not _menu_lines(root, sensor.service):
+                _remove_local_service(root, sensor.service, purge_config=purge_config)
         eprint(f"  instance '{sensor.name}' removed")
     save_lock(root, lock)
     load_manifest(root)  # the gate: the deployment must still load
