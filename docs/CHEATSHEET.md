@@ -363,7 +363,10 @@ scp -r $VEHICLE:<data_dir>/runs/<stamp>_dock-test .        # the whole session, 
 | save a field state      | on the vehicle: `./rig bake --tag day3-final [--bundle-images]` — re-bakes the extracted tree (local edits included) and stamps its parent artifact (lineage) |
 | new service             | `rig rigify <dir>` (descriptor + launcher skeleton + example config, analysis-seeded; never overwrites) → finish TODOs → `rig certify --repo` until green → `rig add <name\|path>` (routes services.yaml + copies the example config + adds the vehicle.yaml row: infra ENABLED, sensor/autonomy a commented menu row) |
 
-Teardown: `./run.sh down` (volumes survive); final removal `rig down --purge`. Dev registry off:
+Teardown: `./run.sh down` (volumes survive); final removal `rig down --purge`. Leaving the machine
+entirely: `rig cleanup` (or `./run.sh cleanup` in an artifact) — removes the deployment's images +
+volumes (never containers, never RIG_DATA_DIR); `--dry-run` shows the sweep, `--keep-volumes` limits
+it to images. Then the tree is safe to delete. Dev registry off:
 `docker rm -f registry` (keep the `registry-data` volume unless you're truly done).
 
 ## Gotchas (each learned the hard way)

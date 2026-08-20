@@ -220,6 +220,15 @@ def cmd_doctor(args, manifest, catalog, descriptors) -> int:
     return doctor_mod.run(manifest, catalog, descriptors, deep=args.deep)
 
 
+def cmd_cleanup(args, manifest, catalog, descriptors) -> int:
+    """Decommission sweep: this deployment's docker images (+ volumes) off the host. Containers
+    must already be gone (`rig down`) — cleanup refuses otherwise, it never kills anything."""
+    from . import cleanup as cleanup_mod
+    env = dispatch.fleet_env(manifest)
+    return cleanup_mod.cleanup(args.rig_root, manifest, descriptors, env, names=args.names,
+                               dry_run=args.dry_run, keep_volumes=args.keep_volumes)
+
+
 def cmd_certify(args, root: Path) -> int:
     """Launcher-contract conformance. Three modes: --diff compares two --emit files; --repo certifies a
     service repo directly (its CI — no deployment tree needed); default certifies the manifest's entries."""
@@ -457,6 +466,7 @@ def cmd_unbake(args, root: Path) -> int:
 _HANDLERS = {
     "up": cmd_up,
     "down": cmd_down,
+    "cleanup": cmd_cleanup,
     "config": cmd_config,
     "pull": cmd_pull,
     "status": cmd_status,
@@ -550,6 +560,17 @@ def build_parser() -> argparse.ArgumentParser:
     down.add_argument("--purge", action="store_true", help="also remove declared external volumes (FINAL teardown)")
     down.add_argument("--end-run", action="store_true", dest="end_run",
                       help="after a successful FULL down, seal the open run (stamps ended: + size)")
+
+    cl = sub.add_parser("cleanup", help="decommission: remove this deployment's docker images + "
+                                        "volumes from the host (after the final `rig down`, "
+                                        "before deleting the tree)")
+    cl.add_argument("names", nargs="*",
+                    help="instance name(s); default: ALL, disabled included — decommission "
+                         "covers the whole tree")
+    cl.add_argument("--dry-run", action="store_true",
+                    help="print every ref/volume that would be removed; touches nothing")
+    cl.add_argument("--keep-volumes", action="store_true", dest="keep_volumes",
+                    help="images only — leave declared external volumes and project volume residue")
 
     nr = sub.add_parser("new-run", help="rotate: seal the open run (if any) and open a new one")
     nr.add_argument("label", nargs="?", default=None, help="session label (dir becomes <stamp>_<label>)")

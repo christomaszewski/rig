@@ -88,6 +88,8 @@ python3 -m venv .venv && .venv/bin/pip install pyyaml
 ./rig logs cam_front -f   # follow one sensor's logs
 ./rig config gnss_primary # render a sensor's merged compose (delegates to the launcher's `config`)
 ./rig down                # tear down in reverse (autonomy FIRST); --purge also GCs external volumes
+./rig cleanup             # decommission: remove this deployment's images + volumes from the host
+                          #   (after the final down, before deleting the tree; --dry-run to preview)
 ./rig up cam_front ins_main   # operate on a subset by name
 ```
 

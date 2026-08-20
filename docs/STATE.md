@@ -211,7 +211,8 @@ A launcher's compose opts into each (`${RIG_IMAGE_REGISTRY:+…}`, `:${RIG_IMAGE
 
 ## rig capabilities (all built/tested — bullets carry their own version tags)
 
-- Lifecycle `up/down(--purge)/status/logs/config/doctor`; tiered ordering (infra → sensors → autonomy;
+- Lifecycle `up/down(--purge)/cleanup/status/logs/config/doctor` (`cleanup` = decommission: images +
+  volumes off the host, v0.2.15); tiered ordering (infra → sensors → autonomy;
   down reversed, so autonomy stops FIRST); tier-aware output ("2 sensors + 2 infra + 1 autonomy").
 - `vehicle.yaml`: `vehicle_id` (→ ROS domain + `VEHICLE_ID`), `ros{rmw,distro}`, `images{registry,tag}`,
   `platform` (→ `RIG_TARGET_PLATFORM`, v0.2.14), `data_dir`, `infra:`, `sensors:`, `autonomy:`.

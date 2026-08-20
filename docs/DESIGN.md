@@ -53,7 +53,13 @@ template — it adapts to each via `rigging.yaml`'s `verbs` map (e.g. cam-up tak
 - **Lifecycle/cleanup.** Restart/boot/teardown are the substrate's job (Docker Compose now;
   systemd/Quadlet/k3s later). External volumes survive `down` by design (a consumer may still be attached);
   `rig down --purge` removes the `rigging.yaml`-declared `external_volumes` on **final** teardown only —
-  `docker volume rm` refuses an in-use volume, which is the safety we want.
+  `docker volume rm` refuses an in-use volume, which is the safety we want. `rig cleanup` (v0.2.15) is
+  the decommission form: after the final down, before deleting the tree, it removes the deployment's
+  image refs (rendered composes ∪ rig.lock pins, by ref, never `-f`) and its volumes (declared +
+  compose-project-labeled residue; `--keep-volumes` opts out). Services never remove volumes on their
+  own teardown (a consumer may still be attached) — rig owns removal, at both tempos. cleanup refuses
+  while any project still has containers (that's `down`'s job) and never touches RIG_DATA_DIR. Baked
+  artifacts carry the same sweep as `cleanup.sh` (`./run.sh cleanup`).
 - **Resource budgets (advisory).** `rig doctor` warns about `/dev/shm` aggregate and NVENC session budgets;
   it never blocks (rig treats driver configs as opaque).
 
@@ -194,7 +200,8 @@ validation; overrides + nameless profiles; dispatch with fleet env + dry-run + t
 (`infra:` → `sensors:` → `autonomy:`; down reversed, so the decider dies before its eyes); `status`
 roll-up; run directories (one session = one folder, `new-run`/`end-run`/`runs`); `doctor` (incl.
 enabled-aware host-port clash checks, distro agreement as ERROR) + `doctor --deep`;
-`up/down/--purge/logs/config/pull`; `certify` (the launcher contract as executable checks, `--repo` CI
+`up/down/--purge/logs/config/pull` + `cleanup` (decommission: images/volumes off the host, v0.2.15);
+`certify` (the launcher contract as executable checks, `--repo` CI
 mode, `--emit/--diff` host-independence proof); `build` (per-service build + mirror; exports
 `ros.distro` as ROS_DISTRO); `vendor` (with provenance) and `bake/unbake` (digest pinning, compose-only
 form, `--bundle-images` air-gap bundles, parent provenance on re-bake); the authoring family — `init`

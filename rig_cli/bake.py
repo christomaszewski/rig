@@ -298,8 +298,43 @@ def _alias_lines(aliases: dict[str, str]) -> list[str]:
     return lines
 
 
+def _cleanup_script(entries: list[dict], refs: list[str]) -> list[str]:
+    """cleanup.sh — the decommission sweep in pure sh (bare-Docker parity with `rig cleanup`):
+    refuse while any project still has containers, then untag this artifact's image refs and
+    remove its external + project-labeled volumes. Data dirs are never touched."""
+    projects = " ".join(shlex.quote(e["project"]) for e in entries)
+    volumes = sorted({v for e in entries for v in e["external_volumes"]})
+    lines = ["#!/usr/bin/env sh",
+             "# Decommission: remove this artifact's images + volumes from the host. Run AFTER",
+             "# ./down.sh, BEFORE deleting this directory. Never containers, never data dirs.",
+             'cd "$(dirname "$0")"',
+             f'for p in {projects}; do',
+             '  if [ -n "$(docker ps -aq --filter "label=com.docker.compose.project=$p")" ]; then',
+             '    echo "cleanup: containers still exist for $p — ./down.sh first" >&2; exit 1',
+             '  fi',
+             'done']
+    for ref in sorted(refs):
+        q = shlex.quote(ref)
+        lines += [f'if docker image inspect {q} >/dev/null 2>&1; then',
+                  f'  docker rmi {q} >/dev/null 2>&1 && echo "removed image {ref}" '
+                  f'|| echo "kept image {ref} (in use)"',
+                  'fi']
+    for vol in volumes:
+        q = shlex.quote(vol)
+        lines.append(f'docker volume rm {q} >/dev/null 2>&1 && echo "removed volume {vol}" || true')
+    lines += [f'for p in {projects}; do',
+              '  for v in $(docker volume ls -q --filter "label=com.docker.compose.project=$p"); do',
+              '    docker volume rm "$v" >/dev/null 2>&1 && echo "removed volume $v" '
+              '|| echo "kept volume $v (in use)"',
+              '  done',
+              'done',
+              'echo "cleanup done — data dirs untouched; this directory is now safe to delete"']
+    return lines
+
+
 def _write_scripts(staging: Path, entries: list[dict], *, bundle_refs: list[str] | None = None,
-                   run_ctx: dict | None = None, aliases: dict[str, str] | None = None) -> None:
+                   run_ctx: dict | None = None, aliases: dict[str, str] | None = None,
+                   cleanup_refs: list[str] | None = None) -> None:
     up = ["#!/usr/bin/env sh", "set -e", "cd \"$(dirname \"$0\")\""]
     if run_ctx:
         up += _run_ensure_guard(run_ctx)
@@ -332,6 +367,8 @@ def _write_scripts(staging: Path, entries: list[dict], *, bundle_refs: list[str]
                        '  echo "run: $(basename "$(readlink "$D/current")") (open)"',
                        'else echo "run: none active"; fi']
     scripts = [("up.sh", up), ("down.sh", down), ("status.sh", status), ("pull.sh", pull)]
+    if cleanup_refs is not None:
+        scripts.append(("cleanup.sh", _cleanup_script(entries, cleanup_refs)))
     if bundle_refs:  # explicit/forced load (up.sh already self-loads when refs are missing)
         scripts.append(("load.sh", ["#!/usr/bin/env sh", "set -e", "cd \"$(dirname \"$0\")\"",
                                     "exec docker load -i ./images.tar"]))
@@ -359,6 +396,7 @@ def _write_bootstrap(staging: Path) -> None:
         "  down)   [ $# -eq 1 ] && [ -f ./down.sh ]   && exec ./down.sh ;;\n"
         "  status) [ $# -eq 1 ] && [ -f ./status.sh ] && exec ./status.sh ;;\n"
         "  pull)   [ $# -eq 1 ] && [ -f ./pull.sh ]   && exec ./pull.sh ;;\n"
+        "  cleanup) [ $# -eq 1 ] && [ -f ./cleanup.sh ] && exec ./cleanup.sh ;;\n"
         "  load)   [ -f ./load.sh ]   && exec ./load.sh ;;\n"
         '  new-run) if [ -f ./new-run.sh ]; then shift; exec ./new-run.sh "$@"; fi ;;\n'
         '  end-run) if [ -f ./end-run.sh ]; then shift; exec ./end-run.sh "$@"; fi ;;\n'
@@ -524,7 +562,9 @@ def bake(root: Path, manifest, catalog, descriptors, env, tag: str, *, registry:
         # tag refs throughout, so there is no split namespace to unify).
         aliases = {} if bundle else {ref: dig for ref, dig in images.items() if dig}
         _write_scripts(staging, entries, bundle_refs=sorted(images) if bundle else None,
-                       run_ctx=run_ctx, aliases=aliases)
+                       run_ctx=run_ctx, aliases=aliases,
+                       # cleanup.sh untags BOTH names of a pinned image (tag ref + digest ref)
+                       cleanup_refs=sorted(set(images) | {d for d in images.values() if d}))
     _write_bootstrap(staging)
 
     # 5. metadata + lock. A re-bake INSIDE an extracted artifact (field edits on the vehicle) records its

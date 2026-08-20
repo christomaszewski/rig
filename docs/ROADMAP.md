@@ -537,3 +537,17 @@ targeting".
   env (`--platform` override); certify's `platform` check (every matrix entry renders anywhere,
   pulls its composed tag, differs from the first entry); doctor platform/matrix validation;
   deprecated-but-working legacy path for platform-valued tags (data-driven detection).
+
+## 8. Decommission sweep — ✅ implemented (v0.2.15)
+
+- **v0.2.15** `rig cleanup` — after the final `rig down`, before deleting the tree: remove the
+  deployment's docker images (rendered compose refs — disabled rows included, composed platform
+  tags included — ∪ rig.lock tag+digest pins; by ref, never `-f`: docker's in-use refusal is the
+  safety) and its volumes (the declared external set, idempotent with `down --purge`, plus
+  compose-project-labeled residue; `--keep-volumes` opts out). Refuses while any project still
+  has containers (`down` owns those); RIG_DATA_DIR never touched. Settled: services never remove
+  volumes on their own teardown (a consumer may still be attached) — rig owns removal at both
+  tempos (`down --purge` routine, `cleanup` decommission). Baked artifacts ship the sh parity
+  form `cleanup.sh`, routed by `./run.sh cleanup`. Known caveat: image refs are daemon-global —
+  two deployments pulling the SAME ref share one tag, so cleaning one untags it for both
+  (`--dry-run` first on shared SIL boxes).
