@@ -101,10 +101,14 @@ rig registry sync && rig overlay apply siyi_zr30 internal/zr30-gideon --clear-lo
 rig pkg promote --all --project gideon --suite gideon-boat --to internal
                                    # whole-deployment capture: overlays + a suite; a fresh vehicle
                                    #   reproduces it with `rig pkg add internal/gideon-boat`
+rig pkg save siyi_zr30             # CANONICAL update-in-place (v0.2.8): publish the edits into the
+                                   #   package the instance is pinned to + re-anchor clean, render
+                                   #   identical — bound overlay first (top of stack), else profile.
 rig pkg promote siyi_zr30 --kind profile --to internal
-                                   # UPDATE the profile the instance is pinned to: name defaults from
-                                   #   provenance, --bump implied, provides/match CARRIED FORWARD.
-                                   #   Hand-authored instance (no pin)? bare promote infers profile.
+                                   # the explicit spelling of the same profile update (name from
+                                   #   provenance, --bump implied, provides/match CARRIED FORWARD);
+                                   #   hand-authored instance (no pin)? bare promote infers profile
+                                   #   — promote is the verb for NEW packages, forks, and suites.
 rig pkg promote siyi_zr30 --kind profile --name org-zr30 --to internal --adopt
                                    # FORK the public base into an org profile (records based_on
                                    #   lineage) and ADOPT it: instance re-pins to the fork, render

@@ -92,9 +92,12 @@ Key design points (full decision log: the registry plan document):
   (registries@commit / package pins+hashes / instance anchors / bake's image digests);
   `--locked` reproduces byte-identically. Suites install atomically (any failure rolls the
   deployment back untouched).
-- **rig never pushes**: promotion writes + validates into a registry checkout (git targets get a
-  local commit on a `promote/` branch); publishing is plain git. `rig setup` owns all user state
-  (`~/.rig`, default registry, shell PATH block, `--purge`) — package managers never touch $HOME.
+- **rig never pushes implicitly**: every authoring verb writes + validates into a registry
+  checkout (git targets get a local commit on a `promote/` branch); publishing is plain git, or
+  the explicit `rig registry push` (v0.2.8 — SYSTEM git, `promote/*` branches only, never the
+  default branch; `--pr` delegates PR *creation* to the user's own gh/glab; rig holds zero
+  credentials). `rig setup` owns all user state (`~/.rig`, default registry, shell PATH block,
+  `--purge`) — package managers never touch $HOME.
 
 ## Vehicle-local vars & fleet artifacts (v0.1.47–48)
 
@@ -117,6 +120,32 @@ v0.1.65 widens substitution with ONE mapping form: `{{map <list_var> <template_v
 swap through the normal tiering) plus the derived built-in `fleet_peer_ids` (`fleet_ids` minus
 THIS `vehicle_id`) — peer endpoints from a fleet roster, self excluded, one artifact for all.
 Still no arithmetic, no conditionals, no nesting.
+
+## The QoL & currency layer (v0.2.5–0.2.9)
+
+The registry layer's daily-use surface (decision log: the QoL plan document; workflows:
+CHEATSHEET §1.5 "the daily loop", RUNBOOK "registry maintainer loop"):
+
+- **One add grammar, full inventory**: `pkg add` = `rig add` (paths, workspace names, refs,
+  `sensor:` — dir-AND-registry ambiguity is a hard error); no-arg `pkg search` is the catalog;
+  `pkg list` shows locally-routed services as `local`/`unpublished` rows — the promotion
+  worklist. `pkg info --versions` enumerates git history (@old was installable, now
+  discoverable).
+- **The verb taxonomy** (settled): `save` = update the package an instance CAME FROM, in place
+  (top-of-stack: the last bound overlay when one exists, else the pinned profile; routed
+  services save their code pointer) · `promote` = something NEW (first publish, fork, kind
+  change, suite, bake-down) · `repin`/`rebase` = registry-side maintenance (declared PINS vs
+  fork PAYLOAD) · `upgrade` = the deployment follows (`--dry-run` runs the real sweep, then
+  rolls back).
+- **Currency detects → repair → propagate**: `pkg outdated` reports dependency drift across all
+  four kinds (FIX column names the verb; exit 1, CI-able); `registry sync` prints a
+  package-level delta digest; consumers follow repairs with `sync` + `upgrade`.
+- **The publish tail + undo**: `registry pending/push/discard` and `pkg yank <ref> --from`
+  (previous version restored from git history; a first publish is removed). The governing
+  invariant BOTH directions: **the render never changes** — save moves tuning local→packaged
+  byte-identically (deltas recomputed against the base, never patch-composed), and
+  discard/yank move it back (the un-save fix-up re-anchors the cwd deployment with the delta
+  as local edits again).
 
 ## Status & roadmap
 

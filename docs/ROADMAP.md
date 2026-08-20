@@ -501,3 +501,21 @@ CHEATSHEET §1.5–1.6):
   reproduction actually reproduces (hashes still gate — rewritten history fails loudly). A
   local-dir folder without `.git` keeps the exact old behavior; a local-dir that IS a git
   checkout gets the feature for free. No authoring-side changes (no tags, no push).
+
+## 6. QoL & registry currency — ✅ implemented (v0.2.5–v0.2.9)
+
+The registry layer's daily-use surface (plan doc: `rig-qol-plan.md`, untracked; design summary
+in DESIGN.md; workflows in CHEATSHEET §1.5 + RUNBOOK "registry maintainer loop"):
+
+- **v0.2.5** discovery & inventory: no-arg `pkg search` catalog (+`--kind`/`--registry`); ONE
+  add grammar under both spellings (paths in `pkg add`; dir-vs-registry ambiguity = hard
+  error); `pkg list` full inventory (local/unpublished rows = the promotion worklist).
+- **v0.2.6** currency: `pkg outdated` (four kinds, FIX column, exit 1 on drift), sync delta
+  digest, one shared namespace resolver.
+- **v0.2.7** `pkg repin`: declared PINS advance registry-side (payloads stay `rebase`'s);
+  suites refresh every member (registry law: in-registry members sit at head).
+- **v0.2.8** `pkg save` (top-of-stack update-in-place; render-identity invariant) + the
+  publish tail: `registry pending|push[--pr]|discard`, `pkg yank --from` — discard/yank run
+  save's inverse (the delta returns as local edits, render byte-identical).
+- **v0.2.9** `pkg info --versions` (history enumeration), `pkg upgrade --dry-run` (real sweep,
+  rolled back), docs sweep.

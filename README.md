@@ -67,7 +67,10 @@ python3 -m venv .venv && .venv/bin/pip install pyyaml
 ./rig registry sync       # then fully offline: pinned installs, vendored surfaces, rig.lock
 ./rig add public/zenoh-router          # infra from the registry, at an exact pin
 ./rig add sensor:zr30                  # profile match -> service + editable config, hash-anchored
-./rig config diff         # git-status for configs; `pkg promote` lifts your tuning into a registry
+./rig config diff         # git-status for configs
+./rig pkg save zr30       # publish the edits into the package they CAME FROM (render identical);
+                          #   `pkg promote` is for NEW packages/forks; `pkg list` = the inventory
+./rig pkg outdated        # dependency drift across the registries (repair: pkg repin / rebase)
 
 # fleet vehicles — one artifact, N vehicles (CHEATSHEET §1.6)
 # reference per-vehicle values as {{vehicle_id}} etc. in configs; `rig bake` auto-detects the
