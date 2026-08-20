@@ -817,10 +817,12 @@ def build_parser() -> argparse.ArgumentParser:
     pp.add_argument("--requires", default=None, metavar="REF",
                     help="(--kind profile) service requirement override (ns/service@X.Y.Z)")
     pp.add_argument("--adopt", action="store_true",
-                    help="(one instance; implies --kind profile) after publishing, re-pin the instance "
-                         "onto the new profile: working+pin reset to the payload, overrides "
-                         "dropped, overlays unbound (baked in) — render identical, provenance "
-                         "now the fork (the profile `--clear-local`)")
+                    help="after publishing, make THIS deployment consume it. Profiles (one "
+                         "instance; implied kind): re-pin the instance onto the new profile — "
+                         "working+pin reset, overrides dropped, overlays baked in, render "
+                         "identical. Services: record the published pin in rig.lock (no more "
+                         "local/unpublished; the dev route stays — `pkg upgrade` vendors at "
+                         "the pin)")
     po = pkgsub.add_parser("outdated", help="dependency-drift report across the registries: "
                                             "profile requires/based_on, overlay authored_against, "
                                             "suite members vs registry-current — report-only, "

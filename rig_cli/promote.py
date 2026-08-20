@@ -191,7 +191,7 @@ def _registry_write_session(entry: Entry, to: str, branch_name: str, written: li
 
 
 def _promote_service(root: Path, spec: str, *, to: str, bump: bool,
-                     version: str | None) -> int:
+                     version: str | None, adopt: bool = False) -> int:
     """`promote <instance|service> --kind service`: publish the service's CODE POINTER — the
     dev-loop counterpart of the repo-side registry-release CI job. Everything comes from the
     routed checkout (rigging.yaml is the naming authority; git supplies repo/rev), never from
@@ -258,6 +258,33 @@ def _promote_service(root: Path, spec: str, *, to: str, bump: bool,
         eprint(f"  service {_namespace_of(to)}/{svc}@{ver} <- {checkout} "
                f"(rev {head[:12]}…{f', path {rel}' if rel not in ('.', '') else ''})")
     _ = desc  # loaded for its cross-checks; the manifest carries no descriptor fields
+    # --adopt: record the published pin in rig.lock — the service branch has no config to
+    # re-anchor, so adoption here is PROVENANCE: pkg list stops calling it local/unpublished
+    # and the lock names what this deployment corresponds to. The dev route stays (that's the
+    # dev loop); `rig pkg upgrade` is the deliberate switch to a vendored copy at the pin.
+    # Once adopted, every republish (promote --bump / pkg save) keeps the row current.
+    lock = load_lock(root)
+    packages = lock.get("packages") or {}
+    prior = next((r for r in packages if r.startswith(f"{to}/") and unqualified(r) == svc
+                  and (packages[r] or {}).get("kind") == "service"), None)
+    if adopt or prior:
+        from .install import registry_commit
+        from .lock import record_package, record_registry, save_lock
+        new_ref = f"{to}/{svc}@{ver}"
+        if prior and prior != new_ref:
+            packages.pop(prior, None)
+        record_package(lock, new_ref, {"kind": "service",
+                                       "source": {"repo": url, "rev": head,
+                                                  **({"path": rel} if rel not in (".", "")
+                                                     else {})}})
+        record_registry(lock, entry.name, rtype=entry.type, location=entry.location,
+                        commit=registry_commit(entry))
+        save_lock(root, lock)
+        eprint(f"  {svc}: rig.lock now pins {new_ref}"
+               + (" (ADOPTED — was local/unpublished)" if adopt and not prior else
+                  " (lock row carried to the new version)")
+               + "; the dev route stays — `rig pkg upgrade` vendors at the pin when you want "
+                 "a self-contained deployment")
     return 0
 
 
@@ -278,12 +305,12 @@ def promote(root: Path, names: list[str], *, to: str, all_dirty: bool, name: str
     if version is not None and not re.match(r"^\d+\.\d+\.\d+$", version):
         raise RigError(f"promote: --version must be exact X.Y.Z, got '{version}'")
     if kind == "service":
-        if len(names) != 1 or all_dirty or suite or adopt or name or matches or requires \
+        if len(names) != 1 or all_dirty or suite or name or matches or requires \
                 or target_instance or project:
             raise RigError("promote --kind service: exactly one instance/service name, plus "
-                           "--to/--bump/--version only — a service manifest is a CODE POINTER "
-                           "(rigging.yaml names it; config flags don't apply)")
-        return _promote_service(root, names[0], to=to, bump=bump, version=version)
+                           "--to/--bump/--version/--adopt only — a service manifest is a CODE "
+                           "POINTER (rigging.yaml names it; config flags don't apply)")
+        return _promote_service(root, names[0], to=to, bump=bump, version=version, adopt=adopt)
     if version is not None:
         raise RigError("promote: --version applies to --kind service only (overlay/profile "
                        "versions follow --bump)")

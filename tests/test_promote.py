@@ -371,6 +371,36 @@ def test_promote_kind_service_publishes_code_pointer():
         assert m2["version"] == "0.1.1" and m2["platforms"] == ["linux/arm64"]
 
 
+def test_promote_kind_service_adopt_lock_tracks():
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        root, _ = _world()
+        _internal()
+        route, head, origin = _dev_service()
+        assert _run("--root", str(root), "add", str(route))[0] == 0
+        rc, out, _ = _run("--root", str(root), "pkg", "list")
+        assert "devsvc" in out and "unpublished" in out                # local before adopt
+        rc, _, err = _run("--root", str(root), "pkg", "promote", "devsvc", "--kind", "service",
+                          "--to", "internal", "--version", "0.0.1", "--adopt")
+        assert rc == 0, err
+        assert "ADOPTED" in err and "dev route stays" in err
+        lock = yaml.safe_load((root / "rig.lock").read_text())
+        row = lock["packages"]["internal/devsvc@0.0.1"]
+        assert row["kind"] == "service" and row["source"]["rev"] == head
+        rc, out, _ = _run("--root", str(root), "pkg", "list")
+        assert "internal/devsvc@0.0.1" in out                          # registry-tracked now
+        assert "unpublished" not in out
+        # once adopted, a republish (pkg save) carries the lock row to the new version
+        (route / "more.txt").write_text("x\n")
+        _git("add", "-A", cwd=route)
+        _git("commit", "-q", "-m", "more", cwd=route)
+        _git("push", "-q", "origin", "HEAD", cwd=route)
+        rc, _, err = _run("--root", str(root), "pkg", "save", "devsvc")
+        assert rc == 0, err
+        lock = yaml.safe_load((root / "rig.lock").read_text())
+        assert "internal/devsvc@0.0.2" in lock["packages"]
+        assert "internal/devsvc@0.0.1" not in lock["packages"]
+
+
 def test_promote_kind_service_guards():
     with _env(RIG_HOME=tempfile.mkdtemp()):
         root, _ = _world()
