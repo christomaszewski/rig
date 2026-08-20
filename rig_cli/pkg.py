@@ -10,7 +10,7 @@ from __future__ import annotations
 import fnmatch
 
 from . import RigError
-from .common import eprint, print_table
+from .common import eprint, load_yaml, print_table
 from .refs import parse_ref, unqualified
 from .registries import Entry, load_entries, open_registry
 
@@ -46,10 +46,52 @@ def _sensor_hits(index: dict, ident: str) -> list[tuple[str, str]]:
     return sorted(set(hits), key=lambda h: (_TIER_ORDER.get(h[1], 3), h[0]))
 
 
-def search(query: str) -> int:
+def _axis_note(pkg) -> str:
+    """The catalog row's NOTE: each kind's key discovery axis (what you'd search it by), never
+    search-hit attribution — no-arg listings aren't 'hits'."""
+    if pkg is None:
+        return ""
+    m = pkg.manifest
+    if pkg.kind == "profile":
+        for block in (m.get("provides") or {}).get("sensor") or []:
+            if isinstance(block, dict) and block.get("match"):
+                return f"match: {block['match'][0]}"
+        req = (m.get("requires") or {}).get("service") if isinstance(m.get("requires"), dict) else None
+        return f"requires: {req}" if req else ""
+    if pkg.kind == "overlay":
+        target = next((t for t in m.get("targets") or [] if isinstance(t, dict) and t), None)
+        note = "target: {}={}".format(*next(iter(target.items()))) if target else ""
+        if m.get("project"):
+            note += (", " if note else "") + f"project: {m['project']}"
+        return note
+    if pkg.kind == "suite":
+        members = m.get("members") or {}
+        count = sum(len(members.get(plural) or []) for plural in ("services", "profiles", "overlays"))
+        return f"{count} member{'s' if count != 1 else ''}"
+    if pkg.kind == "service":
+        source = m.get("source") if isinstance(m.get("source"), dict) else {}
+        if source.get("repo"):
+            return f"src: {str(source['repo']).rstrip('/').rsplit('/', 1)[-1]}"
+        if isinstance(m.get("image"), dict) and m["image"].get("ref"):
+            return "image"
+    return ""
+
+
+def search(query: str = "", *, kind: str | None = None, registry: str | None = None) -> int:
     entries = _entries_or_hint()
+    if registry:
+        entries = [e for e in entries if e.name == registry]
+        if not entries:
+            raise RigError(f"pkg search: no registry named '{registry}' (rig registry list)")
     rows: list[tuple[str, str, str, str]] = []
-    if query.startswith("sensor:"):
+    if not query:  # the catalog: every package, priority order — the intentional "show me everything"
+        for entry, reg, index in _each_index(entries):
+            packages = index.get("packages") or {}
+            for name in sorted(packages):
+                meta = packages.get(name) or {}
+                rows.append((f"{entry.name}/{name}", meta.get("kind", "?"),
+                             meta.get("version", "?"), _axis_note(reg.packages.get(name))))
+    elif query.startswith("sensor:"):
         ident = query[len("sensor:"):]
         for entry, _, index in _each_index(entries):
             packages = index.get("packages") or {}
@@ -101,8 +143,13 @@ def search(query: str) -> int:
                 meta = packages.get(name) or {}
                 rows.append((f"{entry.name}/{name}", meta.get("kind", "?"),
                              meta.get("version", "?"), matched[name]))
+    if kind:
+        rows = [r for r in rows if r[1] == kind]
     if not rows:
-        print(f"no matches for '{query}'")
+        what = f"'{query}'" if query else "the catalog"
+        filters = "".join(f" (--kind {kind})" if kind else "")
+        print(f"no matches for {what}{filters}" if query or kind else
+              "no packages in the configured registries (synced? rig registry sync)")
         return 1
     # priority order is preserved: higher-priority registries printed first
     print_table([("PACKAGE", "KIND", "VERSION", "NOTE")] + rows)
@@ -110,19 +157,30 @@ def search(query: str) -> int:
 
 
 def list_installed(root) -> int:
-    """`rig pkg list` — this deployment's installed packages (from rig.lock), which instances use
-    each, and whether the synced registries carry a newer version (blank when a registry is
-    unreachable — listing never fails on registry state)."""
+    """`rig pkg list` — the FULL deployment inventory: registry packages (from rig.lock) with
+    upgrade state, PLUS locally-routed services (path/workspace adds, vendored checkouts) marked
+    `local`/`unpublished` — the promotion worklist. Never fails on registry state (unreachable
+    registries just blank the upgrade column; a registry-less deployment lists its local rows)."""
+    import os as _os
+
+    from .catalog import load_catalog
     from .lock import load_lock
     from .manifest import load_manifest
 
     lock = load_lock(root)
     packages = lock.get("packages") or {}
-    if not packages:
-        print("no registry packages installed (rig.lock has no packages section) — "
-              "`rig add <ref|sensor:id>` installs one")
-        return 0
     manifest = load_manifest(root)
+    try:
+        catalog = load_catalog(root)
+    except RigError:
+        catalog = {}
+    tracked = {unqualified(ref) for ref, info in packages.items()
+               if (info or {}).get("kind") == "service"}
+    local = sorted(name for name in catalog if name not in tracked)
+    if not packages and not local:
+        print("no packages in this deployment (rig.lock is empty and services.yaml routes "
+              "nothing) — `rig add <path|ref|sensor:id>` adds one")
+        return 0
     entries = {e.name: e for e in load_entries()}
     from .workingcopy import local_delta
     dirty = set()
@@ -170,17 +228,36 @@ def list_installed(root) -> int:
                        and unqualified(str(info.get("requires") or "")) == bare), None)
         return f"dependency of {holder}" if holder else "active"
 
+    def local_origin(name: str) -> str:
+        vendored = root / "services" / name / ".vendored.yaml"
+        if vendored.is_file():
+            try:
+                ref = str(load_yaml(vendored).get("ref") or "")[:7]
+            except RigError:
+                ref = ""
+            return f"vendored{f' @ {ref}' if ref else ''}"
+        try:
+            return _os.path.relpath(catalog[name].path, root)
+        except ValueError:  # different drive (Windows) — absolute is still honest
+            return str(catalog[name].path)
+
     rows = [("PACKAGE", "KIND", "ROLE", "USED BY", "UPGRADE")]
     body = [(ref, str((packages[ref] or {}).get("kind", "?"))) for ref in sorted(packages)]
     for ref, kind in sorted(body, key=lambda rk: (role(*rk).startswith("dependency"), rk[0])):
         rows.append((ref, kind, role(ref, kind), users(ref, kind), registry_current(ref)))
+    for name in local:  # local rows sort together, after the registry ones — the promotion worklist
+        rows.append((name, "service", f"local ({local_origin(name)})",
+                     users(name, "service"), "unpublished"))
     print_table(rows)
     notes = []
     if any("*" in r[3] for r in rows[1:]):
         notes.append("* = local edits (upgrade three-way-merges them, local wins)")
-    if any(r[4] for r in rows[1:]):
+    if any(r[4] and r[4] != "unpublished" for r in rows[1:]):
         notes.append("`rig registry sync && rig pkg upgrade` updates — profiles/services "
                      "three-way, bound overlays rebound in place")
+    if local:
+        notes.append("local = not tracked in any registry — `rig pkg promote --kind service` "
+                     "publishes the code pointer; `--kind profile` captures an instance's config")
     if notes:
         print("\n" + "\n".join(f"({n})" for n in notes))
     return 0

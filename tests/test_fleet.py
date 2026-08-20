@@ -193,7 +193,8 @@ def test_unprovisioned_vehicle_gates_identity_consumers_only():
         rc, _, err = _run("--root", str(root), "up", "--dry-run")      # consumes identity -> gated
         assert rc == 1 and "rig provision" in err
         rc, out, _ = _run("--root", str(root), "pkg", "list")          # management verb -> works
-        assert rc == 0 and "no registry packages installed" in out
+        assert rc == 0  # inventory renders unprovisioned: local rows or the empty message
+        assert "no packages in this deployment" in out or "unpublished" in out
         rc, out, _ = _run("--root", str(root), "config", "diff")       # raw-file diff -> works
         assert rc == 0
 

@@ -272,28 +272,46 @@ def cmd_init(args) -> int:
     return 0
 
 
-def cmd_add(args, root: Path) -> int:
-    """`rig add` — the single porcelain for "put this in my deployment": local path | bare workspace
-    name (the original forms) | registry ref (`public/zenoh-router`) | `sensor:<id>` |
-    `<service>:<profile>`. Local always wins for bare names; the registry is the fallback."""
-    token = args.service
+def route_add(root: Path, token: str, *, as_name: str | None = None, tier: str | None = None,
+              locked: bool = False) -> int:
+    """ONE add grammar under both spellings (`rig add` = `rig pkg add`): local path | bare
+    workspace name | registry ref (`public/zenoh-router`) | `sensor:<id>` | `<service>:<profile>`.
+    An existing directory reads as a path; registry grammar reads as a ref; BOTH live at once is a
+    hard error (the dependency-confusion posture) — `./` forces the directory, `@<version>` the
+    package. `--locked` implies the registry reading (it reproduces registry pins)."""
     if token.startswith("sensor:"):
-        return install_mod.install(root, token, as_name=args.as_name)
+        return install_mod.install(root, token, as_name=as_name, locked=locked)
+    if locked:  # registry semantics by definition — a path can't be --locked
+        if Path(token).expanduser().exists():
+            raise RigError(f"add: --locked applies to registry installs — '{token}' is a local "
+                           f"path (paths are wired, not locked)")
+        return install_mod.install(root, token, as_name=as_name, locked=True)
     if ":" in token and "/" not in token and not Path(token).expanduser().exists():
-        return install_mod.install(root, token, as_name=args.as_name)  # <service>:<profile>
-    if "/" in token and not Path(token).expanduser().exists():
+        return install_mod.install(root, token, as_name=as_name)  # <service>:<profile>
+    if "/" in token:
         ns = token.split("/", 1)[0]
-        if any(e.name == ns for e in registries_mod.load_entries()):
-            return install_mod.install(root, token, as_name=args.as_name)
+        ns_known = any(e.name == ns for e in registries_mod.load_entries())
+        path_live = Path(token).expanduser().exists()
+        if ns_known and path_live:
+            raise RigError(f"add: '{token}' is ambiguous — the directory exists AND '{ns}' is a "
+                           f"configured registry; use ./{token} for the directory, or "
+                           f"{token}@<version> for the registry package")
+        if ns_known:
+            return install_mod.install(root, token, as_name=as_name)
     try:
-        return init_mod.add_service(root, token, tier=args.tier)
+        return init_mod.add_service(root, token, tier=tier)
     except RigError as exc:
         if "unknown service" not in str(exc) or "/" in token:
             raise
         try:  # bare name, not in the workspace — fall back to unqualified registry resolution
-            return install_mod.install(root, token, as_name=args.as_name)
+            return install_mod.install(root, token, as_name=as_name)
         except RigError as reg_exc:
             raise RigError(f"{exc}\n  (registry fallback: {reg_exc})")
+
+
+def cmd_add(args, root: Path) -> int:
+    return route_add(root, args.service, as_name=args.as_name, tier=args.tier,
+                     locked=getattr(args, "locked", False))
 
 
 def cmd_rigify(args) -> int:
@@ -365,7 +383,7 @@ def cmd_registry(args) -> int:
 
 def cmd_pkg(args) -> int:
     if args.pkg_cmd == "search":
-        return pkg_mod.search(args.query)
+        return pkg_mod.search(args.query, kind=args.kind, registry=args.registry)
     try:  # inside a deployment, info also reports the local install state — outside, it's silent
         root = (args.root or find_root()).resolve()
         root = root if (root / "vehicle.yaml").exists() else None
@@ -592,6 +610,8 @@ def build_parser() -> argparse.ArgumentParser:
                     help="override the service's declared tier for THIS deployment (local forms only)")
     ad.add_argument("--as", dest="as_name", default=None, metavar="NAME",
                     help="instance name for registry installs (ROS-safe; default from the package)")
+    ad.add_argument("--locked", action="store_true",
+                    help="registry installs only: reproduce rig.lock exactly (same pins/hashes)")
 
     ven = sub.add_parser("vendor", help="copy a service's launch surface into services/<service>/")
     ven.add_argument("service", help="service name (key in services.yaml / its rigging.yaml)")
@@ -652,8 +672,14 @@ def build_parser() -> argparse.ArgumentParser:
     pkgsub = pkgp.add_subparsers(dest="pkg_cmd", required=True)
     ps = pkgsub.add_parser("search", help="search names, sensor:<id>, project:<tag>, or "
                                           "<service>:[glob] (profiles by required service) — "
-                                          "results are fully qualified, priority order")
-    ps.add_argument("query")
+                                          "no query = the full catalog; results are fully "
+                                          "qualified, priority order")
+    ps.add_argument("query", nargs="?", default="",
+                    help="omit to list every package in every configured registry")
+    ps.add_argument("--kind", choices=["service", "profile", "overlay", "suite"], default=None,
+                    help="only this package kind (composes with any query form)")
+    ps.add_argument("--registry", default=None, metavar="NAME",
+                    help="only this registry's packages")
     pi = pkgsub.add_parser("info", help="one package's manifest highlights + provenance")
     pi.add_argument("ref", help="[registry/]name")
     pkgsub.add_parser("list", help="THIS deployment's installed packages (from rig.lock): kind, "
@@ -666,10 +692,16 @@ def build_parser() -> argparse.ArgumentParser:
     prm.add_argument("--purge-config", action="store_true", dest="purge_config",
                      help="delete the working config even when it carries local edits")
     pin = pkgsub.add_parser("add", aliases=["install"],
-                            help="add a service/profile/suite (or sensor:<id>) to THIS deployment: "
-                                 "fetch @ pin, vendor, materialize the working config, lock "
-                                 "(`install` is a permanent alias)")
-    pin.add_argument("spec", help="[registry/]name[@version] | sensor:<id>")
+                            help="add to THIS deployment — registry ref, sensor:<id>, local path, "
+                                 "or workspace name (ONE grammar with `rig add`; `install` is a "
+                                 "permanent alias). Registry installs fetch @ pin, vendor, "
+                                 "materialize the working config, lock")
+    pin.add_argument("spec", metavar="REF|sensor:ID|PATH|NAME",
+                     help="[registry/]name[@version] | sensor:<id> | a service-dir path | a bare "
+                          "workspace name (local wins; dir + registry both live = hard error)")
+    pin.add_argument("--tier", choices=["infra", "sensor", "autonomy"], default=None,
+                     help="override the service's declared tier for THIS deployment "
+                          "(local forms only)")
     pin.add_argument("--as", dest="as_name", default=None, metavar="NAME",
                      help="instance name (ROS-safe; default: from the package name)")
     pin.add_argument("--locked", action="store_true",
@@ -862,9 +894,9 @@ def main(argv=None) -> int:
                 if not (root / "vehicle.yaml").exists():
                     raise RigError(f"pkg {args.pkg_cmd}: not in a rig deployment (no vehicle.yaml) — "
                                    f"`rig init` creates one")
-                if args.pkg_cmd in ("add", "install"):  # install = permanent alias
-                    return install_mod.install(root, args.spec, as_name=args.as_name,
-                                               locked=args.locked)
+                if args.pkg_cmd in ("add", "install"):  # install = permanent alias; ONE grammar
+                    return route_add(root, args.spec, as_name=args.as_name,  # with `rig add`
+                                     tier=args.tier, locked=args.locked)
                 if args.pkg_cmd == "remove":
                     return install_mod.remove(root, args.specs, purge_config=args.purge_config)
                 if args.pkg_cmd == "list":

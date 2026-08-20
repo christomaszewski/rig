@@ -297,7 +297,7 @@ def test_pkg_list_shows_installed_users_and_upgrades():
     with _env(RIG_HOME=tempfile.mkdtemp()):
         root, reg = _world()
         rc, out, _ = _run("--root", str(root), "pkg", "list")
-        assert rc == 0 and "no registry packages installed" in out
+        assert rc == 0 and "no packages in this deployment" in out
         assert _run("--root", str(root), "add", "testns/routerish")[0] == 0
         assert _run("--root", str(root), "pkg", "install", "sensor:acme")[0] == 0
         assert _run("--root", str(root), "overlay", "apply", "acme_cam", "testns/cam-tune")[0] == 0
