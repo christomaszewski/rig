@@ -118,6 +118,32 @@ def checkout_pkg(entry: Entry, kind_dir: str, name: str, version: str) -> Packag
     return None
 
 
+def previous_version(entry: Entry, kind_dir: str, name: str, current: str) -> str | None:
+    """The most recent version DISTINCT from `current` in the manifest's history — yank's
+    restore target (newest-first walk, published branch only). None without git history or when
+    no prior version exists (a first publish: yank removes the package)."""
+    where = _git_prefix(entry)
+    if where is None:
+        return None
+    toplevel, prefix = where
+    manifest_rel = f"{prefix}{kind_dir}/{name.replace(':', '/')}/manifest.yaml"
+    log = _git(toplevel, "log", "--format=%H", "--", manifest_rel)
+    if log.returncode != 0:
+        return None
+    for commit in [line.strip() for line in log.stdout.splitlines() if line.strip()]:
+        blob = _read_blob(toplevel, commit, manifest_rel)
+        if blob is None:
+            continue
+        try:
+            doc = yaml.safe_load(blob.decode()) or {}
+        except (UnicodeDecodeError, yaml.YAMLError):
+            continue
+        version = str(doc.get("version") or "")
+        if version and version != current:
+            return version
+    return None
+
+
 def kind_dir_of(kind: str) -> str:
     return {"service": "services", "profile": "profiles",
             "overlay": "overlays", "suite": "suites"}.get(kind, kind + "s")

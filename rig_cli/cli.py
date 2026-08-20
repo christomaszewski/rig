@@ -360,6 +360,16 @@ def cmd_artifact_list(args, root: Path) -> int:
     return 0
 
 
+def _optional_root(args) -> Path | None:
+    """The cwd deployment when there is one — for verbs whose deployment half is optional
+    (yank/discard fix-ups run only when a deployment is actually present)."""
+    try:
+        root = (args.root or find_root()).resolve()
+        return root if (root / "vehicle.yaml").exists() else None
+    except RigError:
+        return None
+
+
 def cmd_registry(args) -> int:
     """Registry verbs — authoring (init/validate/index, on a registry tree) and client management
     (add/remove/list/sync, on ~/.rig). All deployment-independent."""
@@ -375,6 +385,15 @@ def cmd_registry(args) -> int:
         return registries_mod.list_registries()
     if args.registry_cmd == "sync":
         return registries_mod.sync(args.names or None)
+    if args.registry_cmd in ("pending", "push", "discard"):
+        from . import publish as publish_mod
+        if args.registry_cmd == "pending":
+            return publish_mod.pending(args.name)
+        if args.registry_cmd == "push":
+            return publish_mod.push(args.name, args.branches, all_pending=args.all_pending,
+                                    pr=args.pr)
+        return publish_mod.discard(args.name, args.branches, all_pending=args.all_pending,
+                                   root=_optional_root(args))
     root = Path(args.directory).resolve()
     if args.registry_cmd == "validate":
         return registry_mod.cli_validate(root)
@@ -494,7 +513,7 @@ def build_parser() -> argparse.ArgumentParser:
                "  rig config   show | render          rig run      new | end | list\n"
                "  rig registry init | add | remove | list | sync | validate | index\n"
                "  rig pkg      search | info | list | outdated | add | remove | upgrade | lock | "
-               "promote | repin | rebase\n"
+               "save | promote | repin | rebase | yank\n"
                "  rig overlay  apply | remove | reorder | list     rig setup (first-run host setup)\n"
                "  rig service  rigify | vendor | certify\n"
                "  rig artifact bake | unbake | list   rig image    build | pull\n"
@@ -662,6 +681,28 @@ def build_parser() -> argparse.ArgumentParser:
     rs = regsub.add_parser("sync", help="git: clone/ff-pull into the cache; local-dir: re-check. "
                                         "All resolution is offline afterwards")
     rs.add_argument("names", nargs="*", help="registry name(s); default: all")
+    rpn = regsub.add_parser("pending", help="unpublished authoring branches (promote/*) across "
+                                            "the git caches — state, carried packages, "
+                                            "copy-paste commands")
+    rpn.add_argument("name", nargs="?", default=None, help="one registry (default: all git-type)")
+    rpu = regsub.add_parser("push", help="push promote/* branches via SYSTEM git (never the "
+                                         "default branch — sync's ff-only contract owns it; "
+                                         "rig holds no credentials)")
+    rpu.add_argument("name", help="the registry whose cache holds the branch(es)")
+    rpu.add_argument("branches", nargs="*", help="branch name(s); or --all")
+    rpu.add_argument("--all", action="store_true", dest="all_pending",
+                     help="every unmerged promote/* branch")
+    rpu.add_argument("--pr", action="store_true",
+                     help="also CREATE the PR via your own gh/glab when installed "
+                          "(capability-detected; URL fallback otherwise — merge stays on "
+                          "the forge)")
+    rdc = regsub.add_parser("discard", help="delete unpushed promote/* branches — the pre-push "
+                                            "undo; the cwd deployment is re-anchored first "
+                                            "(save's inverse, render-identical)")
+    rdc.add_argument("name", help="the registry whose cache holds the branch(es)")
+    rdc.add_argument("branches", nargs="*", help="branch name(s); or --all")
+    rdc.add_argument("--all", action="store_true", dest="all_pending",
+                     help="every promote/* branch (pushed ones are skipped with a note)")
     rv = regsub.add_parser("validate", help="validate a registry tree (every CI rule + index freshness) "
                                             "— what tools/validate and the CI wrappers call")
     rv.add_argument("directory", nargs="?", default=".", help="registry root (default: cwd)")
@@ -713,6 +754,26 @@ def build_parser() -> argparse.ArgumentParser:
     pu.add_argument("names", nargs="*", help="instance name(s); default: every profile instance")
     pkgsub.add_parser("lock", help="re-verify every instance anchor and rewrite rig.lock "
                                    "deterministically")
+    psv = pkgsub.add_parser("save", help="publish this deployment's local edits as the next "
+                                         "version of the package they CAME FROM, then re-anchor "
+                                         "clean (render identical): bound overlay first (top of "
+                                         "the stack), else the pinned profile; a routed SERVICE "
+                                         "saves its code pointer. No targeting flags — a "
+                                         "different registry or kind is `pkg promote`")
+    psv.add_argument("spec", metavar="INSTANCE|SERVICE",
+                     help="an instance name, or a routed service name (services.yaml key)")
+    psv.add_argument("--dry-run", action="store_true",
+                     help="print what would be published/re-anchored; write nothing")
+    pyk = pkgsub.add_parser("yank", help="retract a package's CURRENT version FROM a registry: "
+                                         "restore the previous version from git history (no "
+                                         "prior version = remove the package); this deployment "
+                                         "re-anchors render-identically (save's inverse)")
+    pyk.add_argument("ref", help="the package (profiles: <service>:<short>, or the short half)")
+    pyk.add_argument("--from", dest="from_", required=True, metavar="REGISTRY",
+                     help="the registry to retract from (retraction takes FROM; publication "
+                          "verbs write --to)")
+    pyk.add_argument("--dry-run", action="store_true",
+                     help="print the retraction plan; write nothing")
     pp = pkgsub.add_parser("promote", help="lift local deltas into scaffolded packages in a "
                                            "registry checkout (write + validate; publishing stays "
                                            "plain git)")
@@ -917,7 +978,8 @@ def main(argv=None) -> int:
             return fleet_mod.cmd_sync(fleet, args.names, label=args.label, into=args.into,
                                       jobs=args.jobs)
         if args.cmd == "pkg":
-            if args.pkg_cmd in ("add", "install", "remove", "upgrade", "lock", "promote", "list"):
+            if args.pkg_cmd in ("add", "install", "remove", "upgrade", "lock", "promote",
+                                "list", "save"):
                 root = (args.root or find_root()).resolve()
                 if not (root / "vehicle.yaml").exists():
                     raise RigError(f"pkg {args.pkg_cmd}: not in a rig deployment (no vehicle.yaml) — "
@@ -931,6 +993,9 @@ def main(argv=None) -> int:
                     return pkg_mod.list_installed(root)
                 if args.pkg_cmd == "upgrade":
                     return workingcopy_mod.upgrade(root, args.names)
+                if args.pkg_cmd == "save":
+                    from . import save as save_mod
+                    return save_mod.save(root, args.spec, dry_run=args.dry_run)
                 if args.pkg_cmd == "promote":
                     return promote_mod.promote(
                         root, args.names, to=args.to, all_dirty=args.all_dirty, name=args.name,
@@ -946,6 +1011,10 @@ def main(argv=None) -> int:
             if args.pkg_cmd == "outdated":  # registry-side, report-only
                 from . import outdated as outdated_mod
                 return outdated_mod.outdated(args.refs, registry=args.registry, quiet=args.quiet)
+            if args.pkg_cmd == "yank":  # registry-side; the cwd deployment re-anchors if affected
+                from . import yank as yank_mod
+                return yank_mod.yank(args.ref, from_=args.from_, dry_run=args.dry_run,
+                                     root=_optional_root(args))
             return cmd_pkg(args)  # search/info consult ~/.rig only
         if args.cmd == "setup":  # host/user environment — the one command whose object is the HOST
             return registries_mod.setup(shell=args.shell, no_default_registry=args.no_default_registry,

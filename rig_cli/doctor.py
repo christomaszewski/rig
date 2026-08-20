@@ -143,6 +143,15 @@ def collect(
     if shutil.which("docker") is None:
         issues.append(Issue(WARN, "docker not found on PATH — bring-up/status will fail"))
 
+    try:  # unpublished authoring branches sitting in the registry caches — advisory only
+        from .publish import pending_count
+        pending = pending_count()
+        if pending:
+            issues.append(Issue(INFO, f"{pending} unpublished authoring branch(es) in the "
+                                      f"registry caches — rig registry pending"))
+    except Exception:  # doctor must never break on registry state
+        pass
+
     return issues
 
 
