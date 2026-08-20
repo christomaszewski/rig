@@ -320,21 +320,14 @@ def info(ref: str, root=None) -> int:
 
 
 def _parent_freshness(based_on: str, fork_name: str, fork_alias: str) -> str:
-    """The consumer half of fork lineage: the parent's ns is a NAMESPACE — find the entry that
-    declares it (fail-soft: offline/unsynced parents just show the bare stamp) and say when it
+    """The consumer half of fork lineage: the parent's ns is a NAMESPACE — resolve it via the
+    shared helper (fail-soft: offline/unsynced parents just show the bare stamp) and say when it
     has moved past the stamped version."""
+    from .registries import current_version_of
     ns, pname, pinned = parse_ref(based_on)
-    for entry in load_entries():
-        try:
-            reg, index = open_registry(entry)
-        except RigError:
-            continue
-        if reg.namespace != ns and entry.name != ns:
-            continue
-        current = ((index.get("packages") or {}).get(pname) or {}).get("version")
-        if current and current != pinned:
-            return (f"  ({current} available — rig pkg rebase {fork_name} --to {fork_alias})")
-        return ""
+    current = current_version_of(ns or "", pname)
+    if current and current != pinned:
+        return f"  ({current} available — rig pkg rebase {fork_name} --to {fork_alias})"
     return ""
 
 

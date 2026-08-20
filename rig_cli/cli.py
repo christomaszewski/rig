@@ -493,7 +493,8 @@ def build_parser() -> argparse.ArgumentParser:
         epilog="noun groups (canonical forms; the flat spellings above stay as permanent aliases):\n"
                "  rig config   show | render          rig run      new | end | list\n"
                "  rig registry init | add | remove | list | sync | validate | index\n"
-               "  rig pkg      search | info | list | add | remove | upgrade | lock | promote\n"
+               "  rig pkg      search | info | list | outdated | add | remove | upgrade | lock | "
+               "promote | rebase\n"
                "  rig overlay  apply | remove | reorder | list     rig setup (first-run host setup)\n"
                "  rig service  rigify | vendor | certify\n"
                "  rig artifact bake | unbake | list   rig image    build | pull\n"
@@ -753,6 +754,17 @@ def build_parser() -> argparse.ArgumentParser:
                          "onto the new profile: working+pin reset to the payload, overrides "
                          "dropped, overlays unbound (baked in) — render identical, provenance "
                          "now the fork (the profile `--clear-local`)")
+    po = pkgsub.add_parser("outdated", help="dependency-drift report across the registries: "
+                                            "profile requires/based_on, overlay authored_against, "
+                                            "suite members vs registry-current — report-only, "
+                                            "exit 1 on drift (the FIX column names the repair)")
+    po.add_argument("refs", nargs="*", help="narrow to specific package name(s); default: every "
+                                            "package in the swept registries")
+    po.add_argument("--registry", default=None, metavar="NAME|DIR",
+                    help="sweep one registry — a configured alias, or a registry directory "
+                         "(CI sweeping its own tree); default: all configured")
+    po.add_argument("--quiet", action="store_true",
+                    help="hide INFO rows (caret-still-covering, unresolvable namespaces)")
     pr = pkgsub.add_parser("rebase", help="three-way a FORKED profile onto its parent's current "
                                           "version (based_on lineage; conflicts keep YOURS, "
                                           "loudly) — registry-side, write+validate only")
@@ -912,6 +924,9 @@ def main(argv=None) -> int:
                 return workingcopy_mod.relock(root)
             if args.pkg_cmd == "rebase":  # registry-side: no deployment involved
                 return promote_mod.rebase(args.name, to=args.to, onto=args.onto)
+            if args.pkg_cmd == "outdated":  # registry-side, report-only
+                from . import outdated as outdated_mod
+                return outdated_mod.outdated(args.refs, registry=args.registry, quiet=args.quiet)
             return cmd_pkg(args)  # search/info consult ~/.rig only
         if args.cmd == "setup":  # host/user environment — the one command whose object is the HOST
             return registries_mod.setup(shell=args.shell, no_default_registry=args.no_default_registry,

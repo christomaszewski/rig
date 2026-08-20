@@ -143,6 +143,53 @@ def open_registry(entry: Entry) -> tuple[Registry, dict]:
     return reg, generate_index(reg)
 
 
+def resolve_namespace(ns: str) -> Entry | None:
+    """The configured entry SERVING `ns`: an entry whose registry declares it as namespace wins
+    (manifest-side refs carry namespaces, not consumer aliases); alias match is the fallback.
+    Fail-soft per entry (an unreachable registry must not mask the right one); None when nothing
+    serves it — reporting callers degrade, publishing callers raise their own error."""
+    fallback = None
+    for entry in load_entries():
+        if entry.name == ns:
+            fallback = entry
+        try:
+            reg, _ = open_registry(entry)
+        except RigError:
+            continue
+        if reg.namespace == ns:
+            return entry
+    return fallback
+
+
+def current_version_of(ns: str, name: str) -> str | None:
+    """Registry-current version of ns/name via the synced caches — None when unresolvable
+    (unknown namespace, unsynced cache, package gone). Fail-soft by design: currency reporting
+    must never fail on registry state."""
+    entry = resolve_namespace(ns)
+    if entry is None:
+        return None
+    try:
+        _, index = open_registry(entry)
+    except RigError:
+        return None
+    return ((index.get("packages") or {}).get(name) or {}).get("version")
+
+
+def _index_delta(old: dict, new: dict) -> list[str]:
+    """Package-level changes between two index `packages` maps — the sync digest's body."""
+    lines: list[str] = []
+    for name in sorted(set(old) | set(new)):
+        before, after = old.get(name) or {}, new.get(name) or {}
+        if before and after:
+            if before.get("version") != after.get("version"):
+                lines.append(f"{name} {before.get('version', '?')} -> {after.get('version', '?')}")
+        elif after:
+            lines.append(f"+ {name} ({after.get('kind', '?')}) {after.get('version', '?')}")
+        else:
+            lines.append(f"- {name}")
+    return lines
+
+
 def sync(names: list[str] | None = None) -> int:
     entries = load_entries()
     if not entries:
@@ -184,11 +231,18 @@ def sync(names: list[str] | None = None) -> int:
                 eprint(f"  {entry.name}: DEGRADED — {exc}")
             continue
         dest = cache_dir(entry.name)
+        before: dict = {}
         if not (dest / ".git").is_dir():
             dest.parent.mkdir(parents=True, exist_ok=True)
             res = _git("clone", "-q", entry.location, str(dest))
             action = "cloned"
         else:
+            if (dest / "index.json").is_file():  # the "before" for the delta digest
+                import json
+                try:
+                    before = json.loads((dest / "index.json").read_text()).get("packages") or {}
+                except (OSError, ValueError):
+                    pass
             res = _git("pull", "--ff-only", "-q", cwd=dest)
             action = "updated"
         if res.returncode != 0:
@@ -207,6 +261,12 @@ def sync(names: list[str] | None = None) -> int:
             eprint(f"  {entry.name}: {action} @ {commit} "
                    f"({len(index.get('packages', {}))} packages){mismatch}"
                    f"{_stale_note(entry, reg)}")
+            if action == "updated" and before:  # the delta digest: what actually changed
+                delta = _index_delta(before, index.get("packages") or {})
+                for line in delta[:20]:
+                    eprint(f"      {line}")
+                if len(delta) > 20:
+                    eprint(f"      …and {len(delta) - 20} more")
         except RigError as exc:
             failed += 1
             eprint(f"  {entry.name}: {action} @ {commit} but DEGRADED — {exc}")

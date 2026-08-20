@@ -529,19 +529,12 @@ def _adopt_instance(root: Path, entry: Entry, sensor, pkg_name: str, version: st
 
 def _entry_for_namespace(ns: str) -> Entry:
     """based_on refs carry the registry's NAMESPACE (registry-side documents); consumers know
-    registries by ALIAS. Map ns -> the configured entry whose registry declares it (fail-soft
-    per entry — an unreachable registry must not mask the right one), alias-match fallback."""
-    fallback = None
-    for entry in load_entries():
-        try:
-            if load_registry(entry.root, []).namespace == ns:
-                return entry
-        except RigError:
-            pass
-        if entry.name == ns:
-            fallback = entry
-    if fallback is not None:
-        return fallback
+    registries by ALIAS. The shared resolver maps ns -> entry (namespace-declaration wins,
+    alias fallback, fail-soft per entry); publishing callers raise on a miss."""
+    from .registries import resolve_namespace
+    entry = resolve_namespace(ns)
+    if entry is not None:
+        return entry
     raise RigError(f"rebase: no configured registry declares namespace '{ns}' "
                    f"(rig registry list; the parent must be synced/added)")
 
