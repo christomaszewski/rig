@@ -416,7 +416,10 @@ def _install_suite(root: Path, entry: Entry, pkg: Package, *, locked: bool) -> i
             targets = [s.name for s in created if _overlay_covers(m_pkg.manifest, s)]
             if not targets:
                 raise RigError(f"suite member {member}: no instance created by this suite matches "
-                               f"its targets — the suite is inconsistent with its members")
+                               f"its targets — the suite is inconsistent with its members (an "
+                               f"overlay from a bare service-backed instance needs a services: "
+                               f"member alongside it; re-promote the suite with rig ≥ 0.2.16, "
+                               f"which emits and validates that)")
             for instance in targets:
                 overlay_apply(root, instance, f"{m_entry.name}/{m_pkg.name}")
     except BaseException:

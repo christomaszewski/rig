@@ -551,3 +551,16 @@ targeting".
   form `cleanup.sh`, routed by `./run.sh cleanup`. Known caveat: image refs are daemon-global —
   two deployments pulling the SAME ref share one tag, so cleaning one untags it for both
   (`--dry-run` first on shared SIL boxes).
+
+## 9. Suite closure — ✅ implemented (v0.2.16)
+
+- **v0.2.16** suites capture BARE (service-backed, profile-less) instances: `promote --all
+  --suite` emits a `services:` member from the row's lock service pin, so install can recreate
+  the instance (from the service's example) and bind its promoted overlay — previously the suite
+  published clean but every fresh `pkg add` died with "no instance created by this suite matches
+  its targets". A bare instance whose service a profile member already covers is skipped with a
+  note (a services: member would duplicate the instance); one with no registry pin gets a loud
+  WARNING (adopt it first: `promote <svc> --kind service --adopt`). `registry validate` now
+  enforces closure: an in-registry overlay member whose service targets no profile/service
+  member covers is an ERROR at publish/CI time (instance-scoped-only overlays warn — suite
+  installs create default-named instances).

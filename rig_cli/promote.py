@@ -38,7 +38,7 @@ from . import RigError
 from .common import eprint, load_yaml
 from .lock import load_lock
 from .manifest import load_manifest
-from .refs import short_name, unqualified
+from .refs import parse_ref, short_name, split_key, unqualified
 from .registries import Entry, load_entries
 from .registry import validate_registry, write_index, load_registry
 from .workingcopy import promote_delta
@@ -523,17 +523,48 @@ def promote(root: Path, names: list[str], *, to: str, all_dirty: bool, name: str
             for sensor in manifest.sensors:  # existing bindings first, manifest order; then new
                 bound.extend(r for r in (_requalify(o) for o in sensor.overlays) if r not in bound)
             bound.extend(o for o in new_overlays if o not in bound)
-            if not profiles and not bound:
-                raise RigError("promote: the suite would be EMPTY — no pinned profiles or bound "
-                               "overlays to reference (pin/install something first)")
+            # Bare (service-backed) instances: nothing above recreates them — a profile member
+            # materializes ITS instance at install, so a profile-less row needs a `services:`
+            # member (install materializes one from the service's example) or its promoted
+            # overlay can never bind on a fresh vehicle ("no instance created by this suite
+            # matches its targets"). The member is the row's LOCK service pin, requalified.
+            profile_services = {split_key(parse_ref(p)[1])[0] for p in profiles}
+            services: list[str] = []
+            for sensor in manifest.sensors:
+                if sensor.profile:
+                    continue
+                pin = next((r for r, info in (lock.get("packages") or {}).items()
+                            if info.get("kind") == "service"
+                            and unqualified(r) == sensor.service), None)
+                if pin is None:
+                    eprint(f"  WARNING: '{sensor.name}' ({sensor.service}) has no registry "
+                           f"service pin — the suite cannot recreate it on a fresh vehicle "
+                           f"(adopt the service first: rig pkg promote {sensor.service} "
+                           f"--kind service --adopt)")
+                    continue
+                if sensor.service in profile_services:
+                    eprint(f"  note: bare instance '{sensor.name}' — a profile member already "
+                           f"covers {sensor.service}; not adding a services: member (it would "
+                           f"duplicate the instance on install)")
+                    continue
+                ref = _requalify(pin)
+                if ref not in services:
+                    services.append(ref)
+            services.sort()
+            if not profiles and not bound and not services:
+                raise RigError("promote: the suite would be EMPTY — no pinned profiles, bound "
+                               "overlays, or service-backed instances to reference "
+                               "(pin/install something first)")
             smanifest = {"kind": "suite", "name": suite, "version": version,
                          **_carry_forward(existing, "kind", "name", "version",
                                          "project", "members"),
                          **({"project": project} if project else {}),
-                         "members": {"profiles": profiles, "overlays": bound}}
+                         "members": {**({"services": services} if services else {}),
+                                     "profiles": profiles, "overlays": bound}}
             _write_pkg(reg_root, "suites", suite, smanifest, None, written, backups)
-            eprint(f"  suite {target_ns}/{suite}@{version} ({len(profiles)} profile(s), "
-                   f"{len(bound)} overlay(s) in binding order)")
+            eprint(f"  suite {target_ns}/{suite}@{version} ("
+                   + (f"{len(services)} service(s), " if services else "")
+                   + f"{len(profiles)} profile(s), {len(bound)} overlay(s) in binding order)")
 
     # Registry write committed/validated — the deployment-side half of the round-trip runs
     # only now (a failed publish must never touch the deployment; a failed adoption leaves

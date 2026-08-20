@@ -292,6 +292,38 @@ def _validate_suite(pkg: Package, reg: Registry, issues: list[Issue]) -> None:
                     issues.append(Issue(where, f"member '{ref}' pins {match['ver']} but this registry "
                                                f"carries {dep.version}"))
 
+    # Coverage: every overlay member must be BINDABLE at install — a suite binds its overlays
+    # only onto instances the suite itself creates (profile members; service members via their
+    # example). An overlay whose targets no member covers is the guaranteed install-time failure
+    # "no instance created by this suite matches its targets" — catch it at publish/CI instead.
+    from .refs import split_key
+    covered = set()
+    for plural in ("services", "profiles"):
+        for ref in members.get(plural) or []:
+            match = _QUALIFIED_EXACT.match(str(ref))
+            if match:  # profile keys are service:short — the service half is the coverage unit
+                covered.add(split_key(match["name"])[0] or match["name"])
+    for ref in members.get("overlays") or []:
+        match = _QUALIFIED_EXACT.match(str(ref))
+        if not match or match["ns"] != reg.namespace:
+            continue  # cross-registry overlay: targets unreadable here — install still guards
+        dep = reg.packages.get(match["name"])
+        if dep is None or dep.kind != "overlay":
+            continue  # unresolvable/mis-kinded: already reported above
+        targets = [t for t in dep.manifest.get("targets") or [] if isinstance(t, dict)]
+        svc_targets = sorted({str(t["service"]).rpartition("/")[-1]
+                              for t in targets if t.get("service")})
+        if svc_targets and not any(s in covered for s in svc_targets):
+            issues.append(Issue(where, f"overlay member '{ref}' targets service(s) {svc_targets} "
+                                       f"but no profile/service member creates such an instance — "
+                                       f"install cannot bind it (a bare service-backed instance "
+                                       f"needs a services: member; re-promote the suite)"))
+        elif not svc_targets and any(t.get("instance") for t in targets):
+            issues.append(Issue(where, f"overlay member '{ref}' is instance-scoped only — suite "
+                                       f"installs create instances with DEFAULT names, so the "
+                                       f"binding depends on the consumer's row names",
+                                level="warning"))
+
 
 _VALIDATORS = {"service": _validate_service, "profile": _validate_profile,
                "overlay": _validate_overlay, "suite": _validate_suite}

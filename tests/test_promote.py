@@ -125,6 +125,87 @@ def test_promote_all_suite_and_fresh_install_reproduces():
         assert list(sensor.overlays) == ["internal/acme-cam-gideon@1.0.0"]
 
 
+def test_suite_captures_bare_service_instance():
+    # A service-backed instance (no profile:) — e.g. added straight from a service package or
+    # adopted with --kind service — must land in the suite as a `services:` member, or its
+    # promoted overlay can never bind on a fresh vehicle (v0.2.16; the install-side error was
+    # "no instance created by this suite matches its targets").
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        root, _ = _world()
+        internal = _internal()
+        rc, _, err = _run("--root", str(root), "pkg", "add", "testns/camish")
+        assert rc == 0, err
+        row = next(s for s in load_manifest(root).sensors)
+        assert row.profile is None                            # bare: service-backed, no profile
+        cfg = pathlib.Path(row.config)
+        cfg.write_text(cfg.read_text() + "usb: {width: 640}\n")
+        rc, _, err = _run("--root", str(root), "pkg", "promote", "--all", "--suite", "boat",
+                          "--to", "internal")
+        assert rc == 0, err
+        s = yaml.safe_load((internal / "suites" / "boat" / "manifest.yaml").read_text())
+        assert s["members"]["services"] == ["testns/camish@1.2.0"]   # the row's lock pin
+        assert s["members"]["overlays"] == ["internal/camish@1.0.0"]
+        assert _run("registry", "validate", str(internal))[0] == 0
+        before = _rendered(root, row.name)
+        root2 = pathlib.Path(tempfile.mkdtemp()) / "veh2"
+        with contextlib.redirect_stderr(io.StringIO()):
+            init(root2, no_git=True)
+        rc, _, err = _run("--root", str(root2), "pkg", "install", "internal/boat")
+        assert rc == 0, err
+        assert _rendered(root2, row.name) == before           # fresh vehicle == origin
+        fresh = next(s for s in load_manifest(root2).sensors if s.name == row.name)
+        assert list(fresh.overlays) == ["internal/camish@1.0.0"]
+
+
+def test_suite_validator_flags_uncovered_overlay():
+    # The publish/CI-side half of the same guarantee: an overlay member whose service targets no
+    # profile/service member covers is the guaranteed install failure — validate must catch it.
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        root, _ = _world()
+        internal = _internal()
+        rc, _, err = _run("--root", str(root), "pkg", "add", "testns/camish")
+        assert rc == 0, err
+        row = next(s for s in load_manifest(root).sensors)
+        pathlib.Path(row.config).write_text(pathlib.Path(row.config).read_text()
+                                            + "usb: {width: 640}\n")
+        rc, _, err = _run("--root", str(root), "pkg", "promote", "--all", "--suite", "boat",
+                          "--to", "internal")
+        assert rc == 0, err
+        smf = internal / "suites" / "boat" / "manifest.yaml"
+        s = yaml.safe_load(smf.read_text())
+        del s["members"]["services"]                          # hand-edit the coverage away
+        smf.write_text(yaml.safe_dump(s, sort_keys=False))
+        rc, out, err = _run("registry", "validate", str(internal))
+        assert rc == 1 and "install cannot bind it" in (out + err)
+
+
+def test_suite_bare_instance_covered_by_profile_skips_service_member():
+    # Mixed case: a bare instance of a service a profile member already covers — adding a
+    # services: member would DUPLICATE the instance at install, so promote notes and skips it;
+    # the bare instance's overlay still binds (service-scoped) onto the profile's instance.
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        root, _ = _world()
+        _install_acme(root)                                   # profile-backed camish instance
+        internal = _internal()
+        rc, _, err = _run("--root", str(root), "pkg", "add", "testns/camish", "--as", "cam_bare")
+        assert rc == 0, err
+        row = next(s for s in load_manifest(root).sensors if s.name == "cam_bare")
+        pathlib.Path(row.config).write_text(pathlib.Path(row.config).read_text()
+                                            + "usb: {fps: 5}\n")
+        rc, _, err = _run("--root", str(root), "pkg", "promote", "--all", "--suite", "boat",
+                          "--to", "internal")
+        assert rc == 0, err
+        assert "not adding a services: member" in err
+        s = yaml.safe_load((internal / "suites" / "boat" / "manifest.yaml").read_text())
+        assert "services" not in s["members"]
+        assert s["members"]["profiles"] == ["testns/camish:acme-cam@2.0.0"]
+        root2 = pathlib.Path(tempfile.mkdtemp()) / "veh2"
+        with contextlib.redirect_stderr(io.StringIO()):
+            init(root2, no_git=True)
+        rc, _, err = _run("--root", str(root2), "pkg", "install", "internal/boat")
+        assert rc == 0, err                                   # binds onto the profile's instance
+
+
 def test_suite_alone_when_nothing_dirty():
     # An all-clean deployment (everything adopted/pinned): --all --suite emits the PINS-ONLY
     # suite instead of exiting "nothing dirty" (v0.2.2); an empty deployment still refuses.
