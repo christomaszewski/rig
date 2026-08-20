@@ -100,8 +100,38 @@ def _requalify(ref: str) -> str:
     return f"{_namespace_of(alias)}{sep}{rest}" if sep else ref
 
 
+def _faithful_payload_bytes(config_path, payload: dict) -> bytes | None:
+    """The working FILE's bytes when they are content-equal to the payload being emitted — so
+    COMMENTS survive the promote. PyYAML cannot round-trip comments, so verbatim-when-faithful
+    is the mechanism (install's materialize is already a verbatim copy — this closes the loop:
+    a profile's commented toggle blocks reach its consumers' working configs intact). A
+    top-level `name:` line is commented out (payloads are nameless, same transform as init);
+    any content mismatch (overrides folded in, injected keys, a transform-resistant name)
+    returns None and the caller dumps the dict as before."""
+    try:
+        text = Path(config_path).read_text()
+    except OSError:
+        return None
+    lines = []
+    for line in text.splitlines():
+        if re.match(r"^name:\s", line):  # top-level only — indented name: keys stay
+            lines.append(f"# {line}   # (commented by rig promote: the instance row supplies "
+                         f"the name)")
+        else:
+            lines.append(line)
+    out = "\n".join(lines) + "\n"
+    try:
+        parsed = yaml.safe_load(out)
+    except yaml.YAMLError:
+        return None
+    if not isinstance(parsed, dict) or parsed.get("name") is not None:
+        return None
+    return out.encode() if parsed == payload else None
+
+
 def _write_pkg(reg_root: Path, kind_dir: str, name: str, manifest: dict,
-               payload: dict | None, written: list[Path], backups: dict[Path, Path]) -> None:
+               payload: dict | bytes | None, written: list[Path],
+               backups: dict[Path, Path]) -> None:
     pkg_dir = reg_root / kind_dir / name.replace(":", "/")  # profile keys project svc:short -> svc/short
     if pkg_dir.exists() and pkg_dir not in backups:  # a --bump overwrites: keep the original so
         import tempfile                              # rollback can RESTORE it, never delete it
@@ -111,7 +141,11 @@ def _write_pkg(reg_root: Path, kind_dir: str, name: str, manifest: dict,
     (pkg_dir / "config").mkdir(parents=True, exist_ok=True)
     if payload is not None:
         payload_path = pkg_dir / "config" / ("delta.yaml" if kind_dir == "overlays" else "payload.yaml")
-        payload_path.write_text(yaml.safe_dump(payload, sort_keys=False, default_flow_style=False))
+        if isinstance(payload, bytes):  # verbatim: the working file's bytes, comments intact
+            payload_path.write_bytes(payload)
+        else:
+            payload_path.write_text(yaml.safe_dump(payload, sort_keys=False,
+                                                   default_flow_style=False))
     elif (pkg_dir / "config").exists() and not any((pkg_dir / "config").iterdir()):
         (pkg_dir / "config").rmdir()  # suites: REFERENCES ONLY — no config dir allowed
     (pkg_dir / "manifest.yaml").write_text(yaml.safe_dump(manifest, sort_keys=False))
@@ -427,12 +461,18 @@ def promote(root: Path, names: list[str], *, to: str, all_dirty: bool, name: str
                 # re-promotes ride _carry_forward (the parent baseline only moves on rebase).
                 if sensor.profile and str(sensor.profile).partition("@")[0] != f"{to}/{pkg_name}":
                     pmanifest["based_on"] = _requalify(str(sensor.profile))
-                _write_pkg(reg_root, "profiles", pkg_name, pmanifest, payload, written, backups)
+                payload_bytes = _faithful_payload_bytes(sensor.config, payload)
+                if payload_bytes is None and "#" in Path(sensor.config).read_text():
+                    eprint(f"  {sensor.name}: payload re-rendered (overrides/injected keys "
+                           f"folded in) — the working file's comments are not preserved")
+                _write_pkg(reg_root, "profiles", pkg_name, pmanifest,
+                           payload_bytes or payload, written, backups)
                 eprint(f"  profile {target_ns}/{pkg_name}@{version} <- {sensor.name}"
                        + (f" (based_on {pmanifest['based_on']})" if pmanifest.get("based_on")
                           else ""))
                 if adopt:
-                    adoptions.append((sensor, pkg_name, version, payload, req_lock))
+                    adoptions.append((sensor, pkg_name, version, payload, payload_bytes,
+                                      req_lock))
             else:
                 if delta is None or not delta:
                     continue
@@ -498,13 +538,14 @@ def promote(root: Path, names: list[str], *, to: str, all_dirty: bool, name: str
     # Registry write committed/validated — the deployment-side half of the round-trip runs
     # only now (a failed publish must never touch the deployment; a failed adoption leaves
     # the published package published, loudly).
-    for sensor, pkg_name, version, payload, req_lock in adoptions:
-        _adopt_instance(root, entry, sensor, pkg_name, version, payload, req_lock)
+    for sensor, pkg_name, version, payload, payload_bytes, req_lock in adoptions:
+        _adopt_instance(root, entry, sensor, pkg_name, version, payload, req_lock,
+                        payload_bytes=payload_bytes)
     return 0
 
 
 def _adopt_instance(root: Path, entry: Entry, sensor, pkg_name: str, version: str,
-                    payload: dict, req_lock: str) -> None:
+                    payload: dict, req_lock: str, payload_bytes: bytes | None = None) -> None:
     """--adopt: the profile round-trip's second half (the `--clear-local` of profiles). The
     payload IS the instance's current effective config, so re-pinning the row to the fork,
     resetting working+pin to the payload, dropping overrides, and UNBINDING overlays (their
@@ -515,7 +556,8 @@ def _adopt_instance(root: Path, entry: Entry, sensor, pkg_name: str, version: st
     from .resolve import overlay_payload_path
 
     fork_ref = f"{entry.name}/{pkg_name}@{version}"  # the CONSUMER-side (alias) spelling
-    body = yaml.safe_dump(payload, sort_keys=False, default_flow_style=False)
+    body = payload_bytes.decode() if payload_bytes is not None else \
+        yaml.safe_dump(payload, sort_keys=False, default_flow_style=False)  # comments survive
     old_overlays = list(sensor.overlays)
 
     def mutate(row: dict) -> None:

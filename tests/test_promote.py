@@ -371,6 +371,58 @@ def test_promote_kind_service_publishes_code_pointer():
         assert m2["version"] == "0.1.1" and m2["platforms"] == ["linux/arm64"]
 
 
+def test_promote_profile_preserves_comments_verbatim():
+    """Comments in the working file survive into the payload (verbatim-when-faithful), through
+    --adopt, and back out through a consumer install — the full circle."""
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        root, _ = _world()
+        internal = _internal()
+        cfg = _install_acme(root)
+        cfg.write_text(cfg.read_text()
+                       + "# toggle: uncomment for bench runs\n"
+                       + "# bench: {mode: sim}\n"
+                       + "rate: 9\n")
+        rc, _, err = _run("--root", str(root), "pkg", "promote", "acme_cam", "--kind", "profile",
+                          "--name", "commented", "--to", "internal", "--adopt")
+        assert rc == 0, err
+        payload = (internal / "profiles" / "camish" / "commented" / "config" / "payload.yaml")
+        text = payload.read_text()
+        assert "# toggle: uncomment for bench runs" in text            # comments in the payload
+        assert "# tuned default" in text                               # the base's comments too
+        assert yaml.safe_load(text)["rate"] == 9                       # and it parses to the data
+        assert "# toggle" in cfg.read_text()                           # adopt kept them local
+        assert (root / "config" / ".pins" / "acme_cam.yaml").read_text() == cfg.read_text()
+        # the circle closes: a consumer install materializes the comments verbatim
+        root2 = pathlib.Path(tempfile.mkdtemp()) / "veh2"
+        with contextlib.redirect_stderr(io.StringIO()):
+            init(root2, no_git=True)
+        rc, _, err = _run("--root", str(root2), "pkg", "add", "internal/camish:commented",
+                          "--as", "consumer")
+        assert rc == 0, err
+        assert "# toggle: uncomment for bench runs" in \
+            (root2 / "config" / "sensors" / "consumer.yaml").read_text()
+
+
+def test_promote_hand_authored_comments_and_name_commented():
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        root, _ = _world()
+        internal = _internal()
+        _install_acme(root)                                            # locks the camish service
+        (root / "config" / "sensors" / "hand.yaml").write_text(
+            "service: camish\nname: hand\n# tuning notes live here\nmode: x\n")
+        veh = root / "vehicle.yaml"
+        veh.write_text(veh.read_text().replace(
+            "sensors:", "sensors:\n  - { name: hand, service: camish, "
+                        "config: config/sensors/hand.yaml, enabled: true, order: 90 }", 1))
+        rc, _, err = _run("--root", str(root), "pkg", "promote", "hand", "--kind", "profile",
+                          "--name", "handy", "--to", "internal")
+        assert rc == 0, err
+        text = (internal / "profiles" / "camish" / "handy" / "config" / "payload.yaml").read_text()
+        assert "# tuning notes live here" in text                      # comments preserved
+        assert "# name: hand" in text                                  # name commented, not kept
+        assert yaml.safe_load(text).get("name") is None                # payload is nameless
+
+
 def test_promote_kind_service_adopt_lock_tracks():
     with _env(RIG_HOME=tempfile.mkdtemp()):
         root, _ = _world()
