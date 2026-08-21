@@ -169,12 +169,8 @@ def test_hand_authored_row_captured_as_adopted_profile():
     # hand-authored. The suite capture must not skip it (an overlay is impossible — no base):
     # the FULL config becomes a PROFILE, the origin row is ADOPTED, the plan row references it,
     # and a fresh install reconstructs the row with render equality (v0.2.18).
-    import subprocess
-
+    from test_install import _git  # the shared helper carries committer identity (CI has none)
     from test_promote import _dev_service
-
-    def _git(*args, cwd):
-        return subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, text=True)
 
     with _env(RIG_HOME=tempfile.mkdtemp()):
         root, _ = _world()
