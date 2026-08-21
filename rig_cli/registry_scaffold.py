@@ -73,17 +73,24 @@ _README = """\
 # {name} — a rig package registry (namespace `{namespace}`)
 
 A registry is a git repo (or a plain shared folder) of **manifests**; rig resolves and installs
-from it. Four package kinds:
+from it. Five package kinds:
 
 | kind | dir | carries |
 |---|---|---|
 | `service` | `services/<name>/` | pointer to a code repo pinned by FULL commit SHA and/or an image pinned by digest |
-| `profile` | `profiles/<name>/` | device/sensor profile: hardware `match` identifiers, a required service, a **nameless** config payload |
+| `profile` | `profiles/<service>/<short>/` | device/sensor profile: hardware `match` identifiers, a required service, a **nameless** config payload |
 | `overlay` | `overlays/<name>/` | versioned, project-tagged config **delta** targeting a service or instance |
-| `suite`   | `suites/<name>/`   | ordered *references* to the above (fully-qualified exact pins) — never payloads |
+| `suite`   | `suites/<name>/`   | ordered *references* to the above (fully-qualified exact pins) — never payloads; at most ONE vehicle member |
+| `vehicle` | `vehicles/<name>/` | a suite's **instance plan**: a TEMPLATE vehicle.yaml (`config/vehicle.yaml`) whose rows name the instances, their tier/order/enabled/overrides and per-row overlay bindings, plus fleet defaults (platform, images, data_dir, ros, vars, env). Per-host identity (`vehicle`, `vehicle_id`) is markers-or-absent; row refs are UNVERSIONED (the suite's members carry the pins) |
 
 Kind decision rule: different hardware or new match identifiers → new **profile**; project
-tuning of an existing config → **overlay**.
+tuning of an existing config → **overlay**; "stand up this whole vehicle" → a **suite** (the pins)
++ its **vehicle** plan (the layout), captured together by `rig pkg promote --all --suite <s>
+--vehicle <plan>` from a tuned deployment and reproduced with `rig pkg add <ns>/<s>` on a fresh one.
+
+Exact pins are snapshots: a package that pins an older version of a dependency still validates (a
+stale WARNING) and installs from this repo's git history — keep the registry git-backed and keep
+committing. `rig pkg outdated` reports drift; `rig pkg repin` refreshes.
 
 ## Consume
 
@@ -132,7 +139,18 @@ Ground rules `tools/validate` (and CI) enforce:
 - **Overlays**: the payload is a **delta only** (never a full config copy; `null` deletes a
   key). It must not set `name`/`service` — identity belongs to the instance row.
 - **Suites**: references only — fully-qualified exact pins (`ns/name@X.Y.Z`), no `config/`
-  dir, no nested suites.
+  dir, no nested suites, at most ONE `vehicles:` member. Closure is validated: every overlay
+  member must be bindable (a profile/service member creates an instance it targets), and with a
+  vehicle member every plan row's `profile:`/`overlays:`/bare `service` must resolve to a member
+  (unreferenced members warn as dead weight). A member pinned BEHIND registry-current is a
+  warning, not an error — consumers install the pinned version from git history.
+- **Vehicles**: ONE file, `config/vehicle.yaml`, in TEMPLATE form: `vehicle`/`vehicle_id` are
+  self-markers (`"{{vehicle_id}}"`) or absent — a literal is rejected (identity is per host; a
+  shared literal collides ROS domains and compose projects). Row `profile:`/`overlays:` refs carry
+  NO `@version` (the referencing suite's members are the only pin authority). Fleet defaults
+  (`platform`, `data_dir`, `images`, `ros`, `vars`, `env`) may be literal — each host's
+  vehicle-local tier overrides them. Authored only via the suite capture
+  (`rig pkg promote --all --suite <s> --vehicle <name>`); never installed standalone.
 - **index.json is GENERATED** (`tools/gen-index`). A stale or hand-edited index fails CI.
 
 Flow: branch → add/edit the package → `./tools/validate` → `./tools/gen-index` → commit
@@ -217,11 +235,23 @@ def _schemas() -> dict[str, dict]:
             "required": ["kind", "name", "version", "members"],
             "properties": {**common, "kind": {"const": "suite"}, "project": {"type": "string"},
                            "members": {"type": "object", "additionalProperties": False,
-                                       "properties": {k: {"type": "array", "items": {
+                                       "properties": {**{k: {"type": "array", "items": {
                                            "type": "string",
                                            "pattern": "^[a-z][a-z0-9-]*/(?:[a-z][a-z0-9-]*:)?"
                                                       r"[a-z][a-z0-9-]*@\d+\.\d+\.\d+$"}}
-                                           for k in ("services", "profiles", "overlays")}}},
+                                           for k in ("services", "profiles", "overlays")},
+                                           "vehicles": {"type": "array", "maxItems": 1, "items": {
+                                               "type": "string",
+                                               "pattern": r"^[a-z][a-z0-9-]*/[a-z][a-z0-9-]*@\d+\.\d+\.\d+$"}}}}},
+        },
+        "vehicle": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "title": "vehicle manifest (a suite's instance PLAN: config/vehicle.yaml in TEMPLATE form — "
+                     "identity as markers, row refs unversioned)", "type": "object",
+            "required": ["kind", "name", "version", "config"],
+            "properties": {**common, "kind": {"const": "vehicle"}, "project": {"type": "string"},
+                           "config": {"type": "object", "required": ["payload"],
+                                      "properties": {"payload": relpath}}},
         },
         "index": {
             "$schema": "https://json-schema.org/draft/2020-12/schema",

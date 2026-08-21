@@ -220,7 +220,9 @@ mode, `--emit/--diff` host-independence proof); `build` (per-service build + mir
 form, `--bundle-images` air-gap bundles, parent provenance on re-bake); the authoring family — `init`
 (name seed, `--infra` path/bare-name workspace resolution, `--discover` one-level scan), `add` (wire a
 service into an existing deployment), `fetch` (materialize configs for hand-authored rows), `rigify`
-(retrofit the contract onto existing software, analysis-seeded, certify-green out of the box).
+(retrofit the contract onto existing software, analysis-seeded, certify-green out of the box); the
+package-registry layer (five kinds — services, profiles, overlays, suites, vehicle plans — with
+working-copy tuning, promote/save/repin/outdated currency, stale pins as snapshots).
 Validated against the real launchers (cam-up, dash-up, novatel-up, sbg-up, vectornav-up, the rig-infra
 services) — and continuously, by `rig certify` in each repo's CI.
 

@@ -616,3 +616,15 @@ service-wide overlay binding, no vehicle.yaml composition. Plan doc: `rig-vehicl
   pointed hint. Currency is `pkg outdated`'s job (exit 1 on drift — the suite owner's CI
   signal) and `pkg repin` the refresh. `repin --dep <older>` is now an honored explicit pin.
 
+## 12. Identity defaults to per-host markers — ✅ implemented (v0.2.20)
+
+- **v0.2.20** `rig init` scaffolds `vehicle: "{{vehicle}}"` / `vehicle_id: "{{vehicle_id}}"` by
+  default — per-host identity is supplied per machine (`sudo rig provision --id N --name X`,
+  RIG_VEHICLE_ID/RIG_VEHICLE_NAME, or a bench vehicle.local.yaml); `--vehicle-id N` pins literals
+  (dir name + id — the single-vehicle shape). Why: the old `vehicle_id: 1` default was "vehicle 1
+  by accident" — the exact bug class the marker design exists to prevent — and it defeated
+  vehicle-plan reproduction: a plan with markers installed onto an init'd tree inherited the
+  scaffold literal (the plan install preserves a target's identity because it cannot tell a
+  scaffold placeholder from a deliberate choice). With markers the default, a plan's markers
+  propagate, and a deliberate `--vehicle-id` still wins. Quick-start docs pass `--vehicle-id 1`.
+

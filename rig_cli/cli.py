@@ -527,7 +527,7 @@ def translate_argv(argv: list[str]) -> list[str] | None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="rig", description="vehicle-level sensor-stack orchestrator",
+        prog="rig", description="vehicle-level stack orchestrator (infra · sensors · autonomy)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="noun groups (canonical forms; the flat spellings above stay as permanent aliases):\n"
                "  rig config   show | render          rig run      new | end | list\n"
@@ -625,8 +625,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     ini = sub.add_parser("init", help="scaffold a fresh deployment (vehicle.yaml/services.yaml/config)")
     ini.add_argument("target", help="directory to create the deployment in (its name seeds `vehicle:`)")
-    ini.add_argument("--vehicle-id", type=int, default=1, metavar="N",
-                     help="vehicle identity (ROS domain + VEHICLE_ID); default 1")
+    ini.add_argument("--vehicle-id", type=int, default=None, metavar="N",
+                     help="pin a LITERAL identity (ROS domain + VEHICLE_ID; the dir name seeds "
+                          "`vehicle:`) — a single-vehicle tree. Default: per-host MARKERS, "
+                          "supplied per machine by `rig provision` / RIG_VEHICLE_ID (nothing "
+                          "comes up as vehicle 1 by accident)")
     ini.add_argument("--infra", action="append", default=[], metavar="NAME|PATH",
                      help="fully wire a shared-infra service (repeatable): a service-dir path, or a bare "
                           "name resolved from the workspace (e.g. --infra zenoh-router finds "

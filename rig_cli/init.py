@@ -41,10 +41,7 @@ from .descriptor import find_descriptor, load_descriptor
 
 _VEHICLE_HEAD = """\
 # vehicle.yaml — vehicle identity, fleet-wide settings, shared infra, and sensors.
-vehicle: {name}
-vehicle_id: {vehicle_id}           # identity; decides the ROS domain (override via ros.domain_id) + exported as
-                        #   VEHICLE_ID. Fleet artifacts resolve it on-vehicle (`rig provision`
-                        #   writes /etc/rig/vehicle.local.yaml; RIG_VEHICLE_ID overrides).
+{identity}
 ros:
   # domain_id: 0        # defaults to vehicle_id
   rmw: rmw_zenoh_cpp    # rmw_zenoh needs a zenoh-router in infra: (below); use rmw_fastrtps_cpp for DDS
@@ -292,11 +289,36 @@ def _discover(scan: Path, target: Path, services: dict[str, str],
     return count
 
 
-def _vehicle_yaml(name: str, vehicle_id: int, infra_rows: list[str], menu: dict[str, list[str]]) -> str:
+_IDENTITY_MARKERS = """\
+vehicle: "{{vehicle}}"       # identity — per-HOST MARKERS by default (v0.2.20): nothing comes up as
+vehicle_id: "{{vehicle_id}}" #   "vehicle 1" by accident. Each machine supplies its own: `sudo rig
+                        #   provision --id N --name X` (/etc/rig/vehicle.local.yaml), or
+                        #   RIG_VEHICLE_ID / RIG_VEHICLE_NAME, or a bench vehicle.local.yaml beside
+                        #   this file. vehicle_id decides the ROS domain (override via
+                        #   ros.domain_id) + is exported as VEHICLE_ID. A single-vehicle tree may
+                        #   pin literals instead: `rig init <dir> --vehicle-id N`."""
+
+_IDENTITY_LITERAL = """\
+vehicle: {name}
+vehicle_id: {vehicle_id}           # identity; decides the ROS domain (override via ros.domain_id) + exported as
+                        #   VEHICLE_ID. Literal = a single-vehicle tree; per-HOST tiers still override
+                        #   (`sudo rig provision`, RIG_VEHICLE_ID). Fleet trees use "{{{{vehicle_id}}}}"."""
+
+
+def _identity_block(name: str, vehicle_id: int | None) -> str:
+    """The identity lines: MARKERS (per-host, mandatory-from-local) unless --vehicle-id pinned a
+    literal — then the dir name + id, the single-vehicle shape."""
+    if vehicle_id is None:
+        return _IDENTITY_MARKERS
+    return _IDENTITY_LITERAL.format(name=_yaml_str(name), vehicle_id=vehicle_id)
+
+
+def _vehicle_yaml(name: str, vehicle_id: int | None, infra_rows: list[str],
+                  menu: dict[str, list[str]]) -> str:
     # NOTE: section headers are bare (`infra:`, no `[]`) — an explicit `[]` closes the value, making the
     # commented rows below un-uncommentable (YAML error). A bare header parses as null; the manifest
     # loader treats that as empty, and uncommenting a row Just Works.
-    lines = [_VEHICLE_HEAD.format(name=_yaml_str(name), vehicle_id=vehicle_id).rstrip("\n")]
+    lines = [_VEHICLE_HEAD.format(identity=_identity_block(name, vehicle_id)).rstrip("\n")]
     lines.append(f"{'infra:':<22}# shared services brought up FIRST (e.g. a zenoh router for rmw_zenoh):")
     if not infra_rows and not menu["infra"]:
         lines.append("  # - { name: zenoh-router, service: zenoh-router, config: config/infra/zenoh-router.yaml, enabled: true, order: 0 }")
@@ -353,7 +375,7 @@ def _git_init_deployment(target: Path) -> None:
            else "  git: repo created; initial commit failed (configure git user.name/email)")
 
 
-def init(target: Path, *, vehicle_id: int = 1, infra: list[str] | None = None,
+def init(target: Path, *, vehicle_id: int | None = None, infra: list[str] | None = None,
          discover: Path | None = None, no_git: bool = False) -> Path:
     target = target.resolve()
     if (target / "vehicle.yaml").exists():

@@ -78,7 +78,9 @@ No workspace checkouts needed — services/profiles install from registries, pin
 ```bash
 rig setup                          # once per machine: ~/.rig + the default `public` registry
 rig registry sync                  # clone/ff-pull the caches; everything below is OFFLINE after this
-rig init my-vehicle --vehicle-id 7 && cd my-vehicle    # born a git repo (--no-git opts out)
+rig init my-vehicle --vehicle-id 7 && cd my-vehicle    # born a git repo (--no-git opts out);
+                                   #   without --vehicle-id the tree carries per-host identity
+                                   #   MARKERS (v0.2.20) — `rig provision`/RIG_VEHICLE_ID supply them
 rig add public/zenoh-router        # infra from the registry: repo cloned AT THE PIN, launch surface
                                    #   VENDORED into services/, config from its example, rig.lock written
 rig add sensor:zr30                # match a profile (exact → glob → fallback), install its service
@@ -103,13 +105,20 @@ rig pkg promote siyi_zr30 --name zr30-gideon --project gideon --to internal
                                    #   (write+validate; publish = plain git push/PR, printed for you)
 rig registry sync && rig overlay apply siyi_zr30 internal/zr30-gideon --clear-local
                                    # same render, tuning now VERSIONED (local always beats overlays)
-rig pkg promote --all --project gideon --suite gideon-boat --vehicle gideon --to internal
-                                   # whole-deployment capture: overlays + a suite + (--vehicle,
-                                   #   v0.2.17) the instance PLAN — a template vehicle.yaml whose
-                                   #   rows carry YOUR names/order/enabled/tiers/bindings. A fresh
-                                   #   (EMPTY) vehicle reproduces it with `rig pkg add
-                                   #   internal/gideon-boat`; identity stays per-host, fleet
-                                   #   defaults (platform, images, data_dir) travel literal
+rig pkg promote --all --project gideon --suite gideon-boat --vehicle gideon --to internal --adopt
+                                   # whole-deployment capture: dirty instances -> overlays, plus a
+                                   #   suite, plus (--vehicle, v0.2.17) the instance PLAN — a template
+                                   #   vehicle.yaml whose rows carry YOUR names/order/enabled/tiers/
+                                   #   bindings (N instances per profile). --adopt (v0.2.18) consents
+                                   #   to capturing HAND-AUTHORED instances (no registry anchor — e.g.
+                                   #   a service with no examples) as adopted PROFILES; without it
+                                   #   they are skipped loudly. Re-running the same command re-captures
+                                   #   the plan by name. Identity stays per-host (markers); fleet
+                                   #   defaults (platform, images, data_dir, ros, vars) travel literal
+rig init veh2 && rig pkg add internal/gideon-boat --root veh2
+                                   # a fresh (EMPTY) tree reproduces the vehicle: rows, bindings,
+                                   #   platform… — identity arrives per host (`rig provision` /
+                                   #   RIG_VEHICLE_ID; `rig init --vehicle-id 7` pins a literal)
 rig pkg save siyi_zr30             # CANONICAL update-in-place (v0.2.8): publish the edits into the
                                    #   package the instance is pinned to + re-anchor clean, render
                                    #   identical — bound overlay first (top of stack), else profile.
@@ -163,7 +172,12 @@ rig pkg outdated                   # registry-authoring currency: profile requir
                                    #   the repair; exit 1 on drift (--quiet for cron)
 rig pkg repin ouster:generic --to internal
                                    # advance declared PINS to current + next patch version (payloads
-                                   #   untouched — that's rebase); suites refresh every member
+                                   #   untouched — that's rebase); suites refresh every member incl.
+                                   #   the vehicle plan. Repin inside-out: profiles first, then the
+                                   #   suites that reference them (outdated's FIX column = the order).
+                                   #   NOT an emergency (v0.2.19): stale exact pins are snapshots —
+                                   #   validate warns, installs serve the pinned version from the
+                                   #   registry's git history (keep internal registries git-backed)
 rig pkg upgrade --dry-run          # the REAL sweep (three-ways, conflicts) then rolled back — a
                                    #   full-fidelity preview
 rig registry sync                  # now prints the package-level delta digest (what moved upstream)

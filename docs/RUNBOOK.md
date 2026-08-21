@@ -249,11 +249,19 @@ Keeping a program registry current — run from any machine with the registries 
 rig registry sync                  # ff-pull; prints the package-level delta digest (what moved)
 rig pkg outdated                   # dependency drift across all registries: FIX column names the
                                    #   repair verb; exit 1 on drift, so a cron/CI sweep is one line
-rig pkg repin <pkg> --to internal  # advance declared pins to current (next patch version)
+rig pkg repin <pkg> --to internal  # advance declared pins to current (next patch version) —
+                                   #   inside-out: profiles (requires.service) first, then suites
+                                   #   (every member incl. the vehicle plan refreshes)
 rig pkg rebase <fork> --to internal# ...or three-way a fork's PAYLOAD onto its moved parent
 rig registry pending               # what's awaiting publish (promote/* branches in the caches)
 rig registry push internal --all --pr   # publish via YOUR git + gh/glab (PR creation only)
 ```
+
+A service's registry-release CI never blocks on this (v0.2.19): suites/profiles pinning an older
+version keep validating (a stale WARNING) and keep installing at their pinned versions from the
+registry's git history — so the loop above is maintenance, not firefighting. Whole-vehicle captures
+(`promote --all --suite S --vehicle V [--adopt]`) re-capture the vehicle plan by name on every
+run; a fresh `rig init` tree reproduces the vehicle with `rig pkg add internal/S`.
 
 Mistakes are cheap to retract: `rig registry discard internal <branch>` (unpushed — the cwd
 deployment is re-anchored render-identically, your edits back as local), `rig pkg yank <pkg>

@@ -1,9 +1,12 @@
-# rig — vehicle/machine-level sensor-stack orchestrator
+# rig — vehicle-level stack orchestrator (infra · sensors · autonomy)
 
-`rig` brings up and manages every sensor + autonomy stack on a single robot/vehicle computer (an NVIDIA
-Jetson), driven by config. It is **"a loop + a manifest"**: it reads a vehicle manifest and *delegates*
-the bring-up of each sensor to that service's own per-sensor launcher (`<service>-up`). It never
-reimplements per-stack logic.
+`rig` brings up and manages every stack on a single robot/vehicle computer (an NVIDIA Jetson) —
+shared **infra** (zenoh router, bag loggers, dashboard), **sensors** (cameras, GNSS/INS, lidar), and
+**autonomy** (planners, SLAM, perception) — driven by config. It is **"a loop + a manifest"**: it
+reads a vehicle manifest and *delegates* the bring-up of each stack to that service's own launcher
+(`<service>-up`), in tier order. It never reimplements per-stack logic. Stacks come from sibling
+checkouts or from **package registries** (pinned services, profiles, overlays, suites, and — since
+v0.2.17 — whole-vehicle plans), and a deployment bakes into a tagged artifact that runs on bare Docker.
 
 The dependency is strictly one-way: `rig` depends on the service repos; **a service never knows about
 `rig`**. `rig` learns each service only through its `rigging.yaml` descriptor + the launcher CLI, so
@@ -11,15 +14,25 @@ services evolve independently and new ones drop in by adding two files (a launch
 `rig rigify` generates both onto existing software).
 
 ```
-                 vehicle.yaml (which sensors)          services.yaml (where each repo is)
-                        │                                       │
-                        └──────────────► rig ◄──────────────────┘
-                                          │  per sensor: <launcher> <config> <verb>
-              ┌───────────────────────────┼───────────────────────────┐
-              ▼                            ▼                           ▼
-          cam-up                      novatel-up                    sbg-up        (each repo's launcher)
-   docker compose (camera)     docker compose (GNSS/INS)     docker compose (INS) ...one project per sensor
+   registries (public / internal)                vehicle.yaml                 services.yaml
+   services · profiles · overlays ·            which stacks, in 3 tiers;     where each repo lives
+   suites · vehicle plans (pinned)             identity, platform, ROS env   (checkout or vendored)
+                │  rig pkg add / upgrade               │                            │
+                └──────────────────────────────────────► rig ◄──────────────────────┘
+                                                         │   per stack: <launcher> <config> <verb>
+                                                         │   + fleet env (ROS_DOMAIN_ID, RMW, VEHICLE_ID,
+                                                         │     RIG_IMAGE_REGISTRY/TAG, RIG_TARGET_PLATFORM, RIG_DATA_DIR)
+        ┌────────────────────────────────────────────────┼────────────────────────────────────────────────┐
+        ▼ infra (up FIRST, down last)                    ▼ sensors (producers)                            ▼ autonomy (up LAST, down FIRST)
+   zenoh-router-up · dash-up · bag-logger-up        cam-up · novatel-up · sbg-up · lidar-up          planner-up · slam-up · perception-up
+   docker compose — one project per instance        docker compose — one project per instance        docker compose — one project per instance
+                                                         │
+                                 rig bake ──► tagged artifact (configs + vendored launchers + compose-only
+                                              scripts + rig) ──► ./run.sh up on the vehicle, bare Docker
 ```
+
+Each launcher is the service's own (`cam-up` is the exemplar; `rig rigify` scaffolds one onto existing
+software); rig only sequences the tiers, exports the fleet env, and aggregates status.
 
 ## What rig owns vs. what the launcher owns
 
@@ -27,10 +40,15 @@ services evolve independently and new ones drop in by adding two files (a launch
   (`/<name>`), render driver params, select/parameterize its static compose, wire devices/network, run
   `docker compose`. It **honors** the rig-provided `COMPOSE_PROJECT_NAME` (never passes `-p`), falling
   back to its own `<service>_<name>` only when run standalone.
-- **rig** owns the cross-cutting concerns: which sensors run (the manifest), **globally-unique instance
-  names**, the compose project name (`<name>-vehicle-<vehicle_id>`), bring-up order (producers→consumers),
-  fleet-wide ROS env (`ROS_DOMAIN_ID`/`RMW_IMPLEMENTATION`),
-  status/health aggregation, and lifecycle/cleanup (external-volume GC on final teardown).
+- **rig** owns the cross-cutting concerns: which stacks run (the manifest, in three tiers),
+  **globally-unique instance names**, the compose project name (`<name>-vehicle-<vehicle_id>`),
+  bring-up order (infra → sensors → autonomy; reversed on the way down, so the decider dies before
+  its eyes), the fleet env (`ROS_DOMAIN_ID`/`RMW_IMPLEMENTATION`, `VEHICLE_ID`, `RIG_IMAGE_REGISTRY`/
+  `RIG_IMAGE_TAG`, `RIG_TARGET_PLATFORM` + each service's declared platform override env,
+  `RIG_DATA_DIR`), per-host **identity** and **platform** (vehicle.yaml + the machine tier written by
+  `rig provision`), run directories (one session = one folder), status/health aggregation, and
+  lifecycle: external-volume GC on final teardown (`down --purge`) and full decommission
+  (`rig cleanup` — images + volumes off the host, never containers, never data).
 
 ## Install
 
@@ -57,7 +75,9 @@ formula automatically.
 python3 -m venv .venv && .venv/bin/pip install pyyaml
 
 # authoring — build a deployment (see docs/CHEATSHEET.md for the full flow)
-./rig init my-vehicle --infra zenoh-router --discover   # scaffold: wired infra + a discovered menu
+./rig init my-vehicle --vehicle-id 1 --infra zenoh-router --discover   # scaffold: wired infra + a menu
+                          #   (--vehicle-id pins a single-vehicle identity; without it the tree
+                          #   carries per-host MARKERS, supplied by `rig provision`/RIG_VEHICLE_ID)
 ./rig add ../novatel      # wire ONE more service into an existing deployment (path or bare name)
 ./rig fetch               # hand-wrote vehicle.yaml rows? materialize their configs from examples
 ./rig rigify ../my-sw     # make EXISTING software rig-compatible (descriptor + launcher + example)
@@ -121,6 +141,28 @@ renders it locally from its provisioned identity — one artifact serves the who
 (`sudo ./provision.sh --id 7 --name skiff-07` once per vehicle, then `./run.sh up` forever).
 CHEATSHEET §1.6 has the full lifecycle.
 
+## Registries & package kinds
+
+Stacks install from **package registries** (a git repo or shared folder of manifests — the public seed
+is [rig-registry-public](https://github.com/christomaszewski/rig-registry-public); `rig registry init`
+scaffolds your own, with `tools/validate` + CI wrappers). Five kinds:
+
+| kind | what it is | install shape |
+|---|---|---|
+| `service` | a code pointer (repo + full-SHA rev) and/or a digest-pinned image | `rig add internal/lidarish` — vendors the launch surface, routes it, instance from its example |
+| `profile` | a complete **nameless** config for one service (`requires.service`), keyed `service:short` | `rig add sensor:zr30` / `rig add camera-service:siyi-zr30` — the instance's editable working config, base pinned + hash-anchored |
+| `overlay` | a versioned **delta** on top of a profile-based instance (ordered bindings, last wins; local still beats overlays) | `rig overlay apply <instance> <ref>` — bindings only |
+| `suite` | references only: members at exact pins (services/profiles/overlays + at most one vehicle plan) | `rig pkg add internal/gideon-boat` — atomic, all-or-rollback |
+| `vehicle` | a suite's **instance plan** (v0.2.17): a template vehicle.yaml whose rows carry YOUR instance names, order, enabled, tiers, per-row overlay bindings, fleet defaults (`platform`, `images`, `data_dir`…); per-host identity stays markers | never standalone — captured with its suite (`promote --all --suite S --vehicle V`), installed through it into an empty `rig init` tree |
+
+The capture/reproduce loop: tune a deployment → `rig pkg promote --all --suite <s> --vehicle <plan>
+--to internal [--adopt]` (dirty instances become overlays; hand-authored ones become adopted profiles
+with `--adopt`) → on a fresh tree `rig pkg add internal/<s>` gives the vehicle back, identity supplied
+per host. Exact pins are **snapshots** (v0.2.19): a member's later release never breaks the suites or
+profiles that pin it — `registry validate` warns, installs serve the pinned version from the
+registry's git history, `rig pkg outdated` reports drift (exit 1, CI-able) and `rig pkg repin`
+refreshes. CHEATSHEET §1.5 is the daily loop; `docs/DESIGN.md` has the decision log.
+
 ## Certify a launcher (the contract, executable)
 
 `doctor` checks the *vehicle* (manifest composition); **`certify` checks a *service*** — it runs the
@@ -176,7 +218,13 @@ it keys the compose project, external volumes, and ROS namespace.
 Per-vehicle values flow through `{{var}}` markers (never `${VAR}` — that's compose's): configs and
 manifest scalars may reference `{{vehicle_id}}`, `vars:` entries, etc., resolved at render from
 shell (`RIG_VAR_*`) > `vehicle.local.yaml` > `/etc/rig/vehicle.local.yaml` > `vehicle.yaml`
-defaults. A self-marker (`vehicle_id: "{{vehicle_id}}"`) makes the value MANDATORY per vehicle.
+defaults. A self-marker (`vehicle_id: "{{vehicle_id}}"`) makes the value MANDATORY per vehicle —
+and since v0.2.20 `rig init` scaffolds `vehicle`/`vehicle_id` as markers by default (nothing comes
+up as "vehicle 1" by accident; `--vehicle-id N` pins a single-vehicle literal). `platform:` (e.g.
+`jp7`) declares the host's hardware/OS target → `RIG_TARGET_PLATFORM`; services with a build matrix
+pull `<image>:<tag>-<platform>` and `images.tag` means VERSION only. Both identity and platform are
+per-host facts the machine tier (`sudo rig provision --id 7 --name skiff-07 --platform jp7`) may
+override.
 An `env:` map exports extra (interpolated) variables to every launcher. One mapping form,
 `{{map <list_var> <template_var>}}`, builds lists (e.g. zenoh peer endpoints from
 `{{fleet_peer_ids}}` — the fleet minus THIS vehicle, derived). CHEATSHEET §1.6.

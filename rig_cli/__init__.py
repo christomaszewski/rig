@@ -1,4 +1,4 @@
-"""rig — a vehicle/machine-level sensor-stack orchestrator.
+"""rig — a vehicle-level stack orchestrator (infra · sensors · autonomy).
 
 `rig` is "a loop + a manifest": it reads a vehicle manifest (which sensors this machine runs) and
 *delegates* the bring-up/teardown of each to that service's own per-sensor launcher (``<service>-up``).
@@ -9,7 +9,7 @@ The dependency is strictly one-way: rig depends on the service repos; a service 
 rig learns each service only through its ``rigging.yaml`` descriptor + the launcher CLI.
 """
 
-__version__ = "0.2.19"
+__version__ = "0.2.20"
 
 
 class RigError(Exception):

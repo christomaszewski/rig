@@ -1,8 +1,28 @@
 # rig — project state & handoff (resume here)
 
 > Snapshot for picking the project up cold in a new session. Read this first, then `CHEATSHEET.md` /
-> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.2.9**,
-> branch **`main`**, 335 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.2.20**,
+> branch **`main`**, 384 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> **v0.2.14–0.2.20 (2026-08-20/21) — platform targeting, decommission, suite closure, the vehicle
+> kind, stale pins as snapshots, marker identity by default** (ROADMAP §7–§12; plan docs
+> `rig-platform-plan.md` + `rig-vehicle-kind-plan.md`, untracked):
+> - **v0.2.14 platform**: vehicle.yaml `platform:` (a HOST fact; `/etc/rig` may carry it,
+>   `rig provision --platform`) → `RIG_TARGET_PLATFORM` + each service's declared
+>   `platform.override_env`; services with a `build.platforms` matrix pull `<image>:<tag>-<platform>`
+>   (`images.tag` = VERSION only; the platform-valued tag is deprecated-but-working); build passes the
+>   composed tag; certify gains the `platform` check; doctor validates platform-vs-matrix.
+> - **v0.2.15 `rig cleanup`**: decommission (images + volumes off the host, never containers/data;
+>   `cleanup.sh` in artifacts). **v0.2.16 suite closure**: bare service instances → `services:`
+>   members; validate enforces overlay coverage.
+> - **v0.2.17 kind `vehicle`**: a suite's instance PLAN (template vehicle.yaml; rows drive the install
+>   — custom names/order/enabled/tiers, per-row bindings, N instances per profile; identity markers
+>   enforced, fleet defaults literal, row refs unversioned; captured only with its suite via
+>   `promote --all --suite S --vehicle V`, installed only through it into an EMPTY tree).
+>   **v0.2.18**: hand-authored instances captured as adopted PROFILES, gated on `--adopt` (consent is
+>   a flag, never a prompt; without it loud skip). **v0.2.19**: stale exact pins are SNAPSHOTS —
+>   validate warns, install serves the pin from git history, a service release never blocks
+>   suites/profiles that pin it; `pkg outdated` owns currency. **v0.2.20**: `rig init` scaffolds
+>   identity MARKERS by default (`--vehicle-id N` pins a single-vehicle literal).
 > **The QoL & registry-currency layer SHIPPED** (v0.2.5–0.2.9, plan doc `rig-qol-plan.md`,
 > untracked by request; CHEATSHEET §1.5 "the daily loop", RUNBOOK "registry maintainer loop"):
 > - **v0.2.5 discovery & inventory**: no-arg `pkg search` = the catalog (+`--kind`/`--registry`);
@@ -214,7 +234,8 @@ A launcher's compose opts into each (`${RIG_IMAGE_REGISTRY:+…}`, `:${RIG_IMAGE
 - Lifecycle `up/down(--purge)/cleanup/status/logs/config/doctor` (`cleanup` = decommission: images +
   volumes off the host, v0.2.15); tiered ordering (infra → sensors → autonomy;
   down reversed, so autonomy stops FIRST); tier-aware output ("2 sensors + 2 infra + 1 autonomy").
-- `vehicle.yaml`: `vehicle_id` (→ ROS domain + `VEHICLE_ID`), `ros{rmw,distro}`, `images{registry,tag}`,
+- `vehicle.yaml`: `vehicle`/`vehicle_id` (→ ROS domain + `VEHICLE_ID`; per-host MARKERS by default
+  since v0.2.20 — `rig init --vehicle-id N` pins literals), `ros{rmw,distro}`, `images{registry,tag}`,
   `platform` (→ `RIG_TARGET_PLATFORM`, v0.2.14), `data_dir`, `infra:`, `sensors:`, `autonomy:`.
   Config overrides + nameless profiles (deep-merge).
 - `doctor`: one-distro check, launcher-present, host-port clash (enabled-aware `plugins[name=x,enabled=true].params.port`

@@ -14,7 +14,7 @@ from rig_cli.init import init  # noqa: E402
 def _deployment() -> pathlib.Path:
     target = pathlib.Path(tempfile.mkdtemp()) / "veh"
     with contextlib.redirect_stderr(io.StringIO()):
-        init(target)
+        init(target, vehicle_id=1)  # single-vehicle tree: config show/render + pull consume identity
     data = target / "data"
     data.mkdir()
     v = target / "vehicle.yaml"

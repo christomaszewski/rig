@@ -36,7 +36,7 @@ Architecture: all
 Depends: python3 (>= 3.9), python3-yaml
 Maintainer: Chris Tomaszewski <christomaszewski@gmail.com>
 Homepage: https://github.com/christomaszewski/rig
-Description: vehicle-level sensor-stack orchestrator
+Description: vehicle-level stack orchestrator (infra, sensors, autonomy)
  A loop + a manifest: rig reads vehicle.yaml and delegates bring-up/teardown
  of each sensor/infra/autonomy stack to that service's own launcher. Includes
  the package-registry layer (profiles, overlays, suites) and deployment

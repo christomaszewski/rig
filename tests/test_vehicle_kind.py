@@ -72,9 +72,19 @@ def test_capture_emits_template_and_plan_install_reproduces():
         assert got == {"acme_cam": (True, 10, ["internal/acme-cam@1.0.0"]),
                        "cam_rear": (False, 77, [])}          # names/order/enabled/bindings travel
         assert m2.platform == "jp7"
-        assert m2.vehicle == "veh2" and m2.vehicle_id == 1   # TARGET identity survives the plan
+        # Identity: the init'd target carried MARKERS (v0.2.20 default) and the plan carries markers,
+        # so the fresh tree stays per-host/mandatory-from-local — fleet-style reproduction.
+        assert m2.vehicle_id is None and "vehicle_id" in m2.missing_identity
         assert _rendered(root2, "acme_cam") == _rendered(root, "acme_cam")
         assert _rendered(root2, "cam_rear") == _rendered(root, "cam_rear")
+        # A DELIBERATE target identity (rig init --vehicle-id 7) survives the plan verbatim.
+        root3 = pathlib.Path(tempfile.mkdtemp()) / "veh3"
+        with contextlib.redirect_stderr(io.StringIO()):
+            init(root3, no_git=True, vehicle_id=7)
+        rc, _, err = _run("--root", str(root3), "pkg", "install", "internal/boat")
+        assert rc == 0, err
+        m3 = load_manifest(root3)
+        assert m3.vehicle == "veh3" and m3.vehicle_id == 7
 
 
 def test_plan_refuses_populated_deployment_and_standalone_add():

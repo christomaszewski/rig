@@ -37,6 +37,19 @@ def test_init_seeds_vehicle_name_and_id_from_args():
     assert "vehicle: skiff1" in body and "vehicle_id: 7" in body
 
 
+def test_init_defaults_identity_to_per_host_markers():
+    # v0.2.20: no --vehicle-id -> MARKERS, not "vehicle 1 by accident". The tree loads lazily (manifest
+    # reports the identity as missing) and identity-consuming verbs point at provision/RIG_VEHICLE_ID;
+    # a vehicle-plan install onto such a tree keeps the markers (fleet-style reproduction).
+    from rig_cli.manifest import load_manifest
+    target = pathlib.Path(tempfile.mkdtemp()) / "skiff3"
+    init(target, no_git=True)
+    body = (target / "vehicle.yaml").read_text()
+    assert 'vehicle: "{{vehicle}}"' in body and 'vehicle_id: "{{vehicle_id}}"' in body
+    m = load_manifest(target)
+    assert m.vehicle_id is None and {"vehicle", "vehicle_id"} <= set(m.missing_identity)
+
+
 def test_init_scaffolds_vars_convention_and_gitignores_operational_files():
     target = pathlib.Path(tempfile.mkdtemp()) / "skiff2"
     init(target, no_git=True)
@@ -127,7 +140,7 @@ def test_init_yaml_hostile_dirname_is_quoted():
     import yaml as _yaml
 
     target = pathlib.Path(tempfile.mkdtemp()) / "veh #1"
-    init(target)
+    init(target, vehicle_id=1)   # literal-identity shape: the dir name seeds `vehicle:`
     data = _yaml.safe_load((target / "vehicle.yaml").read_text())
     assert data["vehicle"] == "veh #1"  # quoted, not truncated to "veh"
 

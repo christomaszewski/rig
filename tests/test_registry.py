@@ -86,7 +86,7 @@ def test_scaffold_is_self_valid_and_complete():
     assert (root / "tools" / "gen-index").stat().st_mode & 0o111
     assert (root / ".github" / "workflows" / "ci.yaml").is_file()
     assert (root / ".gitlab-ci.yml").is_file()  # both CI wrappers ship (OQ-7)
-    assert len(list((root / "schemas").glob("*.schema.json"))) == 6
+    assert len(list((root / "schemas").glob("*.schema.json"))) == 7   # registry + index + 5 kinds
     meta = yaml.safe_load((root / "registry.yaml").read_text())
     assert meta["namespace"] == "testns" and meta["schema"] == 2
 
