@@ -107,11 +107,12 @@ def test_profile_repin_exact_and_caret():
         assert _manifest(reg, "profiles", "camish:carety")["requires"]["service"] == "camish@^1.5.0"
         rc, _, err = _run("pkg", "repin", "exactly", "--to", "main")   # already current
         assert rc == 0 and "already current" in err
-        # --dep to a NON-head in-registry version: the registry law refuses at validate, and
-        # the rollback restores the tree (restore-not-delete).
+        # --dep to a NON-head in-registry version: an explicit exact pin is a legal SNAPSHOT
+        # (v0.2.19 — validate warns "stale", install serves it from git history); the publish
+        # goes through and the manifest carries the asked-for pin.
         rc, _, err = _run("pkg", "repin", "exactly", "--to", "main", "--dep", "camish@1.4.0")
-        assert rc == 1 and "not satisfied" in err
-        assert _manifest(reg, "profiles", "camish:exactly")["requires"]["service"] == "camish@1.5.0"
+        assert rc == 0, err
+        assert _manifest(reg, "profiles", "camish:exactly")["requires"]["service"] == "camish@1.4.0"
 
 
 def test_dry_run_writes_nothing():

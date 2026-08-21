@@ -100,7 +100,12 @@ Key design points (full decision log: the registry plan document):
   only; registry provenance is a row field (`profile:`) + lock anchors.
 - **Exact pins everywhere**: full-SHA sources, digest-only images, one `rig.lock`
   (registries@commit / package pins+hashes / instance anchors / bake's image digests);
-  `--locked` reproduces byte-identically. Suites install atomically (any failure rolls the
+  `--locked` reproduces byte-identically. **Stale exact pins are snapshots, not errors**
+  (v0.2.19): a suite member or profile `requires.service` behind registry-current is a
+  validate WARNING, never a publish blocker (a service's registry-release CI must not be held
+  hostage by suites/profiles it doesn't own); install serves the pinned version from the
+  registry's git history (non-git registries fail pointedly); currency is `pkg outdated`'s
+  report (exit 1 on drift) and `pkg repin` the refresh. Suites install atomically (any failure rolls the
   deployment back untouched) and are CLOSED (v0.2.16): promote captures bare service-backed
   instances as `services:` members, and validate rejects an overlay member no profile/service
   member can create an instance for. A suite may carry ONE `vehicle` member (v0.2.17): a

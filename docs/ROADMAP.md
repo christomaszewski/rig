@@ -514,7 +514,8 @@ in DESIGN.md; workflows in CHEATSHEET §1.5 + RUNBOOK "registry maintainer loop"
 - **v0.2.6** currency: `pkg outdated` (four kinds, FIX column, exit 1 on drift), sync delta
   digest, one shared namespace resolver.
 - **v0.2.7** `pkg repin`: declared PINS advance registry-side (payloads stay `rebase`'s);
-  suites refresh every member (registry law: in-registry members sit at head).
+  suites refresh every member (in-registry members at head; since v0.2.19 a stale member is a
+  legal snapshot — validate warns, install serves the pin from git history).
 - **v0.2.8** `pkg save` (top-of-stack update-in-place; render-identity invariant) + the
   publish tail: `registry pending|push[--pr]|discard`, `pkg yank --from` — discard/yank run
   save's inverse (the delta returns as local edits, render byte-identical).
@@ -600,3 +601,18 @@ service-wide overlay binding, no vehicle.yaml composition. Plan doc: `rig-vehicl
   prints both fixes: re-run with --adopt, or name it yourself first
   (`promote <inst> --kind profile --name <short> --adopt`) and re-capture. No service pin at
   all still warns and skips (adopt the service first).
+
+## 11. Stale pins are snapshots — ✅ implemented (v0.2.19)
+
+- **v0.2.19** a member's release no longer breaks what pins it. Before: a suite member or a
+  profile's exact `requires.service` behind registry-current was a `registry validate` ERROR
+  and an install refusal ("uninstallable at this sync state") — so a service repo's
+  registry-release CI failed validation because of suites/profiles it doesn't own, and those
+  packages were uninstallable until someone repinned. Now: validate WARNS ("stale … installs
+  from git history; repin refreshes"; a caret base above head stays an ERROR — nothing can
+  satisfy it), suite members and exact profile requires install at their PINNED versions from
+  the registry's git history (the same `resolve_ref(history=True)` path `pkg add ns/name@old`
+  uses; overlay bindings land at the pinned version), and a non-git registry fails with the
+  pointed hint. Currency is `pkg outdated`'s job (exit 1 on drift — the suite owner's CI
+  signal) and `pkg repin` the refresh. `repin --dep <older>` is now an honored explicit pin.
+

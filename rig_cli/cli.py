@@ -887,9 +887,9 @@ def build_parser() -> argparse.ArgumentParser:
                      help="the registry carrying the package (local-dir in place, git on a "
                           "promote/ branch)")
     prp.add_argument("--dep", default=None, metavar="[ns/]name[@ver]",
-                     help="advance the NAMED dependency to this exact version (mainly for "
-                          "cross-registry deps — in-registry pins must sit at head to "
-                          "validate; suite siblings still refresh to current)")
+                     help="advance the NAMED dependency to this exact version (an explicit "
+                          "pin — a stale in-registry pin validates with a warning and installs "
+                          "from git history; suite siblings still refresh to current)")
     prp.add_argument("--dry-run", action="store_true",
                      help="print the resulting manifest changes; write nothing")
     pr = pkgsub.add_parser("rebase", help="three-way a FORKED profile onto its parent's current "

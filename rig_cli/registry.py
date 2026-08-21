@@ -187,8 +187,16 @@ def _validate_profile(pkg: Package, reg: Registry, issues: list[Issue]) -> None:
         dep = reg.packages.get(match["name"]) if (not match["ns"] or match["ns"] == reg.namespace) else None
         if dep is not None and dep.kind == "service" and not constraint_satisfied(
                 match["ver"], bool(match["caret"]), dep.version):
-            issues.append(Issue(where, f"`requires.service` {req} is not satisfied by "
-                                       f"{match['name']}@{dep.version} in this registry"))
+            if match["caret"]:  # a caret base ABOVE head: nothing in this registry can satisfy it
+                issues.append(Issue(where, f"`requires.service` {req} is not satisfied by "
+                                           f"{match['name']}@{dep.version} in this registry"))
+            else:  # an EXACT pin behind head is a valid SNAPSHOT: installable from git history;
+                #    currency is `pkg outdated`'s report, not a publish blocker (a service release
+                #    must never be held hostage by profiles it does not own)
+                issues.append(Issue(where, f"`requires.service` {req} is behind registry-current "
+                                           f"{match['name']}@{dep.version} — stale exact pin "
+                                           f"(installs from git history; `rig pkg repin "
+                                           f"{pkg.name}` refreshes)", level="warning"))
     for block in (m.get("provides") or {}).get("sensor", []) if isinstance(m.get("provides"), dict) else []:
         if not isinstance(block, dict) or not isinstance(block.get("match"), list) or not block["match"]:
             issues.append(Issue(where, "`provides.sensor[]` entries need a non-empty `match:` list"))
@@ -343,8 +351,13 @@ def _validate_suite(pkg: Package, reg: Registry, issues: list[Issue]) -> None:
                     issues.append(Issue(where, f"member '{ref}' does not resolve to a {kind} "
                                                f"in this registry"))
                 elif dep.version != match["ver"]:
+                    # Stale member pin = a valid SNAPSHOT (a suite's value IS its exact set):
+                    # installable from git history; `pkg outdated` reports the drift. Never a
+                    # publish blocker — a member's release must not break suites it doesn't own.
                     issues.append(Issue(where, f"member '{ref}' pins {match['ver']} but this registry "
-                                               f"carries {dep.version}"))
+                                               f"carries {dep.version} — stale (installs from git "
+                                               f"history; `rig pkg repin {pkg.name}` refreshes)",
+                                        level="warning"))
 
     # Plan-driven closure (vehicle member present): the payload's rows drive the install, so
     # every row ref must resolve to a member (else install cannot build the row), and members no

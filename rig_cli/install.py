@@ -136,6 +136,17 @@ def _resolve_required_service(entry: Entry, reg: Registry, profile: Package) -> 
     if service is None or service.kind != "service":
         raise RigError(f"install: requires.service '{req}' does not resolve to a service")
     if not constraint_satisfied(match["ver"], bool(match["caret"]), service.version):
+        if not match["caret"]:  # EXACT pin behind head: honor it from git history (a snapshot
+            full = ".".join((str(match["ver"]).split(".") + ["0", "0", "0"])[:3])  # stays valid)
+            try:
+                svc_entry, _, service = resolve_ref(f"{svc_entry.name}/{match['name']}@{full}",
+                                                    history=True)
+                return svc_entry, service
+            except RigError as exc:
+                raise RigError(f"install: {profile.name} requires {req} but the registry carries "
+                               f"{service.name}@{service.version} and the pinned version is "
+                               f"unavailable ({exc}) — `rig pkg repin` the profile, or sync a "
+                               f"git-backed registry")
         raise RigError(f"install: {profile.name} requires {req} but the registry carries "
                        f"{service.name}@{service.version}")
     return svc_entry, service
@@ -382,12 +393,24 @@ def _rollback(root: Path, snap: dict) -> None:
 
 
 def _member_pkg(member) -> tuple:
-    """Resolve one suite member ref; ERROR unless the exact pin is the registry's current
-    version (the head law — repin refreshes stale suites)."""
-    m_entry, m_reg, m_pkg = resolve_ref(str(member).split("@", 1)[0])
-    if m_pkg.version != str(member).rpartition("@")[-1]:
-        raise RigError(f"suite member {member}: registry carries {m_pkg.version} — the "
-                       f"exact pin is uninstallable at this sync state")
+    """Resolve one suite member at its EXACT pin. At head: the current package. Behind head: the
+    pinned version from the registry's git history (a suite's value IS its exact set — a member's
+    later release must not make the suite uninstallable; `pkg outdated` reports the drift and
+    `pkg repin` refreshes). A non-git registry, or a version history never carried, fails with
+    the pointed hint."""
+    ref = str(member)
+    m_entry, m_reg, m_pkg = resolve_ref(ref.split("@", 1)[0])
+    want = ref.rpartition("@")[-1]
+    if m_pkg.version != want:
+        head = m_pkg.version
+        try:
+            m_entry, m_reg, m_pkg = resolve_ref(ref, history=True)
+        except RigError as exc:
+            raise RigError(f"suite member {ref}: registry carries {head} and the pinned version "
+                           f"is unavailable ({exc}) — `rig pkg repin <suite>` to refresh the "
+                           f"suite, or sync a git-backed registry")
+        eprint(f"  note: suite member {ref} is behind registry-current ({head}) — installing the "
+               f"pinned version from history (rig pkg repin <suite> --to <registry> refreshes)")
     return m_entry, m_reg, m_pkg
 
 
@@ -440,7 +463,7 @@ def _install_planned(root: Path, suite_ref: str, plan: dict, v_entry, v_pkg, v_p
     overlay_refs: dict[str, str] = {}  # member name -> consumer-alias ref for overlay apply
     for member in members.get("overlays") or []:
         m_entry, _, m_pkg = _member_pkg(member)
-        overlay_refs[m_pkg.name] = f"{m_entry.name}/{m_pkg.name}"
+        overlay_refs[m_pkg.name] = f"{m_entry.name}/{m_pkg.name}@{m_pkg.version}"  # exact pin
     lock = load_lock(root)  # the plan itself is provenance
     record_package(lock, qualified(v_entry, v_pkg),
                    {"kind": "vehicle", "payload_sha256": sha256_file(v_payload)})
@@ -525,10 +548,7 @@ def _install_suite(root: Path, entry: Entry, pkg: Package, *, locked: bool) -> i
             eprint(f"rig install: suite {ref} complete")
             return 0
         for member in members.get("services") or []:
-            m_entry, _, m_pkg = resolve_ref(str(member).split("@", 1)[0])
-            if m_pkg.version != str(member).rpartition("@")[-1]:
-                raise RigError(f"suite member {member}: registry carries {m_pkg.version} — the "
-                               f"exact pin is uninstallable at this sync state")
+            m_entry, _, m_pkg = _member_pkg(member)
             lock = load_lock(root)
             desc = _install_service(root, m_entry, m_pkg, lock, locked=locked)
             save_lock(root, lock)
@@ -541,17 +561,11 @@ def _install_suite(root: Path, entry: Entry, pkg: Package, *, locked: bool) -> i
                                       enabled=True)
                 save_lock(root, lock)
         for member in members.get("profiles") or []:
-            m_entry, m_reg, m_pkg = resolve_ref(str(member).split("@", 1)[0])
-            if m_pkg.version != str(member).rpartition("@")[-1]:
-                raise RigError(f"suite member {member}: registry carries {m_pkg.version} — the "
-                               f"exact pin is uninstallable at this sync state")
-            install(root, f"{m_entry.name}/{m_pkg.name}", locked=locked)
+            m_entry, m_reg, m_pkg = _member_pkg(member)
+            install(root, f"{m_entry.name}/{m_pkg.name}@{m_pkg.version}", locked=locked)
         created = [s for s in load_manifest(root).sensors if s.name not in before_names]
         for member in members.get("overlays") or []:
-            m_entry, _, m_pkg = resolve_ref(str(member).split("@", 1)[0])
-            if m_pkg.version != str(member).rpartition("@")[-1]:
-                raise RigError(f"suite member {member}: registry carries {m_pkg.version} — the "
-                               f"exact pin is uninstallable at this sync state")
+            m_entry, _, m_pkg = _member_pkg(member)
             targets = [s.name for s in created if _overlay_covers(m_pkg.manifest, s)]
             if not targets:
                 raise RigError(f"suite member {member}: no instance created by this suite matches "
@@ -560,7 +574,7 @@ def _install_suite(root: Path, entry: Entry, pkg: Package, *, locked: bool) -> i
                                f"member alongside it; re-promote the suite with rig ≥ 0.2.16, "
                                f"which emits and validates that)")
             for instance in targets:
-                overlay_apply(root, instance, f"{m_entry.name}/{m_pkg.name}")
+                overlay_apply(root, instance, f"{m_entry.name}/{m_pkg.name}@{m_pkg.version}")
     except BaseException:
         _rollback(root, snap)
         eprint(f"rig install: suite {ref} FAILED — deployment rolled back untouched")

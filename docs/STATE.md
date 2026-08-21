@@ -15,7 +15,7 @@
 >   (`registries.resolve_namespace/current_version_of`).
 > - **v0.2.7 `pkg repin`**: advance declared dependency PINS registry-side (profile requires —
 >   caret keeps its caret; overlay authored_against re-stamp, fresh-stamps pre-v0.1.59 packages,
->   warn-only vanished-key check via history; suites refresh EVERY member — the registry law pins
+>   warn-only vanished-key check via history; suites refresh EVERY member — (v0.2.19: stale pins are legal snapshots; validate warns, install serves them from git history; pre-0.2.19 the registry law pinned
 >   in-registry members at head); payloads stay rebase's job; `--dry-run`.
 > - **v0.2.8 `pkg save` + the publish tail**: save = update-in-place porcelain (top-of-stack:
 >   bound overlay first — delta recomputed against the pre-overlay base, never patch-composed —

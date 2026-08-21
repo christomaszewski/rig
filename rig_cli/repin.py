@@ -257,9 +257,10 @@ def _repin_suite(reg, name, existing, dep_name, dep_ver, changes) -> tuple[dict,
             mmatch = _QUALIFIED_EXACT.match(str(ref))
             if not mmatch:
                 raise RigError(f"repin: suite member '{ref}' is not ns/name@X.Y.Z")
-            # EVERY member refreshes — the registry law pins in-registry members at head, so a
-            # narrowed refresh could never validate; --dep only overrides the named member's
-            # target version (its real use: cross-registry members, validated format-only).
+            # EVERY member refreshes — repin means "advance to current"; --dep only overrides
+            # the named member's target version (cross-registry members, or an explicit pin).
+            # Stale members are legal snapshots (validate warns, install serves them from git
+            # history) — repin is the maintainer's refresh, not a law enforcer.
             named = dep_name and (mmatch["name"] == dep_name
                                   or split_key(mmatch["name"])[1] == dep_name)
             target = dep_ver if (named and dep_ver) else \

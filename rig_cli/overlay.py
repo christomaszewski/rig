@@ -125,7 +125,7 @@ def _warn_authored_against(lock: dict, pkg, service: str) -> None:
 
 def apply(root: Path, instance: str, ref: str, *, clear_local: bool = False) -> int:
     sensor = _find_instance(root, instance)
-    entry, _, pkg = resolve_ref(ref)
+    entry, _, pkg = resolve_ref(ref, history="@" in ref)  # an exact @ver may live in git history
     if pkg.kind != "overlay":
         raise RigError(f"overlay apply: '{ref}' is a {pkg.kind}, not an overlay")
     if not _targets_cover(pkg.manifest, sensor):
