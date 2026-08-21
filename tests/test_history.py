@@ -3,6 +3,7 @@
 import contextlib
 import io
 import pathlib
+import shutil
 import sys
 import tempfile
 
@@ -72,6 +73,33 @@ def test_add_historical_needs_git_backed_registry():
         root, _ = _world()                                # plain local-dir folder, no .git
         rc, _, err = _run("--root", str(root), "pkg", "install", "testns/camish:acme-cam@1.9.9")
         assert rc == 1 and "git-backed registry" in err
+
+
+def test_nested_registry_resolves_history_through_parent_repo():
+    """A registry checked out BELOW a larger repo's root (monorepo layout): _git_prefix must
+    address blobs as <prefix>/<kind_dir>/… — historical versions still resolve."""
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        repo, rev = _code_repo()
+        parent = pathlib.Path(tempfile.mkdtemp()) / "monorepo"
+        parent.mkdir(parents=True)
+        (parent / "README.md").write_text("the registry is just one corner of this repo\n")
+        reg = parent / "deploy" / "registry"
+        reg.parent.mkdir(parents=True)
+        shutil.copytree(_registry_with(repo, rev), reg)       # acme-cam@2.0.0, usb width 1280
+        _git("init", "-q", cwd=parent)
+        _git("add", "-A", cwd=parent)
+        _git("commit", "-q", "-m", "seed", cwd=parent)
+        _run("setup", "--no-default-registry")
+        _run("registry", "add", "testns", "--path", str(reg))  # local-dir INSIDE the parent repo
+        root = pathlib.Path(tempfile.mkdtemp()) / "veh"
+        with contextlib.redirect_stderr(io.StringIO()):
+            init(root, no_git=True)
+        _bump_profile(reg, "2.1.0", "service: camish\ncamera: {type: usb}\nusb: {width: 4096}\n")
+        rc, _, err = _run("--root", str(root), "pkg", "install", "testns/camish:acme-cam@2.0.0")
+        assert rc == 0, err
+        assert "HISTORICAL" in err                            # found through the nested prefix
+        working = (root / "config" / "sensors" / "acme_cam.yaml").read_text()
+        assert "width: 1280" in working                       # the OLD payload, byte-faithful
 
 
 def test_locked_reproduces_from_locked_registry_commit():

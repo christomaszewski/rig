@@ -211,12 +211,22 @@ def test_provision_write_show_check_and_force_gate():
         assert data == {"vehicle_id": 7, "vehicle": "skiff-07", "vars": {"camera_ip": "10.160.7.25"}}
         rc, _, err = _run("provision", "--var", "extra=1")               # vars-only: no identity change
         assert rc == 0, err
+        assert yaml.safe_load(machine.read_text())["vars"] == \
+            {"camera_ip": "10.160.7.25", "extra": 1}                     # MERGED; digit -> int
         rc, _, err = _run("provision", "--id", "8")                      # re-identify without --force
         assert rc == 1 and "ORPHANING" in err
         rc, _, err = _run("provision", "--id", "8", "--force")
         assert rc == 0 and yaml.safe_load(machine.read_text())["vehicle_id"] == 8
         rc, _, err = _run("provision", "--id", "x")
         assert rc == 1 and "numeric" in err
+        rc, _, err = _run("provision", "--platform", "jp7")              # a HOST fact, not identity:
+        assert rc == 0, err                                              # no --force gate
+        data = yaml.safe_load(machine.read_text())
+        assert data["platform"] == "jp7" and data["vehicle_id"] == 8     # identity untouched
+        rc, _, err = _run("provision", "--platform", "jp8")              # CHANGING it: still no gate
+        assert rc == 0 and yaml.safe_load(machine.read_text())["platform"] == "jp8"
+        rc, _, err = _run("provision", "--platform=-bad")                # it suffixes image tags
+        assert rc == 1 and "image-tag fragment" in err
 
 
 def test_provision_show_checks_deployment():

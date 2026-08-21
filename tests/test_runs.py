@@ -7,6 +7,7 @@ rotate or seal — `up`'s ensure never does either.
 import json
 import os
 import pathlib
+import shutil
 import sys
 import tempfile
 
@@ -182,6 +183,35 @@ def test_guard_parses_ndjson_compose_output():
     _mark_idle()
 
 
+def test_guard_ignores_unrelated_running_project():
+    # Precision: somebody ELSE's running compose stack on this host is not OUR evidence — only
+    # this manifest's expected project names may block rotation.
+    data = pathlib.Path(tempfile.mkdtemp())
+    m = _manifest(data)
+    _mark_idle()
+    runs.ensure(m, data)
+    os.environ["SHIM_COMPOSE_LS"] = json.dumps(
+        [{"Name": "somebody-elses-stack", "Status": "running(2)"}])
+    assert runs.new_run(m, data, "ours").endswith("_ours")      # unrelated stack -> no refusal
+    _mark_idle()
+
+
+def test_guard_missing_docker_reads_as_nothing_running():
+    # A missing docker binary alone is NOT "cannot tell": nothing of ours can run without it, so
+    # rotation proceeds (the guard's one deliberate fail-soft carve-out).
+    data = pathlib.Path(tempfile.mkdtemp())
+    m = _manifest(data)
+    _mark_idle()
+    runs.ensure(m, data)
+    old_path = os.environ["PATH"]
+    os.environ["PATH"] = tempfile.mkdtemp()                     # empty dir: no docker anywhere
+    try:
+        rid = runs.new_run(m, data, "nodocker")
+    finally:
+        os.environ["PATH"] = old_path
+    assert rid.endswith("_nodocker")                            # rotation still works
+
+
 def test_stale_current_tmp_does_not_brick():
     _mark_idle()
     data = pathlib.Path(tempfile.mkdtemp())
@@ -231,6 +261,28 @@ def test_corrupt_open_manifest_never_wedges_up():
     assert "ended:" in body and "corrupt: true" in body
 
 
+def test_dangling_current_self_heals_on_next_ensure():
+    _mark_idle()
+    data = pathlib.Path(tempfile.mkdtemp())
+    m = _manifest(data)
+    rid = runs.ensure(m, data)
+    shutil.rmtree(data / "runs" / rid)                          # the run dir behind the link is gone
+    assert (data / "current").is_symlink()                      # …so `current` now dangles
+    healed = runs.ensure(m, data)                               # reads as None -> heals, no error
+    assert healed is not None and (data / "current").resolve().name == healed
+    assert (data / "runs" / healed / "manifest.yaml").is_file()
+
+
+def test_sealed_run_with_corrupt_manifest_lists_as_corrupt():
+    _mark_idle()
+    data = pathlib.Path(tempfile.mkdtemp())
+    m = _manifest(data)
+    rid = runs.ensure(m, data)
+    runs.end_run(m, data)                                       # sealed; `current` removed
+    (data / "runs" / rid / "manifest.yaml").write_text("{{{ not yaml")
+    assert {r.run: r.state for r in runs.list_runs(m)}[rid] == "corrupt"  # reported, not hidden
+
+
 def test_relative_data_dir_rejected():
     import dataclasses
 
@@ -248,7 +300,11 @@ def test_up_run_label_comparison_survives_yaml_typing():
     m = _manifest(data)
     rid = runs.new_run(m, data, "123")
     mpath = data / "runs" / rid / "manifest.yaml"
-    mpath.write_text(mpath.read_text().replace("label: '123'", "label: 123"))  # sh-style unquoted int
+    text = mpath.read_text()
+    rewritten = text.replace("label: '123'", "label: 123")      # sh-style unquoted int
+    assert rewritten != text, "manifest lost the quoted label form this test rewrites"
+    mpath.write_text(rewritten)
+    assert yaml.safe_load(mpath.read_text())["label"] == 123    # the int really is on disk
     assert runs.up_run(m, data, "123") == rid                   # joins; no silent rotation on type drift
 
 

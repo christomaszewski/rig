@@ -2,8 +2,10 @@
 Run: python3 tests/test_fleet_verbs.py
 
 Local rows exercise the REAL code path (subprocess `rig up` on real deployments — no mocks);
-ssh/scp are PATH shims (the docker-shim idiom): ssh strips options and runs the command locally
-via sh -c (SHIM_SSH_FAIL=<host> => exit 255, the transport-failure branch), scp copies locally.
+ssh/scp are PATH shims (the docker-shim idiom): each logs its FULL argv (SHIM_SSH_LOG /
+SHIM_SCP_LOG — the transport-option contract stays checkable), then strips options; ssh runs the
+command locally via sh -c (SHIM_SSH_FAIL=<host> => exit 255, the transport-failure branch), scp
+copies locally (SHIM_SCP_FAIL=<host> => exit 1, the copy-failure branch).
 docker is shimmed to answer `compose ls` with [] and log network verbs to SHIM_DOCKER_LOG.
 """
 import contextlib
@@ -25,6 +27,7 @@ _REPO = pathlib.Path(__file__).resolve().parent.parent
 
 _SSH_SHIM = """\
 #!/bin/sh
+[ -n "$SHIM_SSH_LOG" ] && echo "$@" >> "$SHIM_SSH_LOG"
 while [ $# -gt 0 ]; do
   case "$1" in
     -o) shift 2 ;;
@@ -39,6 +42,7 @@ sh -c "$*"
 
 _SCP_SHIM = """\
 #!/bin/sh
+[ -n "$SHIM_SCP_LOG" ] && echo "$@" >> "$SHIM_SCP_LOG"
 while [ $# -gt 0 ]; do
   case "$1" in
     -o) shift 2 ;;
@@ -46,6 +50,11 @@ while [ $# -gt 0 ]; do
     *) break ;;
   esac
 done
+if [ -n "$SHIM_SCP_FAIL" ]; then
+  case "$1 $2" in
+    *"$SHIM_SCP_FAIL":*) echo "scp: connect to host $SHIM_SCP_FAIL: refused" >&2; exit 1 ;;
+  esac
+fi
 src="${1#*:}"; dst="${2#*:}"
 cp -r "$src" "$dst"
 """
@@ -157,6 +166,10 @@ def test_roster_loader_validation():
         ({"fleet": "f", "mode": "sim", "vehicles": [base]}, "mode must be"),
         ({"fleet": "f", "mode": "field", "sil": {"data_root": "/d"},
           "vehicles": [base]}, "requires `mode: sil`"),
+        ({"fleet": "f", "mode": "sil", "sil": {"bogus": 1}, "vehicles": [base]}, "carries only"),
+        ({"fleet": "f", "mode": "sil", "sil": {"network": {"name": "n"}},
+          "vehicles": [base]}, "sil.network needs"),
+        ({"fleet": "f", "vars": [1, 2], "vehicles": [base]}, "must be a mapping"),
         ({"fleet": "f", "vehicles": [{"name": "a"}]}, "needs id, name, path"),
         ({"fleet": "f", "vehicles": [dict(base, extra=1)]}, "unknown key"),
         ({"fleet": "f", "vehicles": []}, "no vehicles"),
@@ -169,14 +182,33 @@ def test_roster_loader_validation():
             raise AssertionError(f"expected RigError for {doc}")
         except RigError as exc:
             assert msg in str(exc), f"{doc}: {exc}"
-    with _env(RIG_FLEET=None):  # no file anywhere -> the convention pointer
-        cwd = os.getcwd()
-        os.chdir(tempfile.mkdtemp())
+    # The miss branches, without leaning on the tmpdir's ancestors (a stray /tmp/fleet.yaml on
+    # someone's box must never fail this test): explicit path and $RIG_FLEET are fully controlled…
+    try:
+        load_fleet(str(pathlib.Path(tempfile.mkdtemp()) / "absent" / "fleet.yaml"))
+        raise AssertionError("expected RigError for a missing explicit --fleet path")
+    except RigError as exc:
+        assert "not found" in str(exc)
+    with _env(RIG_FLEET=str(pathlib.Path(tempfile.mkdtemp()) / "gone.yaml")):
         try:
             load_fleet(None)
-            raise AssertionError("expected RigError")
+            raise AssertionError("expected RigError for a dangling $RIG_FLEET")
         except RigError as exc:
-            assert "CHEATSHEET" in str(exc)
+            assert "$RIG_FLEET" in str(exc)
+    # …and the walk-miss pointer is only asserted when NO ancestor carries a roster (the walk
+    # ends at /, which no tmpdir choice can control).
+    with _env(RIG_FLEET=None):
+        cwd = os.getcwd()
+        nest = pathlib.Path(tempfile.mkdtemp()).resolve() / "deep" / "er"
+        nest.mkdir(parents=True)
+        os.chdir(nest)
+        try:
+            if not any((d / "fleet.yaml").is_file() for d in (nest, *nest.parents)):
+                try:
+                    load_fleet(None)
+                    raise AssertionError("expected RigError")
+                except RigError as exc:
+                    assert "CHEATSHEET" in str(exc)
         finally:
             os.chdir(cwd)
 
@@ -276,6 +308,89 @@ def test_fleet_status_aggregates_and_survives_unreachable():
         assert "UNREACHABLE" in out                             # …and the sweep completed
 
 
+def test_fleet_up_fails_soft_over_unreachable_row():
+    """The MUTATING verbs share `list`/`status`'s DDIL posture: an unreachable row mars its line,
+    never the sweep — the healthy vehicle's run still opens, and ssh rode BatchMode (never a
+    credential prompt hanging a field fan-out)."""
+    a, b = _sil_tree("veh_a"), _sil_tree("veh_b")
+    data_root = pathlib.Path(tempfile.mkdtemp()) / "sil-data"
+    log = pathlib.Path(tempfile.mkdtemp()) / "ssh.log"
+    fy = _fleet_yaml([{"id": 1, "name": "veh_a", "path": str(a)},
+                      {"id": 2, "name": "far", "host": "downhost", "path": str(b)}],
+                     data_root=data_root)
+    with _env(SHIM_SSH_FAIL="downhost", SHIM_SSH_LOG=str(log)):
+        rc, _, err = _run("fleet", "up", "--fleet", str(fy), "--run", "soft1", "-j", "1")
+    assert rc == 1                                              # the marred row
+    assert "UNREACHABLE" in err and "1/2 ok" in err             # …but the sweep completed
+    run_dirs = list((data_root / "veh_a" / "runs").iterdir())
+    assert len(run_dirs) == 1 and run_dirs[0].name.endswith("_soft1")  # survivor's run opened
+    view = next((data_root / "runs").iterdir())
+    assert (view / "veh_a").is_symlink() and not (view / "far").exists()
+    assert "BatchMode=yes" in log.read_text()                   # the transport contract, verbatim
+
+
+def test_fleet_up_view_links_only_survivors_and_down_fails_soft():
+    """fleet.py:461's filter: a LOCAL row whose up FAILED must not lend its (stale) `current` to
+    the new label's view — only rc==0 vehicles are linked. Same fail-soft shape for down."""
+    a, b = _sil_tree("veh_a"), _sil_tree("veh_b")
+    data_root = pathlib.Path(tempfile.mkdtemp()) / "sil-data"
+    fy = _fleet_yaml([{"id": 1, "name": "veh_a", "path": str(a)},
+                      {"id": 2, "name": "veh_b", "path": str(b)}],
+                     data_root=data_root)
+    rc, _, err = _run("fleet", "up", "--fleet", str(fy), "--run", "one", "-j", "1")
+    assert rc == 0, err                                         # both rows healthy; both linked
+    (b / "vehicle.yaml").write_text("vehicle: [broken\n")       # veh_b's next up fails…
+    rc, _, err = _run("fleet", "up", "--fleet", str(fy), "--run", "two", "-j", "1")
+    assert rc == 1 and "1/2 ok" in err                          # …softly
+    assert any(d.name.endswith("_two") for d in (data_root / "veh_a" / "runs").iterdir())
+    two = next(v for v in (data_root / "runs").iterdir() if v.name.startswith("two-"))
+    assert (two / "veh_a").is_symlink()
+    assert not (two / "veh_b").exists()          # veh_b still HAS `current` (run one) — filtered
+    rc, _, err = _run("fleet", "down", "--fleet", str(fy), "--end-run", "-j", "1")
+    assert rc == 1 and "1/2 ok" in err                          # down mars the row, not the sweep
+    a_two = next(d for d in (data_root / "veh_a" / "runs").iterdir() if d.name.endswith("_two"))
+    assert "ended:" in (a_two / "manifest.yaml").read_text()    # the healthy vehicle still sealed
+
+
+def test_fleet_up_var_forwarding_and_malformed_var():
+    a = _sil_tree("veh_a")
+    data_root = pathlib.Path(tempfile.mkdtemp()) / "sil-data"
+    fy = _fleet_yaml([{"id": 1, "name": "veh_a", "path": str(a)}], data_root=data_root)
+    rc, _, err = _run("fleet", "up", "--fleet", str(fy), "--run", "varfwd",
+                      "--var", "mission_tag=alpha7", "-j", "1")
+    assert rc == 0, err
+    run_dir = next((data_root / "veh_a" / "runs").iterdir())
+    doc = yaml.safe_load((run_dir / "manifest.yaml").read_text())
+    snap = run_dir / ".rig" / "config" / doc["config"]
+    vars_doc = yaml.safe_load((snap / "vars.yaml").read_text())
+    assert vars_doc["vars"]["mission_tag"] == "alpha7"          # RIG_VAR_* landed in provenance
+    rc, _, err = _run("fleet", "up", "--fleet", str(fy), "--var", "novalue")
+    assert rc == 1 and "k=v" in err                             # malformed --var errors up front
+
+
+def test_vars_source_explicit_beats_derived_and_rejects_unknown_keys():
+    """The VEHICLE-side read (fleet.py vars_source): fleet_ids derive from the roster, an
+    explicit fleet-level vars: overrides them, and unknown top-level keys stay loud."""
+    from rig_cli import RigError
+    from rig_cli.fleet import vars_source
+    p = pathlib.Path(tempfile.mkdtemp()) / "fleet.yaml"
+    p.write_text(yaml.safe_dump({"fleet": "f", "mode": "sil", "gcs_ip": "10.0.0.10",
+                                 "vehicles": [{"id": 3}, {"id": 9}]}))
+    doc = vars_source(p)["vars"]
+    assert doc["fleet_ids"] == [3, 9]                           # roster-DERIVED
+    assert doc["gcs_ip"] == "10.0.0.10" and doc["fleet_mode"] == "sil"
+    p.write_text(yaml.safe_dump({"fleet": "f", "mode": "sil",
+                                 "vehicles": [{"id": 3}, {"id": 9}],
+                                 "vars": {"fleet_ids": [1, 2, 7]}}))
+    assert vars_source(p)["vars"]["fleet_ids"] == [1, 2, 7]     # explicit beats derived
+    p.write_text(yaml.safe_dump({"fleet": "f", "surprise": 1, "vehicles": [{"id": 3}]}))
+    try:
+        vars_source(p)
+        raise AssertionError("expected RigError for an unknown top-level key")
+    except RigError as exc:
+        assert "unknown key" in str(exc)
+
+
 def test_fleet_vars_flow_and_reboot_persistence():
     """The v0.1.68 tier: peer_endpoint lives ONLY in fleet.yaml, fleet_ids ONLY in the roster —
     after `fleet up`, each tree renders mutual peers, the snapshot records the roster-derived
@@ -339,6 +454,35 @@ def test_fleet_sync_skips_open_runs():
     assert "not sealed" in err                                   # OPEN skipped, with the reason
     assert (into / "done" / "veh_a" / "20260102T000000Z_done" / "manifest.yaml").is_file()
     assert not (into / "open").exists()
+
+
+def test_fleet_sync_label_filter_and_scp_fail_soft():
+    """--label pulls the label AND its same-second collision suffixes (`dock-2`), never other
+    labels; a failing remote copy mars its row while the rest of the harvest lands (DDIL)."""
+    a = _sil_tree("veh_l")
+    dl = pathlib.Path(tempfile.mkdtemp()) / "dl"
+    for rid in ("20260101T000000Z_dock", "20260101T000010Z_dock-2", "20260102T000000Z_survey"):
+        (dl / "runs" / rid).mkdir(parents=True)
+        (dl / "runs" / rid / "manifest.yaml").write_text(f"run: {rid}\nended: '2026-01-02'\n")
+    dr = pathlib.Path(tempfile.mkdtemp()) / "dr"
+    (dr / "runs" / "20260103T000000Z_dock").mkdir(parents=True)
+    (dr / "runs" / "20260103T000000Z_dock" / "manifest.yaml").write_text(
+        "run: 20260103T000000Z_dock\nended: '2026-01-03'\n")
+    fy = _fleet_yaml([{"id": 1, "name": "veh_l", "path": str(a), "data_dir": str(dl)},
+                      {"id": 2, "name": "far", "host": "farhost", "path": str(a),
+                       "data_dir": str(dr)}], mode="field")
+    into = pathlib.Path(tempfile.mkdtemp()) / "harvest"
+    log = pathlib.Path(tempfile.mkdtemp()) / "scp.log"
+    with _env(SHIM_SCP_FAIL="farhost", SHIM_SCP_LOG=str(log)):
+        rc, _, err = _run("fleet", "sync", "--fleet", str(fy), "--label", "dock",
+                          "--into", str(into))
+    assert rc == 1 and "scp failed" in err                       # the marred remote row…
+    assert "2 run(s) pulled" in err                              # …and the local rows landed
+    assert (into / "dock" / "veh_l" / "20260101T000000Z_dock" / "manifest.yaml").is_file()
+    assert (into / "dock-2" / "veh_l" / "20260101T000010Z_dock-2").is_dir()  # suffix matched
+    assert not (into / "survey").exists()                        # other label filtered out
+    assert not (into / "dock" / "far" / "20260103T000000Z_dock").exists()
+    assert "BatchMode=yes" in log.read_text()                    # scp rode the same ssh options
 
 
 if __name__ == "__main__":
