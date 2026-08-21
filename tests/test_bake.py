@@ -63,6 +63,26 @@ def test_localize_binds_relativizes_staging_paths_only():
     assert vols[3]["source"] == "/data/host"
 
 
+def test_localize_binds_disambiguates_same_basename_sources():
+    # Two staged binds whose sources share a basename (a/params.yaml + b/params.yaml) must NOT
+    # collapse onto one localized file — the second copy silently overwrote the first, cross-wiring
+    # both mounts to b's content.
+    staging = pathlib.Path(tempfile.mkdtemp())
+    for sub in ("a", "b"):
+        (staging / sub).mkdir()
+        (staging / sub / "params.yaml").write_text(f"from: {sub}\n")
+    dest = pathlib.Path(tempfile.mkdtemp())
+    c = {"services": {"drv": {"volumes": [
+        {"type": "bind", "source": str(staging / "a" / "params.yaml"), "target": "/etc/a.yaml"},
+        {"type": "bind", "source": str(staging / "b" / "params.yaml"), "target": "/etc/b.yaml"},
+    ]}}}
+    _localize_binds(c, dest, staging)
+    vols = c["services"]["drv"]["volumes"]
+    assert vols[0]["source"] != vols[1]["source"]                       # distinct localized names
+    for vol, want in zip(vols, ("from: a\n", "from: b\n")):             # each mount keeps ITS content
+        assert (dest / vol["source"][2:]).read_text() == want
+
+
 def test_write_scripts_emits_pull_beside_up_down_status():
     from rig_cli.bake import _write_bootstrap, _write_scripts
 
@@ -228,6 +248,10 @@ def test_bundle_images_saves_tar_and_keeps_tag_refs():
     from rig_cli.bake import bake, unbake
 
     root, m, cat, descs = _deployment_fixture(_COMPOSE_LAUNCHER)
+    # A deployment lock exists (a registry package was installed): bake must MERGE its image
+    # digests into that lock, not replace it — the artifact carries one rig.lock with both.
+    (root / "rig.lock").write_text(
+        "schema: 1\npackages:\n  public/demo@1.0.0: {kind: service, payload_sha256: abc}\n")
     shim = pathlib.Path(tempfile.mkdtemp())
     (shim / "docker").write_text(_DOCKER_SHIM)
     (shim / "docker").chmod(0o755)
@@ -246,11 +270,16 @@ def test_bundle_images_saves_tar_and_keeps_tag_refs():
     assert "reg.test/foo:t1" in compose and "@sha256" not in compose  # tags kept despite a known digest
     up = (tree / "up.sh").read_text()
     assert "images.tar" in up and "reg.test/foo:t1" in up             # guarded self-load on first up
+    assert "docker tag " not in up and "docker tag " not in (tree / "pull.sh").read_text()  # bundle
+    #                                  mode keeps tag refs throughout — bake() must emit NO aliases
     assert "docker load" in (tree / "load.sh").read_text()
     assert "load)" in (tree / "run.sh").read_text()
     meta = (tree / "metadata.yaml").read_text()
     assert "pinning: tag+bundle" in meta and "fakeimageid" in meta    # audit ids recorded
     assert "reg.test/foo@sha256:deadbeef" in meta                     # digest kept as metadata, not as ref
+    lock = (tree / "rig.lock").read_text()
+    assert "public/demo@1.0.0" in lock                                # deployment lock carried through
+    assert "reg.test/foo:t1" in lock                                  # + bake's images section merged in
 
 
 def test_bake_preserves_all_three_tiers_and_script_order():
@@ -298,6 +327,9 @@ def test_bake_preserves_all_three_tiers_and_script_order():
     down = (tree / "down.sh").read_text()
     assert up.index('"router"') < up.index('"gnss"') < up.index('"planner"')       # autonomy up LAST
     assert down.index('"planner"') < down.index('"gnss"') < down.index('"router"')  # autonomy down FIRST
+    cleanup = (tree / "cleanup.sh").read_text()                        # bake() must EMIT cleanup.sh,
+    assert "reg.test/foo:t1" in cleanup                                # untagging the tag ref
+    assert "reg.test/foo@sha256:deadbeef" in cleanup                   # AND the pinned digest ref
 
 
 def test_rebake_inside_extracted_artifact_stamps_parent():

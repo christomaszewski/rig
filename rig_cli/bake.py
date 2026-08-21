@@ -68,6 +68,7 @@ def _localize_binds(compose: dict, dest: Path, staging_root: Path) -> None:
     (files) or placeheld (dirs) into the project dir and rewritten relative. Genuine host paths (/dev/*,
     /tmp/gige, a /data partition) are NOT under the staging root, so they're left literal to resolve on the
     vehicle."""
+    used: dict[str, Path] = {}  # localized name -> source; two SOURCES must never share a name
     for sname, svc in _services(compose):
         for vol in svc.get("volumes") or []:
             if not (isinstance(vol, dict) and vol.get("type") == "bind"):
@@ -80,6 +81,11 @@ def _localize_binds(compose: dict, dest: Path, staging_root: Path) -> None:
             if not under_staging:
                 continue  # a real host path on the vehicle — leave literal
             relname = f"{sname}__{src.name}"
+            if used.get(relname, src) != src:  # basename collision (a/params.yaml + b/params.yaml):
+                #                                the second copy would silently OVERWRITE the first —
+                #                                fall back to the full staging-relative path, flattened
+                relname = f"{sname}__{'_'.join(src.relative_to(staging_root).parts)}"
+            used[relname] = src
             target = dest / relname
             if src.is_file():
                 shutil.copy2(src, target)

@@ -104,21 +104,24 @@ def _build_env(distro: str | None, desc: Descriptor | None = None, platform: str
     stays.) A declared platform rides the same way for platform-sensitive services
     (RIG_TARGET_PLATFORM + the service's own override_env), so a matrix build selects the DECLARED
     variant, not the build box's. The rig-owned build channel — RIG_BASE_IMAGE (FROM this),
-    RIG_BUILD_NO_CACHE (full rebuild) — is set-or-POPPED: a value leaked from the caller's shell
-    must not silently redirect FROM lines or flip caching."""
+    RIG_BUILD_NO_CACHE (full rebuild), RIG_TARGET_PLATFORM — is set-or-POPPED, matching fleet_env:
+    a value leaked from the caller's shell must not silently redirect FROM lines, flip caching, or
+    retarget a platform build. (The service's own override_env is NOT popped — operators use it
+    standalone, outside rig.)"""
     env = dict(os.environ)
     if distro:
         env["ROS_DISTRO"] = distro
+    plat_active = platform and desc is not None and (desc.build_platforms
+                                                    or desc.platform_override_env)
     for key, value in (("RIG_BASE_IMAGE", base_image),
-                       ("RIG_BUILD_NO_CACHE", "1" if no_cache else None)):
+                       ("RIG_BUILD_NO_CACHE", "1" if no_cache else None),
+                       ("RIG_TARGET_PLATFORM", platform if plat_active else None)):
         if value:
             env[key] = value
         else:
             env.pop(key, None)
-    if platform and desc is not None and (desc.build_platforms or desc.platform_override_env):
-        env["RIG_TARGET_PLATFORM"] = platform
-        if desc.platform_override_env:
-            env[desc.platform_override_env] = platform
+    if plat_active and desc.platform_override_env:
+        env[desc.platform_override_env] = platform
     return env
 
 
