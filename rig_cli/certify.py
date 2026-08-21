@@ -22,7 +22,10 @@ that cannot occur in real life (``certify.invalid:5000``, ``certify-tag-x``, ins
   - identity         rename the instance and the old name vanishes (nothing about identity is hardcoded)
   - binds            warn on bind mounts into the service repo (recordings belong under RIG_DATA_DIR;
                      bake would freeze a repo-relative dir into the artifact)
-  - status           the `status` verb emits parseable `ps --format json` output
+  - status           the `status` verb emits parseable `ps --format json` output (a failure with NO
+                     docker daemon reachable is a skip, not an error — `docker compose ps` needs a
+                     daemon while every other check renders client-side, and certify must stay
+                     honest on daemon-less hosts: build containers, thin CI runners)
 
 Certify is per-service and host-agnostic, so it runs in a service repo's CI with no deployment tree
 (``rig certify --repo . --config examples/usb.yaml``). One contract property a single machine cannot prove
@@ -67,6 +70,24 @@ NAME_A, NAME_B = "certifyname0", "certifyname1"
 _COMPOSE_TOP_KEYS = {"name", "version", "services", "networks", "volumes", "configs", "secrets", "include"}
 
 _LAUNCHER_TIMEOUT = 60  # seconds; a hung launcher must not hang certify (or doctor --deep)
+
+_DAEMON_OK: bool | None = None  # per-process cache; tests may pin it
+
+
+def _docker_daemon_ok() -> bool:
+    """Whether a docker DAEMON is reachable — NOT just the CLI. `docker compose config` renders
+    client-side, so certify's checks run on daemon-less hosts; only the `status` verb ultimately
+    needs a daemon (`docker compose ps`), and a failure there without one is the host's condition,
+    not a launcher violation."""
+    global _DAEMON_OK
+    if _DAEMON_OK is None:
+        try:
+            _DAEMON_OK = (shutil.which("docker") is not None
+                          and subprocess.run(["docker", "version", "--format", "{{.Server.Os}}"],
+                                             capture_output=True, timeout=10).returncode == 0)
+        except (subprocess.TimeoutExpired, OSError):
+            _DAEMON_OK = False
+    return _DAEMON_OK
 
 
 @dataclass
@@ -332,7 +353,12 @@ def certify_target(desc: Descriptor, config_path: Path, base_env: dict[str, str]
 
         # status: rig parses `status` as `docker compose ps --format json` (empty = no containers, fine).
         run_s = _run_launcher(desc, cfg_a, [*desc.verb_args("status"), "--format", "json"], env_a)
-        if run_s.returncode != 0:
+        if run_s.returncode != 0 and not _docker_daemon_ok():
+            checks.append(Check(INFO, "status", "skipped — `status` failed with no docker daemon "
+                                                "reachable (`docker compose ps` needs one; the other "
+                                                "checks render client-side). Re-run certify on a "
+                                                "docker-capable host to prove this check"))
+        elif run_s.returncode != 0:
             fail("status", f"`status` exited {run_s.returncode}: {(run_s.stderr or '').strip()[:160]}")
         else:
             try:

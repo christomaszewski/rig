@@ -109,6 +109,29 @@ def test_conformant_fixture_is_green():
             "volumes", "determinism", "identity", "status"} <= oks
 
 
+def test_status_failure_without_docker_daemon_is_a_skip_not_an_error():
+    # A failing `status` verb is a contract ERROR only when a docker daemon is reachable —
+    # `docker compose ps` needs one, while every other check renders client-side. On a daemon-less
+    # host (build container, thin CI runner) the same failure is an INFO skip: certify can't
+    # attribute it to the launcher. Pin the cached probe both ways to prove both behaviors anywhere.
+    from rig_cli import certify
+
+    repo = make_service()
+    launcher = repo / "fak-up"
+    launcher.write_text(launcher.read_text().replace('ps) echo "[]" ;;', "ps) exit 1 ;;"))
+    old = certify._DAEMON_OK
+    try:
+        certify._DAEMON_OK = False
+        checks, errors, _, _ = run_certify(repo)
+        assert "status" not in errors
+        assert any(c.name == "status" and c.level == "INFO" and "skipped" in c.detail for c in checks)
+        certify._DAEMON_OK = True
+        _, errors, _, _ = run_certify(repo)
+        assert "status" in errors
+    finally:
+        certify._DAEMON_OK = old
+
+
 def test_hardcoded_project_name_fails():
     _, errors, _, _ = run_certify(make_service(**{"@PROJECT@": "hardcoded-project"}))
     assert errors == {"project-name"}
