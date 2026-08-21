@@ -14,6 +14,7 @@ import yaml  # noqa: E402
 
 from rig_cli.cli import main  # noqa: E402
 from rig_cli.init import init  # noqa: E402
+from rig_cli.publish import pending_count  # noqa: E402
 from rig_cli.registry_scaffold import registry_init  # noqa: E402
 
 
@@ -110,6 +111,7 @@ def test_pending_push_and_merged_lifecycle():
         rc, out, _ = _run("registry", "pending")
         assert rc == 0 and "no pending" in out
         _dirty_and_save(veh)
+        assert pending_count() == 1                                      # doctor's advisory count
         rc, out, _ = _run("registry", "pending")
         assert rc == 0 and "promote/cam" in out and "unpushed" in out
         assert "registry push gitty" in out                              # copy-paste hint
@@ -119,6 +121,7 @@ def test_pending_push_and_merged_lifecycle():
         rc, _, err = _run("registry", "push", "gitty", branch, "--pr")
         assert rc == 0, err
         assert "pushed to origin" in err
+        assert pending_count() == 0                                      # pushed = off the worklist
         assert "open the PR from the URL above" in err                   # --pr fallback (no forge)
         assert branch in _git("branch", "--list", "--all", cwd=origin).stdout
         rc, out, _ = _run("registry", "pending")
@@ -134,6 +137,7 @@ def test_pending_push_and_merged_lifecycle():
         rc, _, err = _run("--root", str(veh), "registry", "discard", "gitty", branch)
         assert rc == 0, err                                              # merged: plain cleanup
         assert branch not in _git("branch", "--list", cwd=cache).stdout
+        assert pending_count() == 0                                      # nothing left pending
 
 
 def test_discard_unsaves_the_deployment():
@@ -157,7 +161,7 @@ def test_discard_unsaves_the_deployment():
         rc, out, _ = _run("--root", str(veh), "config", "diff")
         assert "1 instance(s) dirty" in out                              # the delta is LOCAL again
         working = yaml.safe_load((veh / "config" / "sensors" / "cam.yaml").read_text())
-        assert working["rate"] == 9                                      # render preserved
+        assert working == render_before                                  # WHOLE render preserved
         pin = yaml.safe_load((veh / "config" / ".pins" / "cam.yaml").read_text())
         assert pin["rate"] == 5                                          # pin = pre-save payload
 

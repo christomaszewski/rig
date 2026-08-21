@@ -33,12 +33,14 @@ def _service(svc: str, image: str) -> pathlib.Path:
 
 def _fake_docker(cases: dict[str, str]) -> pathlib.Path:
     """A `docker` stub keyed on the image ref appearing in its argv. Values: inspection stdout
-    (None-like 'FAIL' -> exit 126 like a shell-less image)."""
+    (None-like 'FAIL' -> exit 126 like a shell-less image; 'SLEEP' -> hang past the timeout)."""
     bin_dir = pathlib.Path(tempfile.mkdtemp())
     lines = ["#!/bin/sh", 'case "$*" in']
     for ref, out in cases.items():
         if out == "FAIL":
             lines.append(f'  *"{ref}"*) echo "exec: /bin/sh: not found" >&2; exit 126 ;;')
+        elif out == "SLEEP":
+            lines.append(f'  *"{ref}"*) sleep 5 ;;')
         else:
             lines.append(f'  *"{ref}"*) printf %b "{out}" ;;')
     lines += ['  *) echo "unexpected: $*" >&2; exit 1 ;;', "esac"]
@@ -65,11 +67,12 @@ def _stubbed(cases: dict[str, str]):
 
 
 def _run_audit(images: dict[str, str], cases: dict[str, str],
-               ros="ros: {distro: lyrical, rmw: rmw_zenoh_cpp}") -> tuple[int, str]:
-    """Deployment with one stack per (service -> image ref); returns (rc, stderr text)."""
+               ros="ros: {distro: lyrical, rmw: rmw_zenoh_cpp}", repos=None) -> tuple[int, str]:
+    """Deployment with one stack per (service -> image ref); returns (rc, stderr text).
+    `repos` overrides the generated launcher stubs (misbehaving `config` verbs)."""
     root = pathlib.Path(tempfile.mkdtemp())
     (root / "config").mkdir()
-    repos = {svc: _service(svc, ref) for svc, ref in images.items()}
+    repos = repos or {svc: _service(svc, ref) for svc, ref in images.items()}
     rows = "\n".join(f"  - {{name: {svc}_0, service: {svc}, config: config/{svc}.yaml}}"
                      for svc in images)
     (root / "vehicle.yaml").write_text(f"vehicle: t\nvehicle_id: 1\n{ros}\nsensors:\n{rows}\n")
@@ -131,6 +134,71 @@ def test_non_ros_excluded_and_uninspectable_skipped_without_failing():
          "distroless-thing": "FAIL"})          # no shell -> uninspectable, reported, not fatal
     assert rc == 0
     assert "non-ROS" in out and "uninspectable" in out
+
+
+def _scripted_service(svc: str, script: str) -> pathlib.Path:
+    """A launcher whose `config` verb misbehaves in a controlled way (exit 1, imageless compose)."""
+    d = pathlib.Path(tempfile.mkdtemp())
+    (d / "rigging.yaml").write_text(f"service: {svc}\nlauncher: {svc}-up\n")
+    (d / f"{svc}-up").write_text("#!/bin/sh\n" + script)
+    (d / f"{svc}-up").chmod(0o755)
+    return d
+
+
+def test_inspect_timeout_is_a_warn_not_fatal():
+    # a hung daemon/cold pull must degrade to `uninspectable` (WARN), never hang audit or flip
+    # the exit — pin the timeout down to 1s so the SLEEP stub trips it fast
+    from rig_cli import audit as audit_mod
+    old = audit_mod._DOCKER_TIMEOUT
+    audit_mod._DOCKER_TIMEOUT = 1
+    try:
+        rc, out = _run_audit({"cam": "cam-core:v1"}, {"cam-core": "SLEEP"})
+    finally:
+        audit_mod._DOCKER_TIMEOUT = old
+    assert rc == 0
+    assert "timed out" in out and "uninspectable" in out
+
+
+def test_config_failure_is_a_per_stack_warn_not_fatal():
+    # a stack whose launcher can't render is REPORTED per stack, but a config failure alone must
+    # not flip the exit — audit's errors are about image CONTENT; doctor owns launcher health
+    rc, out = _run_audit({"cam": "unused"}, {},
+                         repos={"cam": _scripted_service("cam", "exit 1\n")})
+    assert rc == 0 and "produced no compose" in out
+
+
+def test_docker_missing_from_path_is_rc_1():
+    # audit inspects with `docker run` — without the CLI it must say so and fail. PATH is emptied
+    # around the audit call ONLY (fixture building above still needs the real PATH).
+    root = pathlib.Path(tempfile.mkdtemp())
+    (root / "config").mkdir()
+    repo = _service("cam", "cam-core:v1")
+    (root / "vehicle.yaml").write_text("vehicle: t\nvehicle_id: 1\n"
+                                      "ros: {distro: lyrical, rmw: rmw_zenoh_cpp}\nsensors:\n"
+                                      "  - {name: cam_0, service: cam, config: config/cam.yaml}\n")
+    (root / "services.yaml").write_text(f"services:\n  cam: {{path: {repo}}}\n")
+    (root / "config" / "cam.yaml").write_text("service: cam\nname: cam_0\n")
+    manifest = load_manifest(root)
+    descriptors = {"cam": load_descriptor("cam", repo)}
+    env = fleet_env(manifest, descriptors)
+    err = io.StringIO()
+    old = os.environ["PATH"]
+    os.environ["PATH"] = tempfile.mkdtemp()  # a dir with nothing in it
+    try:
+        with contextlib.redirect_stderr(err):
+            rc = audit(manifest, descriptors, env)
+    finally:
+        os.environ["PATH"] = old
+    assert rc == 1 and "docker not found" in err.getvalue()
+
+
+def test_no_resolved_images_is_nothing_to_audit():
+    # enabled stacks rendering composes WITHOUT image: keys leave nothing to inspect — a clean
+    # rc 0, not an error and not a per-stack failure
+    launcher = "printf 'services:\\n  main:\\n    command: sleep\\n'\n"
+    rc, out = _run_audit({"cam": "unused"}, {},
+                         repos={"cam": _scripted_service("cam", launcher)})
+    assert rc == 0 and "nothing to audit" in out
 
 
 def test_source_built_ros_image_warns_thin_packages():

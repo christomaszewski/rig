@@ -53,9 +53,9 @@ def _service_with_build(name, script_body):
 
 
 def test_build_runs_a_service_once_for_multiple_instances():
-    svc = _service_with_build("cam", f'echo built >> "{tempfile.gettempdir()}/rig_dedupe.log"\n')
-    log = pathlib.Path(tempfile.gettempdir(), "rig_dedupe.log")
-    log.unlink(missing_ok=True)
+    # the dedupe log lives in the per-test service dir — a fixed shared /tmp path races parallel runs
+    svc = _service_with_build("cam", 'echo built >> "$(dirname "$0")/dedupe.log"\n')
+    log = svc / "dedupe.log"
     root = pathlib.Path(tempfile.mkdtemp())
     (root / "config").mkdir()
     (root / "vehicle.yaml").write_text(
@@ -245,13 +245,113 @@ def test_build_provider_stage_runs_first_dedupes_and_exports_base():
     m = load_manifest(root)
     descs = {s: load_descriptor(s, ws / s) for s in ("cam", "router", "logger")}
     for jobs in (1, 2):  # sequential AND concurrent path: base first, dependents see RIG_BASE_IMAGE
+        # scrub ALL of the previous leg's state (log, marker, cam's seen) so jobs=2 proves the
+        # concurrent path on its own, not by riding the jobs=1 leg's artifacts
         (ws / "base" / "log").unlink(missing_ok=True)
+        (ws / "base" / "marker").unlink(missing_ok=True)
+        (ws / "cam" / "seen").unlink(missing_ok=True)
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
             assert build(m, descs, registry=None, tag=None, dry_run=False, jobs=jobs) == 0
         assert (ws / "base" / "log").read_text().count("built") == 1  # two providers -> ONE base build
         assert (ws / "cam" / "seen").read_text().strip() == "reg:5000/fleet-ros:v1"
         assert "base image reg:5000/fleet-ros:v1" in err.getvalue()
+
+
+def test_build_base_stage_failure_aborts_before_dependents():
+    # stage 0 exiting nonzero must stop the WHOLE build: dependents FROM the base would silently
+    # build against a stale/absent image ("stopping here" in build.py).
+    ws = _provider_workspace()
+    (ws / "base" / "build.sh").write_text("#!/bin/sh\nexit 1\n")
+    (ws / "base" / "build.sh").chmod(0o755)
+    root = _deployment("vehicle: t\nsensors:\n"
+                       "  - {name: i0, service: cam, config: config/i0.yaml}\n"
+                       "  - {name: i1, service: router, config: config/i1.yaml}\n",
+                       {"cam": ws / "cam", "router": ws / "router"})
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        assert build(load_manifest(root),
+                     {s: load_descriptor(s, ws / s) for s in ("cam", "router")},
+                     registry=None, tag=None, dry_run=False) == 1
+    assert "stopping here" in err.getvalue()
+    assert not (ws / "cam" / "seen").exists()  # the dependent's build never ran
+
+
+def test_build_failing_service_flips_rc_on_both_paths():
+    # one failing + one passing service: the sequential leg sets rc=1; the concurrent leg must
+    # AGGREGATE (`rc |= rc1`) — a passing service finishing last must not launder the failure.
+    bad = _service_with_build("bad", "exit 1\n")
+    good = _service_with_build("good", 'touch "$(dirname "$0")/done"\n')
+    root = _deployment("vehicle: t\nsensors:\n"
+                       "  - {name: i0, service: bad, config: config/i0.yaml}\n"
+                       "  - {name: i1, service: good, config: config/i1.yaml}\n",
+                       {"bad": bad, "good": good})
+    m = load_manifest(root)
+    descs = {"bad": load_descriptor("bad", bad), "good": load_descriptor("good", good)}
+    for jobs in (1, 2):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            assert build(m, descs, registry=None, tag=None, dry_run=False, jobs=jobs) == 1
+        assert "FAILED" in err.getvalue()
+
+
+# --- mirror: the REAL pull→tag→push path, docker stubbed on PATH (no daemon needed) ---------------
+
+@contextlib.contextmanager
+def _stub_docker(body: str):
+    """A fake `docker` first on PATH (test_audit's technique) that runs `body` as sh."""
+    bin_dir = pathlib.Path(tempfile.mkdtemp())
+    docker = bin_dir / "docker"
+    docker.write_text("#!/bin/sh\n" + body)
+    docker.chmod(0o755)
+    old = os.environ["PATH"]
+    os.environ["PATH"] = f"{bin_dir}:{old}"
+    try:
+        yield bin_dir
+    finally:
+        os.environ["PATH"] = old
+
+
+def _mirror_deployment(images_line: str):
+    svc = _repo("service: s\nlauncher: s-up\nmirror: [busybox:1]\n")
+    root = pathlib.Path(tempfile.mkdtemp())
+    (root / "config").mkdir()
+    (root / "vehicle.yaml").write_text(f"vehicle: t\n{images_line}"
+                                       "sensors: [{name: a, service: s, config: config/a.yaml}]\n")
+    (root / "services.yaml").write_text(f"services: {{s: {{path: {svc}}}}}\n")
+    (root / "config" / "a.yaml").write_text("service: s\nname: a\n")
+    return load_manifest(root), {"s": load_descriptor("s", svc)}
+
+
+def test_build_mirror_runs_pull_tag_push_in_order():
+    m, descs = _mirror_deployment("images: {registry: 'r:5000'}\n")
+    with _stub_docker('echo "$@" >> "$(dirname "$0")/argv.log"\n') as bin_dir:
+        assert build(m, descs, registry=None, tag=None, dry_run=False) == 0
+        lines = (bin_dir / "argv.log").read_text().splitlines()
+    assert lines == ["pull busybox:1", "tag busybox:1 r:5000/busybox:1", "push r:5000/busybox:1"]
+
+
+def test_build_mirror_pull_failure_stops_the_chain():
+    m, descs = _mirror_deployment("images: {registry: 'r:5000'}\n")
+    body = ('echo "$@" >> "$(dirname "$0")/argv.log"\n'
+            '[ "$1" = pull ] && exit 1\nexit 0\n')
+    err = io.StringIO()
+    with _stub_docker(body) as bin_dir:
+        with contextlib.redirect_stderr(err):
+            assert build(m, descs, registry=None, tag=None, dry_run=False) == 1
+        lines = (bin_dir / "argv.log").read_text().splitlines()
+    assert lines == ["pull busybox:1"]  # tag/push never invoked for an image we don't have
+    assert "mirror busybox:1 FAILED" in err.getvalue()
+
+
+def test_build_mirror_without_registry_skips_and_says_so():
+    m, descs = _mirror_deployment("")  # no images.registry, no --registry
+    err = io.StringIO()
+    with _stub_docker('echo "$@" >> "$(dirname "$0")/argv.log"\n') as bin_dir:
+        with contextlib.redirect_stderr(err):
+            assert build(m, descs, registry=None, tag=None, dry_run=False) == 0
+        assert not (bin_dir / "argv.log").exists()  # docker never invoked
+    assert "no registry" in err.getvalue() and "skipped" in err.getvalue()
 
 
 def test_build_conflicting_providers_refuse_to_guess():

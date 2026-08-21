@@ -2,7 +2,7 @@
 import contextlib
 import io
 import pathlib
-import shutil
+import subprocess
 import sys
 import tempfile
 
@@ -112,9 +112,14 @@ def test_tier_flag_declares_in_generated_rigging():
 
 def test_generated_skeleton_passes_certify_out_of_the_box():
     # THE acceptance: rigify -> certify green with ZERO hand edits (the contract mechanics come free;
-    # certify then teaches only the service-specific 20%). Needs docker compose; skip cleanly without.
-    if shutil.which("docker") is None:
-        print("     (docker not on PATH — certify smoke skipped)")
+    # certify then teaches only the service-specific 20%). The real dependency is the compose PLUGIN
+    # (`docker compose config` — a bare docker CLI isn't enough; no daemon needed); skip cleanly without.
+    try:
+        probe = subprocess.run(["docker", "compose", "version"], capture_output=True)
+    except OSError:
+        probe = None
+    if probe is None or probe.returncode != 0:
+        print("     (docker compose not available — certify smoke skipped)")
         return
     import os
 

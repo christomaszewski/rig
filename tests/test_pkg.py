@@ -124,6 +124,9 @@ def test_noarg_search_lists_the_catalog():
         assert "acme-cam" not in out and "cam-kit" not in out
         rc, out, _ = _run("pkg", "search", "--registry", "testns")
         assert rc == 0 and "testns/camish" in out
+        rc, out, _ = _run("pkg", "search", "project:gideon")                   # project: prefix
+        assert rc == 0 and "testns/cam-tune" in out and "project: gideon" in out
+        assert "acme-cam" not in out and "cam-kit" not in out                  # tagged pkg ONLY
         rc, out, _ = _run("pkg", "search", "zzz-no-such")                      # empty result = 1
         assert rc == 1
         rc, _, err = _run("pkg", "search", "--registry", "nope")               # unknown registry
@@ -195,6 +198,15 @@ def test_list_is_the_full_inventory():
         local_i = next(i for i, l in enumerate(lines) if l.startswith("localish"))
         reg_i = next(i for i, l in enumerate(lines) if "acme-cam" in l)
         assert local_i > reg_i                                          # local rows sort together, last
+        cfg = veh / "config" / "sensors" / "acme_cam.yaml"
+        doc = yaml.safe_load(cfg.read_text())
+        doc["rate"] = 99                                                # local edit -> dirty
+        cfg.write_text(yaml.safe_dump(doc))
+        assert _run("registry", "remove", "testns")[0] == 0             # alias dropped
+        rc, out, _ = _run("--root", str(veh), "pkg", "list")
+        assert rc == 0, out
+        assert "acme_cam*" in out and "* = local edits" in out          # dirty marker + footnote
+        assert "registry gone" in out                                   # upgrade column degrades
 
 
 def test_info_versions_from_git_history():

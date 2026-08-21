@@ -170,6 +170,32 @@ def test_stdout_chatter_fails_discipline():
     assert errors == {"discipline"}
 
 
+def test_discipline_nonzero_exit_short_circuits():
+    # discipline failures early-return: exit nonzero AFTER rendering a plausible compose, so a
+    # dropped early return would score `ok discipline` off the stdout and run every later check
+    repo = make_service()
+    launcher = repo / "fak-up"
+    launcher.write_text(launcher.read_text().replace("EOF\n    ;;", "EOF\n    exit 2\n    ;;"))
+    checks, errors, _, _ = run_certify(repo)
+    assert errors == {"discipline"}
+    assert {c.name for c in checks} == {"discipline"}  # nothing after the early return
+    assert any("exited 2" in c.detail for c in checks)
+
+
+def test_discipline_non_yaml_stdout_short_circuits():
+    checks, errors, _, _ = run_certify(make_service(**{"@PRELUDE@": "    printf '{{{'\n    exit 0"}))
+    assert errors == {"discipline"}
+    assert {c.name for c in checks} == {"discipline"}
+    assert any("not YAML" in c.detail for c in checks)
+
+
+def test_discipline_yaml_without_services_short_circuits():
+    checks, errors, _, _ = run_certify(make_service(**{"@PRELUDE@": "    echo '[]'\n    exit 0"}))
+    assert errors == {"discipline"}
+    assert {c.name for c in checks} == {"discipline"}
+    assert any("no `services:`" in c.detail for c in checks)
+
+
 def test_missing_ros_env_warns_for_ros_service():
     # Absence is only a WARN: rig can't know whether this config runs a ROS node (plugin-less camera,
     # ros1 without RMW). A WRONG value, by contrast, is proof of hardcoding -> ERROR (next test).
@@ -252,12 +278,17 @@ def test_repo_mode_defaults_to_the_declared_example():
 
 
 def test_emit_normalizes_host_paths_and_diff():
-    repo = make_service()
+    # surface the ABSOLUTE repo path in the render (an env value is how a real launcher leaks
+    # it; ros-env only inspects its two poison keys, so the extra key trips nothing else) —
+    # otherwise the "not in text" assertion is vacuously true and proves no tokenization
+    envblock = DEFAULTS["@ENVBLOCK@"] + "\n      RIG_PARAMS: $REPO/params.yaml"
+    repo = make_service(**{"@ENVBLOCK@": envblock})
     out_a = repo / "emit-a.yaml"
     _, errors, _, _ = run_certify(repo, emit=out_a)
     assert not errors
     text = out_a.read_text()
-    assert str(repo) not in text, "emit must tokenize the repo path for cross-host diffing"
+    assert "${REPO}/params.yaml" in text, "emit must tokenize the repo path for cross-host diffing"
+    assert str(repo) not in text
     assert diff_emits(out_a, out_a) == 0
     out_b = repo / "emit-b.yaml"
     out_b.write_text(text.replace("fak-core", "other-core"))

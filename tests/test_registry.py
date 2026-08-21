@@ -74,9 +74,12 @@ def _issues(root, **kw):
     return [f"{i.where}: {i.message}" for i in issues]
 
 
-def _assert_issue(root, needle, **kw):
-    msgs = _issues(root, **kw)
-    assert any(needle in m for m in msgs), f"expected issue containing {needle!r}, got: {msgs}"
+def _assert_issue(root, needle, level="error", **kw):
+    _, issues = validate_registry(root, **kw)
+    got = [f"[{i.level}] {i.where}: {i.message}" for i in issues]
+    hits = [i for i in issues if needle in f"{i.where}: {i.message}"]
+    assert hits, f"expected issue containing {needle!r}, got: {got}"
+    assert all(i.level == level for i in hits), f"expected level {level!r} for {needle!r}, got: {got}"
 
 
 def test_scaffold_is_self_valid_and_complete():
@@ -169,7 +172,33 @@ def test_suite_member_version_must_match_registry_head():
     _service(root)
     _pkg(root, "suites", "s", {"kind": "suite", "name": "s", "version": "1.0.0",
                                "members": {"services": ["testns/camera-service@9.9.9"]}})
-    _assert_issue(root, "carries 1.4.2", check_index=False)
+    _assert_issue(root, "carries 1.4.2", level="warning", check_index=False)  # stale = snapshot
+
+
+def test_suite_closure_warnings():
+    root = _registry()
+    _service(root)
+    _service(root, name="extra-svc")
+    _profile(root)
+    _overlay(root, name="inst-tune", targets=[{"instance": "cam_front"}])
+    _pkg(root, "vehicles", "veh-plan", {
+        "kind": "vehicle", "name": "veh-plan", "version": "1.0.0",
+        "config": {"payload": "config/vehicle.yaml"}},
+        {"config/vehicle.yaml": "sensors:\n"
+                                "  - { name: cam, service: camera-service, "
+                                "profile: camera-service:siyi-zr30 }\n"})
+    _pkg(root, "suites", "plan-kit", {  # plan-driven: a member no plan row references
+        "kind": "suite", "name": "plan-kit", "version": "1.0.0",
+        "members": {"vehicles": ["testns/veh-plan@1.0.0"],
+                    "profiles": ["testns/camera-service:siyi-zr30@1.0.0"],
+                    "services": ["testns/extra-svc@1.4.2"]}})
+    _pkg(root, "suites", "inst-kit", {  # plan-less: an overlay member bindable only by row name
+        "kind": "suite", "name": "inst-kit", "version": "1.0.0",
+        "members": {"overlays": ["testns/inst-tune@1.0.0"]}})
+    _assert_issue(root, "dead weight", level="warning", check_index=False)
+    _assert_issue(root, "instance-scoped only", level="warning", check_index=False)
+    _, issues = validate_registry(root, check_index=False)
+    assert not [i for i in issues if i.level == "error"]
 
 
 def test_profile_rules():
@@ -184,6 +213,26 @@ def test_profile_rules():
     _service(root3, version="1.2.0")
     _profile(root3, requires="camera-service@^1.4")
     _assert_issue(root3, "not satisfied", check_index=False)
+
+
+def test_profile_stale_exact_pin_warns_installs_from_history():
+    root = _registry()  # exact pin BEHIND head = a valid snapshot, never a publish blocker
+    _service(root, version="2.0.0")
+    _profile(root, requires="camera-service@1.4.2")
+    _assert_issue(root, "git history", level="warning", check_index=False)
+    _, issues = validate_registry(root, check_index=False)
+    assert not [i for i in issues if i.level == "error"]
+
+
+def test_profile_based_on_drift_warns_rebase():
+    root = _registry()
+    _service(root)
+    _profile(root)                                           # the in-registry parent, now @1.0.0
+    _profile(root, name="zr30-fork",                         # forked while the parent was @0.9.0
+             based_on="testns/camera-service:siyi-zr30@0.9.0")
+    _assert_issue(root, "rebase", level="warning", check_index=False)
+    _, issues = validate_registry(root, check_index=False)
+    assert not [i for i in issues if i.level == "error"]
 
 
 def test_profile_payload_validates_against_own_schema():
@@ -278,6 +327,21 @@ def test_index_sensor_tiers_and_projects():
     assert index["sensors"]["*"][0]["tier"] == "fallback"
     assert index["projects"]["gideon"] == ["zr30-gideon"]
     assert render_index(index) == render_index(generate_index(reg))  # deterministic
+
+
+def test_index_shared_identifier_rows_sorted_and_deterministic():
+    root = _registry()
+    _service(root, name="cam")
+    _service(root, name="cam-b")
+    for svc in ("cam", "cam-b"):  # one identifier from two profiles; dir walk visits cam:p first
+        _profile(root, name="p", requires=f"{svc}@^1.4",
+                 provides={"sensor": [{"model": "X", "match": ["shared-id"]}]})
+    index = generate_index(load_registry(root, []))
+    assert index["sensors"]["shared-id"] == [                # SORTED by key, not insertion order
+        {"profile": "cam-b:p", "tier": "exact"},             # ('-' < ':' — dir order would put
+        {"profile": "cam:p", "tier": "exact"}]               #  cam:p first)
+    assert render_index(generate_index(load_registry(root, []))) == \
+        render_index(generate_index(load_registry(root, [])))  # independent loads: same bytes
 
 
 def test_authored_against_drift_warns_without_failing():

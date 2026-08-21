@@ -14,7 +14,7 @@ import yaml  # noqa: E402
 
 from rig_cli import RigError  # noqa: E402
 from rig_cli.cli import main  # noqa: E402
-from rig_cli.registries import load_entries, rig_home  # noqa: E402
+from rig_cli.registries import load_entries, resolve_namespace, rig_home  # noqa: E402
 from rig_cli.registry_scaffold import registry_init  # noqa: E402
 
 
@@ -89,7 +89,7 @@ def test_setup_no_default_registry():
 
 
 def test_setup_purge_removes_state():
-    with _env(RIG_HOME=_home()):
+    with _env(RIG_HOME=_home(), HOME=_home()):  # fresh HOME: purge scans rc files under it
         _run("setup")
         assert rig_home().is_dir()
         rc, _, _ = _run("setup", "--purge", "--yes")
@@ -143,6 +143,7 @@ def test_sync_git_clone_pull_and_divergence():
         _git("commit", "-q", "-m", "extra", cwd=remote)
         rc, _, err = _run("registry", "sync")
         assert rc == 0 and "updated" in err and "3 packages" in err
+        assert "+ extra-svc (service) 1.0.0" in err          # the delta digest names the change
         # divergence: remote moves AND cache moves -> ff-only fails with guidance
         cache = rig_home() / "cache" / "registries" / "testns"
         (cache / "junk.txt").write_text("local\n")
@@ -162,6 +163,8 @@ def test_sync_warns_on_namespace_mismatch_and_degrades_broken():
         _run("registry", "add", "othername", "--path", str(reg))
         rc, _, err = _run("registry", "sync")
         assert rc == 0 and "namespace 'testns'" in err and "othername" in err
+        entry = resolve_namespace("testns")                  # declared namespace beats the alias
+        assert entry is not None and entry.name == "othername"
         broken = _seed_registry(ns="broke", pkgs=False)
         (broken / "registry.yaml").write_text("schema: 99\nname: broke\nnamespace: broke\n")
         _run("registry", "add", "broke", "--path", str(broken))
@@ -226,7 +229,7 @@ def test_info_versioned_ref_and_authored_against():
         rc, out, _ = _run("pkg", "info", "testns/zr30-gideon")
         assert rc == 0 and "authored_against: service: camera-service@1.4.2" in out
         rc, out, _ = _run("pkg", "info", "testns/camera-service:siyi-zr30")
-        assert "requires: None" not in out                   # absent fields stay silent
+        assert rc == 0 and "based_on" not in out             # absent fields stay silent
 
 
 def test_pkg_search_and_info_across_registries():
@@ -262,6 +265,16 @@ def test_pkg_search_priority_order_and_shadowing():
         assert out.index("high/camera-service:siyi-zr30") < out.index("low/camera-service:siyi-zr30")  # priority order printed first
         rc, out, _ = _run("pkg", "info", "camera-service:siyi-zr30")
         assert rc == 0 and out.splitlines()[0].startswith("high/")
+
+
+def test_pkg_search_survives_corrupt_index():
+    with _env(RIG_HOME=_home()):
+        _run("setup", "--no-default-registry")
+        reg = _seed_registry(ns="testns")
+        _run("registry", "add", "testns", "--path", str(reg))
+        (reg / "index.json").write_text("{ not json !")      # corrupt on-disk index
+        rc, out, _ = _run("pkg", "search", "zr30")           # open_registry regenerates in memory
+        assert rc == 0 and "testns/camera-service:siyi-zr30" in out
 
 
 def test_setup_shell_block_idempotent_and_purged():
