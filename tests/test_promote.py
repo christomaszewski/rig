@@ -87,6 +87,28 @@ def test_promote_requires_dirty_and_bump():
         assert m["version"] == "1.0.1"
 
 
+def test_promote_target_instance_scopes_binding_to_the_name():
+    # --target-instance emits `targets: [{instance: <name>}]` — the overlay binds onto the
+    # instance with THAT name only; a sibling instance of the same service is refused
+    # (overlay.py matches instance targets on the row name, never the service).
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        root, _ = _world()
+        working = _install_acme(root)
+        internal = _internal()
+        rc, _, err = _run("--root", str(root), "pkg", "install", "sensor:acme", "--as", "cam_b")
+        assert rc == 0, err
+        working.write_text(working.read_text().replace("width: 1280", "width: 640"))
+        rc, _, err = _run("--root", str(root), "pkg", "promote", "acme_cam", "--name", "mine",
+                          "--to", "internal", "--target-instance")
+        assert rc == 0, err
+        m = yaml.safe_load((internal / "overlays" / "mine" / "manifest.yaml").read_text())
+        assert m["targets"] == [{"instance": "acme_cam"}]         # instance-scoped, not service
+        rc, _, err = _run("--root", str(root), "overlay", "apply", "acme_cam", "internal/mine")
+        assert rc == 0, err                                       # the SAME instance binds
+        rc, _, err = _run("--root", str(root), "overlay", "apply", "cam_b", "internal/mine")
+        assert rc == 1 and "does not target" in err               # same-service sibling refused
+
+
 def test_promote_kind_profile():
     with _env(RIG_HOME=tempfile.mkdtemp()):
         root, _ = _world()
@@ -286,6 +308,39 @@ def test_promote_to_git_registry_branches_and_keeps_cache_clean():
         show = subprocess.run(["git", "-C", str(cache), "show", "promote/zg:overlays/zg/config/delta.yaml"],
                               capture_output=True, text=True).stdout
         assert "width: 640" in show
+
+
+def test_promote_failure_rolls_back_git_write_session():
+    # A failure AFTER the git write session opened (validation rejects an unresolvable
+    # --requires) must leave the cache exactly as sync left it: default branch checked out,
+    # tree clean, and the session's promote/ branch deleted.
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        root, _ = _world()
+        working = _install_acme(root)
+        remote = pathlib.Path(tempfile.mkdtemp()) / "internal-remote"
+        with contextlib.redirect_stderr(io.StringIO()):
+            registry_init(remote, namespace="internal")
+        _git("init", "-q", cwd=remote)
+        _git("add", "-A", cwd=remote)
+        _git("commit", "-q", "-m", "seed", cwd=remote)
+        _run("registry", "add", "internal", str(remote))
+        assert _run("registry", "sync", "internal")[0] == 0
+        working.write_text(working.read_text().replace("width: 1280", "width: 640"))
+        rc, _, err = _run("--root", str(root), "pkg", "promote", "acme_cam", "--kind", "profile",
+                          "--name", "doomed", "--to", "internal",
+                          "--requires", "internal/ghost@9.9.9")   # unresolvable -> validation fails
+        assert rc == 1, "sabotaged promote should fail validation"
+        from rig_cli.registries import cache_dir
+        cache = cache_dir("internal")
+        head = subprocess.run(["git", "-C", str(cache), "rev-parse", "--abbrev-ref", "HEAD"],
+                              capture_output=True, text=True).stdout.strip()
+        assert head in ("main", "master")                          # back on the default branch
+        assert not subprocess.run(["git", "-C", str(cache), "status", "--porcelain"],
+                                  capture_output=True, text=True).stdout.strip()
+        branches = subprocess.run(["git", "-C", str(cache), "branch"],
+                                  capture_output=True, text=True).stdout
+        assert "promote/" not in branches                          # session branch deleted
+        assert not (cache / "profiles" / "camish" / "doomed").exists()
 
 
 # --- update flow: name-from-provenance, auto-bump, carry-forward, inference (v0.1.61) -----------
@@ -688,7 +743,10 @@ def test_adopt_closes_the_profile_round_trip():
         root, _ = _world()
         working = _install_acme(root)
         internal = _internal()
-        _run("--root", str(root), "overlay", "apply", "acme_cam", "testns/cam-tune")
+        rc, _, err = _run("--root", str(root), "overlay", "apply", "acme_cam", "testns/cam-tune")
+        assert rc == 0, err
+        sensor = next(s for s in load_manifest(root).sensors if s.name == "acme_cam")
+        assert sensor.overlays                             # bound — the unbind below is meaningful
         working.write_text(working.read_text().replace("width: 1280", "width: 640"))
         before = _rendered(root)
         rc, _, err = _run("--root", str(root), "pkg", "promote", "acme_cam", "--kind", "profile",
@@ -696,7 +754,6 @@ def test_adopt_closes_the_profile_round_trip():
         assert rc == 0, err
         assert "ADOPTED internal/camish:org-cam@1.0.0" in err
         assert _rendered(root) == before                          # THE round-trip law
-        from rig_cli.manifest import load_manifest
         sensor = next(s for s in load_manifest(root).sensors if s.name == "acme_cam")
         assert sensor.profile == "internal/camish:org-cam@1.0.0"         # provenance = the fork now
         assert not sensor.overlays and not sensor.overrides       # baked in + dropped

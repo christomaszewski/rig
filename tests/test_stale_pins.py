@@ -128,9 +128,19 @@ def test_stale_pin_without_git_history_fails_pointedly():
         rc, out, err = _run("registry", "validate", str(internal))
         assert rc == 0                                   # still only a warning registry-side
         root2 = _fresh()
+        texts = {n: (root2 / n).read_bytes() if (root2 / n).exists() else None
+                 for n in ("vehicle.yaml", "services.yaml", "rig.lock")}
+        cfg = {p.relative_to(root2): p.read_bytes()
+               for p in (root2 / "config").rglob("*") if p.is_file()}
         rc, out, err = _run("--root", str(root2), "pkg", "install", "internal/boat")
         assert rc == 1
         assert "git history" in err and "rolled back" in err   # pointed, atomic
+        # ...and PROVABLY atomic: the claim must hold byte-for-byte, not just print
+        for name, blob in texts.items():
+            now = (root2 / name).read_bytes() if (root2 / name).exists() else None
+            assert now == blob, f"{name} not restored by the rollback"
+        assert {p.relative_to(root2): p.read_bytes()
+                for p in (root2 / "config").rglob("*") if p.is_file()} == cfg
 
 
 if __name__ == "__main__":

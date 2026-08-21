@@ -13,7 +13,8 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
 import yaml  # noqa: E402
 
-from test_install import _env, _run, _world  # noqa: E402
+from test_install import _run, _world  # noqa: E402  (shared fixtures)
+from test_platform import _env  # noqa: E402  (None-aware: value None UNSETS the variable)
 from test_promote import _install_acme, _internal, _rendered  # noqa: E402
 
 from rig_cli.init import init  # noqa: E402
@@ -67,7 +68,8 @@ def test_capture_emits_template_and_plan_install_reproduces():
         root2 = _fresh()
         rc, _, err = _run("--root", str(root2), "pkg", "install", "internal/boat")
         assert rc == 0, err
-        m2 = load_manifest(root2)
+        with _env(RIG_VEHICLE_ID=None, RIG_VEHICLE_NAME=None):  # ambient per-host identity (the
+            m2 = load_manifest(root2)                           # documented env) must not mask markers
         got = {s.name: (s.enabled, s.order, list(s.overlays)) for s in m2.sensors}
         assert got == {"acme_cam": (True, 10, ["internal/acme-cam@1.0.0"]),
                        "cam_rear": (False, 77, [])}          # names/order/enabled/bindings travel
@@ -83,7 +85,8 @@ def test_capture_emits_template_and_plan_install_reproduces():
             init(root3, no_git=True, vehicle_id=7)
         rc, _, err = _run("--root", str(root3), "pkg", "install", "internal/boat")
         assert rc == 0, err
-        m3 = load_manifest(root3)
+        with _env(RIG_VEHICLE_ID=None, RIG_VEHICLE_NAME=None):  # shell wins by design — clear it
+            m3 = load_manifest(root3)
         assert m3.vehicle == "veh3" and m3.vehicle_id == 7
 
 
@@ -172,6 +175,29 @@ def test_repromote_recaptures_plan_and_repin_refreshes_member():
         # direct repin of the vehicle kind is refused with the re-capture pointer
         rc, _, err = _run("pkg", "repin", "gideon", "--to", "internal")
         assert rc == 1 and "UNVERSIONED" in err
+
+
+def test_capture_preserves_overlay_order_fresh_delta_last():
+    # ORDER IS MERGE ORDER: the suite's overlays member carries the existing bindings in binding
+    # order with the just-emitted delta overlay appended LAST, and the plan row mirrors the same
+    # order unversioned (apply-order parity — anything else changes last-wins precedence).
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        root, _ = _world()
+        internal = _internal()
+        _install_acme(root)
+        assert _run("--root", str(root), "overlay", "apply", "acme_cam", "testns/cam-tune")[0] == 0
+        assert _run("--root", str(root), "overlay", "apply", "acme_cam", "testns/cam-tune-b")[0] == 0
+        working = root / "config" / "sensors" / "acme_cam.yaml"
+        working.write_text(working.read_text().replace("width: 1280", "width: 640"))  # dirty delta
+        rc, _, err = _run("--root", str(root), "pkg", "promote", "--all", "--suite", "boat",
+                          "--vehicle", "gideon", "--to", "internal")
+        assert rc == 0, err
+        s = yaml.safe_load((internal / "suites" / "boat" / "manifest.yaml").read_text())
+        assert s["members"]["overlays"] == ["testns/cam-tune@1.0.0", "testns/cam-tune-b@1.0.0",
+                                            "internal/acme-cam@1.0.0"]   # bindings first, fresh LAST
+        vp = yaml.safe_load((internal / "vehicles" / "gideon" / "config" / "vehicle.yaml").read_text())
+        row = next(r for r in vp["sensors"] if r["name"] == "acme_cam")
+        assert row["overlays"] == ["testns/cam-tune", "testns/cam-tune-b", "internal/acme-cam"]
 
 
 def test_hand_authored_row_captured_as_adopted_profile():

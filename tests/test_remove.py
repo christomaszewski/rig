@@ -76,6 +76,27 @@ def test_remove_unbinds_overlays_with_refcount():
         assert "testns/cam-tune@1.0.0" not in (load_lock(root).get("packages") or {})
 
 
+def test_overlay_payload_survives_while_second_binding_remains():
+    # the KEEP side of the refcount: a payload copy bound to TWO instances outlives the first remove
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        root, _ = _world()
+        assert _run("--root", str(root), "pkg", "add", "sensor:acme")[0] == 0
+        assert _run("--root", str(root), "pkg", "add", "sensor:acme", "--as", "cam_b")[0] == 0
+        assert _run("--root", str(root), "overlay", "apply", "acme_cam", "testns/cam-tune")[0] == 0
+        assert _run("--root", str(root), "overlay", "apply", "cam_b", "testns/cam-tune")[0] == 0
+        copy = root / "config" / ".overlays" / "testns--cam-tune--1.0.0.yaml"
+        assert copy.exists()
+        rc, _, err = _run("--root", str(root), "pkg", "remove", "acme_cam")
+        assert rc == 0, err
+        assert "last binding" not in err
+        assert copy.exists()                                           # cam_b still binds it
+        assert "testns/cam-tune@1.0.0" in (load_lock(root).get("packages") or {})
+        rc, _, err = _run("--root", str(root), "pkg", "remove", "cam_b")
+        assert rc == 0, err
+        assert "last binding" in err and not copy.exists()             # last binding -> both gone
+        assert "testns/cam-tune@1.0.0" not in (load_lock(root).get("packages") or {})
+
+
 def test_package_form_guards_and_dependency_removal():
     with _env(RIG_HOME=tempfile.mkdtemp()):
         root, _ = _world()

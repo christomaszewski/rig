@@ -202,7 +202,7 @@ if __name__ == "__main__":
             try:
                 fn()
                 print(f"ok   {name}")
-            except AssertionError as exc:
+            except Exception as exc:  # noqa: BLE001
                 failed += 1
                 print(f"FAIL {name}: {exc}")
     sys.exit(1 if failed else 0)

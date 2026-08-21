@@ -14,7 +14,7 @@ import yaml  # noqa: E402
 
 from rig_cli.cli import main  # noqa: E402
 from rig_cli.init import init  # noqa: E402
-from rig_cli.lock import load_lock  # noqa: E402
+from rig_cli.lock import load_lock, sha256_file  # noqa: E402
 from rig_cli.manifest import load_manifest  # noqa: E402
 from rig_cli.registry_scaffold import registry_init  # noqa: E402
 
@@ -187,7 +187,37 @@ def test_service_install_vendors_routes_and_wires():
         assert row.name == "routerish" and row.tier == "infra" and row.enabled   # named example honored
         lock = load_lock(root)
         assert "testns/routerish@1.2.0" in lock["packages"]
-        assert lock["instances"]["routerish"]["base_sha256"]
+        assert lock["instances"]["routerish"]["base_sha256"] == \
+            sha256_file(root / "config" / ".pins" / "routerish.yaml")  # the EXACT anchor
+
+
+def test_service_vendors_pinned_rev_not_clone_head():
+    # The clone lands at the repo's HEAD; the vendored surface must come from the PINNED rev —
+    # a registry pin is a snapshot, not "whatever the repo carries today".
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        repo, rev = _code_repo()
+        reg = _registry_with(repo, rev)
+        _run("setup", "--no-default-registry")
+        _run("registry", "add", "testns", "--path", str(reg))
+        root = pathlib.Path(tempfile.mkdtemp()) / "veh"
+        with contextlib.redirect_stderr(io.StringIO()):
+            init(root, no_git=True)
+        # a SECOND commit moves HEAD and rewrites the vendored files
+        (repo / "camish" / "config" / "camish.example.yaml").write_text(
+            "service: camish\ncamera: {type: usb}\nrate: 999   # HEAD-only\n")
+        rigging = repo / "camish" / "rigging.yaml"
+        rigging.write_text(rigging.read_text() + "# HEAD-only\n")
+        _git("add", "-A", cwd=repo)
+        _git("commit", "-q", "-m", "head moves past the pin", cwd=repo)
+        rc, _, err = _run("--root", str(root), "pkg", "add", "testns/camish")
+        assert rc == 0, err
+        vendored = root / "services" / "camish"
+        assert (vendored / "config" / "camish.example.yaml").read_text() == \
+            "service: camish\ncamera: {type: usb}\n"             # the PINNED rev's bytes
+        assert "HEAD-only" not in (vendored / "rigging.yaml").read_text()
+        assert yaml.safe_load((vendored / ".vendored.yaml").read_text())["ref"] == rev
+        assert "HEAD-only" not in \
+            (root / "config" / "sensors" / "camish.yaml").read_text()  # working copy = pinned base
 
 
 def test_package_name_must_equal_declared_service_name():
@@ -227,7 +257,8 @@ def test_profile_install_transitive_and_working_copy():
         lock = load_lock(root)
         assert lock["packages"]["testns/camish:acme-cam@2.0.0"]["requires"] == "testns/camish@1.2.0"
         inst = lock["instances"]["acme_cam"]
-        assert inst["profile"] == "testns/camish:acme-cam@2.0.0" and inst["base_sha256"]
+        assert inst["profile"] == "testns/camish:acme-cam@2.0.0"
+        assert inst["base_sha256"] == sha256_file(root / "config" / ".pins" / "acme_cam.yaml")
         assert (root / "services" / "camish" / "rigging.yaml").is_file()  # transitive service install
 
 
@@ -237,6 +268,61 @@ def test_sensor_glob_match_and_as_name():
         rc, _, err = _run("--root", str(root), "add", "sensor:usb:9999:0042", "--as", "cam_front")
         assert rc == 0, err
         assert any(s.name == "cam_front" for s in load_manifest(root).sensors)
+
+
+def _extra_profile(reg, short: str, match: list[str]) -> None:
+    p = reg / "profiles" / "camish" / short
+    (p / "config").mkdir(parents=True)
+    (p / "manifest.yaml").write_text(yaml.safe_dump({
+        "kind": "profile", "name": short, "version": "1.0.0",
+        "provides": {"sensor": [{"model": short, "match": match}]},
+        "requires": {"service": "camish@^1.0"},
+        "config": {"payload": "config/payload.yaml"}}))
+    (p / "config" / "payload.yaml").write_text("service: camish\ncamera: {type: usb}\n")
+
+
+def test_sensor_ambiguity_and_exact_beats_glob():
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        root, reg = _world()
+        _extra_profile(reg, "dupe-a", ["dupecam"])       # TWO exact matches for one identifier
+        _extra_profile(reg, "dupe-b", ["dupecam"])
+        _extra_profile(reg, "glob-cam", ["acme*"])       # a glob that also covers 'acme'
+        assert _run("registry", "index", str(reg))[0] == 0
+        rc, _, err = _run("--root", str(root), "add", "sensor:dupecam")
+        assert rc == 1 and "ambiguous" in err and "install one by name" in err
+        assert "camish:dupe-a" in err and "camish:dupe-b" in err   # the choices, spelled out
+        assert not any(s.service == "camish" for s in load_manifest(root).sensors)  # nothing installed
+        # precedence: the EXACT match wins over the glob that also covers the identifier
+        rc, _, err = _run("--root", str(root), "pkg", "install", "sensor:acme")
+        assert rc == 0, err
+        row = next(s for s in load_manifest(root).sensors if s.name == "acme_cam")
+        assert row.profile == "testns/camish:acme-cam@2.0.0"
+
+
+def test_hand_authored_vehicle_yaml_stays_untouched_with_paste_ready_row():
+    # A flow-style tier section isn't the generated block form: install must stage config + pin +
+    # lock anchor, print the paste-ready row, and leave vehicle.yaml byte-identical.
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        root, _ = _world()
+        veh = root / "vehicle.yaml"
+        veh.write_text(veh.read_text().replace("sensors:\n", "sensors: []\n", 1))
+        before = veh.read_bytes()
+        rc, _, err = _run("--root", str(root), "pkg", "install", "sensor:acme")
+        assert rc == 0, err
+        assert "INCOMPLETE" in err and "name: acme_cam" in err     # the paste-ready warning
+        assert veh.read_bytes() == before                          # file untouched, byte for byte
+        assert (root / "config" / "sensors" / "acme_cam.yaml").is_file()   # staged halves present
+        assert (root / "config" / ".pins" / "acme_cam.yaml").is_file()
+        assert "acme_cam" in (load_lock(root).get("instances") or {})
+
+
+def test_as_name_must_be_ros_safe():
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        root, _ = _world()
+        rc, _, err = _run("--root", str(root), "pkg", "install", "sensor:acme", "--as", "Bad-Name")
+        assert rc == 1 and "ROS-safe" in err
+        assert not (root / "config" / "sensors" / "Bad-Name.yaml").exists()
+        assert not (root / "services" / "camish").exists()         # rolled back, no leaked vendor
 
 
 def test_collision_demands_as_name():
@@ -263,11 +349,26 @@ def test_bare_name_registry_fallback_via_add():
 
 def test_version_spec_and_wrong_kind_errors():
     with _env(RIG_HOME=tempfile.mkdtemp()):
-        root, _ = _world()
+        root, reg = _world()
         rc, _, err = _run("--root", str(root), "pkg", "install", "testns/routerish@9.9.9")
         assert rc == 1 and "is at 1.2.0" in err
         rc, _, err = _run("--root", str(root), "pkg", "install", "testns/ghost")
         assert rc == 1 and "not found" in err
+        # WRONG-KIND refs: an overlay is BOUND, never installed standalone
+        rc, _, err = _run("--root", str(root), "pkg", "install", "testns/cam-tune")
+        assert rc == 1 and "BOUND" in err and "overlay apply" in err
+        # ...and a vehicle plan installs only through its suite
+        v = reg / "vehicles" / "planish"
+        (v / "config").mkdir(parents=True)
+        (v / "manifest.yaml").write_text(yaml.safe_dump({
+            "kind": "vehicle", "name": "planish", "version": "1.0.0",
+            "config": {"payload": "config/vehicle.yaml"}}))
+        (v / "config" / "vehicle.yaml").write_text(
+            'vehicle: "{{vehicle}}"\nvehicle_id: "{{vehicle_id}}"\n')
+        assert _run("registry", "index", str(reg))[0] == 0
+        rc, _, err = _run("--root", str(root), "pkg", "install", "testns/planish")
+        assert rc == 1 and "vehicle plan" in err and "suite" in err
+        assert not (root / "rig.lock").exists()                  # neither refusal touched the tree
 
 
 def test_build_falls_back_to_pinned_source_for_vendored_services():
@@ -342,6 +443,20 @@ def test_locked_reproduces_and_detects_drift():
         (root3 / "rig.lock").write_text((root / "rig.lock").read_text())
         rc, _, err = _run("--root", str(root3), "pkg", "install", "testns/camish:acme-cam", "--locked")
         assert rc == 1 and "hash" in err
+        # registry VERSION moves under the lock (2.0.0 -> 2.1.0 re-publish) -> --locked refuses too
+        mpath = reg / "profiles" / "camish" / "acme-cam" / "manifest.yaml"
+        m = yaml.safe_load(mpath.read_text())
+        m["version"] = "2.1.0"
+        mpath.write_text(yaml.safe_dump(m, sort_keys=False))
+        _run("registry", "index", str(reg))
+        root4 = pathlib.Path(tempfile.mkdtemp()) / "veh4"
+        with contextlib.redirect_stderr(io.StringIO()):
+            init(root4, no_git=True)
+        (root4 / "rig.lock").write_text((root / "rig.lock").read_text())
+        rc, _, err = _run("--root", str(root4), "pkg", "install", "testns/camish:acme-cam", "--locked")
+        assert rc == 1 and "not the locked pin" in err
+        assert "testns/camish:acme-cam@2.0.0" in err              # the lock's pin, named in the hint
+        assert not (root4 / "config" / "sensors" / "acme_cam.yaml").exists()  # nothing materialized
 
 
 if __name__ == "__main__":

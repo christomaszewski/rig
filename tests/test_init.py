@@ -1,4 +1,6 @@
 """init — deployment scaffold. Run: python3 tests/test_init.py"""
+import contextlib
+import os
 import pathlib
 import sys
 import tempfile
@@ -7,6 +9,19 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 from rig_cli import RigError  # noqa: E402
 from rig_cli.init import init  # noqa: E402
+
+
+@contextlib.contextmanager
+def _env(**over):
+    """Env patch (test_platform's None-aware pattern): value None UNSETS the variable."""
+    old = {k: os.environ.get(k) for k in over}
+    for k, v in over.items():
+        os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, str(v))
+    try:
+        yield
+    finally:
+        for k, v in old.items():
+            os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
 
 
 def test_init_scaffolds_infra_and_sensors_config_dirs():
@@ -46,7 +61,8 @@ def test_init_defaults_identity_to_per_host_markers():
     init(target, no_git=True)
     body = (target / "vehicle.yaml").read_text()
     assert 'vehicle: "{{vehicle}}"' in body and 'vehicle_id: "{{vehicle_id}}"' in body
-    m = load_manifest(target)
+    with _env(RIG_VEHICLE_ID=None, RIG_VEHICLE_NAME=None):  # ambient per-host identity (the
+        m = load_manifest(target)                           # documented env) must not mask markers
     assert m.vehicle_id is None and {"vehicle", "vehicle_id"} <= set(m.missing_identity)
 
 

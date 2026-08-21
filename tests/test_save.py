@@ -73,13 +73,15 @@ def _registry(ns: str, repo, rev) -> pathlib.Path:
         "config": {"payload": "config/payload.yaml"}}))
     (p / "config" / "payload.yaml").write_text(
         "service: camish\nrate: 5\ncamera: {type: usb, gain: 1}\n")
-    o = reg / "overlays" / "cam-tune"
-    (o / "config").mkdir(parents=True)
-    (o / "manifest.yaml").write_text(yaml.safe_dump({
-        "kind": "overlay", "name": "cam-tune", "version": "1.0.0",
-        "targets": [{"service": "camish"}], "project": "gideon",
-        "config": {"payload": "config/delta.yaml"}}))
-    (o / "config" / "delta.yaml").write_text("camera: {gain: 3}\n")
+    for oname, delta in (("cam-tune", "camera: {gain: 3}\n"),
+                         ("cam-tune-b", "camera: {exposure: 2}\n")):
+        o = reg / "overlays" / oname
+        (o / "config").mkdir(parents=True)
+        (o / "manifest.yaml").write_text(yaml.safe_dump({
+            "kind": "overlay", "name": oname, "version": "1.0.0",
+            "targets": [{"service": "camish"}], "project": "gideon",
+            "config": {"payload": "config/delta.yaml"}}))
+        (o / "config" / "delta.yaml").write_text(delta)
     _run("registry", "index", str(reg))
     return reg
 
@@ -167,6 +169,38 @@ def test_overlay_save_folds_into_the_bound_overlay():
         assert yaml.safe_load(cfg.read_text())["camera"]["gain"] == 1   # working = pristine pin
 
 
+def test_save_two_overlays_folds_into_top_of_stack_only():
+    # THE top-of-stack rule with a real stack: the LAST bound overlay absorbs the delta; the
+    # first is untouched (manifest, payload, binding); the re-render equals the working surface.
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        veh, reg, _ = _world()
+        assert _run("--root", str(veh), "pkg", "add", "sv/camish:cam", "--as", "cam")[0] == 0
+        assert _run("--root", str(veh), "overlay", "apply", "cam", "sv/cam-tune")[0] == 0
+        assert _run("--root", str(veh), "overlay", "apply", "cam", "sv/cam-tune-b")[0] == 0
+        cfg = veh / "config" / "sensors" / "cam.yaml"
+        doc = yaml.safe_load(cfg.read_text())
+        doc["rate"] = 9                    # dirty a pin-owned key on top of the two-layer stack
+        cfg.write_text(yaml.safe_dump(doc))
+        before = _render(veh)
+        rc, _, err = _run("--root", str(veh), "pkg", "save", "cam")
+        assert rc == 0, err
+        mb = yaml.safe_load((reg / "overlays" / "cam-tune-b" / "manifest.yaml").read_text())
+        assert mb["version"] == "1.0.1"                                 # LAST overlay moved
+        delta_b = yaml.safe_load(
+            (reg / "overlays" / "cam-tune-b" / "config" / "delta.yaml").read_text())
+        assert delta_b == {"rate": 9, "camera": {"exposure": 2}}        # own delta + the edit
+        ma = yaml.safe_load((reg / "overlays" / "cam-tune" / "manifest.yaml").read_text())
+        assert ma["version"] == "1.0.0"                                 # FIRST overlay untouched
+        assert yaml.safe_load(
+            (reg / "overlays" / "cam-tune" / "config" / "delta.yaml").read_text()) == \
+            {"camera": {"gain": 3}}
+        assert _render(veh) == before                                   # render identical
+        from rig_cli.manifest import load_manifest
+        sensor = next(s for s in load_manifest(veh).sensors if s.name == "cam")
+        assert list(sensor.overlays) == ["sv/cam-tune@1.0.0", "sv/cam-tune-b@1.0.1"]
+        assert yaml.safe_load(cfg.read_text())["rate"] == 5             # working = pristine pin
+
+
 def test_save_refusals():
     with _env(RIG_HOME=tempfile.mkdtemp()):
         veh, reg, _ = _world()
@@ -240,7 +274,7 @@ if __name__ == "__main__":
             try:
                 fn()
                 print(f"ok   {name}")
-            except AssertionError as exc:
+            except Exception as exc:  # noqa: BLE001
                 failed += 1
                 print(f"FAIL {name}: {exc}")
     sys.exit(1 if failed else 0)

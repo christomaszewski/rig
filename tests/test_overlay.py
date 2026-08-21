@@ -83,7 +83,8 @@ def test_apply_guards():
         rc, _, err = _run("--root", str(root), "overlay", "apply", "acme_cam",
                           "testns/camish:acme-cam")
         assert rc == 1 and "not an overlay" in err
-        rc, _, err = _run("--root", str(root), "add", "testns/routerish") and (0, "", "")
+        rc, _, err = _run("--root", str(root), "add", "testns/routerish")
+        assert rc == 0, err
         rc, _, err = _run("--root", str(root), "overlay", "apply", "routerish", "testns/cam-tune")
         assert rc == 1 and "does not target" in err
         _run("--root", str(root), "overlay", "apply", "acme_cam", "testns/cam-tune")

@@ -19,6 +19,13 @@ from rig_cli.cli import main  # noqa: E402
 from rig_cli.manifest import load_manifest  # noqa: E402
 from rig_cli.resolve import materialize_manifest  # noqa: E402
 
+# Hermetic on ANY host, provisioned included: a fleet artifact's whole point is that identity comes
+# from the VEHICLE, so ambient shell identity must not stand in for it here (tests set the machine
+# tier themselves via _env(RIG_VEHICLE_LOCAL=...)).
+for _stray in [k for k in os.environ
+               if k in ("RIG_VEHICLE_ID", "RIG_VEHICLE_NAME") or k.startswith("RIG_VAR_")]:
+    os.environ.pop(_stray)
+
 
 @contextlib.contextmanager
 def _env(**over):

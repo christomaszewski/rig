@@ -82,6 +82,11 @@ def _shim_dir() -> str:
 
 os.environ["PATH"] = _shim_dir() + ":" + os.environ["PATH"]
 os.environ["RIG_VEHICLE_LOCAL"] = str(pathlib.Path(tempfile.mkdtemp()) / "absent.yaml")
+# …and the shell tier too: each SIL row is its own simulated machine, so ambient identity/vars from
+# the host would cross-contaminate every vehicle in the roster at once.
+for _stray in [k for k in os.environ
+               if k in ("RIG_VEHICLE_ID", "RIG_VEHICLE_NAME") or k.startswith("RIG_VAR_")]:
+    os.environ.pop(_stray)
 
 
 @contextlib.contextmanager

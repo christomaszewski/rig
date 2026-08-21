@@ -1,13 +1,21 @@
 """bake — compose transforms, baked script/bootstrap emission (incl. pull.sh + bundle load guard),
 end-to-end bake (tool bundling, --bundle-images tag refs), and re-bake parent provenance.
 Run: `.venv/bin/python tests/test_bake.py`."""
+import os
 import pathlib
 import sys
 import tempfile
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
-from rig_cli.bake import (
+# Hermetic on ANY host, provisioned included: shell identity would rename the baked compose
+# projects (<name>-vehicle-<id>) out from under the ordering assertions below.
+os.environ["RIG_VEHICLE_LOCAL"] = str(pathlib.Path(tempfile.mkdtemp()) / "absent.yaml")
+for _stray in [k for k in os.environ
+               if k in ("RIG_VEHICLE_ID", "RIG_VEHICLE_NAME") or k.startswith("RIG_VAR_")]:
+    os.environ.pop(_stray)
+
+from rig_cli.bake import (  # noqa: E402
     _external_volume_names,
     _localize_binds,
     _pin_images,

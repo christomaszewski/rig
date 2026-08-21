@@ -113,6 +113,10 @@ def test_profile_repin_exact_and_caret():
         rc, _, err = _run("pkg", "repin", "exactly", "--to", "main", "--dep", "camish@1.4.0")
         assert rc == 0, err
         assert _manifest(reg, "profiles", "camish:exactly")["requires"]["service"] == "camish@1.4.0"
+        # --dep naming a service the profile does NOT require is a hard error, nothing written
+        rc, _, err = _run("pkg", "repin", "exactly", "--to", "main", "--dep", "ghost@1.0.0")
+        assert rc == 1 and "does not match" in err
+        assert _manifest(reg, "profiles", "camish:exactly")["requires"]["service"] == "camish@1.4.0"
 
 
 def test_dry_run_writes_nothing():
@@ -179,6 +183,15 @@ def test_suite_refresh_all_and_dep_narrowing():
         assert m["members"]["services"] == ["kit/camish@1.5.0"]
         assert m["members"]["profiles"] == ["kit/camish:p@3.0.0"]
         assert m["version"] == "1.0.1"
+        # --dep NARROWS: only the named member takes the explicit (non-head) pin — a legal
+        # snapshot; every other member refreshes to current, i.e. stays put at head.
+        rc, _, err = _run("pkg", "repin", "boat", "--to", "kit", "--dep", "o@1.0.0")
+        assert rc == 0, err
+        m = _manifest(reg, "suites", "boat")
+        assert m["members"]["overlays"] == ["kit/o@1.0.0"]             # ONLY the named member moved
+        assert m["members"]["services"] == ["kit/camish@1.5.0"]
+        assert m["members"]["profiles"] == ["kit/camish:p@3.0.0"]
+        assert m["version"] == "1.0.2"
         # unresolvable member = hard error, nothing written
         _mk_suite(reg, "broken", "1.0.0", {"profiles": ["ghost/none:p@1.0.0"]})
         _run("registry", "index", str(reg))
@@ -266,7 +279,7 @@ if __name__ == "__main__":
             try:
                 fn()
                 print(f"ok   {name}")
-            except AssertionError as exc:
+            except Exception as exc:  # noqa: BLE001
                 failed += 1
                 print(f"FAIL {name}: {exc}")
     sys.exit(1 if failed else 0)
