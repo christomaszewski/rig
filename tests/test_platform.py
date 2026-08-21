@@ -102,6 +102,15 @@ def test_descriptor_rejects_bad_platform_declarations():
             assert needle in str(exc), f"{body!r} -> {exc}"
 
 
+def test_descriptor_rejects_tier_typo():
+    # a typo'd tier must not silently demote a service to sensor
+    try:
+        load_descriptor("c", _write_rigging("service: c\nlauncher: c-up\ntier: sensro\n"))
+        raise AssertionError("expected RigError")
+    except RigError as exc:
+        assert "tier must be" in str(exc) and "sensro" in str(exc)
+
+
 # --- manifest: the per-host field ---------------------------------------------------------------
 
 def test_manifest_platform_from_vehicle_yaml_and_var_context():
@@ -151,6 +160,23 @@ def test_fleet_env_exports_and_pops_target_platform():
         assert "RIG_TARGET_PLATFORM" not in env   # rig owns it: inherited values must not leak
 
 
+def test_fleet_env_pops_every_rig_owned_var_the_manifest_leaves_unset():
+    # The same set-or-pop contract across the whole rig-owned channel: a leaked shell value must
+    # never rename compose projects or redirect pulls/outputs; a manifest value always wins.
+    leaked = {"VEHICLE_ID": "99", "RIG_IMAGE_REGISTRY": "leak:5000",
+              "RIG_IMAGE_TAG": "leak-tag", "RIG_DATA_DIR": "/leak"}
+    with _env(**leaked):
+        env = fleet_env(_manifest(tag=None, platform=None))   # manifest defines none of them
+        assert not any(key in env for key in leaked)
+        declared = Manifest(vehicle="t", ros=RosSettings(domain_id=0, rmw="rmw_fastrtps_cpp",
+                                                         distro=None),
+                            sensors=[], vehicle_id=7, image_registry="fleet:5000",
+                            image_tag="v2", data_dir="/data/rec")
+        env2 = fleet_env(declared)
+        assert env2["VEHICLE_ID"] == "7" and env2["RIG_IMAGE_REGISTRY"] == "fleet:5000"
+        assert env2["RIG_IMAGE_TAG"] == "v2" and env2["RIG_DATA_DIR"] == "/data/rec"
+
+
 def test_service_env_composes_tag_and_mirrors_override():
     base = {"RIG_TARGET_PLATFORM": "jp7", "RIG_IMAGE_TAG": "v1.3.0"}
     matrix = _desc(platforms=["jp7", "jp6"], override="CAM_PLATFORM")
@@ -189,7 +215,8 @@ def test_build_tag_composition_and_env():
     env = _build_env("lyrical", matrix, "jp7")
     assert env["ROS_DISTRO"] == "lyrical" and env["RIG_TARGET_PLATFORM"] == "jp7"
     assert env["CAM_PLATFORM"] == "jp7"
-    with _env(ROS_DISTRO="from-shell", RIG_BASE_IMAGE="leaked", RIG_BUILD_NO_CACHE="leaked"):
+    with _env(ROS_DISTRO="from-shell", RIG_BASE_IMAGE="leaked", RIG_BUILD_NO_CACHE="leaked",
+              RIG_TARGET_PLATFORM="leaked"):
         env2 = _build_env(None, plain, "jp7")               # nothing to add for a plain service …
         assert "RIG_TARGET_PLATFORM" not in env2 and env2["ROS_DISTRO"] == "from-shell"
         # … but the rig-owned build channel is set-or-POPPED, never inherited from the shell
@@ -197,6 +224,7 @@ def test_build_tag_composition_and_env():
         env3 = _build_env(None, plain, None, base_image="reg:5000/fleet-ros:v1", no_cache=True)
         assert env3["RIG_BASE_IMAGE"] == "reg:5000/fleet-ros:v1"
         assert env3["RIG_BUILD_NO_CACHE"] == "1"
+        assert "RIG_TARGET_PLATFORM" not in env3               # popped here too, not inherited
 
 
 # --- doctor -------------------------------------------------------------------------------------

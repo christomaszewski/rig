@@ -43,6 +43,9 @@ def _deployment(vehicle_yaml: str, files: dict = (), local: str | None = None) -
 
 
 _NO_MACHINE = str(pathlib.Path(tempfile.mkdtemp()) / "absent.yaml")  # hermetic: no /etc/rig leak
+for _stray in [k for k in os.environ
+               if k in ("RIG_VEHICLE_ID", "RIG_VEHICLE_NAME") or k.startswith("RIG_VAR_")]:
+    os.environ.pop(_stray)  # hermetic: a host's stray identity/RIG_VAR_* must not feed the tiers
 
 
 def test_interpolate_primitives():

@@ -1,11 +1,17 @@
-"""doctor — config-path resolution (incl. the enabled-aware list selector) + the non-ROS-safe
-instance-name warning. Run: python3 tests/test_doctor.py"""
+"""doctor — config-path resolution (incl. the enabled-aware list selector) + the cross-service
+checks (distros, ports, routers, launchers) and the non-ROS-safe instance-name warning.
+Run: python3 tests/test_doctor.py"""
+import os
 import pathlib
 import sys
+import tempfile
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 from rig_cli.doctor import _get_path
+
+# hermetic: no /etc/rig identity/vars leak — set at import, fixtures load manifests directly
+os.environ["RIG_VEHICLE_LOCAL"] = str(pathlib.Path(tempfile.mkdtemp()) / "absent.yaml")
 
 
 def test_dotted_and_list_selector():
@@ -115,6 +121,93 @@ def _three_tier_fixture(sensor_enabled: bool, autonomy_name: str = "planner"):
     m = load_manifest(d)
     descs = {svc: load_descriptor(svc, r) for svc, r in repos.items()}
     return collect(m, load_catalog(d), descs)
+
+
+def _svc_repo(svc: str, rigging: str, *, launcher: bool = True, executable: bool = True) -> pathlib.Path:
+    r = pathlib.Path(tempfile.mkdtemp())
+    (r / "rigging.yaml").write_text(rigging)
+    if launcher:
+        (r / f"{svc}-up").write_text("#!/bin/sh\n")
+        (r / f"{svc}-up").chmod(0o755 if executable else 0o644)
+    return r
+
+
+def _collect_from(vehicle_body: str, repos: dict, configs: dict):
+    from rig_cli.catalog import load_catalog
+    from rig_cli.descriptor import load_descriptor
+    from rig_cli.doctor import collect
+    from rig_cli.manifest import load_manifest
+
+    d = pathlib.Path(tempfile.mkdtemp())
+    (d / "config").mkdir()
+    (d / "vehicle.yaml").write_text(vehicle_body)
+    routes = ", ".join(f"{svc}: {{path: {repo}}}" for svc, repo in repos.items())
+    (d / "services.yaml").write_text(f"services: {{{routes}}}\n")
+    for rel, body in configs.items():
+        (d / "config" / rel).write_text(body)
+    descs = {svc: load_descriptor(svc, repo) for svc, repo in repos.items()}
+    return collect(load_manifest(d), load_catalog(d), descs)
+
+
+def test_errors_on_host_port_clash_across_instances():
+    # two instances of a host_ports-declaring service claiming ONE port -> ERROR naming both
+    svc = _svc_repo("dash", "service: dash\nlauncher: dash-up\nhost_ports: [server.port]\n")
+
+    def issues_with(port_b: int):
+        return _collect_from(
+            "vehicle: t\n"
+            "sensors: [{name: dash_a, service: dash, config: config/a.yaml},\n"
+            "          {name: dash_b, service: dash, config: config/b.yaml}]\n",
+            {"dash": svc},
+            {"a.yaml": "service: dash\nname: dash_a\nserver: {port: 8443}\n",
+             "b.yaml": f"service: dash\nname: dash_b\nserver: {{port: {port_b}}}\n"})
+
+    clash = issues_with(8443)
+    assert any(i.level == "ERROR" and "host port 8443" in i.message
+               and "dash_a" in i.message and "dash_b" in i.message for i in clash)
+    assert not any("host port" in i.message for i in issues_with(8444))  # distinct ports: clean
+
+
+def test_errors_on_mixed_distros_across_services():
+    cam = _svc_repo("cam", "service: cam\nlauncher: cam-up\nros_distro: lyrical\n")
+    gnss = _svc_repo("gnss", "service: gnss\nlauncher: gnss-up\nros_distro: jazzy\n")
+    issues = _collect_from(
+        "vehicle: t\n"
+        "sensors: [{name: cam0, service: cam, config: config/c.yaml},\n"
+        "          {name: gnss0, service: gnss, config: config/g.yaml}]\n",
+        {"cam": cam, "gnss": gnss},
+        {"c.yaml": "service: cam\nname: cam0\n", "g.yaml": "service: gnss\nname: gnss0\n"})
+    assert any(i.level == "ERROR" and "mixed ROS distros" in i.message for i in issues)
+
+
+def test_zenoh_rmw_without_infra_router_warns():
+    cam = _svc_repo("cam", "service: cam\nlauncher: cam-up\nros_distro: lyrical\n")
+    router = _svc_repo("zenoh-router", "service: zenoh-router\nlauncher: zenoh-router-up\n")
+    without = _collect_from(
+        "vehicle: t\nros: {rmw: rmw_zenoh_cpp}\n"
+        "sensors: [{name: cam0, service: cam, config: config/c.yaml}]\n",
+        {"cam": cam}, {"c.yaml": "service: cam\nname: cam0\n"})
+    assert any(i.level == "WARN" and "no zenoh router" in i.message for i in without)
+    with_router = _collect_from(
+        "vehicle: t\nros: {rmw: rmw_zenoh_cpp}\n"
+        "infra: [{name: router, service: zenoh-router, config: config/r.yaml}]\n"
+        "sensors: [{name: cam0, service: cam, config: config/c.yaml}]\n",
+        {"cam": cam, "zenoh-router": router},
+        {"c.yaml": "service: cam\nname: cam0\n",
+         "r.yaml": "service: zenoh-router\nname: router\n"})
+    assert not any("no zenoh router" in i.message for i in with_router)
+
+
+def test_launcher_missing_errors_and_non_executable_warns():
+    fixture = ("vehicle: t\nsensors: [{name: cam0, service: cam, config: config/c.yaml}]\n",
+               {"c.yaml": "service: cam\nname: cam0\n"})
+    missing = _svc_repo("cam", "service: cam\nlauncher: cam-up\n", launcher=False)
+    issues = _collect_from(fixture[0], {"cam": missing}, fixture[1])
+    assert any(i.level == "ERROR" and "launcher missing" in i.message for i in issues)
+    non_exec = _svc_repo("cam", "service: cam\nlauncher: cam-up\n", executable=False)
+    issues2 = _collect_from(fixture[0], {"cam": non_exec}, fixture[1])
+    assert any(i.level == "WARN" and "not executable" in i.message for i in issues2)
+    assert not any("launcher missing" in i.message for i in issues2)
 
 
 def test_warns_autonomy_with_no_enabled_sensors():

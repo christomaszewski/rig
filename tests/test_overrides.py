@@ -1,4 +1,5 @@
 """§1 — config overrides & profiles. Run: `.venv/bin/python tests/test_overrides.py` (no pytest needed)."""
+import os
 import pathlib
 import sys
 import tempfile
@@ -9,6 +10,9 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 from rig_cli.common import load_yaml
 from rig_cli.manifest import load_manifest
 from rig_cli.resolve import deep_merge, materialize_manifest
+
+# hermetic: no /etc/rig identity/vars leak — set at import, tests load manifests directly
+os.environ["RIG_VEHICLE_LOCAL"] = str(pathlib.Path(tempfile.mkdtemp()) / "absent.yaml")
 
 
 def test_deep_merge_dict_and_scalar_and_list():
@@ -54,6 +58,25 @@ def test_profile_shared_across_instances_and_passthrough():
 
     # a complete named config with no overrides is passed through untouched (no render)
     assert by["gnss"].config == (root / "named.yaml").resolve()
+
+
+def test_nameless_profile_without_overrides_still_renders_the_name():
+    # The passthrough clause needs a complete NAMED config — a nameless profile with no overrides
+    # must still render, with the instance name injected (never the raw profile handed through).
+    root = _root_with({
+        "vehicle.yaml": """
+            vehicle: t
+            ros: {domain_id: 0}
+            sensors:
+              - {name: cam_solo, service: camera-service, config: p.yaml}
+        """,
+        "p.yaml": "service: camera-service\ncamera: {type: gige, frame_rate: 20.0}\ngige: {fake: true}\n",
+    })
+    cam = materialize_manifest(load_manifest(root), root).sensors[0]
+    assert cam.config == root / "var" / "rendered" / "cam_solo.yaml"  # RENDERED, not the raw profile
+    rendered = load_yaml(cam.config)
+    assert rendered["name"] == "cam_solo" and rendered["service"] == "camera-service"
+    assert rendered["camera"]["frame_rate"] == 20.0  # profile body carried through unchanged
 
 
 if __name__ == "__main__":

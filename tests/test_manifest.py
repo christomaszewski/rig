@@ -1,4 +1,5 @@
 """Manifest validation. Run: `.venv/bin/python tests/test_manifest.py` (no pytest needed)."""
+import os
 import pathlib
 import sys
 import tempfile
@@ -8,6 +9,13 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 from rig_cli import RigError
 from rig_cli.manifest import load_manifest
+
+# Hermetic on ANY host, provisioned included — set at import, since tests load manifests directly:
+# no /etc/rig identity file, no shell identity, no stray RIG_VAR_* feeding the vars tier.
+os.environ["RIG_VEHICLE_LOCAL"] = str(pathlib.Path(tempfile.mkdtemp()) / "absent.yaml")
+for _stray in [k for k in os.environ
+               if k in ("RIG_VEHICLE_ID", "RIG_VEHICLE_NAME") or k.startswith("RIG_VAR_")]:
+    os.environ.pop(_stray)
 
 
 def _root_with(files: dict) -> pathlib.Path:
@@ -49,7 +57,18 @@ def test_config_name_mismatch_rejected():
               - {name: gnss, service: novatel, config: c.yaml}
         """,
         "c.yaml": "service: novatel\nname: OTHER\nconnection: {type: file}\n",
-    }), "name")
+    }), "vehicle.yaml name != config name 'OTHER'")
+
+
+def test_config_service_mismatch_rejected():
+    _expect_error(_root_with({
+        "vehicle.yaml": """
+            vehicle: t
+            sensors:
+              - {name: gnss, service: novatel, config: c.yaml}
+        """,
+        "c.yaml": "service: sbg\nname: gnss\nconnection: {type: file}\n",
+    }), "vehicle.yaml service 'novatel' != config service 'sbg'")
 
 
 def test_nameless_profile_accepted():
@@ -65,18 +84,41 @@ def test_nameless_profile_accepted():
 
 
 def test_order_sorts_and_shared_profile():
-    # both instances share one nameless profile; names come from the manifest
+    # both instances share one nameless profile; names come from the manifest. Alphabetical name
+    # order (and row order) CONTRADICT the numeric `order`, so only sorting by `order` passes.
     root = _root_with({
         "vehicle.yaml": """
             vehicle: t
             sensors:
-              - {name: c, service: novatel, config: x.yaml, order: 30}
-              - {name: a, service: novatel, config: x.yaml, order: 10}
+              - {name: a, service: novatel, config: x.yaml, order: 30}
+              - {name: c, service: novatel, config: x.yaml, order: 10}
         """,
         "x.yaml": "service: novatel\nconnection: {type: file}\n",
     })
     sel = load_manifest(root).select([], enabled_only=True)
-    assert [s.name for s in sel] == ["a", "c"]
+    assert [s.name for s in sel] == ["c", "a"]
+
+
+def test_select_explicit_names_and_unknown_rejected():
+    root = _root_with({
+        "vehicle.yaml": """
+            vehicle: t
+            sensors:
+              - {name: a, service: novatel, config: x.yaml, order: 10}
+              - {name: b, service: novatel, config: x.yaml, order: 20, enabled: false}
+              - {name: c, service: novatel, config: x.yaml, order: 30}
+        """,
+        "x.yaml": "service: novatel\nconnection: {type: file}\n",
+    })
+    m = load_manifest(root)
+    assert [s.name for s in m.select(["c", "a"], enabled_only=True)] == ["a", "c"]  # exactly those, order-sorted
+    assert [s.name for s in m.select(["b"], enabled_only=True)] == ["b"]  # explicit names beat enabled:
+    assert [s.name for s in m.select([], enabled_only=True)] == ["a", "c"]
+    try:
+        m.select(["a", "ghost"], enabled_only=True)
+        raise AssertionError("expected RigError")
+    except RigError as exc:
+        assert "unknown sensor(s)" in str(exc) and "ghost" in str(exc)
 
 
 def test_vehicle_id_derives_domain():
@@ -210,6 +252,18 @@ def test_data_dir_parsed_and_exported():
     m = load_manifest(root)
     assert m.data_dir == "/data/rec"
     assert fleet_env(m)["RIG_DATA_DIR"] == "/data/rec"
+
+
+def test_catalog_missing_path_and_relative_resolution():
+    from rig_cli.catalog import load_catalog
+    root = _root_with({"services.yaml": "services: {cam: {path: ../cam-repo}, gnss: {}}\n"})
+    try:
+        load_catalog(root)
+        raise AssertionError("expected RigError")
+    except RigError as exc:
+        assert "gnss" in str(exc) and "path" in str(exc)
+    ok = _root_with({"services.yaml": "services: {cam: {path: ../cam-repo}}\n"})
+    assert load_catalog(ok)["cam"].path == (ok / ".." / "cam-repo").resolve()  # relative to the root
 
 
 if __name__ == "__main__":
