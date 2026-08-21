@@ -348,6 +348,207 @@ def test_rebake_inside_extracted_artifact_stamps_parent():
     assert "parent:" in meta and "tag: day0" in meta and "rig_version:" in meta
 
 
+# --- appended coverage: bake_fleet, _bundle_images/_resolve_digest error paths, mirror tags ------
+
+def _docker_on_path(body: str):
+    """Context manager: prepend a mkdtemp holding a fake `docker` sh script to PATH (restored on
+    exit) — bake's digest/bundle helpers shell out via os.environ, not a passed env."""
+    import contextlib
+    import os
+
+    @contextlib.contextmanager
+    def _cm():
+        shim = pathlib.Path(tempfile.mkdtemp())
+        (shim / "docker").write_text(body)
+        (shim / "docker").chmod(0o755)
+        old = os.environ["PATH"]
+        os.environ["PATH"] = f"{shim}:{old}"
+        try:
+            yield shim
+        finally:
+            os.environ["PATH"] = old
+    return _cm()
+
+
+def _fleet_fixture() -> pathlib.Path:
+    """A fleet-SHAPED deployment: fleet-ness is a property of the tree ({{var}} markers in
+    vehicle.yaml / config), never a bake flag. Identity markers + one mandatory config var
+    ({{gcs_ip}}) + one fleet-defaulted var (vars: rtsp_port) to exercise the example split."""
+    svc = pathlib.Path(tempfile.mkdtemp()) / "camsvc"
+    svc.mkdir(parents=True)
+    (svc / "rigging.yaml").write_text("service: camsvc\nlauncher: camsvc-up\n"
+                                      "launch_surface: [camsvc-up]\n")
+    (svc / "camsvc-up").write_text("#!/bin/sh\n")
+    (svc / "camsvc-up").chmod(0o755)
+    root = pathlib.Path(tempfile.mkdtemp()) / "veh"
+    (root / "config" / "sensors").mkdir(parents=True)
+    (root / "vehicle.yaml").write_text(
+        'vehicle: "{{vehicle}}"\n'
+        'vehicle_id: "{{vehicle_id}}"\n'
+        "vars: {rtsp_port: 8554}\n"
+        "sensors:\n"
+        "  - {name: cam, service: camsvc, config: config/sensors/cam.yaml}\n")
+    (root / "config" / "sensors" / "cam.yaml").write_text(
+        "service: camsvc\nname: cam\n"
+        "rtsp: {url: 'rtsp://10.160.{{vehicle_id}}.80:{{rtsp_port}}/main'}\n"
+        "gcs: {ip: '{{gcs_ip}}'}\n")
+    (root / "services.yaml").write_text(f"services:\n  camsvc: {{ path: {svc} }}\n")
+    return root
+
+
+def test_bake_fleet_stages_unresolved_tree_and_splits_vars():
+    from rig_cli.bake import bake_fleet, is_fleet, unbake
+
+    root = _fleet_fixture()
+    assert is_fleet(root)                       # the tree's markers alone make it a fleet artifact
+    artifact = bake_fleet(root, "f1")
+    tree = unbake(artifact, pathlib.Path(tempfile.mkdtemp()))
+    # The staged tree is the UNRESOLVED template, verbatim — rendering happens on-vehicle; a
+    # resolved value baked in here would silently weld ONE vehicle's identity into all N.
+    veh = (tree / "vehicle.yaml").read_text()
+    assert "{{vehicle}}" in veh and "{{vehicle_id}}" in veh
+    cam = (tree / "config" / "sensors" / "cam.yaml").read_text()
+    assert "{{rtsp_port}}" in cam and "{{gcs_ip}}" in cam
+    # vehicle.local.example.yaml: mandatory (nothing supplies them) split from fleet-defaulted
+    example = (tree / "vehicle.local.example.yaml").read_text()
+    assert "vehicle: my-vehicle      # REQUIRED" in example
+    assert "vehicle_id: 1            # REQUIRED" in example
+    assert "# vars: {gcs_ip: <value>}   # REQUIRED" in example
+    assert "# vars: {rtsp_port: 8554}   # optional — fleet default shown" in example
+    # ...and the split is exclusive: a fleet-DEFAULTED var must not also be listed as mandatory
+    # (an operator told rtsp_port is REQUIRED would hand-write a value the fleet already sets).
+    assert "rtsp_port: <value>" not in example
+    assert example.count("# REQUIRED") == 3          # exactly gcs_ip + vehicle + vehicle_id
+    # provisioning + vendored launch surfaces travel with the artifact; no compose-only form
+    # (it would embed one vehicle's values) — run.sh falls through to the bundled rig.
+    assert (tree / "provision.sh").is_file() and (tree / "provision.sh").stat().st_mode & 0o111
+    assert (tree / "services" / "camsvc" / "rigging.yaml").is_file()
+    assert (tree / "services" / "camsvc" / "camsvc-up").is_file()
+    assert (tree / "rig").is_file() and (tree / "run.sh").is_file()
+    assert not (tree / "up.sh").exists()
+    assert "fleet: true" in (tree / "metadata.yaml").read_text()
+
+
+def test_bake_fleet_refuses_bundle_images_and_registry_override():
+    from rig_cli import RigError
+    from rig_cli.bake import bake_fleet
+
+    root = _fleet_fixture()
+    # --bundle-images needs the resolved compose-only form a fleet artifact deliberately omits;
+    # --registry would bake one override into values that must resolve per vehicle.
+    for kwargs, needle in (({"bundle_images": True}, "compose-only"),
+                           ({"registry": "reg:5000"}, "per-vehicle")):
+        try:
+            bake_fleet(root, "f2", **kwargs)
+            raise AssertionError(f"expected RigError for {kwargs}")
+        except RigError as exc:
+            assert needle in str(exc), f"{kwargs} -> {exc}"
+    assert not (root / "var" / "bake" / "f2").exists()  # refused before any staging
+
+
+def test_bundle_images_hard_errors():
+    from rig_cli import RigError
+    from rig_cli.bake import _bundle_images
+
+    staging = pathlib.Path(tempfile.mkdtemp())
+    # A ref neither local nor pullable is a HARD error (a silently incomplete bundle would
+    # betray the air-gap promise): `image inspect` fails before AND after the pull attempt.
+    with _docker_on_path("#!/bin/sh\nexit 1\n"):
+        try:
+            _bundle_images(staging, ["reg.test/foo:t1"])
+            raise AssertionError("expected RigError for unpullable ref")
+        except RigError as exc:
+            assert "not in the local store and not pullable" in str(exc)
+            assert "reg.test/foo:t1" in str(exc)
+    assert not (staging / "images.tar").exists()
+    # Images all present but `docker save` fails (e.g. disk full): hard error, stderr surfaced.
+    save_fail = ("#!/bin/sh\n"
+                 'case "$1" in\n'
+                 "  image) exit 0 ;;\n"
+                 '  save) echo "write images.tar: no space left on device" >&2; exit 1 ;;\n'
+                 "esac\n"
+                 "exit 0\n")
+    with _docker_on_path(save_fail):
+        try:
+            _bundle_images(staging, ["reg.test/foo:t1"])
+            raise AssertionError("expected RigError for failed save")
+        except RigError as exc:
+            assert "docker save failed" in str(exc) and "no space left" in str(exc)
+
+
+def test_resolve_digest_registry_fallback_chain():
+    from rig_cli.bake import _resolve_digest
+
+    # Step 1 (local RepoDigests) fails -> step 2 (buildx imagetools, the registry) still pins.
+    buildx_only = ("#!/bin/sh\n"
+                   'case "$1" in\n'
+                   "  inspect) exit 1 ;;\n"
+                   '  buildx) echo "sha256:beefcafe"; exit 0 ;;\n'
+                   "esac\n"
+                   "exit 1\n")
+    with _docker_on_path(buildx_only):
+        assert _resolve_digest("reg.test/foo:t1") == "reg.test/foo@sha256:beefcafe"
+        # local_only (bundle mode) must NOT take the registry round-trip even when it would
+        # answer — the whole point is not stalling on an unreachable registry.
+        assert _resolve_digest("reg.test/foo:t1", local_only=True) is None
+    # Both sources fail -> None, and the caller leaves the ref as a tag (graceful degrade).
+    with _docker_on_path("#!/bin/sh\nexit 1\n"):
+        assert _resolve_digest("reg.test/foo:t1") is None
+
+
+_MIRROR_LAUNCHER = """\
+#!/bin/sh
+[ "$2" = config ] || exit 0
+printf 'services:\\n  core:\\n    image: reg.test/foo:t1\\n  router:\\n    image: thirdparty/zenoh:1.0\\n'
+"""
+
+# Digest shim answering PER REF (repo derived from the inspected ref, $4) — so BOTH refs are
+# pinnable, and only the mirror exemption keeps the third-party ref a tag. A shim that only
+# knows foo's digest would leave zenoh a tag by accident, guarding nothing.
+_PER_REF_DIGEST_SHIM = """\
+#!/bin/sh
+case "$1" in
+  inspect) repo="${4%%:*}"; echo "[\\"$repo@sha256:deadbeef\\"]"; exit 0 ;;
+esac
+exit 0
+"""
+
+
+def test_mirror_declared_refs_stay_tags_while_built_refs_pin():
+    import os
+
+    import yaml as _yaml
+
+    from rig_cli.bake import bake, unbake
+    from rig_cli.catalog import load_catalog
+    from rig_cli.descriptor import load_descriptor
+    from rig_cli.manifest import load_manifest
+
+    svc = pathlib.Path(tempfile.mkdtemp())
+    (svc / "rigging.yaml").write_text("service: demo\nlauncher: demo-up\nlaunch_surface: [demo-up]\n"
+                                      "mirror: [thirdparty/zenoh:1.0]\n")
+    (svc / "demo-up").write_text(_MIRROR_LAUNCHER)
+    (svc / "demo-up").chmod(0o755)
+    root = pathlib.Path(tempfile.mkdtemp())
+    (root / "config" / "sensors").mkdir(parents=True)
+    (root / "vehicle.yaml").write_text(
+        "vehicle: t\nsensors: [{name: a, service: demo, config: config/sensors/a.yaml}]\n")
+    (root / "services.yaml").write_text(f"services: {{demo: {{path: {svc}}}}}\n")
+    (root / "config" / "sensors" / "a.yaml").write_text("service: demo\nname: a\n")
+    m, cat, descs = load_manifest(root), load_catalog(root), {"demo": load_descriptor("demo", svc)}
+
+    with _docker_on_path(_PER_REF_DIGEST_SHIM) as shim:
+        artifact = bake(root, m, cat, descs, {"PATH": f"{shim}:/usr/bin:/bin"}, "t")
+    tree = unbake(artifact, pathlib.Path(tempfile.mkdtemp()))
+    compose = (tree / "compose" / "a" / "docker-compose.yaml").read_text()
+    assert "reg.test/foo@sha256:deadbeef" in compose     # built ref: digest-pinned
+    assert "thirdparty/zenoh:1.0" in compose             # mirrored third-party: the TAG survives
+    assert "thirdparty/zenoh@" not in compose            # ...never digest-pinned (fragile digests)
+    meta = _yaml.safe_load((tree / "metadata.yaml").read_text())
+    assert meta["images"]["reg.test/foo:t1"] == "reg.test/foo@sha256:deadbeef"
+    assert meta["images"]["thirdparty/zenoh:1.0"] is None   # recorded unpinned in the audit map
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

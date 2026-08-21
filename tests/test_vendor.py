@@ -77,6 +77,10 @@ def test_refuses_to_clobber_a_nonvendored_dir():
         assert "isn't a vendored dir" in str(exc)
     else:
         raise AssertionError("expected RigError")
+    # The guard exists to PREVENT data loss, not just to phrase an error: the hand-written
+    # tree must survive the refusal untouched (no rmtree, no partial copy over it).
+    assert (t / "handwritten.txt").read_text() == "do not delete me"
+    assert not (t / "demo-up").exists() and not (t / ".vendored.yaml").exists()
 
 
 def test_requires_launch_surface_and_errors_on_missing_file():

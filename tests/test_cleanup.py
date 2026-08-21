@@ -2,6 +2,7 @@
 composed platform tags included), the containers guard, volume targets, dry-run inertness, and the
 baked cleanup.sh parity script. Run: python3 tests/test_cleanup.py"""
 import contextlib
+import io
 import os
 import pathlib
 import subprocess
@@ -67,20 +68,34 @@ def _fixture():
 
 
 @contextlib.contextmanager
-def _fake_docker(ps_output: str = ""):
+def _fake_docker(ps_output: str = "", fail_rm: bool = False):
     """A PATH-shimmed `docker` that logs every invocation and answers `ps`/`volume ls` with
-    canned output — the sweep is exercised for real, the daemon is not."""
+    canned output — the sweep is exercised for real, the daemon is not. The residue volume is
+    emitted ONLY when the compose-project label filter is on the `volume ls` command line:
+    that filter is the label-scoping that keeps cleanup from deleting every volume on the
+    host, so a shim answering an UNFILTERED ls would leave it untested. ``fail_rm`` makes
+    `rmi`/`volume rm` refuse like the daemon's in-use errors (canned stderr, exit 1) to
+    drive the kept/in-use reporting branches."""
     bin_dir = pathlib.Path(tempfile.mkdtemp(prefix="cleanup-bin-"))
     log = bin_dir / "calls.log"
-    (bin_dir / "docker").write_text(textwrap.dedent(f"""\
-        #!/bin/sh
-        echo "$@" >> {log}
-        case "$1 $2" in
-          "ps -aq") printf '%s' {repr(ps_output) if ps_output else "''"} ;;
-          "volume ls") printf 'residue_vol\\n' ;;
-        esac
-        exit 0
-        """))
+    fail_branches = (
+        '  "rmi "*) echo "Error response from daemon: conflict: image is being used'
+        ' by a container" >&2; exit 1 ;;\n'
+        '  "volume rm") echo "Error response from daemon: remove $3: volume is in use'
+        ' - [cafe]" >&2; exit 1 ;;\n'
+    ) if fail_rm else ""
+    (bin_dir / "docker").write_text(
+        "#!/bin/sh\n"
+        f'echo "$@" >> {log}\n'
+        'case "$1 $2" in\n'
+        f"""  "ps -aq") printf '%s' {repr(ps_output) if ps_output else "''"} ;;\n"""
+        '  "volume ls")\n'
+        '    case "$*" in\n'
+        '      *"--filter label=com.docker.compose.project="*) printf \'residue_vol\\n\' ;;\n'
+        "    esac ;;\n"
+        f"{fail_branches}"
+        "esac\n"
+        "exit 0\n")
     (bin_dir / "docker").chmod(0o755)
     old = os.environ["PATH"]
     os.environ["PATH"] = f"{bin_dir}:{old}"
@@ -126,14 +141,21 @@ def test_declared_volumes_format_instance_names():
     assert vols == {"fak_cam_a_sock", "fak_cam_b_sock"}
 
 
-def test_dry_run_touches_nothing_and_prints_the_plan(capsys=None):
+def test_dry_run_touches_nothing_and_prints_the_plan():
     manifest, descriptors = _fixture()
     root = pathlib.Path(tempfile.mkdtemp())
+    err = io.StringIO()
     with _fake_docker() as log:
-        rc = cleanup(root, manifest, descriptors, {"RIG_IMAGE_TAG": "v1"},
-                     names=[], dry_run=True)
+        with contextlib.redirect_stderr(err):
+            rc = cleanup(root, manifest, descriptors, {"RIG_IMAGE_TAG": "v1"},
+                         names=[], dry_run=True)
         assert rc == 0
         assert not log.exists(), "dry-run must not invoke docker at all"
+    plan = err.getvalue()  # the plan must actually PRINT — images, declared volumes, and residue
+    assert "would rmi reg:5000/fak-core:v1" in plan
+    assert "would rmi docker.io/library/busybox:stable" in plan
+    assert "would rm volume fak_cam_a_sock" in plan
+    assert "would rm volumes labeled com.docker.compose.project=cam_a-vehicle-1" in plan
 
 
 def test_guard_refuses_while_containers_exist():
@@ -163,6 +185,10 @@ def test_sweep_removes_images_declared_and_labeled_volumes():
     assert "volume rm fak_cam_a_sock" in calls and "volume rm fak_cam_b_sock" in calls
     assert "volume rm residue_vol" in calls                   # project-labeled residue swept
     assert "label=com.docker.compose.project=cam_a-vehicle-1" in calls
+    # The residue listing must be label-SCOPED (an unfiltered `volume ls` would sweep every
+    # volume on the host) — assert the exact filtered invocation, per project:
+    assert "volume ls -q --filter label=com.docker.compose.project=cam_a-vehicle-1" in calls
+    assert "volume ls -q --filter label=com.docker.compose.project=cam_b-vehicle-1" in calls
 
 
 def test_keep_volumes_removes_images_only():
@@ -195,6 +221,28 @@ def test_bake_emits_cleanup_script():
     assert "com.docker.compose.project=$p" in body
     assert body.index("ps -aq") < body.index("rmi")           # guard runs BEFORE any removal
     assert "cleanup)" in (staging / "run.sh").read_text()      # run.sh routes the verb
+
+
+def test_in_use_refusals_are_reported_kept_with_counts():
+    # The daemon refusing `rmi`/`volume rm` (image/volume still in use by ANOTHER deployment)
+    # is cleanup's safety net — it must surface as per-item "kept" lines plus accurate summary
+    # counts, and the sweep still exits 0 (partial is expected, not an error).
+    manifest, descriptors = _fixture()
+    root = pathlib.Path(tempfile.mkdtemp())
+    err = io.StringIO()
+    with _fake_docker(fail_rm=True):
+        with contextlib.redirect_stderr(err):
+            rc = cleanup(root, manifest, descriptors, {"RIG_IMAGE_TAG": "v1"}, names=[])
+    assert rc == 0
+    out = err.getvalue()
+    # per-item reporting: the image line carries the daemon's reason, the volume line the fixed hint
+    assert "kept image reg:5000/fak-core:v1 (Error response from daemon: conflict" in out
+    assert "kept image docker.io/library/busybox:stable (" in out
+    assert "kept volume fak_cam_a_sock (in use — a consumer may still be attached)" in out
+    assert "kept volume residue_vol (in use" in out            # labeled residue reported too
+    assert "removed image" not in out and "removed volume" not in out
+    # summary: 2 rendered images kept, 2 declared volumes + 1 residue kept, nothing removed
+    assert "0 image(s) removed, 2 kept (in use), 0 volume(s) removed, 3 kept" in out
 
 
 if __name__ == "__main__":
