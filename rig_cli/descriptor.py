@@ -57,6 +57,10 @@ class Descriptor:
     #                                              image sets per hardware/OS target. Presence makes the
     #                                              service platform-dependent: rig composes its pull tag as
     #                                              <tag>-<platform> and certify checks each entry renders.
+    build_provides: str | None = None            # "base": this service's build produces the deployment's
+    #                                              base image (build.images[0]) — rig builds it FIRST and
+    #                                              exports it as RIG_BASE_IMAGE; vehicle.yaml images.base
+    #                                              overrides (see build.resolve_base_image)
     platform_auto_detect: str | None = None      # the launcher's standalone host probe (e.g.
     #                                              /etc/nv_tegra_release) — informational; declared wins
     platform_override_env: str | None = None     # env var the launcher honors as platform override (e.g.
@@ -115,21 +119,31 @@ def load_descriptor(service: str, repo: Path) -> Descriptor:
     if tier not in ("sensor", "infra", "autonomy"):  # a typo must not silently demote a service to sensor
         raise RigError(f"{path}: tier must be 'infra', 'sensor', or 'autonomy', not '{tier}'")
 
-    build_raw = data.get("build")  # `build: <cmd>` or `build: { command: <cmd>, images: [...], platforms: [...] }`
+    build_raw = data.get("build")  # `build: <cmd>` or `build: { command: <cmd>, images: [...],
+    #                                 platforms: [...], provides: base }`
     build_images: list[str] = []
     build_platforms: list[str] = []
+    build_provides: str | None = None
     if isinstance(build_raw, str):
         build_command = build_raw
     elif isinstance(build_raw, dict):
         build_command = build_raw.get("command")
         build_images = list(build_raw.get("images") or [])
         build_platforms = [str(p) for p in (build_raw.get("platforms") or [])]
+        if build_raw.get("provides") is not None:
+            build_provides = str(build_raw["provides"])
     else:
         build_command = None
     for p in build_platforms:  # platform names suffix image tags — they must be tag-safe fragments
         if not re.match(r"^[A-Za-z0-9][A-Za-z0-9._-]*$", p):
             raise RigError(f"{path}: build.platforms entry '{p}' is not a valid image-tag fragment "
                            f"([A-Za-z0-9][A-Za-z0-9._-]*)")
+    if build_provides is not None and build_provides != "base":  # a typo must not silently drop the role
+        raise RigError(f"{path}: build.provides must be 'base' (the only provided role), "
+                       f"not '{build_provides}'")
+    if build_provides == "base" and not build_images:
+        raise RigError(f"{path}: build.provides: base needs build.images — the FIRST entry names the "
+                       f"base image this build produces (what rig exports as RIG_BASE_IMAGE)")
 
     platform_raw = data.get("platform") or {}  # `platform: { auto_detect: <path>, override_env: <VAR> }`
     if not isinstance(platform_raw, dict):
@@ -160,6 +174,7 @@ def load_descriptor(service: str, repo: Path) -> Descriptor:
         build_command=build_command,
         build_images=build_images,
         build_platforms=build_platforms,
+        build_provides=build_provides,
         platform_auto_detect=(str(platform_raw["auto_detect"]) if platform_raw.get("auto_detect")
                               else None),
         platform_override_env=override_env,

@@ -7,6 +7,11 @@
 Work is per unique *service* (two camera instances build the service once). A service declares either, both,
 or neither (neither ⇒ images are assumed already in the registry, or pulled from upstream with internet).
 Specifying a full image ref directly is the per-service `${<SVC>_IMAGE}` override (handled by the launcher).
+
+Extras a build command may honor from the env (all optional, all rig-owned — set-or-popped so shell
+leakage can't flip them): RIG_BASE_IMAGE (the deployment's one base image — FROM it; see
+resolve_base_image below) and RIG_BUILD_NO_CACHE=1 (`rig build --no-cache` — pass e.g.
+`docker build ${RIG_BUILD_NO_CACHE:+--no-cache}` to force a full rebuild).
 """
 from __future__ import annotations
 
@@ -20,6 +25,38 @@ from .refs import unqualified
 from .common import eprint
 from .descriptor import Descriptor
 from .manifest import Manifest
+
+
+def resolve_base_image(manifest: Manifest, descriptors: dict[str, Descriptor], *,
+                       registry: str | None = None, tag: str | None = None,
+                       platform: str | None = None, base: str | None = None):
+    """The deployment's ONE base image, as (ref, origin, error). Precedence: an explicit ref
+    (`--base-image` / vehicle.yaml `images.base` — the operator's declaration, used verbatim) beats
+    any `provides: base` service, whose ref rig composes exactly like the pull side:
+    `<registry>/<build.images[0]>:<tag>` (platform-composed for a matrix provider). Several
+    providers naming the SAME image (rig-infra's fleet-ros pattern — services sharing one
+    ../base/build.sh) are one base; providers naming DIFFERENT images are ambiguous —
+    (None, None, error), never a manifest-order guess. No base at all is fine: (None, None, None)."""
+    explicit = base or manifest.image_base
+    if explicit:
+        return explicit, "images.base", None
+    providers: dict[str, list[str]] = {}  # base image repo -> the services providing it
+    for svc, desc in descriptors.items():
+        if desc.build_provides == "base":
+            providers.setdefault(desc.build_images[0], []).append(svc)
+    if not providers:
+        return None, None, None
+    if len(providers) > 1:
+        detail = "; ".join(f"'{repo}' from {', '.join(sorted(svcs))}"
+                           for repo, svcs in sorted(providers.items()))
+        return None, None, (f"base-image providers disagree: {detail} — set images.base to choose, "
+                            f"or drop `provides: base` from one")
+    repo, svcs = next(iter(providers.items()))
+    reg = registry or manifest.image_registry
+    composed = _service_tag(descriptors[svcs[0]], tag or manifest.image_tag,
+                            platform or manifest.platform)
+    ref = (f"{reg}/{repo}" if reg else repo) + (f":{composed}" if composed else "")
+    return ref, f"provided by {', '.join(sorted(svcs))}", None
 
 
 def _build_cmd(desc: Descriptor, cwd: Path, reg, tag):
@@ -58,21 +95,31 @@ def _resolve_build_cwd(service: str, desc: Descriptor, root: Path | None):
                  f"({str(source.get('rev'))[:12]}…)")
 
 
-def _build_env(distro: str | None, desc: Descriptor | None = None, platform: str | None = None):
+def _build_env(distro: str | None, desc: Descriptor | None = None, platform: str | None = None,
+               base_image: str | None = None, no_cache: bool = False):
     """Env for a service's build command: vehicle.yaml `ros.distro` rides along as ROS_DISTRO, so a
-    base-image build (rig-infra's fleet-ros) bakes the SAME distro the vehicle declares — the
-    router/session version-match must not depend on the operator remembering an env var. A declared
-    platform rides the same way for platform-sensitive services (RIG_TARGET_PLATFORM + the service's
-    own override_env), so a matrix build selects the DECLARED variant, not the build box's. None
-    (nothing to add) inherits the caller's env untouched."""
-    extra: dict[str, str] = {}
+    base-image build (fleet-ros) bakes the SAME distro the vehicle declares — the router/session
+    version-match must not depend on the operator remembering an env var. (ROS_DISTRO is a
+    conventional ROS var, not a rig-owned one: with no distro declared, an inherited shell value
+    stays.) A declared platform rides the same way for platform-sensitive services
+    (RIG_TARGET_PLATFORM + the service's own override_env), so a matrix build selects the DECLARED
+    variant, not the build box's. The rig-owned build channel — RIG_BASE_IMAGE (FROM this),
+    RIG_BUILD_NO_CACHE (full rebuild) — is set-or-POPPED: a value leaked from the caller's shell
+    must not silently redirect FROM lines or flip caching."""
+    env = dict(os.environ)
     if distro:
-        extra["ROS_DISTRO"] = distro
+        env["ROS_DISTRO"] = distro
+    for key, value in (("RIG_BASE_IMAGE", base_image),
+                       ("RIG_BUILD_NO_CACHE", "1" if no_cache else None)):
+        if value:
+            env[key] = value
+        else:
+            env.pop(key, None)
     if platform and desc is not None and (desc.build_platforms or desc.platform_override_env):
-        extra["RIG_TARGET_PLATFORM"] = platform
+        env["RIG_TARGET_PLATFORM"] = platform
         if desc.platform_override_env:
-            extra[desc.platform_override_env] = platform
-    return {**os.environ, **extra} if extra else None
+            env[desc.platform_override_env] = platform
+    return env
 
 
 def _service_tag(desc: Descriptor, tag: str | None, platform: str | None) -> str | None:
@@ -84,9 +131,12 @@ def _service_tag(desc: Descriptor, tag: str | None, platform: str | None) -> str
     return tag
 
 
-def _distro_note(distro: str | None, platform: str | None = None) -> str:
-    return (f" ROS_DISTRO={distro}" if distro else "") + \
-           (f" RIG_TARGET_PLATFORM={platform}" if platform else "")
+def _env_note(distro: str | None, platform: str | None = None, base: str | None = None,
+              no_cache: bool = False) -> str:
+    parts = [f"{k}={v}" for k, v in (("ROS_DISTRO", distro), ("RIG_TARGET_PLATFORM", platform),
+                                     ("RIG_BASE_IMAGE", base),
+                                     ("RIG_BUILD_NO_CACHE", "1" if no_cache else None)) if v]
+    return (" " + " ".join(parts)) if parts else ""
 
 
 def _mirror_steps(img: str, target: str):
@@ -95,7 +145,8 @@ def _mirror_steps(img: str, target: str):
 
 
 def _one_captured(service: str, desc: Descriptor, cwd: Path, reg, tag, distro: str | None,
-                  platform: str | None):
+                  platform: str | None, base_image: str | None = None, no_cache: bool = False,
+                  skip_note: str | None = None):
     """Concurrent worker: run a service's build + mirrors, capturing output. Returns (service, rc, text)."""
     log: list[str] = []
     rc = 0
@@ -107,11 +158,14 @@ def _one_captured(service: str, desc: Descriptor, cwd: Path, reg, tag, distro: s
             log.append(out)
         return p.returncode
 
-    if desc.build_command:
+    if desc.build_command and skip_note:
+        log.append(f"build skipped: {skip_note}")
+    elif desc.build_command:
         cmd, args = _build_cmd(desc, cwd, reg, _service_tag(desc, tag, platform))
-        note = _distro_note(distro, platform if desc.build_platforms else None)
+        note = _env_note(distro, platform if desc.build_platforms else None, base_image, no_cache)
         log.append(f"$ {desc.build_command} {' '.join(args)}  (cwd={cwd}){note}")
-        if run(cmd, run_cwd=str(cwd), env=_build_env(distro, desc, platform)):
+        if run(cmd, run_cwd=str(cwd),
+               env=_build_env(distro, desc, platform, base_image, no_cache)):
             rc = 1
             log.append("  build FAILED")
     for img in desc.mirror:
@@ -130,10 +184,16 @@ def _one_captured(service: str, desc: Descriptor, cwd: Path, reg, tag, distro: s
 
 def build(manifest: Manifest, descriptors: dict[str, Descriptor], *, registry: str | None,
           tag: str | None, dry_run: bool, jobs: int = 1, root: Path | None = None,
-          platform: str | None = None) -> int:
+          platform: str | None = None, no_cache: bool = False,
+          base_image: str | None = None) -> int:
     reg = registry or manifest.image_registry
     tag = tag or manifest.image_tag  # default the build tag to vehicle.yaml images.tag (a version)
     platform = platform or manifest.platform  # matrix services build/push <tag>-<platform>
+    base_ref, base_origin, base_err = resolve_base_image(
+        manifest, descriptors, registry=reg, tag=tag, platform=platform, base=base_image)
+    if base_err:
+        eprint(f"rig build: {base_err}")
+        return 1
     services = [s for s in dict.fromkeys(x.service for x in manifest.sensors)  # unique, manifest order
                 if (d := descriptors.get(s)) and (d.build_command or d.mirror)]
     if not services:
@@ -176,10 +236,48 @@ def build(manifest: Manifest, descriptors: dict[str, Descriptor], *, registry: s
                    f"platform is declared (vehicle.yaml `platform:` or --platform); pushing "
                    f"':{tag or 'latest'}' which composed pulls won't find")
 
+    # Base staging. Dependent builds FROM the base, so a provider's build runs FIRST (stage 0);
+    # identical provider builds (several riggings sharing one ../base/build.sh) dedupe by resolved
+    # script path — one runs, the rest skip. An EXPLICIT external base makes a provider's build
+    # pointless when the base is the only image it produces: nothing would pull it.
+    stage0: list[str] = []
+    skip_build: dict[str, str] = {}  # service -> why its build_command is skipped (mirrors still run)
+    providers = [s for s in services
+                 if descriptors[s].build_provides == "base" and descriptors[s].build_command]
+    if base_origin == "images.base":
+        for s in providers:
+            if len(descriptors[s].build_images) == 1:
+                skip_build[s] = (f"external base '{base_ref}' replaces its "
+                                 f"'{descriptors[s].build_images[0]}'")
+    elif providers:
+        scripts: dict[Path, str] = {}
+        for s in providers:
+            script = (cwds[s] / shlex.split(descriptors[s].build_command)[0]).resolve()
+            if script in scripts:
+                skip_build[s] = f"base already built by '{scripts[script]}' ({script.name})"
+            else:
+                scripts[script] = s
+                stage0.append(s)
+
+    if base_ref:
+        eprint(f"rig build: base image {base_ref} ({base_origin}) -> RIG_BASE_IMAGE")
+    for s in stage0:  # stage 0: the base — sequential, live-streamed, before any dependent build
+        desc = descriptors[s]
+        cmd, args = _build_cmd(desc, cwds[s], reg, _service_tag(desc, tag, platform))
+        note = _env_note(distro, platform if desc.build_platforms else None, no_cache=no_cache)
+        eprint(f"build {s} [base]: {desc.build_command} {' '.join(args)}  (cwd={cwds[s]}){note}")
+        if not dry_run and subprocess.run(cmd, cwd=str(cwds[s]),
+                                          env=_build_env(distro, desc, platform,
+                                                         no_cache=no_cache)).returncode:
+            eprint(f"  build {s} FAILED — the other services build FROM {base_ref}; stopping here")
+            return 1
+        skip_build[s] = "built in the base stage above"
+
     if jobs > 1 and len(services) > 1 and not dry_run:  # concurrent: capture + print grouped per service
         eprint(f"rig build: {len(services)} services, up to {jobs} concurrent (output grouped per service)")
         with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as ex:
-            futures = [ex.submit(_one_captured, s, descriptors[s], cwds[s], reg, tag, distro, platform)
+            futures = [ex.submit(_one_captured, s, descriptors[s], cwds[s], reg, tag, distro,
+                                 platform, base_ref, no_cache, skip_build.get(s))
                        for s in services]
             for fut in concurrent.futures.as_completed(futures):
                 svc, rc1, out = fut.result()
@@ -189,12 +287,15 @@ def build(manifest: Manifest, descriptors: dict[str, Descriptor], *, registry: s
 
     for s in services:  # sequential: live-streamed
         desc = descriptors[s]
-        if desc.build_command:
+        if desc.build_command and s in skip_build:
+            eprint(f"build {s}: skipped — {skip_build[s]}")
+        elif desc.build_command:
             cmd, args = _build_cmd(desc, cwds[s], reg, _service_tag(desc, tag, platform))
-            note = _distro_note(distro, platform if desc.build_platforms else None)
+            note = _env_note(distro, platform if desc.build_platforms else None, base_ref, no_cache)
             eprint(f"build {s}: {desc.build_command} {' '.join(args)}  (cwd={cwds[s]}){note}")
             if not dry_run and subprocess.run(cmd, cwd=str(cwds[s]),
-                                              env=_build_env(distro, desc, platform)).returncode:
+                                              env=_build_env(distro, desc, platform, base_ref,
+                                                             no_cache)).returncode:
                 rc = 1
                 eprint(f"  build {s} FAILED")
         for img in desc.mirror:

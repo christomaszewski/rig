@@ -96,7 +96,7 @@ def cmd_up(args, manifest, catalog, descriptors) -> int:
         for issue in blocking:
             eprint(f"  [✗] {issue.message}")
         return 1
-    env = dispatch.fleet_env(manifest)
+    env = dispatch.fleet_env(manifest, descriptors)
     if args.run and not manifest.data_dir:  # an EXPLICIT --run must never be silently dropped
         raise RigError("up --run needs `data_dir` in vehicle.yaml (the run registry lives under it)")
     pairs = _pairs(manifest, descriptors, args.names)  # ascending order: producers before consumers
@@ -115,7 +115,7 @@ def cmd_up(args, manifest, catalog, descriptors) -> int:
 
 
 def cmd_down(args, manifest, catalog, descriptors) -> int:
-    env = dispatch.fleet_env(manifest)
+    env = dispatch.fleet_env(manifest, descriptors)
     pairs = _pairs(manifest, descriptors, args.names, reverse=True)  # reverse: consumers before producers
     if not pairs:
         eprint("rig: no enabled stacks to tear down")
@@ -136,7 +136,7 @@ def cmd_down(args, manifest, catalog, descriptors) -> int:
 
 
 def cmd_config(args, manifest, catalog, descriptors) -> int:
-    env = dispatch.fleet_env(manifest)
+    env = dispatch.fleet_env(manifest, descriptors)
     pairs = _pairs(manifest, descriptors, args.names)
     return _summarize(dispatch.run_verb(pairs, env, "config", dry_run=args.dry_run))
 
@@ -144,7 +144,7 @@ def cmd_config(args, manifest, catalog, descriptors) -> int:
 def cmd_pull(args, manifest, catalog, descriptors) -> int:
     """Pre-pull every stack's images — no containers created/restarted. The field-ops primer: pull while
     the registry is reachable, then `up` (now or later) starts from the local cache."""
-    env = dispatch.fleet_env(manifest)
+    env = dispatch.fleet_env(manifest, descriptors)
     pairs = _pairs(manifest, descriptors, args.names)
     if not pairs:
         eprint("rig: no enabled stacks to pull for")
@@ -154,7 +154,7 @@ def cmd_pull(args, manifest, catalog, descriptors) -> int:
 
 
 def cmd_status(args, manifest, catalog, descriptors) -> int:
-    env = dispatch.fleet_env(manifest)
+    env = dispatch.fleet_env(manifest, descriptors)
     pairs = _pairs(manifest, descriptors, args.names)
     rows = status_mod.gather(pairs, env)
     run_line = runs_mod.status_line(manifest)
@@ -174,7 +174,7 @@ def cmd_new_run(args, manifest, catalog, descriptors) -> int:
 
 def cmd_end_run(args, manifest, catalog, descriptors) -> int:
     # Snapshot the fleet state into the manifest as part of sealing (best-effort).
-    env = dispatch.fleet_env(manifest)
+    env = dispatch.fleet_env(manifest, descriptors)
     rows = status_mod.gather(_pairs(manifest, descriptors, []), env)
     runs_mod.end_run(manifest, args.rig_root, force=args.force, status_text=status_mod.render(rows))
     return 0
@@ -204,7 +204,7 @@ def cmd_runs(args, manifest, catalog, descriptors) -> int:
 
 
 def cmd_logs(args, manifest, catalog, descriptors) -> int:
-    env = dispatch.fleet_env(manifest)
+    env = dispatch.fleet_env(manifest, descriptors)
     pairs = _pairs(manifest, descriptors, args.names)
     extra: list[str] = []
     if args.follow:
@@ -220,11 +220,17 @@ def cmd_doctor(args, manifest, catalog, descriptors) -> int:
     return doctor_mod.run(manifest, catalog, descriptors, deep=args.deep)
 
 
+def cmd_image_audit(args, manifest, catalog, descriptors) -> int:
+    from . import audit as audit_mod
+    env = dispatch.fleet_env(manifest, descriptors)
+    return audit_mod.audit(manifest, descriptors, env, names=args.names)
+
+
 def cmd_cleanup(args, manifest, catalog, descriptors) -> int:
     """Decommission sweep: this deployment's docker images (+ volumes) off the host. Containers
     must already be gone (`rig down`) — cleanup refuses otherwise, it never kills anything."""
     from . import cleanup as cleanup_mod
-    env = dispatch.fleet_env(manifest)
+    env = dispatch.fleet_env(manifest, descriptors)
     return cleanup_mod.cleanup(args.rig_root, manifest, descriptors, env, names=args.names,
                                dry_run=args.dry_run, keep_volumes=args.keep_volumes)
 
@@ -438,7 +444,8 @@ def cmd_build(args, root: Path) -> int:
                "building without a push target unless --registry/--tag are passed")
     return build_mod.build(manifest, descriptors, registry=args.registry, tag=args.tag,
                            dry_run=args.dry_run, jobs=args.jobs, root=root,
-                           platform=args.platform)
+                           platform=args.platform, no_cache=args.no_cache,
+                           base_image=args.base_image)
 
 
 def cmd_bake(args, root: Path) -> int:
@@ -450,7 +457,7 @@ def cmd_bake(args, root: Path) -> int:
                             bundle_images=args.bundle_images)
         return 0
     manifest, catalog, descriptors = _load(root)
-    env = dispatch.fleet_env(manifest)
+    env = dispatch.fleet_env(manifest, descriptors)
     bake_mod.bake(root, manifest, catalog, descriptors, env, args.tag, registry=args.registry,
                   bundle_images=args.bundle_images)
     return 0
@@ -472,6 +479,7 @@ _HANDLERS = {
     "status": cmd_status,
     "logs": cmd_logs,
     "doctor": cmd_doctor,
+    "image-audit": cmd_image_audit,
     "new-run": cmd_new_run,
     "end-run": cmd_end_run,
     "runs": cmd_runs,
@@ -486,7 +494,7 @@ _GROUP_VERBS: dict[str, dict[str, str]] = {
     "config": {"show": "config", "render": "config-render", "diff": "config-diff"},
     "run": {"new": "new-run", "end": "end-run", "list": "runs"},
     "artifact": {"bake": "bake", "unbake": "unbake", "list": "artifact-list"},
-    "image": {"build": "build", "pull": "pull"},
+    "image": {"build": "build", "pull": "pull", "audit": "image-audit"},
     "service": {"rigify": "rigify", "vendor": "vendor", "certify": "certify"},
 }
 # Not-yet-implemented grouped verbs get a pointed error instead of an "unknown sensor" mystery.
@@ -536,7 +544,7 @@ def build_parser() -> argparse.ArgumentParser:
                "save | promote | repin | rebase | yank\n"
                "  rig overlay  apply | remove | reorder | list     rig setup (first-run host setup)\n"
                "  rig service  rigify | vendor | certify\n"
-               "  rig artifact bake | unbake | list   rig image    build | pull\n"
+               "  rig artifact bake | unbake | list   rig image    build | pull | audit\n"
                "  rig fleet    list | status | sync | up | down    (GCS-side fan-out; fleet.yaml)")
     parser.add_argument("--version", action="version", version=f"rig {__version__}")
     parser.add_argument("--root", type=Path, default=None,
@@ -607,6 +615,9 @@ def build_parser() -> argparse.ArgumentParser:
     add("pull", "pre-pull each stack's images (no container changes)").add_argument(
         "--dry-run", action="store_true"
     )
+
+    add("image-audit", "inspect every image the deployment runs for ROS distro/rmw/package-version "
+                       "consistency (canonical: image audit; run after build/pull)")
 
     add("doctor", "read-only preflight checks").add_argument(
         "--deep", action="store_true", help="also certify each service's launcher (runs `config` per service)"
@@ -680,6 +691,12 @@ def build_parser() -> argparse.ArgumentParser:
                           "build/push the composed <tag>-<platform> and get RIG_TARGET_PLATFORM")
     bld.add_argument("-j", "--jobs", type=int, default=1, metavar="N",
                      help="build/mirror up to N services concurrently (output grouped per service)")
+    bld.add_argument("--no-cache", action="store_true", dest="no_cache",
+                     help="full rebuild: export RIG_BUILD_NO_CACHE=1 to every build command (scripts "
+                          "opt in, e.g. `docker build ${RIG_BUILD_NO_CACHE:+--no-cache}`)")
+    bld.add_argument("--base-image", default=None, metavar="REF", dest="base_image",
+                     help="deployment base image ref (overrides vehicle.yaml images.base and any "
+                          "`provides: base` service) — exported to builds as RIG_BASE_IMAGE")
     bld.add_argument("--dry-run", action="store_true")
 
     bk = sub.add_parser("bake", help="freeze the deployment into a tagged, content-addressed artifact")

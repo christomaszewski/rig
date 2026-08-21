@@ -189,7 +189,14 @@ def test_build_tag_composition_and_env():
     env = _build_env("lyrical", matrix, "jp7")
     assert env["ROS_DISTRO"] == "lyrical" and env["RIG_TARGET_PLATFORM"] == "jp7"
     assert env["CAM_PLATFORM"] == "jp7"
-    assert _build_env(None, plain, "jp7") is None           # nothing to add -> inherit untouched
+    with _env(ROS_DISTRO="from-shell", RIG_BASE_IMAGE="leaked", RIG_BUILD_NO_CACHE="leaked"):
+        env2 = _build_env(None, plain, "jp7")               # nothing to add for a plain service …
+        assert "RIG_TARGET_PLATFORM" not in env2 and env2["ROS_DISTRO"] == "from-shell"
+        # … but the rig-owned build channel is set-or-POPPED, never inherited from the shell
+        assert "RIG_BASE_IMAGE" not in env2 and "RIG_BUILD_NO_CACHE" not in env2
+        env3 = _build_env(None, plain, None, base_image="reg:5000/fleet-ros:v1", no_cache=True)
+        assert env3["RIG_BASE_IMAGE"] == "reg:5000/fleet-ros:v1"
+        assert env3["RIG_BUILD_NO_CACHE"] == "1"
 
 
 # --- doctor -------------------------------------------------------------------------------------

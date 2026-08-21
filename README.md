@@ -125,6 +125,10 @@ vendor` step) and digest-pins images against the registry from `vehicle.yaml` (`
 
 ```bash
 rig build                                   # build/push + mirror images into the registry
+rig build --no-cache                        # full rebuild: RIG_BUILD_NO_CACHE=1 to every build command
+                                            #   (re-converges apt-level drift across images)
+rig image audit                             # inspect what the stacks will RUN: one ROS distro, the
+                                            #   declared rmw installed, ros-* versions agree across images
 rig bake --tag v1                           # -> var/artifacts/v1.tar.gz (auto-vendored + digest-pinned)
 scp var/artifacts/v1.tar.gz vehicle:~/      # on the vehicle: `tar xzf v1.tar.gz && cd v1 && ./run.sh up`
 ```
@@ -261,7 +265,11 @@ sensor/autonomy services get a commented menu row to uncomment):
   logger defaults to `fleet-ros` (rosbag2 + mcap + rmw_zenoh, ~1 GB — no camera image on camera-less
   vehicles).
 - **`base/`** — the `fleet-ros` image; `rig build` builds + pushes it via the riggings' `build:`
-  declaration, and certify enforces the composes pull the same tag.
+  declaration, and certify enforces the composes pull the same tag. A rigging that marks it
+  `provides: base` makes it the DEPLOYMENT's base image: `rig build` builds it first and exports it
+  to every other build (and to launchers) as `RIG_BASE_IMAGE`, so one image pins the fleet's
+  distro+rmw packages; `vehicle.yaml images.base` (or `rig build --base-image`) overrides it with an
+  external ref.
 
 Each is just a launcher + compose around a stock tool — the same contract any service meets; rig-infra's
 CI runs `rig certify` against every one.
@@ -292,6 +300,10 @@ launch_surface:                              # the minimal file set `rig vendor`
 #                                            #   (ROS_DISTRO exported from vehicle.yaml ros.distro)
 # build: { command: ..., images: [...], platforms: [jp7, jp6] }   # a build MATRIX: distinct image sets per
 #                                            #   hardware/OS target — rig composes pulls as <tag>-<platform>
+# build: { command: ../base/build.sh, images: [fleet-ros], provides: base }  # this build produces the
+#                                            #   deployment's BASE image: rig builds it FIRST and exports
+#                                            #   <registry>/<images[0]>:<tag> as RIG_BASE_IMAGE to every
+#                                            #   other build + launcher (vehicle.yaml images.base overrides)
 # platform: { auto_detect: /etc/nv_tegra_release, override_env: CAM_PLATFORM }  # the launcher's standalone
 #                                            #   host probe + the env var it honors; rig mirrors the vehicle's
 #                                            #   declared `platform:` into it (RIG_TARGET_PLATFORM sibling)

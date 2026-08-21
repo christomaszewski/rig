@@ -94,6 +94,7 @@ def _poison_env(base_env: dict[str, str], name: str, desc: Descriptor | None = N
         "COMPOSE_PROJECT_NAME": project_name(name, POISON_VID),
     }
     env.pop("RIG_TARGET_PLATFORM", None)  # never inherit a real one from the caller's shell
+    env.pop("RIG_BASE_IMAGE", None)  # ditto — RIG_BASE_IMAGE is optional; launchers carry a fallback
     if desc is not None and platform:
         env["RIG_TARGET_PLATFORM"] = platform
         env = service_env(env, desc)

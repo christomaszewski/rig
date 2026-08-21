@@ -223,6 +223,8 @@ deployment artifacts. See `DESIGN.md`.
 
 `ROS_DOMAIN_ID`, `RMW_IMPLEMENTATION`, `VEHICLE_ID`, `RIG_IMAGE_REGISTRY`, `RIG_IMAGE_TAG` (a VERSION,
 e.g. `v1.3.0` — composed per-service to `<tag>-<platform>` for build-matrix services, v0.2.14),
+`RIG_BASE_IMAGE` (the deployment's ONE base image, v0.2.21 — vehicle.yaml `images.base`, or composed
+from a `provides: base` service like fleet-ros; a compose may RUN it directly),
 `RIG_TARGET_PLATFORM` (the host's declared hw/OS target from vehicle.yaml `platform:`, e.g. `jp7`;
 also mirrored into each service's declared `platform.override_env`, e.g. `CAM_PLATFORM`),
 `RIG_DATA_DIR` (recordings/logs host dir), and per-call `COMPOSE_PROJECT_NAME=<name>-vehicle-<vehicle_id>`.
@@ -243,6 +245,14 @@ A launcher's compose opts into each (`${RIG_IMAGE_REGISTRY:+…}`, `:${RIG_IMAGE
   zenoh-router guardrail, autonomy-with-no-enabled-sensors warning ("a brain with no eyes").
 - `rig build [-j N] [--registry] [--tag]`: per-unique-service **build** (`rigging.yaml build:`) + **mirror**
   (`mirror:`, via `docker pull/tag/push` so a plain-HTTP registry works). Concurrent with `-j`.
+  v0.2.21: **base staging** — a `provides: base` rigging (fleet-ros) builds FIRST (dedup'd across
+  riggings sharing one script) and rides into every other build as `RIG_BASE_IMAGE` (`images.base` /
+  `--base-image` overrides; conflicting providers = ERROR); **`--no-cache`** exports
+  `RIG_BUILD_NO_CACHE=1` (scripts opt in: `docker build ${RIG_BUILD_NO_CACHE:+--no-cache}`).
+- `rig image audit` (v0.2.21): inspect every image the enabled stacks resolve to (rendered composes →
+  `docker run --entrypoint /bin/sh` + dpkg): one ROS distro (= `ros.distro`), the declared rmw package
+  installed, and shared ros-* package versions AGREE across images — catches the
+  two-images-two-rmw_zenoh_cpp-builds failure before the vehicle does. Run after `rig build`/`pull`.
 - `rig vendor` (copy launch surface, files **and dirs**), `rig bake [--registry] --tag` / `rig unbake`:
   tagged artifact = resolved configs + complete vehicle.yaml + vendored surfaces + rig + a **compose-only**
   form (build-stripped, registry-pinned, runs on just Docker). Built images digest-pinned; **mirrored

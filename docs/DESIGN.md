@@ -47,6 +47,17 @@ template — it adapts to each via `rigging.yaml`'s `verbs` map (e.g. cam-up tak
 - **Platform targeting.** vehicle.yaml `platform:` (a HOST fact) → `RIG_TARGET_PLATFORM` + each service's
   declared `platform.override_env`; services with a `build.platforms` matrix pull the composed
   `<image>:<tag>-<platform>`. `images.tag` means VERSION only. (Full section below.)
+- **One base image per deployment.** vehicle.yaml `images.base` (a full ref, used verbatim) or a
+  service whose rigging declares `build: {…, provides: base}` (rig composes `<registry>/<images[0]>:
+  <tag>` — the fleet-ros pattern) resolves to `RIG_BASE_IMAGE`, exported to every build command AND
+  every launcher (a router compose can RUN the base directly). `rig build` builds the provider FIRST
+  (dedup'd across riggings sharing one build script), so dependent images `FROM ${RIG_BASE_IMAGE}`
+  and the fleet's distro+rmw packages come from one layer by construction. An explicit `images.base`
+  always wins; providers naming DIFFERENT images are an ERROR (doctor + build) — rig never guesses.
+  `rig image audit` is the detection side: it inspects the images the stacks resolve to (distro
+  present, declared rmw installed, shared ros-* package versions agree across images); `rig build
+  --no-cache` (RIG_BUILD_NO_CACHE=1 to every build command, opt-in in the script) is the remediation
+  for a fleet whose images have already drifted apart at the apt layer.
 - **Status/health.** rig calls each launcher's `status` (`ps --format json`) and rolls a project up to one
   row: healthy iff every *healthchecked* container is healthy and all are running (a plugin without a probe
   doesn't drag the sensor to "unknown"). ROS `/diagnostics` aggregation is a planned second layer.
@@ -216,7 +227,9 @@ enabled-aware host-port clash checks, distro agreement as ERROR) + `doctor --dee
 `up/down/--purge/logs/config/pull` + `cleanup` (decommission: images/volumes off the host, v0.2.15);
 `certify` (the launcher contract as executable checks, `--repo` CI
 mode, `--emit/--diff` host-independence proof); `build` (per-service build + mirror; exports
-`ros.distro` as ROS_DISTRO); `vendor` (with provenance) and `bake/unbake` (digest pinning, compose-only
+`ros.distro` as ROS_DISTRO; base-image staging via `provides: base`/`images.base` → RIG_BASE_IMAGE;
+`--no-cache`) and `image audit` (deployment-wide image content checks: distro/rmw presence, cross-image
+ros-* version agreement); `vendor` (with provenance) and `bake/unbake` (digest pinning, compose-only
 form, `--bundle-images` air-gap bundles, parent provenance on re-bake); the authoring family — `init`
 (name seed, `--infra` path/bare-name workspace resolution, `--discover` one-level scan), `add` (wire a
 service into an existing deployment), `fetch` (materialize configs for hand-authored rows), `rigify`

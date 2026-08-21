@@ -229,7 +229,8 @@ def rigify(target: Path, *, service: str | None = None, tier: str | None = None)
     if f.build_services or f.dockerfiles:
         src = ", ".join([*map(str, f.dockerfiles), *(f"compose service '{s}'" for s in f.build_services)])
         eprint(f"  found: build inputs ({src}) — declare `build:` in rigging.yaml so `rig build` "
-               f"builds+pushes your images (`<cmd> <registry> [tag]`, ROS_DISTRO exported)")
+               f"builds+pushes your images (`<cmd> <registry> [tag]`, ROS_DISTRO + RIG_BASE_IMAGE + "
+               f"RIG_BUILD_NO_CACHE exported)")
     if f.launch_files:
         eprint(f"  found: ROS launch file(s) {[str(p) for p in f.launch_files[:3]]} — see the command "
                f"hint in the compose; a ROS service should also uncomment `ros_distro:`")

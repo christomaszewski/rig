@@ -20,6 +20,11 @@ images:
   tag: ""                      # a VERSION, e.g. v1.3.0 -> RIG_IMAGE_TAG. rig build defaults its --tag
                                #   to this. (Legacy: a platform name here, e.g. jp7, still works with
                                #   `platform:` unset — deprecated.)
+  base: ""                     # deployment-wide base image (FULL ref, e.g. nvcr.io/l4t-ros:x) -> RIG_BASE_IMAGE.
+                               #   Empty = derived from a service declaring `provides: base` (fleet-ros),
+                               #   which rig build builds FIRST; set it to override with an external image
+                               #   (it must contain the ros.distro + ros.rmw declared above — `rig image
+                               #   audit` checks).
 
 # THIS host's hardware/OS target (e.g. jp7 = JetPack 7 userspace) -> RIG_TARGET_PLATFORM. Services that
 # declare a build matrix (rigging.yaml build.platforms) pull <image>:<tag>-<platform> and get their

@@ -322,6 +322,13 @@ vehicle, then `rig certify --diff /tmp/dev.yaml /tmp/orin.yaml` — identical = 
 rig build -j 3                                # per unique service: build+push (build:) / mirror (mirror:)
                                               #   registry comes from vehicle.yaml; --registry <ip:5000> overrides
                                               #   exports ROS_DISTRO from ros.distro (fleet-ros bakes YOUR distro)
+rig build --no-cache                          # FULL rebuild: RIG_BUILD_NO_CACHE=1 to every build command
+                                              #   (scripts opt in: docker build ${RIG_BUILD_NO_CACHE:+--no-cache});
+                                              #   the way to re-converge apt-level drift across images
+rig image audit                               # inspect what the stacks will RUN (docker + images local/pullable):
+                                              #   every ROS image carries ros.distro, the declared rmw package
+                                              #   is installed, and shared ros-* package VERSIONS agree across
+                                              #   images (a skewed rmw_zenoh_cpp = sessions that can't talk)
 curl -s http://<dev-box-ip>:5000/v2/_catalog  # expect every repo the composes will pull
 ```
 
@@ -329,6 +336,12 @@ Tags: `rig build` tags with `images.tag` — COMPOSED to `<tag>-<platform>` for 
 `build.platforms` matrix (vehicle.yaml `platform:` or `--platform`; the build also gets
 RIG_TARGET_PLATFORM + the service's override env) — and certify's tag/platform checks guarantee the
 composes pull the same per matrix entry — build/pull agreement is enforced, not hoped.
+
+Base image: a service whose rigging declares `build: {…, provides: base}` (rig-infra's fleet-ros)
+builds FIRST, and its composed ref (`<registry>/<images[0]>:<tag>`) is exported to every other build
+and launcher as **RIG_BASE_IMAGE** — build `FROM ${RIG_BASE_IMAGE}` and the fleet's distro+rmw
+packages come from ONE image by construction. `vehicle.yaml images.base` (or `--base-image REF`)
+overrides with an external ref; two providers naming different images is an ERROR, never a guess.
 
 ## 4 — bake a deployable artifact
 

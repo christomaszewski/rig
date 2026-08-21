@@ -628,3 +628,38 @@ service-wide overlay binding, no vehicle.yaml composition. Plan doc: `rig-vehicl
   scaffold placeholder from a deliberate choice). With markers the default, a plan's markers
   propagate, and a deliberate `--vehicle-id` still wins. Quick-start docs pass `--vehicle-id 1`.
 
+## 13. One base image per deployment + image audit — ✅ implemented (v0.2.21)
+
+The motivating failure: two images in one deployment apt-installed `rmw_zenoh_cpp` at different
+times → two package versions → zenoh sessions that can't talk. Prevention, detection, remediation:
+
+- **`RIG_BASE_IMAGE` (prevention)** — the deployment's ONE base image, resolved as: vehicle.yaml
+  `images.base` / `rig build --base-image REF` (an explicit full ref, verbatim) → else a service
+  whose rigging declares `build: {…, provides: base}` (base = `build.images[0]`, composed like the
+  pull side: `<registry>/<repo>:<tag>`, platform-composed for a matrix provider) → else none
+  (advisory INFO in doctor when ROS services exist). Several providers naming the SAME image
+  (fleet-ros from zenoh-router + bag-logger, one shared `../base/build.sh`) are one base — `rig
+  build` stages it FIRST (dedup'd by resolved script path) and exports `RIG_BASE_IMAGE` to every
+  other build, so dependents `FROM ${RIG_BASE_IMAGE}` and the distro+rmw layer is shared by
+  construction; a base-stage failure stops the build. Providers naming DIFFERENT images are an
+  ERROR (doctor + build) — rig never guesses by manifest order. An explicit external base skips a
+  provider's build when the base is the only image it produces (nothing would pull it). fleet_env
+  exports the same resolution to every launcher (a router compose RUNS the base directly), bake
+  carries `images.base` into the artifact, certify never inherits a shell value, and `env:` maps
+  can't shadow it (rig-owned).
+- **`rig image audit` (detection)** — renders each enabled stack's compose (the launcher's `config`
+  verb under the real fleet env, so `${<SVC>_IMAGE}` overrides and composed platform tags are
+  honored), collects the `image:` refs, and inspects each unique image via
+  `docker run --entrypoint /bin/sh` (`ls /opt/ros` + dpkg `ros-*` listing). Checks: every ROS image
+  carries `ros.distro` (ERROR), the declared rmw package is installed in matching images (ERROR),
+  and every ros-* package shared by ≥2 images has ONE version (ERROR — the rmw_zenoh_cpp case).
+  Non-ROS images excluded; shell-less images reported as uninspectable (WARN); a ROS tree with zero
+  ros-* dpkg packages WARNs (source-built — dpkg can't see it). Canonical spelling `rig image
+  audit`; flat alias `image-audit`.
+- **`rig build --no-cache` (remediation)** — exports `RIG_BUILD_NO_CACHE=1` to every build command
+  (rig-owned, set-or-popped; scripts opt in with `docker build ${RIG_BUILD_NO_CACHE:+--no-cache}`)
+  for the full re-converge after audit finds drift. Env, not a positional arg — the
+  `<cmd> <registry> [tag]` contract is untouched.
+- rig-infra side (queued): mark zenoh-router/ros2-bag-logger riggings `provides: base`, honor
+  RIG_BASE_IMAGE + RIG_BUILD_NO_CACHE in `base/build.sh` and the service build scripts.
+

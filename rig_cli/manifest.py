@@ -29,7 +29,8 @@ MACHINE_LOCAL_DEFAULT = "/etc/rig/vehicle.local.yaml"
 LOCAL_KEYS = {"vehicle", "vehicle_id", "vars", "env", "data_dir", "images", "platform"}
 # Env keys rig owns end-to-end (fleet_env sets them; an `env:` map may not shadow them).
 RIG_OWNED_ENV = {"VEHICLE_ID", "ROS_DOMAIN_ID", "RMW_IMPLEMENTATION", "RIG_IMAGE_REGISTRY",
-                 "RIG_IMAGE_TAG", "RIG_TARGET_PLATFORM", "RIG_DATA_DIR", "COMPOSE_PROJECT_NAME"}
+                 "RIG_IMAGE_TAG", "RIG_TARGET_PLATFORM", "RIG_DATA_DIR", "COMPOSE_PROJECT_NAME",
+                 "RIG_BASE_IMAGE", "RIG_BUILD_NO_CACHE"}
 
 
 @dataclass(frozen=True)
@@ -68,6 +69,8 @@ class Manifest:
     vehicle_id: object = None        # int|str; decides the ROS domain + exported as VEHICLE_ID
     image_tag: str | None = None     # fleet-wide image tag (a VERSION, e.g. v1.3.0); -> RIG_IMAGE_TAG.
     #                                  Legacy: a platform name here (jp7) still works, deprecated.
+    image_base: str | None = None    # fleet-wide base image (a FULL ref) -> RIG_BASE_IMAGE; overrides
+    #                                  any `provides: base` service (see build.resolve_base_image)
     platform: str | None = None      # THIS host's hardware/OS target (e.g. jp7) -> RIG_TARGET_PLATFORM;
     #                                  matrix services pull <tag>-<platform> (see dispatch.service_env)
     data_dir: str | None = None      # host dir for recordings/logs/outputs; -> RIG_DATA_DIR
@@ -332,7 +335,7 @@ def load_manifest(root: Path) -> Manifest:
 
     base_images = data.get("images") or {}
     eff_images = {}
-    for sub in ("registry", "tag"):
+    for sub in ("registry", "tag", "base"):
         value = _effective(sub, [s.get("images") or {} for s in sources], base_images.get(sub))
         value = _lazy(value, f"images.{sub}")
         eff_images[sub] = (str(value or "").strip()) or None
@@ -363,6 +366,6 @@ def load_manifest(root: Path) -> Manifest:
     return Manifest(vehicle=vehicle, ros=ros,
                     sensors=infra + sensors + autonomy,
                     image_registry=eff_images["registry"], vehicle_id=vehicle_id,
-                    image_tag=eff_images["tag"], platform=platform,
+                    image_tag=eff_images["tag"], image_base=eff_images["base"], platform=platform,
                     data_dir=data_dir, vars=ctx, extra_env=extra_env,
                     missing_identity=tuple(unresolved))

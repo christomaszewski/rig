@@ -520,8 +520,9 @@ def bake(root: Path, manifest, catalog, descriptors, env, tag: str, *, registry:
         veh["vehicle_id"] = manifest.vehicle_id
     veh["ros"] = {"domain_id": manifest.ros.domain_id, "rmw": manifest.ros.rmw, "distro": manifest.ros.distro}
     eff_registry = registry or manifest.image_registry
-    if eff_registry or manifest.image_tag:
-        veh["images"] = {k: v for k, v in (("registry", eff_registry), ("tag", manifest.image_tag)) if v}
+    if eff_registry or manifest.image_tag or manifest.image_base:
+        veh["images"] = {k: v for k, v in (("registry", eff_registry), ("tag", manifest.image_tag),
+                                           ("base", manifest.image_base)) if v}
     if manifest.platform:  # the host's declared target — a rig re-run on the unbaked tree must
         veh["platform"] = manifest.platform  # export the same RIG_TARGET_PLATFORM / composed tags
     if manifest.data_dir:

@@ -40,6 +40,7 @@ def test_translation_table():
     assert translate_argv(["artifact", "list"]) == ["artifact-list"]
     assert translate_argv(["image", "build", "-j", "3"]) == ["build", "-j", "3"]
     assert translate_argv(["image", "pull"]) == ["pull"]
+    assert translate_argv(["image", "audit"]) == ["image-audit"]
     assert translate_argv(["service", "rigify", "d"]) == ["rigify", "d"]
     assert translate_argv(["service", "vendor", "s"]) == ["vendor", "s"]
     assert translate_argv(["service", "certify", "--repo", "."]) == ["certify", "--repo", "."]

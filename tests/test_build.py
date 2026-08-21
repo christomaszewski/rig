@@ -1,14 +1,20 @@
-"""rig build — descriptor build/mirror parsing, dry-run, once-per-service dedupe, and the concurrent
--j path. Run: `.venv/bin/python tests/test_build.py`."""
+"""rig build — descriptor build/mirror parsing, dry-run, once-per-service dedupe, the concurrent
+-j path, the base-image resolution/staging, and the --no-cache channel.
+Run: `.venv/bin/python tests/test_build.py`."""
+import contextlib
+import io
+import os
 import pathlib
 import sys
 import tempfile
+import textwrap
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
-from rig_cli.build import build
-from rig_cli.descriptor import load_descriptor
-from rig_cli.manifest import load_manifest
+from rig_cli import RigError
+from rig_cli.build import build, resolve_base_image
+from rig_cli.descriptor import Descriptor, load_descriptor
+from rig_cli.manifest import Manifest, RosSettings, load_manifest
 
 
 def _repo(rigging: str) -> pathlib.Path:
@@ -119,6 +125,219 @@ def test_build_concurrent_runs_every_service():
     descs = {"svc1": load_descriptor("svc1", s1), "svc2": load_descriptor("svc2", s2)}
     assert build(m, descs, registry=None, tag=None, dry_run=False, jobs=2) == 0
     assert (s1 / "done").exists() and (s2 / "done").exists()  # both ran via the concurrent path
+
+
+# --- base image: provides parsing, resolution, staging; the --no-cache channel -------------------
+
+def _bdesc(svc, *, provides=None, images=("fleet-ros",), platforms=(), command="b.sh"):
+    return Descriptor(service=svc, repo=pathlib.Path("/nonexistent"), launcher=f"{svc}-up", verbs={},
+                      ros_distro=None, external_volumes=[], host_ports=[], build_command=command,
+                      build_images=list(images), build_platforms=list(platforms),
+                      build_provides=provides)
+
+
+def _bmanifest(**kw):
+    return Manifest(vehicle="t", ros=RosSettings(0, "rmw_zenoh_cpp", "lyrical"), sensors=[], **kw)
+
+
+def test_descriptor_provides_base_parses_and_validates():
+    d = load_descriptor("s", _repo("service: s\nlauncher: s-up\n"
+                                   "build: {command: ../base/b.sh, images: [fleet-ros], provides: base}\n"))
+    assert d.build_provides == "base" and d.build_images == ["fleet-ros"]
+    assert load_descriptor("s", _repo("service: s\nlauncher: s-up\nbuild: b.sh\n")).build_provides is None
+    for bad in ("build: {command: b.sh, images: [x], provides: bogus}\n",  # unknown role
+                "build: {command: b.sh, provides: base}\n"):               # no images -> no base name
+        try:
+            load_descriptor("s", _repo(f"service: s\nlauncher: s-up\n{bad}"))
+            raise AssertionError("expected RigError")
+        except RigError:
+            pass
+
+
+def test_resolve_base_image_precedence_composition_and_conflict():
+    descs = {"router": _bdesc("router", provides="base")}
+    # an explicit images.base beats any provider, verbatim
+    m = _bmanifest(image_registry="reg:5000", image_tag="v1", image_base="custom/ros:x")
+    assert resolve_base_image(m, descs) == ("custom/ros:x", "images.base", None)
+    # provider ref composes like the pull side: <registry>/<images[0]>:<tag>
+    m2 = _bmanifest(image_registry="reg:5000", image_tag="v1")
+    ref, origin, err = resolve_base_image(m2, descs)
+    assert (ref, err) == ("reg:5000/fleet-ros:v1", None) and "router" in origin
+    assert resolve_base_image(_bmanifest(), descs)[0] == "fleet-ros"  # no registry/tag: bare repo
+    # a matrix provider composes the per-platform tag (same rule as its build/pull)
+    m3 = _bmanifest(image_registry="r", image_tag="v1", platform="jp7")
+    assert resolve_base_image(m3, {"router": _bdesc("router", provides="base",
+                                                    platforms=("jp7",))})[0] == "r/fleet-ros:v1-jp7"
+    # two providers, same image = ONE base (the fleet-ros pattern); different images = ambiguous
+    same = {"a": _bdesc("a", provides="base"), "b": _bdesc("b", provides="base")}
+    ref, origin, err = resolve_base_image(m2, same)
+    assert ref == "reg:5000/fleet-ros:v1" and err is None and "a" in origin and "b" in origin
+    diff = {"a": _bdesc("a", provides="base"), "b": _bdesc("b", provides="base", images=("other",))}
+    ref, origin, err = resolve_base_image(m2, diff)
+    assert ref is None and err and "disagree" in err
+    assert resolve_base_image(m2, {"a": _bdesc("a")}) == (None, None, None)  # no providers, no base
+
+
+def _deployment(vehicle_yaml: str, services: dict) -> pathlib.Path:
+    root = pathlib.Path(tempfile.mkdtemp())
+    (root / "config").mkdir()
+    (root / "vehicle.yaml").write_text(textwrap.dedent(vehicle_yaml))
+    rows = ", ".join(f"{s}: {{path: {p}}}" for s, p in services.items())
+    (root / "services.yaml").write_text(f"services: {{{rows}}}\n")
+    for name, svc in [(f"i{i}", s) for i, s in enumerate(services)]:
+        (root / "config" / f"{name}.yaml").write_text(f"service: {svc}\nname: {name}\n")
+    return root
+
+
+def test_build_no_cache_and_base_image_ride_the_env_set_or_popped():
+    svc = _service_with_build(
+        "cam", 'echo "${RIG_BUILD_NO_CACHE:-UNSET} ${RIG_BASE_IMAGE:-UNSET}" > "$(dirname "$0")/seen"\n')
+    root = _deployment("vehicle: t\nimages: {base: 'my/base:2'}\n"
+                       "sensors: [{name: i0, service: cam, config: config/i0.yaml}]\n", {"cam": svc})
+    m = load_manifest(root)
+    descs = {"cam": load_descriptor("cam", svc)}
+    assert build(m, descs, registry=None, tag=None, dry_run=False, no_cache=True) == 0
+    assert (svc / "seen").read_text().strip() == "1 my/base:2"
+    # not requested + leaked from the shell -> POPPED, never inherited
+    root2 = _deployment("vehicle: t\nsensors: [{name: i0, service: cam, config: config/i0.yaml}]\n",
+                        {"cam": svc})
+    os.environ["RIG_BUILD_NO_CACHE"] = "1"
+    os.environ["RIG_BASE_IMAGE"] = "leak"
+    try:
+        assert build(load_manifest(root2), descs, registry=None, tag=None, dry_run=False) == 0
+    finally:
+        os.environ.pop("RIG_BUILD_NO_CACHE")
+        os.environ.pop("RIG_BASE_IMAGE")
+    assert (svc / "seen").read_text().strip() == "UNSET UNSET"
+
+
+def _provider_workspace():
+    """rig-infra shape: base/build.sh shared by two provider services; a dependent cam service."""
+    ws = pathlib.Path(tempfile.mkdtemp())
+    (ws / "base").mkdir()
+    (ws / "base" / "build.sh").write_text(  # like rig-infra's: works from any provider's cwd
+        '#!/bin/sh\ncd "$(dirname "$0")"\necho built >> log\ntouch marker\n')
+    (ws / "base" / "build.sh").chmod(0o755)
+    for svc in ("router", "logger"):
+        d = ws / svc
+        d.mkdir()
+        (d / "rigging.yaml").write_text(
+            f"service: {svc}\nlauncher: {svc}-up\n"
+            f"build: {{command: ../base/build.sh, images: [fleet-ros], provides: base}}\n")
+    cam = ws / "cam"
+    cam.mkdir()
+    (cam / "rigging.yaml").write_text("service: cam\nlauncher: cam-up\nbuild: build.sh\n")
+    (cam / "build.sh").write_text(
+        '#!/bin/sh\nif [ -f ../base/marker ]; then echo "${RIG_BASE_IMAGE:-UNSET}" > seen; '
+        'else echo TOO-EARLY > seen; fi\n')
+    (cam / "build.sh").chmod(0o755)
+    return ws
+
+
+def test_build_provider_stage_runs_first_dedupes_and_exports_base():
+    ws = _provider_workspace()
+    # cam listed FIRST: stage 0 must still build the base before cam's build runs
+    root = _deployment("vehicle: t\nimages: {registry: 'reg:5000', tag: v1}\nsensors:\n"
+                       "  - {name: i0, service: cam, config: config/i0.yaml}\n"
+                       "  - {name: i1, service: router, config: config/i1.yaml}\n"
+                       "  - {name: i2, service: logger, config: config/i2.yaml}\n",
+                       {"cam": ws / "cam", "router": ws / "router", "logger": ws / "logger"})
+    m = load_manifest(root)
+    descs = {s: load_descriptor(s, ws / s) for s in ("cam", "router", "logger")}
+    for jobs in (1, 2):  # sequential AND concurrent path: base first, dependents see RIG_BASE_IMAGE
+        (ws / "base" / "log").unlink(missing_ok=True)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            assert build(m, descs, registry=None, tag=None, dry_run=False, jobs=jobs) == 0
+        assert (ws / "base" / "log").read_text().count("built") == 1  # two providers -> ONE base build
+        assert (ws / "cam" / "seen").read_text().strip() == "reg:5000/fleet-ros:v1"
+        assert "base image reg:5000/fleet-ros:v1" in err.getvalue()
+
+
+def test_build_conflicting_providers_refuse_to_guess():
+    ws = _provider_workspace()
+    (ws / "logger" / "rigging.yaml").write_text(
+        "service: logger\nlauncher: logger-up\n"
+        "build: {command: ../base/build.sh, images: [other-base], provides: base}\n")
+    root = _deployment("vehicle: t\nsensors:\n"
+                       "  - {name: i0, service: router, config: config/i0.yaml}\n"
+                       "  - {name: i1, service: logger, config: config/i1.yaml}\n",
+                       {"router": ws / "router", "logger": ws / "logger"})
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        assert build(load_manifest(root),
+                     {s: load_descriptor(s, ws / s) for s in ("router", "logger")},
+                     registry=None, tag=None, dry_run=False) == 1
+    assert "disagree" in err.getvalue()
+    assert not (ws / "base" / "log").exists()  # refused BEFORE building anything
+
+
+def test_build_external_base_skips_single_image_provider():
+    ws = _provider_workspace()
+    root = _deployment("vehicle: t\nimages: {base: 'nvcr.io/custom-ros:1'}\nsensors:\n"
+                       "  - {name: i0, service: cam, config: config/i0.yaml}\n"
+                       "  - {name: i1, service: router, config: config/i1.yaml}\n",
+                       {"cam": ws / "cam", "router": ws / "router"})
+    # cam's guard would see no marker (provider build skipped) — make it record the base only
+    (ws / "cam" / "build.sh").write_text('#!/bin/sh\necho "${RIG_BASE_IMAGE:-UNSET}" > seen\n')
+    (ws / "cam" / "build.sh").chmod(0o755)
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        assert build(load_manifest(root),
+                     {s: load_descriptor(s, ws / s) for s in ("cam", "router")},
+                     registry=None, tag=None, dry_run=False) == 0
+    assert not (ws / "base" / "log").exists()  # nothing would pull the provider's fleet-ros
+    assert "skipped" in err.getvalue()
+    assert (ws / "cam" / "seen").read_text().strip() == "nvcr.io/custom-ros:1"
+
+
+def test_fleet_env_exports_resolves_and_pops_base_image():
+    from rig_cli.dispatch import fleet_env
+    root = _deployment("vehicle: t\nvehicle_id: 1\nimages: {base: 'my/base:2'}\n"
+                       "sensors: [{name: i0, service: cam, config: config/i0.yaml}]\n",
+                       {"cam": pathlib.Path("/x")})
+    assert fleet_env(load_manifest(root))["RIG_BASE_IMAGE"] == "my/base:2"
+    # no base declared: a provider service resolves it; leaked shell values are popped without one
+    bare = _deployment("vehicle: t\nvehicle_id: 1\nimages: {registry: 'r:5000', tag: v1}\n"
+                       "sensors: [{name: i0, service: cam, config: config/i0.yaml}]\n",
+                       {"cam": pathlib.Path("/x")})
+    m = load_manifest(bare)
+    provider = {"router": _bdesc("router", provides="base")}
+    assert fleet_env(m, provider)["RIG_BASE_IMAGE"] == "r:5000/fleet-ros:v1"
+    os.environ["RIG_BASE_IMAGE"] = "leak"
+    try:
+        assert "RIG_BASE_IMAGE" not in fleet_env(m, {"cam": _bdesc("cam")})
+        # a provider CONFLICT resolves to nothing here — doctor owns the ERROR, up blocks on it
+        clash = {"a": _bdesc("a", provides="base"), "b": _bdesc("b", provides="base", images=("o",))}
+        assert "RIG_BASE_IMAGE" not in fleet_env(m, clash)
+    finally:
+        os.environ.pop("RIG_BASE_IMAGE")
+
+
+def test_env_map_cannot_shadow_base_image_or_no_cache():
+    for var in ("RIG_BASE_IMAGE", "RIG_BUILD_NO_CACHE"):
+        root = _deployment(f"vehicle: t\nenv: {{{var}: sneaky}}\nsensors: []\n", {})
+        try:
+            load_manifest(root)
+            raise AssertionError("expected RigError")
+        except RigError as exc:
+            assert "rig-owned" in str(exc)
+
+
+def test_doctor_base_image_checks():
+    from rig_cli.doctor import ERROR, INFO, OK, collect
+    ros_desc = _bdesc("cam")
+    ros_desc.ros_distro = "lyrical"
+    m = _bmanifest(image_registry="r", image_tag="v1")
+    # resolved via a provider -> OK line naming the composed ref
+    issues = collect(m, {}, {"router": _bdesc("router", provides="base"), "cam": ros_desc})
+    assert any(i.level == OK and "r/fleet-ros:v1" in i.message for i in issues)
+    # conflicting providers -> ERROR (blocks up)
+    clash = {"a": _bdesc("a", provides="base"), "b": _bdesc("b", provides="base", images=("o",))}
+    assert any(i.level == ERROR and "disagree" in i.message for i in collect(m, {}, clash))
+    # ROS services but no base anywhere -> advisory only
+    issues = collect(m, {}, {"cam": ros_desc})
+    assert any(i.level == INFO and "no deployment base image" in i.message for i in issues)
 
 
 if __name__ == "__main__":

@@ -96,6 +96,21 @@ def collect(
         else:
             issues.append(Issue(OK, f"single ROS distro: {only}"))
 
+    # The deployment's ONE base image (images.base, or a `provides: base` service). A provider
+    # conflict is an ERROR — rig never guesses which base a fleet builds against; no base at all is
+    # only advisory (services then build FROM their own defaults, and per-image rmw/distro skew is
+    # possible — `rig image audit` detects it, a shared base prevents it).
+    from .build import resolve_base_image
+    base_ref, base_origin, base_err = resolve_base_image(manifest, descriptors)
+    if base_err:
+        issues.append(Issue(ERROR, base_err))
+    elif base_ref:
+        issues.append(Issue(OK, f"base image: {base_ref} ({base_origin}) -> RIG_BASE_IMAGE"))
+    elif any(d.ros_distro for d in descriptors.values()):
+        issues.append(Issue(INFO, "no deployment base image — set images.base (or mark one service's "
+                                  "build `provides: base`) to build every ROS service FROM one image; "
+                                  "builds get no RIG_BASE_IMAGE until then"))
+
     # Platform targeting: `platform:` is the host's declared hardware/OS target; a service's
     # build.platforms is its matrix. The declared platform must be IN each in-use matrix (a typo'd
     # platform means composed <tag>-<platform> refs that don't exist); a matrix service with no

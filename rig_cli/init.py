@@ -49,6 +49,8 @@ ros:
 images:
   registry: ""          # where stacks pull images from (e.g. devbox:5000); empty = local images
   tag: ""               # a VERSION (e.g. v1.3.0) -> RIG_IMAGE_TAG; rig build defaults --tag to it
+  base: ""              # deployment-wide base image (FULL ref) -> RIG_BASE_IMAGE; empty = derived
+                        #   from a `provides: base` service (fleet-ros), built first by rig build
 platform: ""            # THIS host's hardware/OS target (e.g. jp7) -> RIG_TARGET_PLATFORM; services
                         #   with a build matrix pull <image>:<tag>-<platform>. Per-host fact —
                         #   /etc/rig/vehicle.local.yaml may carry it (rig provision --platform)
