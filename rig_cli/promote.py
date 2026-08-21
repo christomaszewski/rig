@@ -323,7 +323,9 @@ def _promote_service(root: Path, spec: str, *, to: str, bump: bool,
     return 0
 
 
-def _capture_vehicle(root: Path, lock: dict, new_overlay_rows: dict[str, str] | None = None) -> dict:
+def _capture_vehicle(root: Path, lock: dict, new_overlay_rows: dict[str, str] | None = None,
+                     adopted_rows: dict[str, str] | None = None,
+                     skipped_rows: set[str] | None = None) -> dict:
     """The vehicle payload: the origin vehicle.yaml in TEMPLATE form. Identity that must be
     distinct per host (vehicle/vehicle_id) becomes self-markers; fleet DEFAULTS (platform,
     data_dir, images, ros, vars, env) pass through literal — the vehicle-local tier overrides
@@ -348,7 +350,10 @@ def _capture_vehicle(root: Path, lock: dict, new_overlay_rows: dict[str, str] | 
         for row in raw.get(tier) or []:
             if not isinstance(row, dict) or not (row.get("name") and row.get("service")):
                 continue
-            if not row.get("profile") and row["service"] not in service_pins:
+            if str(row["name"]) in (skipped_rows or set()):
+                continue  # hand-authored without --adopt consent — warned at selection time
+            adopted_ref = (adopted_rows or {}).get(str(row["name"]))
+            if not adopted_ref and not row.get("profile") and row["service"] not in service_pins:
                 eprint(f"  WARNING: row '{row['name']}' ({row['service']}) has no registry "
                        f"provenance (no profile, no service pin) — omitted from the vehicle "
                        f"plan; adopt it first (rig pkg promote {row['service']} --kind service "
@@ -356,6 +361,16 @@ def _capture_vehicle(root: Path, lock: dict, new_overlay_rows: dict[str, str] | 
                 continue
             out = dict(row)
             out["config"] = f"config/{tier}/{row['name']}.yaml"  # canonical: where install writes
+            if adopted_ref:
+                # This promote just profiled + adopted the hand-authored row; the origin row
+                # re-anchors only after the publish session, so substitute here — and strip
+                # overrides/overlays exactly as adoption does (the payload baked them in;
+                # re-applying would double-apply).
+                out["profile"] = adopted_ref
+                out.pop("overrides", None)
+                out.pop("overlays", None)
+                rows_out.append(out)
+                continue
             if row.get("profile"):
                 out["profile"] = _requalify(str(row["profile"])).partition("@")[0]
             overlays = [_requalify(str(o)).partition("@")[0] for o in row.get("overlays") or []]
@@ -405,9 +420,15 @@ def promote(root: Path, names: list[str], *, to: str, all_dirty: bool, name: str
     if version is not None:
         raise RigError("promote: --version applies to --kind service only (overlay/profile "
                        "versions follow --bump)")
-    if adopt and (all_dirty or suite or len(names) != 1 or kind == "overlay"):
+    # --adopt: ONE named instance onto its freshly published profile — OR, with a suite capture
+    # (--all --suite), consent for the capture to profile+adopt HAND-AUTHORED instances it could
+    # not otherwise reproduce (dirty anchored instances still become overlays, un-adopted).
+    if adopt and not (all_dirty and suite) and (all_dirty or suite or len(names) != 1
+                                                or kind == "overlay"):
         raise RigError("promote: --adopt re-pins ONE named instance onto its freshly published "
-                       "PROFILE (the overlay analogue is `overlay apply --clear-local`)")
+                       "PROFILE (the overlay analogue is `overlay apply --clear-local`); with "
+                       "--all it composes with --suite only (capture consent for hand-authored "
+                       "instances)")
 
     entry = _target_entry(to)
     reg_root = entry.root
@@ -417,6 +438,8 @@ def promote(root: Path, names: list[str], *, to: str, all_dirty: bool, name: str
     lock = load_lock(root)
 
     chosen = []
+    auto_adopted: set[str] = set()  # hand-authored instances a suite capture profiles + adopts
+    hand_skipped: set[str] = set()  # hand-authored, no --adopt consent: warned, plan omits them
     for sensor in manifest.sensors:
         if names and sensor.name not in names:
             continue
@@ -439,6 +462,37 @@ def promote(root: Path, names: list[str], *, to: str, all_dirty: bool, name: str
             chosen.append((sensor, delta, skind))
         elif delta:  # --all: dirty instances only
             chosen.append((sensor, delta, kind or "overlay"))
+        elif delta is None and suite and sensor.profile is None:
+            # --all + suite: a HAND-AUTHORED instance (no registry anchor — e.g. its service
+            # declares no example, so install never materialized one). An overlay is impossible
+            # (no base to diff), and without capture the suite cannot reconstruct the row — or
+            # worse, would silently reproduce the service's example instead of the hand config.
+            # Same inference as the named form: the FULL config becomes a PROFILE, and the
+            # instance is ADOPTED (row gains provenance, render unchanged) so later captures
+            # see a normal pinned instance. Adoption MUTATES the origin (row + anchor) and
+            # publishes an auto-derived package name, so it takes --adopt as consent; without
+            # it the instance is skipped LOUDLY and the plan omits the row.
+            has_pin = any((info or {}).get("kind") == "service"
+                          and unqualified(r) == sensor.service
+                          for r, info in (lock.get("packages") or {}).items())
+            if not has_pin:
+                eprint(f"  WARNING: '{sensor.name}' ({sensor.service}) is hand-authored with no "
+                       f"registry service pin — cannot capture it (adopt the service first: "
+                       f"rig pkg promote {sensor.service} --kind service --adopt)")
+                continue
+            if not adopt:
+                hand_skipped.add(sensor.name)
+                eprint(f"  WARNING: '{sensor.name}' is hand-authored (no registry anchor) — NOT "
+                       f"captured; the suite will not reproduce it. Either re-run with --adopt "
+                       f"(captures it as profile '{sensor.service}:"
+                       f"{sensor.name.replace('_', '-')}' and adopts the row), or pick the name "
+                       f"yourself first: rig pkg promote {sensor.name} --kind profile "
+                       f"--name <short> --adopt --to {to}, then re-capture")
+                continue
+            chosen.append((sensor, None, "profile"))
+            auto_adopted.add(sensor.name)
+            eprint(f"  {sensor.name}: hand-authored — capturing as PROFILE and adopting "
+                   f"(no registry base to diff an overlay against; render unchanged)")
     unknown = set(names) - {s.name for s in manifest.sensors}
     if unknown:
         raise RigError(f"promote: unknown instance(s): {', '.join(sorted(unknown))}")
@@ -448,7 +502,7 @@ def promote(root: Path, names: list[str], *, to: str, all_dirty: bool, name: str
             return 0
         eprint("rig pkg promote: nothing dirty — emitting the suite alone "
                "(pinned profiles + existing bindings)")
-    if adopt and chosen and chosen[0][2] != "profile":
+    if adopt and not all_dirty and chosen and chosen[0][2] != "profile":
         raise RigError("promote: --adopt needs --kind profile (this promote would emit an "
                        "overlay — its round-trip is `overlay apply --clear-local`)")
 
@@ -457,6 +511,9 @@ def promote(root: Path, names: list[str], *, to: str, all_dirty: bool, name: str
     new_overlays: list[str] = []
     new_overlay_rows: dict[str, str] = {}  # instance -> UNVERSIONED ref of its just-emitted overlay
     #                                        (the vehicle plan's row must carry the tuning too)
+    new_profile_members: list[str] = []  # auto-adopted instances' profiles: suite members too —
+    adopted_rows: dict[str, str] = {}    # ...and the vehicle plan's rows reference them (the
+    #                                       origin rows re-anchor only AFTER the publish session)
     adoptions: list[tuple] = []     # (sensor, pkg_name, version, payload, req_lock)
     with _registry_write_session(entry, to, suite or name or chosen[0][0].name,
                                  written, backups):
@@ -529,7 +586,10 @@ def promote(root: Path, names: list[str], *, to: str, all_dirty: bool, name: str
                 eprint(f"  profile {target_ns}/{pkg_name}@{version} <- {sensor.name}"
                        + (f" (based_on {pmanifest['based_on']})" if pmanifest.get("based_on")
                           else ""))
-                if adopt:
+                if sensor.name in auto_adopted:
+                    new_profile_members.append(f"{target_ns}/{pkg_name}@{version}")
+                    adopted_rows[sensor.name] = f"{target_ns}/{pkg_name}"
+                if adopt or sensor.name in auto_adopted:
                     adoptions.append((sensor, pkg_name, version, payload, payload_bytes,
                                       req_lock))
             else:
@@ -578,7 +638,8 @@ def promote(root: Path, names: list[str], *, to: str, all_dirty: bool, name: str
             existing = _existing_manifest(reg_root, "suites", suite)
             version = _next_version(existing, bump, f"suite '{suite}'")
             profiles = sorted({_requalify(str(s.profile))
-                               for s in manifest.sensors if s.profile})
+                               for s in manifest.sensors if s.profile}
+                              | set(new_profile_members))
             bound = []
             for sensor in manifest.sensors:  # existing bindings first, manifest order; then new
                 bound.extend(r for r in (_requalify(o) for o in sensor.overlays) if r not in bound)
@@ -606,8 +667,9 @@ def promote(root: Path, names: list[str], *, to: str, all_dirty: bool, name: str
             profile_services = {split_key(parse_ref(p)[1])[0] for p in profiles}
             services: list[str] = []
             for sensor in manifest.sensors:
-                if sensor.profile:
-                    continue
+                if sensor.profile or sensor.name in auto_adopted or sensor.name in hand_skipped:
+                    continue  # auto-adopted: its base is the just-emitted profile member;
+                    #           hand-skipped: its row is omitted — a member would be dead weight
                 pin = next((r for r, info in (lock.get("packages") or {}).items()
                             if info.get("kind") == "service"
                             and unqualified(r) == sensor.service), None)
@@ -634,7 +696,8 @@ def promote(root: Path, names: list[str], *, to: str, all_dirty: bool, name: str
             # combined capture is the one moment rows and members are closed by construction).
             vmember = []
             if vehicle_name:
-                vpayload = _capture_vehicle(root, lock, new_overlay_rows)
+                vpayload = _capture_vehicle(root, lock, new_overlay_rows, adopted_rows,
+                                            hand_skipped)
                 vexisting = _existing_manifest(reg_root, "vehicles", vehicle_name)
                 vversion = _next_version(vexisting, bump, f"vehicle '{vehicle_name}'")
                 vmanifest = {"kind": "vehicle", "name": vehicle_name, "version": vversion,

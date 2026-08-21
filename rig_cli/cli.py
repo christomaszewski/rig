@@ -862,7 +862,9 @@ def build_parser() -> argparse.ArgumentParser:
                          "working+pin reset, overrides dropped, overlays baked in, render "
                          "identical. Services: record the published pin in rig.lock (no more "
                          "local/unpublished; the dev route stays — `pkg upgrade` vendors at "
-                         "the pin)")
+                         "the pin). With --all --suite: consent for the capture to profile+"
+                         "adopt HAND-AUTHORED instances (without it they are skipped loudly "
+                         "and the plan omits them)")
     po = pkgsub.add_parser("outdated", help="dependency-drift report across the registries: "
                                             "profile requires/based_on, overlay authored_against, "
                                             "suite members vs registry-current — report-only, "

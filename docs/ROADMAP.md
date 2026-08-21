@@ -586,3 +586,17 @@ service-wide overlay binding, no vehicle.yaml composition. Plan doc: `rig-vehicl
   ERROR; member no row references = dead-weight WARN). An overlay emitted by the same promote
   is folded into its source row. `repin <suite>` refreshes the vehicle member; direct vehicle
   repin is refused (re-capture is the update path).
+- **v0.2.18** hand-authored instances survive the capture: an instance with NO registry anchor
+  (e.g. its service declares no `examples:`, so install never materialized one) used to be
+  skipped by `--all` — the plan row then couldn't rebuild (no example) or silently reproduced
+  the example instead of the hand config. With `--adopt` (composable with `--all --suite` now —
+  the CONSENT flag, since this mutates the origin and auto-derives a package name; rig never
+  prompts, fleet/CI BatchMode), the capture promotes it as a PROFILE (the full config — an
+  overlay is impossible with no base to diff, the same inference the named form makes) and
+  ADOPTS it (row gains provenance, render unchanged); the profile joins the suite's members,
+  the plan row references it (overrides/overlays stripped — the payload baked them in), and
+  later captures see a normal pinned instance. WITHOUT --adopt the instance is skipped LOUDLY,
+  the plan omits its row (the published suite stays consistent, just smaller), and the warning
+  prints both fixes: re-run with --adopt, or name it yourself first
+  (`promote <inst> --kind profile --name <short> --adopt`) and re-capture. No service pin at
+  all still warns and skips (adopt the service first).

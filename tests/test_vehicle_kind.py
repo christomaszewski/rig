@@ -164,6 +164,79 @@ def test_repromote_recaptures_plan_and_repin_refreshes_member():
         assert rc == 1 and "UNVERSIONED" in err
 
 
+def test_hand_authored_row_captured_as_adopted_profile():
+    # A service with NO examples: install can't anchor an instance, so the config is
+    # hand-authored. The suite capture must not skip it (an overlay is impossible — no base):
+    # the FULL config becomes a PROFILE, the origin row is ADOPTED, the plan row references it,
+    # and a fresh install reconstructs the row with render equality (v0.2.18).
+    import subprocess
+
+    from test_promote import _dev_service
+
+    def _git(*args, cwd):
+        return subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, text=True)
+
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        root, _ = _world()
+        internal = _internal()
+        _install_acme(root)                        # a normal profile instance alongside
+        route, _, _ = _dev_service(name="lidarish")
+        (route / "rigging.yaml").write_text("service: lidarish\nlauncher: lidarish-up\n"
+                                            "tier: sensor\nlaunch_surface: [lidarish-up]\n")
+        (route / "config" / "lidarish.example.yaml").unlink()
+        _git("add", "-A", cwd=route)
+        _git("commit", "-q", "-m", "no examples", cwd=route)
+        _git("push", "-q", "origin", "HEAD", cwd=route)
+        assert _run("--root", str(root), "add", str(route))[0] == 0
+        cfg = root / "config" / "sensors" / "lidar_main.yaml"
+        cfg.parent.mkdir(parents=True, exist_ok=True)
+        cfg.write_text("service: lidarish\nrate: 42\nrange_m: 120\n")
+        veh = root / "vehicle.yaml"
+        veh.write_text(veh.read_text().replace(
+            "sensors:",
+            "sensors:\n  - { name: lidar_main, service: lidarish, "
+            "config: config/sensors/lidar_main.yaml, enabled: true, order: 30 }", 1))
+        assert _run("--root", str(root), "pkg", "promote", "lidarish", "--kind", "service",
+                    "--to", "internal", "--version", "0.0.1", "--adopt")[0] == 0
+        # Without --adopt: adoption mutates the origin + auto-derives a package name, so the
+        # capture refuses to do it silently — loud skip, row omitted, both fixes printed.
+        rc, _, err = _run("--root", str(root), "pkg", "promote", "--all", "--suite", "boat",
+                          "--vehicle", "gideon", "--to", "internal")
+        assert rc == 0, err
+        assert "NOT captured" in err and "--adopt" in err and "--name <short>" in err
+        s = yaml.safe_load((internal / "suites" / "boat" / "manifest.yaml").read_text())
+        assert s["members"]["profiles"] == ["testns/camish:acme-cam@2.0.0"]  # lidar absent
+        assert "services" not in s["members"]
+        vp = yaml.safe_load((internal / "vehicles" / "gideon" / "config" / "vehicle.yaml").read_text())
+        assert not any(r["name"] == "lidar_main" for r in vp.get("sensors") or [])
+        assert _run("registry", "validate", str(internal))[0] == 0    # consistent, just smaller
+        row = next(x for x in load_manifest(root).sensors if x.name == "lidar_main")
+        assert row.profile is None                                    # origin untouched
+        # With --adopt: consent given — profile + adoption + full capture.
+        rc, _, err = _run("--root", str(root), "pkg", "promote", "--all", "--suite", "boat",
+                          "--vehicle", "gideon", "--to", "internal", "--adopt", "--bump")
+        assert rc == 0, err
+        assert "capturing as PROFILE and adopting" in err
+        s = yaml.safe_load((internal / "suites" / "boat" / "manifest.yaml").read_text())
+        assert s["members"]["profiles"] == ["internal/lidarish:lidar-main@1.0.0",
+                                            "testns/camish:acme-cam@2.0.0"]
+        assert "services" not in s["members"]                # the profile IS the row's base now
+        vp = yaml.safe_load((internal / "vehicles" / "gideon" / "config" / "vehicle.yaml").read_text())
+        assert vp["sensors"][0]["profile"] == "internal/lidarish:lidar-main"   # plan row adopted
+        origin_row = next(x for x in load_manifest(root).sensors if x.name == "lidar_main")
+        assert origin_row.profile == "internal/lidarish:lidar-main@1.0.0"      # origin adopted too
+        assert _run("registry", "validate", str(internal))[0] == 0
+        root2 = _fresh()
+        rc, _, err = _run("--root", str(root2), "pkg", "install", "internal/boat")
+        assert rc == 0, err
+        assert _rendered(root2, "lidar_main") == _rendered(root, "lidar_main")
+        # Second capture: the instance is a normal pinned row now — no re-profile, no churn.
+        rc, _, err = _run("--root", str(root), "pkg", "promote", "--all", "--suite", "boat",
+                          "--to", "internal", "--bump")
+        assert rc == 0, err
+        assert "capturing as PROFILE" not in err
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):
