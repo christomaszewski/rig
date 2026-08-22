@@ -1,8 +1,13 @@
 # rig — project state & handoff (resume here)
 
 > Snapshot for picking the project up cold in a new session. Read this first, then `CHEATSHEET.md` /
-> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.2.21**,
-> branch **`main`**, 469 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.2.22**,
+> branch **`main`**, 473 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> **v0.2.22 (2026-08-22) — base-provider agreement + RIG_ROS_RMW** (ROADMAP §13): rig-infra's
+> adoption of the v0.2.21 contract surfaced two order-dependence holes — providers of one base
+> disagreeing on `build.platforms` (composed tag followed descriptor order) or on the build script
+> (two `[base]` builds racing for one tag) — both now refused rather than guessed. `ros.rmw` reaches
+> build commands as rig-owned `RIG_ROS_RMW`, giving audit's rmw check a prevention counterpart.
 > **v0.2.21 (2026-08-21) — one base image per deployment** (ROADMAP §13): `RIG_BASE_IMAGE` from
 > vehicle.yaml `images.base` or a `provides: base` rigging staged FIRST (conflicting providers =
 > ERROR), `rig image audit` (one ROS distro, the declared rmw installed, shared ros-* versions
@@ -255,7 +260,10 @@ A launcher's compose opts into each (`${RIG_IMAGE_REGISTRY:+…}`, `:${RIG_IMAGE
   v0.2.21: **base staging** — a `provides: base` rigging (fleet-ros) builds FIRST (dedup'd across
   riggings sharing one script) and rides into every other build as `RIG_BASE_IMAGE` (`images.base` /
   `--base-image` overrides; conflicting providers = ERROR); **`--no-cache`** exports
-  `RIG_BUILD_NO_CACHE=1` (scripts opt in: `docker build ${RIG_BUILD_NO_CACHE:+--no-cache}`).
+  `RIG_BUILD_NO_CACHE=1` (scripts opt in: `docker build ${RIG_BUILD_NO_CACHE:+--no-cache}`), and
+  **`RIG_ROS_RMW`** (v0.2.22 — vehicle.yaml `ros.rmw`, so a base build installs the rmw the audit
+  then checks for). Providers of one base must agree on image name, build.platforms, and build
+  script; disagreement is an error, never an order-dependent guess (v0.2.22).
 - `rig image audit` (v0.2.21): inspect every image the enabled stacks resolve to (rendered composes →
   `docker run --entrypoint /bin/sh` + dpkg): one ROS distro (= `ros.distro`), the declared rmw package
   installed, and shared ros-* package versions AGREE across images — catches the

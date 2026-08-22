@@ -151,6 +151,12 @@ def audit(manifest: Manifest, descriptors: dict[str, Descriptor], env: dict[str,
         issues.append((OK, f"{rmw_pkg} present in every matching ROS image"))
     if shared and not skewed:
         issues.append((OK, f"{len(shared)} ros-* package(s) shared across images — versions agree"))
+    elif len(ros_images) == 1:
+        # One ROS image has nothing to disagree with. Say it explicitly: a missing "versions agree"
+        # line is the contract working (a shared base collapses the fleet to one ROS layer), not a
+        # check that silently didn't run.
+        issues.append((INFO, "one ROS image in this deployment — no cross-image comparison to make "
+                             "(nothing to skew against)"))
 
     errors = sum(1 for lvl, _ in issues if lvl == ERROR)
     eprint(f"rig image audit: {manifest.vehicle} — {len(refs)} image ref(s), "

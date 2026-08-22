@@ -125,6 +125,16 @@ def test_consistent_deployment_is_green():
     assert "versions agree" in out and "/opt/ros/lyrical" in out and "0 error(s)" in out
 
 
+def test_single_ros_image_says_no_comparison_exists():
+    # A one-base deployment prints no "versions agree" line — nothing to compare. Say so explicitly:
+    # a missing line is the contract WORKING (one shared ROS layer), not a check silently skipped.
+    rc, out = _run_audit(
+        {"cam": "fleet-ros:v1"},
+        {"fleet-ros": _ros_out("lyrical", {"ros-lyrical-rmw-zenoh-cpp": "0.3.2"})})
+    assert rc == 0
+    assert "no cross-image comparison" in out and "versions agree" not in out
+
+
 def test_non_ros_excluded_and_uninspectable_skipped_without_failing():
     pkgs = {"ros-lyrical-rmw-zenoh-cpp": "0.3.2"}
     rc, out = _run_audit(

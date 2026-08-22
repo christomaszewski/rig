@@ -265,8 +265,8 @@ sensor/autonomy services get a commented menu row to uncomment):
   logger defaults to `fleet-ros` (rosbag2 + mcap + rmw_zenoh, ~1 GB — no camera image on camera-less
   vehicles).
 - **`base/`** — the `fleet-ros` image; `rig build` builds + pushes it via the riggings' `build:`
-  declaration, and certify enforces the composes pull the same tag. A rigging that marks it
-  `provides: base` makes it the DEPLOYMENT's base image: `rig build` builds it first and exports it
+  declaration, and certify enforces the composes pull the same tag. The zenoh-router and
+  ros2-bag-logger riggings mark it `provides: base`, making it the DEPLOYMENT's base image: `rig build` builds it first and exports it
   to every other build (and to launchers) as `RIG_BASE_IMAGE`, so one image pins the fleet's
   distro+rmw packages; `vehicle.yaml images.base` (or `rig build --base-image`) overrides it with an
   external ref.
@@ -303,7 +303,9 @@ launch_surface:                              # the minimal file set `rig vendor`
 # build: { command: ../base/build.sh, images: [fleet-ros], provides: base }  # this build produces the
 #                                            #   deployment's BASE image: rig builds it FIRST and exports
 #                                            #   <registry>/<images[0]>:<tag> as RIG_BASE_IMAGE to every
-#                                            #   other build + launcher (vehicle.yaml images.base overrides)
+#                                            #   other build + launcher (vehicle.yaml images.base overrides).
+#                                            #   Providers of one base must agree on build.platforms AND
+#                                            #   the build script — rig refuses rather than pick by order.
 # platform: { auto_detect: /etc/nv_tegra_release, override_env: CAM_PLATFORM }  # the launcher's standalone
 #                                            #   host probe + the env var it honors; rig mirrors the vehicle's
 #                                            #   declared `platform:` into it (RIG_TARGET_PLATFORM sibling)

@@ -9,7 +9,9 @@ vehicle_id: 1                  # identity; decides the ROS domain (override via 
 
 ros:
   # domain_id: 0               # defaults to vehicle_id; uncomment to override
-  rmw: rmw_zenoh_cpp           # one RMW across every stack; rmw_zenoh needs a zenoh-router in infra: (below)
+  rmw: rmw_zenoh_cpp           # one RMW across every stack; rmw_zenoh needs a zenoh-router in infra: (below).
+                               #   Exported to launchers as RMW_IMPLEMENTATION and to build commands as
+                               #   RIG_ROS_RMW (a base image installs THIS rmw; `rig image audit` checks it)
   distro: lyrical
 
 # Where stacks pull images from (fleet-wide). Empty = local images (dev). Set to a registry the machine

@@ -660,6 +660,22 @@ times → two package versions → zenoh sessions that can't talk. Prevention, d
   (rig-owned, set-or-popped; scripts opt in with `docker build ${RIG_BUILD_NO_CACHE:+--no-cache}`)
   for the full re-converge after audit finds drift. Env, not a positional arg — the
   `<cmd> <registry> [tag]` contract is untouched.
-- rig-infra side (queued): mark zenoh-router/ros2-bag-logger riggings `provides: base`, honor
-  RIG_BASE_IMAGE + RIG_BUILD_NO_CACHE in `base/build.sh` and the service build scripts.
+- rig-infra side — ✅ done (v0.2.21, reference provider): zenoh-router + ros2-bag-logger riggings
+  mark `provides: base` (both, so either alone still provides one); `base/build.sh` honors
+  RIG_BUILD_NO_CACHE. **The provider build never receives RIG_BASE_IMAGE** — fleet-ros IS the base,
+  the root of the FROM chain, and rig pops the var for stage 0; that half of this bullet applies to
+  DEPENDENT service build scripts only (the earlier wording said otherwise and was wrong).
+- **v0.2.22** closed two order-dependence holes the rig-infra adoption surfaced, plus the audit's
+  missing counterpart. Agreeing on the base image NAME is not agreeing on the base: (a) providers
+  declaring different `build.platforms` composed `<tag>-<platform>` or not depending on descriptor
+  order — both orders reported success, one ref didn't exist; (b) providers naming one image from
+  DIFFERENT build scripts survived the stage-0 dedup (keyed on resolved script path), so both ran
+  as `[base]` and pushed the same tag — two images racing, last writer wins, the exact skew §13
+  exists to prevent, produced by rig itself. Now: platform disagreement is an error in
+  `resolve_base_image` (doctor gets it free), and `len(stage0) > 1` after dedup refuses in `build()`
+  before anything is built. Also **RIG_ROS_RMW**: vehicle.yaml `ros.rmw` is now build-visible, so
+  audit's rmw check has a prevention counterpart instead of flagging an image whose builder was
+  never told which rmw the fleet runs. Rig-owned (set-or-popped), deliberately NOT named
+  RMW_IMPLEMENTATION — that name is exported in most ROS shells, and a dev box's `.bashrc` must not
+  decide what a fleet image contains.
 

@@ -53,7 +53,13 @@ template — it adapts to each via `rigging.yaml`'s `verbs` map (e.g. cam-up tak
   every launcher (a router compose can RUN the base directly). `rig build` builds the provider FIRST
   (dedup'd across riggings sharing one build script), so dependent images `FROM ${RIG_BASE_IMAGE}`
   and the fleet's distro+rmw packages come from one layer by construction. An explicit `images.base`
-  always wins; providers naming DIFFERENT images are an ERROR (doctor + build) — rig never guesses.
+  always wins. Providers of ONE base must agree on every input to the resolved ref: a different image
+  name, a different `build.platforms` (the composed `<tag>-<platform>` would follow descriptor order),
+  or a different build script (two builds racing for one tag) is an ERROR in doctor and/or build — rig
+  never guesses by manifest order. `ros.rmw` reaches build commands as **RIG_ROS_RMW** (rig-owned,
+  set-or-popped — NOT the conventional `RMW_IMPLEMENTATION`, which most ROS shells export and would
+  let a dev box's `.bashrc` decide what a fleet image contains), so the builder is told the same rmw
+  the audit enforces.
   `rig image audit` is the detection side: it inspects the images the stacks resolve to (distro
   present, declared rmw installed, shared ros-* package versions agree across images); `rig build
   --no-cache` (RIG_BUILD_NO_CACHE=1 to every build command, opt-in in the script) is the remediation

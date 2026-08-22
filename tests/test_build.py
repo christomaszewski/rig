@@ -391,6 +391,70 @@ def test_build_external_base_skips_single_image_provider():
     assert (ws / "cam" / "seen").read_text().strip() == "nvcr.io/custom-ros:1"
 
 
+def test_resolve_base_image_providers_must_agree_on_the_platform_matrix():
+    # Agreeing on the image NAME is not agreeing on the base: with a matrix declared by only ONE
+    # provider, the composed tag flipped with descriptor order (v1-jp7 vs v1) and BOTH orders
+    # reported success — the manifest-order guess resolve_base_image exists to refuse.
+    m = _bmanifest(image_registry="reg:5000", image_tag="v1", platform="jp7")
+    matrix, plain = _bdesc("router", provides="base", platforms=("jp7",)), _bdesc("logger",
+                                                                                  provides="base")
+    for descs in ({"router": matrix, "logger": plain}, {"logger": plain, "router": matrix}):
+        ref, _, err = resolve_base_image(m, descs)
+        assert ref is None and err and "different build.platforms" in err
+    # agreeing matrices still resolve — and compose the per-platform tag
+    both = {"router": matrix, "logger": _bdesc("logger", provides="base", platforms=("jp7",))}
+    assert resolve_base_image(m, both)[0] == "reg:5000/fleet-ros:v1-jp7"
+
+
+def test_build_refuses_two_provider_scripts_racing_for_one_tag():
+    # Same image name from DIFFERENT build scripts: stage-0 dedup (by resolved script path) keeps
+    # both, so both would build and push one ref — two different images, last writer wins. That is
+    # the skew `rig image audit` exists to catch, produced by rig itself.
+    ws = _provider_workspace()
+    (ws / "logger" / "build-alt.sh").write_text("#!/bin/sh\ntouch alt-ran\n")
+    (ws / "logger" / "build-alt.sh").chmod(0o755)
+    (ws / "logger" / "rigging.yaml").write_text(
+        "service: logger\nlauncher: logger-up\n"
+        "build: {command: ./build-alt.sh, images: [fleet-ros], provides: base}\n")
+    root = _deployment("vehicle: t\nimages: {registry: 'reg:5000', tag: v1}\nsensors:\n"
+                       "  - {name: i0, service: router, config: config/i0.yaml}\n"
+                       "  - {name: i1, service: logger, config: config/i1.yaml}\n",
+                       {"router": ws / "router", "logger": ws / "logger"})
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        assert build(load_manifest(root),
+                     {s: load_descriptor(s, ws / s) for s in ("router", "logger")},
+                     registry=None, tag=None, dry_run=False) == 1
+    assert "different build commands" in err.getvalue()
+    assert not (ws / "base" / "log").exists()          # refused BEFORE building anything
+    assert not (ws / "logger" / "alt-ran").exists()
+
+
+def test_build_exports_ros_rmw_set_or_popped():
+    # audit ERRORs when ros-<distro>-<rmw> is missing from an image; the builder must be TOLD which
+    # rmw the vehicle declares, or that check has no prevention counterpart. Rig-owned (not the
+    # conventional RMW_IMPLEMENTATION) so a dev box's .bashrc can't decide what a fleet image holds.
+    svc = _service_with_build("base", 'echo "${RIG_ROS_RMW:-UNSET}" > "$(dirname "$0")/seen"\n')
+    root = _deployment("vehicle: t\nros: {distro: lyrical, rmw: rmw_cyclonedds_cpp}\n"
+                       "sensors: [{name: i0, service: base, config: config/i0.yaml}]\n",
+                       {"base": svc})
+    descs = {"base": load_descriptor("base", svc)}
+    assert build(load_manifest(root), descs, registry=None, tag=None, dry_run=False) == 0
+    assert (svc / "seen").read_text().strip() == "rmw_cyclonedds_cpp"
+    # the audit's package mapping is the shared source of truth for builder and checker
+    assert "ros-lyrical-rmw-cyclonedds-cpp" == f"ros-lyrical-{'rmw_cyclonedds_cpp'.replace('_', '-')}"
+    os.environ["RIG_ROS_RMW"] = "leak"                 # rig-owned: never inherited from the shell
+    try:
+        m = load_manifest(_deployment(
+            "vehicle: t\nsensors: [{name: i0, service: base, config: config/i0.yaml}]\n",
+            {"base": svc}))
+        m.ros = type(m.ros)(domain_id=0, rmw="", distro=None)   # nothing declared -> POP
+        assert build(m, descs, registry=None, tag=None, dry_run=False) == 0
+    finally:
+        os.environ.pop("RIG_ROS_RMW")
+    assert (svc / "seen").read_text().strip() == "UNSET"
+
+
 def test_fleet_env_exports_resolves_and_pops_base_image():
     from rig_cli.dispatch import fleet_env
     root = _deployment("vehicle: t\nvehicle_id: 1\nimages: {base: 'my/base:2'}\n"

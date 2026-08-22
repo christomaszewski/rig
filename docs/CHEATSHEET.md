@@ -341,7 +341,11 @@ Base image: a service whose rigging declares `build: {…, provides: base}` (rig
 builds FIRST, and its composed ref (`<registry>/<images[0]>:<tag>`) is exported to every other build
 and launcher as **RIG_BASE_IMAGE** — build `FROM ${RIG_BASE_IMAGE}` and the fleet's distro+rmw
 packages come from ONE image by construction. `vehicle.yaml images.base` (or `--base-image REF`)
-overrides with an external ref; two providers naming different images is an ERROR, never a guess.
+overrides with an external ref. Providers of one base must AGREE on everything that decides the ref —
+a different image name, a different `build.platforms`, or a different build script is an ERROR, never a
+manifest-order guess (the last one would have two builds racing for one tag). `ros.rmw` rides along as
+**RIG_ROS_RMW** so a base build installs the rmw the vehicle declares — the prevention counterpart to
+audit's rmw check.
 
 ## 4 — bake a deployable artifact
 
