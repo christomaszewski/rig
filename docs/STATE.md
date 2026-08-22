@@ -1,8 +1,12 @@
 # rig — project state & handoff (resume here)
 
 > Snapshot for picking the project up cold in a new session. Read this first, then `CHEATSHEET.md` /
-> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.2.22**,
-> branch **`main`**, 473 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.2.23**,
+> branch **`main`**, 474 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> **v0.2.23 (2026-08-22) — the zenoh guardrail goes both ways**: doctor warns on an ENABLED zenoh
+> router under a non-zenoh `ros.rmw`. Load-bearing since v0.2.22 — the router runs `rmw_zenohd` out
+> of a base built for the DECLARED rmw, so on a DDS fleet that image carries no zenoh at all: it
+> builds clean and dies on `up`. Now said at preflight.
 > **v0.2.22 (2026-08-22) — base-provider agreement + RIG_ROS_RMW** (ROADMAP §13): rig-infra's
 > adoption of the v0.2.21 contract surfaced two order-dependence holes — providers of one base
 > disagreeing on `build.platforms` (composed tag followed descriptor order) or on the build script
@@ -254,7 +258,8 @@ A launcher's compose opts into each (`${RIG_IMAGE_REGISTRY:+…}`, `:${RIG_IMAGE
   Config overrides + nameless profiles (deep-merge).
 - `doctor`: one-distro check, launcher-present, host-port clash (enabled-aware `plugins[name=x,enabled=true].params.port`
   selector), **non-ROS-safe name warning** (hyphens → invalid ROS namespace; sensor + autonomy tiers),
-  zenoh-router guardrail, autonomy-with-no-enabled-sensors warning ("a brain with no eyes").
+  zenoh-router guardrail (SYMMETRIC since v0.2.23 — zenoh rmw with no router, and an enabled
+  router under a non-zenoh rmw), autonomy-with-no-enabled-sensors warning ("a brain with no eyes").
 - `rig build [-j N] [--registry] [--tag]`: per-unique-service **build** (`rigging.yaml build:`) + **mirror**
   (`mirror:`, via `docker pull/tag/push` so a plain-HTTP registry works). Concurrent with `-j`.
   v0.2.21: **base staging** — a `provides: base` rigging (fleet-ros) builds FIRST (dedup'd across
