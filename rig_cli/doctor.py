@@ -63,11 +63,22 @@ def collect(
     issues.append(Issue(OK, f"vehicle '{manifest.vehicle}'{vid} · ROS domain {manifest.ros.domain_id} · "
                             f"{manifest.ros.rmw}"))
 
-    # rmw_zenoh needs a shared zenoh router (one per vehicle) in the infra tier.
-    if manifest.ros.rmw in ("rmw_zenoh", "rmw_zenoh_cpp") and manifest.sensors:
+    # rmw_zenoh needs a shared zenoh router (one per vehicle) in the infra tier — and the converse:
+    # a router on a NON-zenoh fleet is a runtime failure waiting to happen. The router runs `rmw_zenohd`
+    # out of the base image, and a base built from this vehicle's `ros.rmw` (RIG_ROS_RMW) installs THAT
+    # rmw only — so the image simply has no zenohd in it. Builds clean, dies on `up`.
+    _ZENOH_RMW = ("rmw_zenoh", "rmw_zenoh_cpp")
+    zenoh_routers = [s.name for s in manifest.sensors
+                     if s.tier == "infra" and "zenoh" in s.service and s.enabled]
+    if manifest.ros.rmw in _ZENOH_RMW and manifest.sensors:
         if not any(s.tier == "infra" and "zenoh" in s.service for s in manifest.sensors):
             issues.append(Issue(WARN, "ros.rmw is zenoh but no zenoh router in `infra:` — ROS nodes may not "
                                        "discover each other; add a zenoh-router service (or switch RMW)"))
+    elif zenoh_routers:
+        issues.append(Issue(WARN, f"zenoh router enabled ({', '.join(zenoh_routers)}) but ros.rmw is "
+                                  f"'{manifest.ros.rmw}' — the router runs rmw_zenohd from the base image, "
+                                  f"which is built for the DECLARED rmw and carries no zenoh; disable the "
+                                  f"router (or switch ros.rmw to rmw_zenoh_cpp)"))
 
     # Autonomy consumes the sensor graph — enabled autonomy with zero enabled sensors is a brain with no eyes.
     autonomy_on = [s.name for s in manifest.sensors if s.tier == "autonomy" and s.enabled]

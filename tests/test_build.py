@@ -488,6 +488,27 @@ def test_env_map_cannot_shadow_base_image_or_no_cache():
             assert "rig-owned" in str(exc)
 
 
+def test_doctor_warns_on_a_zenoh_router_under_a_non_zenoh_rmw():
+    # The converse of the existing guardrail. The router runs rmw_zenohd out of the base image, and a
+    # base built for the DECLARED rmw (RIG_ROS_RMW) carries only that one — so a DDS fleet with a
+    # router enabled builds clean and dies on `up`. Catch it at doctor time instead.
+    from rig_cli.doctor import WARN, collect
+    from rig_cli.manifest import Sensor
+
+    def _issues(rmw, enabled=True):
+        m = _bmanifest()
+        m.ros = RosSettings(0, rmw, "lyrical")
+        m.sensors = [Sensor(name="router", service="zenoh-router", config=pathlib.Path("/x"),
+                            enabled=enabled, order=0, tier="infra")]
+        return collect(m, {}, {})
+
+    hit = [i for i in _issues("rmw_cyclonedds_cpp") if i.level == WARN and "rmw_zenohd" in i.message]
+    assert hit and "router" in hit[0].message and "rmw_cyclonedds_cpp" in hit[0].message
+    assert not [i for i in _issues("rmw_zenoh_cpp") if "rmw_zenohd" in i.message]   # zenoh fleet: fine
+    assert not [i for i in _issues("rmw_cyclonedds_cpp", enabled=False)             # disabled: not running
+                if "rmw_zenohd" in i.message]
+
+
 def test_doctor_base_image_checks():
     from rig_cli.doctor import ERROR, INFO, OK, collect
     ros_desc = _bdesc("cam")

@@ -59,7 +59,9 @@ template — it adapts to each via `rigging.yaml`'s `verbs` map (e.g. cam-up tak
   never guesses by manifest order. `ros.rmw` reaches build commands as **RIG_ROS_RMW** (rig-owned,
   set-or-popped — NOT the conventional `RMW_IMPLEMENTATION`, which most ROS shells export and would
   let a dev box's `.bashrc` decide what a fleet image contains), so the builder is told the same rmw
-  the audit enforces.
+  the audit enforces. Doctor's zenoh guardrail is symmetric for the same reason: a zenoh router on a
+  NON-zenoh fleet warns, because the router runs `rmw_zenohd` out of a base built for the declared
+  rmw — an image that simply has no zenoh in it (builds clean, dies on `up`).
   `rig image audit` is the detection side: it inspects the images the stacks resolve to (distro
   present, declared rmw installed, shared ros-* package versions agree across images); `rig build
   --no-cache` (RIG_BUILD_NO_CACHE=1 to every build command, opt-in in the script) is the remediation
