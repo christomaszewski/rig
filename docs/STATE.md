@@ -1,8 +1,15 @@
 # rig — project state & handoff (resume here)
 
 > Snapshot for picking the project up cold in a new session. Read this first, then `CHEATSHEET.md` /
-> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.2.20**,
-> branch **`main`**, 384 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.2.21**,
+> branch **`main`**, 469 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> **v0.2.21 (2026-08-21) — one base image per deployment** (ROADMAP §13): `RIG_BASE_IMAGE` from
+> vehicle.yaml `images.base` or a `provides: base` rigging staged FIRST (conflicting providers =
+> ERROR), `rig image audit` (one ROS distro, the declared rmw installed, shared ros-* versions
+> agree), `rig build --no-cache`. Plus a full test-suite audit (6 tranches): 384 → 469 tests, each
+> new test mutation-checked, the suite hermetic under a poisoned host environment, and two real
+> bugs fixed on the way (same-basename bind collapse in bake; `RIG_TARGET_PLATFORM` leaking into
+> builds from a stale shell export).
 > **v0.2.14–0.2.20 (2026-08-20/21) — platform targeting, decommission, suite closure, the vehicle
 > kind, stale pins as snapshots, marker identity by default** (ROADMAP §7–§12; plan docs
 > `rig-platform-plan.md` + `rig-vehicle-kind-plan.md`, untracked):
