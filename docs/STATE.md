@@ -3,7 +3,7 @@
 > Snapshot for picking the project up cold in a new session. Read this first, then `CHEATSHEET.md` /
 > `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.2.24**,
 > branch **`main`**, 477 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
-> **v0.2.24 (2026-08-22) — rebasing alone doesn't stop skew** (camera-service consumer finding):
+> **v0.2.24 (2026-08-24) — rebasing alone doesn't stop skew** (camera-service consumer finding):
 > a consumer that plain-`apt-get install`s a package the base already carries silently upgrades it
 > (base built earlier, ROS apt repo moved) — docs now mandate `--no-upgrade` for consumer extras;
 > audit's skew ERROR is base-aware (diagnoses the reinstall + names the fix when a skewed ref IS
