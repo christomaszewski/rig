@@ -51,7 +51,10 @@ template — it adapts to each via `rigging.yaml`'s `verbs` map (e.g. cam-up tak
   service whose rigging declares `build: {…, provides: base}` (rig composes `<registry>/<images[0]>:
   <tag>` — the fleet-ros pattern) resolves to `RIG_BASE_IMAGE`, exported to every build command AND
   every launcher (a router compose can RUN the base directly). `rig build` builds the provider FIRST
-  (dedup'd across riggings sharing one build script), so dependent images `FROM ${RIG_BASE_IMAGE}`
+  (dedup'd across riggings sharing one build script — by CONTENT since v0.2.25: same script name +
+  same git tree of the script's directory in clean checkouts, so two pinned clones of one collection
+  repo are one build; the contract is that a base script's directory IS its whole build context, and
+  anything unprovable falls back to path identity, toward refusing), so dependent images `FROM ${RIG_BASE_IMAGE}`
   and the fleet's distro+rmw packages come from one layer — **provided the consumer doesn't
   reinstall them**. Plain `apt-get install` of a package the base already carries silently UPGRADES
   it to the repo's current candidate (the base was built earlier; the ROS apt repo moved in

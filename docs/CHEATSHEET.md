@@ -342,8 +342,14 @@ builds FIRST, and its composed ref (`<registry>/<images[0]>:<tag>`) is exported 
 and launcher as **RIG_BASE_IMAGE** — build `FROM ${RIG_BASE_IMAGE}` and the fleet's distro+rmw
 packages come from ONE image by construction. `vehicle.yaml images.base` (or `--base-image REF`)
 overrides with an external ref. Providers of one base must AGREE on everything that decides the ref —
-a different image name, a different `build.platforms`, or a different build script is an ERROR, never a
-manifest-order guess (the last one would have two builds racing for one tag). `ros.rmw` rides along as
+a different image name, a different `build.platforms`, or a genuinely different build script is an
+ERROR, never a manifest-order guess (the last one would have two builds racing for one tag). "The same
+script" is judged by CONTENT, not path (v0.2.25): two pinned checkouts of one collection repo — the
+registry-install case, where each service used to fetch its own clone — dedupe to ONE base build when
+the script's directory has the same git tree, even at different revs. The contract that makes this
+sound: **a base build script's directory is its whole build context** (rig-infra's `base/` —
+Dockerfile + build.sh, self-contained); anything unprovable (dirty checkout, not git) falls back to
+path identity, i.e. toward refusing. `ros.rmw` rides along as
 **RIG_ROS_RMW** so a base build installs the rmw the vehicle declares — the prevention counterpart to
 audit's rmw check.
 

@@ -425,9 +425,112 @@ def test_build_refuses_two_provider_scripts_racing_for_one_tag():
         assert build(load_manifest(root),
                      {s: load_descriptor(s, ws / s) for s in ("router", "logger")},
                      registry=None, tag=None, dry_run=False) == 1
-    assert "different build commands" in err.getvalue()
+    assert "different base builds" in err.getvalue()
+    # the message names WHAT differs — the resolved scripts — not two identical command strings
+    assert str((ws / "base" / "build.sh").resolve()) in err.getvalue()
+    assert str((ws / "logger" / "build-alt.sh").resolve()) in err.getvalue()
     assert not (ws / "base" / "log").exists()          # refused BEFORE building anything
     assert not (ws / "logger" / "alt-ran").exists()
+
+
+def _git_b(*args, cwd):
+    import subprocess
+    return subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *args],
+                          cwd=cwd, capture_output=True, text=True)
+
+
+def _cloned_provider_pair():
+    """The registry-install shape: router and logger each reach the same collection repo through
+    their OWN pinned clone (the src cache is repo+rev-keyed since v0.2.25, but two services'
+    releases can still pin different revs — two checkouts of possibly-identical content)."""
+    src = pathlib.Path(tempfile.mkdtemp()) / "infra"
+    (src / "base").mkdir(parents=True)
+    (src / "base" / "build.sh").write_text('#!/bin/sh\ncd "$(dirname "$0")"\necho built >> log\n')
+    (src / "base" / "build.sh").chmod(0o755)
+    for svc in ("router", "logger"):
+        d = src / svc
+        d.mkdir()
+        (d / "rigging.yaml").write_text(
+            f"service: {svc}\nlauncher: {svc}-up\n"
+            f"build: {{command: ../base/build.sh, images: [fleet-ros], provides: base}}\n")
+    _git_b("init", "-q", cwd=src)
+    _git_b("add", "-A", cwd=src)
+    _git_b("commit", "-q", "-m", "infra", cwd=src)
+    a = pathlib.Path(tempfile.mkdtemp()) / "a"
+    b = pathlib.Path(tempfile.mkdtemp()) / "b"
+    for clone in (a, b):
+        assert _git_b("clone", "-q", str(src), str(clone), cwd=src.parent).returncode == 0
+    return src, a, b
+
+
+def _build_two_clone_deployment(a, b):
+    root = _deployment("vehicle: t\nimages: {registry: 'reg:5000', tag: v1}\nsensors:\n"
+                       "  - {name: i0, service: router, config: config/i0.yaml}\n"
+                       "  - {name: i1, service: logger, config: config/i1.yaml}\n",
+                       {"router": a / "router", "logger": b / "logger"})
+    descs = {"router": load_descriptor("router", a / "router"),
+             "logger": load_descriptor("logger", b / "logger")}
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        rc = build(load_manifest(root), descs, registry=None, tag=None, dry_run=False)
+    return rc, err.getvalue()
+
+
+def test_build_dedupes_identical_base_across_pinned_clones():
+    # Two clean checkouts of the same base content are ONE build (identity = tree hash of the
+    # script's dir + the script name), even at DIFFERENT revs when base/ itself is untouched —
+    # the registry-install case that used to be refused as a phantom race.
+    src, a, b = _cloned_provider_pair()
+    rc, err = _build_two_clone_deployment(a, b)
+    assert rc == 0, err
+    assert (a / "base" / "log").read_text().count("built") == 1   # ONE base build...
+    assert not (b / "base" / "log").exists()                      # ...never the second clone's
+    assert "base already built by 'router'" in err
+    # revs DIVERGE but base/ is untouched: still one build
+    (a / "base" / "log").unlink()
+    (b / "router" / "README.md").write_text("router-only drift\n")
+    _git_b("add", "-A", cwd=b)
+    _git_b("commit", "-q", "-m", "router-only", cwd=b)
+    rc, err = _build_two_clone_deployment(a, b)
+    assert rc == 0, err
+    assert (a / "base" / "log").read_text().count("built") == 1
+    assert not (b / "base" / "log").exists()
+
+
+def test_build_refuses_diverged_or_dirty_base_across_clones():
+    src, a, b = _cloned_provider_pair()
+    # base/ content actually differs across the two pins: a REAL race — refuse, naming the revs
+    (b / "base" / "build.sh").write_text('#!/bin/sh\ncd "$(dirname "$0")"\necho OTHER >> log\n')
+    _git_b("add", "-A", cwd=b)
+    _git_b("commit", "-q", "-m", "base diverges", cwd=b)
+    rc, err = _build_two_clone_deployment(a, b)
+    assert rc == 1 and "different base builds" in err and "rev " in err
+    assert not (a / "base" / "log").exists() and not (b / "base" / "log").exists()
+    # equal trees again, but a DIRTY checkout is never trusted as content identity: refuse
+    _git_b("reset", "-q", "--hard", "HEAD~1", cwd=b)
+    (b / "base" / "extra.txt").write_text("untracked — could reach the build context\n")
+    rc, err = _build_two_clone_deployment(a, b)
+    assert rc == 1 and "different base builds" in err
+    assert not (a / "base" / "log").exists() and not (b / "base" / "log").exists()
+
+
+def test_build_base_identity_includes_the_script_name():
+    # Two DIFFERENT scripts in one clean dir share the tree hash; the builds still differ — the
+    # script name is part of the identity, or rig would silently skip one of two real builds.
+    src, a, b = _cloned_provider_pair()
+    (src / "base" / "build2.sh").write_text('#!/bin/sh\ncd "$(dirname "$0")"\necho TWO >> log\n')
+    (src / "base" / "build2.sh").chmod(0o755)
+    (src / "logger" / "rigging.yaml").write_text(
+        "service: logger\nlauncher: logger-up\n"
+        "build: {command: ../base/build2.sh, images: [fleet-ros], provides: base}\n")
+    _git_b("add", "-A", cwd=src)
+    _git_b("commit", "-q", "-m", "second script", cwd=src)
+    a2 = pathlib.Path(tempfile.mkdtemp()) / "a2"
+    b2 = pathlib.Path(tempfile.mkdtemp()) / "b2"
+    for clone in (a2, b2):
+        assert _git_b("clone", "-q", str(src), str(clone), cwd=src.parent).returncode == 0
+    rc, err = _build_two_clone_deployment(a2, b2)
+    assert rc == 1 and "different base builds" in err
 
 
 def test_build_exports_ros_rmw_set_or_popped():

@@ -1,8 +1,18 @@
 # rig — project state & handoff (resume here)
 
 > Snapshot for picking the project up cold in a new session. Read this first, then `CHEATSHEET.md` /
-> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.2.24**,
-> branch **`main`**, 477 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.2.25**,
+> branch **`main`**, 482 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> **v0.2.25 (2026-08-24) — the phantom base race**: registry installs fetched a per-SERVICE clone of
+> the collection repo, so zenoh-router + ros2-bag-logger — both declaring rig-infra's
+> `../base/build.sh` — resolved it to two paths and every fresh install refused `rig build` as a
+> "race" between identical builds. Three fixes: the src cache is keyed by (repo, rev) — services
+> from one repo SHARE a checkout (legacy per-service dirs renamed in place, so offline machines
+> never reclone); provider dedupe is by CONTENT — script name + git tree hash of the script's dir
+> in clean checkouts (the contract: a base script's directory IS its whole build context;
+> unprovable = path identity, toward refusing), so even rev-divergent pins dedupe while `base/` is
+> untouched; and the refusal names the resolved scripts + revs ("align their source pins") instead
+> of printing one command string twice and calling it "different".
 > **v0.2.24 (2026-08-24) — rebasing alone doesn't stop skew** (camera-service consumer finding):
 > a consumer that plain-`apt-get install`s a package the base already carries silently upgrades it
 > (base built earlier, ROS apt repo moved) — docs now mandate `--no-upgrade` for consumer extras;
@@ -275,7 +285,10 @@ A launcher's compose opts into each (`${RIG_IMAGE_REGISTRY:+…}`, `:${RIG_IMAGE
   `RIG_BUILD_NO_CACHE=1` (scripts opt in: `docker build ${RIG_BUILD_NO_CACHE:+--no-cache}`), and
   **`RIG_ROS_RMW`** (v0.2.22 — vehicle.yaml `ros.rmw`, so a base build installs the rmw the audit
   then checks for). Providers of one base must agree on image name, build.platforms, and build
-  script; disagreement is an error, never an order-dependent guess (v0.2.22).
+  script; disagreement is an error, never an order-dependent guess (v0.2.22). Script agreement is
+  judged by CONTENT since v0.2.25 (name + git tree of the script's dir in clean checkouts): two
+  pinned checkouts of identical base context are ONE build, and the src cache is (repo, rev)-keyed
+  so one collection repo is one clone.
 - `rig image audit` (v0.2.21): inspect every image the enabled stacks resolve to (rendered composes →
   `docker run --entrypoint /bin/sh` + dpkg): one ROS distro (= `ros.distro`), the declared rmw package
   installed, and shared ros-* package versions AGREE across images — catches the

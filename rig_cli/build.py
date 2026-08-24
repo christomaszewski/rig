@@ -159,6 +159,34 @@ def _env_note(distro: str | None, platform: str | None = None, base: str | None 
     return (" " + " ".join(parts)) if parts else ""
 
 
+def _script_identity(script: Path):
+    """What makes two base-build scripts ONE build: the resolved path — widened to the git tree
+    hash of the script's directory when that directory is a CLEAN checkout, so identical content
+    reached through two pinned clones (each registry install used to fetch its own copy of the
+    collection repo; revs may still differ across service releases) dedupes to one build. This
+    leans on a contract the providers must keep: a base build script's directory IS its whole
+    build context (rig-infra's ``base/`` — Dockerfile + build.sh, self-contained). Anything short
+    of a provably clean checkout (not git, dirty/untracked files, git errors) falls back to path
+    identity — failing toward REFUSING two builds, never toward skipping one that might differ."""
+    def git(*args):
+        return subprocess.run(["git", "-C", str(script.parent), *args],
+                              capture_output=True, text=True)
+    status = git("status", "--porcelain", "--", ".")
+    if status.returncode != 0 or status.stdout.strip():
+        return ("path", str(script))
+    tree = git("rev-parse", "HEAD:./")  # tree hash of the script's directory at HEAD
+    if tree.returncode != 0:
+        return ("path", str(script))
+    return ("tree", script.name, tree.stdout.strip())
+
+
+def _script_rev(script: Path) -> str:
+    """`` (rev …)`` detail for the racing-providers error — names WHICH pins to align."""
+    p = subprocess.run(["git", "-C", str(script.parent), "rev-parse", "--short", "HEAD"],
+                       capture_output=True, text=True)
+    return f" (rev {p.stdout.strip()})" if p.returncode == 0 else ""
+
+
 def _mirror_steps(img: str, target: str):
     # pull -> tag -> push honors the daemon's insecure-registries (a plain-HTTP local registry).
     return [["docker", "pull", img], ["docker", "tag", img, target], ["docker", "push", target]]
@@ -272,23 +300,29 @@ def build(manifest: Manifest, descriptors: dict[str, Descriptor], *, registry: s
                 skip_build[s] = (f"external base '{base_ref}' replaces its "
                                  f"'{descriptors[s].build_images[0]}'")
     elif providers:
-        scripts: dict[Path, str] = {}
+        scripts: dict[tuple, str] = {}   # base-script identity -> first provider carrying it
+        script_paths: dict[str, Path] = {}
         for s in providers:
             script = (cwds[s] / shlex.split(descriptors[s].build_command)[0]).resolve()
-            if script in scripts:
-                skip_build[s] = f"base already built by '{scripts[script]}' ({script.name})"
+            script_paths[s] = script
+            key = _script_identity(script)
+            if key in scripts:
+                skip_build[s] = f"base already built by '{scripts[key]}' ({script.name})"
             else:
-                scripts[script] = s
+                scripts[key] = s
                 stage0.append(s)
-        # Same image name, DIFFERENT build scripts: the dedup above kept both, so both would run as
-        # [base] and push the same ref — two different images racing for one tag, last writer wins.
-        # That is the very skew `rig image audit` exists to catch, produced by rig itself; refuse
-        # BEFORE building anything rather than pick by manifest order.
+        # Same image name, DIFFERENT base builds: the dedup above (path, widened to content
+        # identity for clean checkouts) kept both, so both would run as [base] and push the same
+        # ref — two different images racing for one tag, last writer wins. That is the very skew
+        # `rig image audit` exists to catch, produced by rig itself; refuse BEFORE building
+        # anything rather than pick by manifest order.
         if len(stage0) > 1:
-            detail = ", ".join(f"{s} ({descriptors[s].build_command})" for s in stage0)
-            eprint(f"rig build: base-image providers for '{base_ref}' run different build commands: "
-                   f"{detail} — two builds would race for one tag; point them at ONE script, or set "
-                   f"images.base to pin the ref")
+            detail = "; ".join(f"{s}: {script_paths[s]}{_script_rev(script_paths[s])}"
+                               for s in stage0)
+            eprint(f"rig build: base-image providers for '{base_ref}' run different base builds: "
+                   f"{detail} — two builds would race for one tag; align their source pins "
+                   f"(identical base content dedupes to ONE build), or set images.base to use an "
+                   f"external base instead")
             return 1
 
     if base_ref:

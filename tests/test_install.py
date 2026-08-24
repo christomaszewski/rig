@@ -4,6 +4,7 @@ import contextlib
 import io
 import os
 import pathlib
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -159,7 +160,9 @@ def test_fetch_initializes_submodules():
             init(root, no_git=True)
         rc, _, err = _run("--root", str(root), "pkg", "add", "subreg/subbed")
         assert rc == 0, err
-        cache = pathlib.Path(os.environ["RIG_HOME"]) / "cache" / "src" / f"subbed-{rev[:12]}"
+        from rig_cli.install import _repo_slug
+        cache = (pathlib.Path(os.environ["RIG_HOME"]) / "cache" / "src"
+                 / f"{_repo_slug(str(repo))}-{rev[:12]}")
         assert (cache / "vendor" / "core" / "core.txt").read_text() == "upstream\n"
 
 
@@ -379,7 +382,7 @@ def test_build_falls_back_to_pinned_source_for_vendored_services():
         rc, _, err = _run("--root", str(root), "image", "build", "--dry-run")
         assert rc == 0, err
         assert "using the pinned source checkout" in err               # fallback engaged
-        assert "cache/src/routerish-" in err                           # cwd = the pinned clone
+        assert "cache/src/collection-" in err          # cwd = the pinned clone (repo-keyed, v0.2.25)
         # a service with a repo-relative build command, NO context, NO lock pin: pointed error, rc 1
         fake = pathlib.Path(tempfile.mkdtemp()) / "handsvc"
         (fake / "config").mkdir(parents=True)
@@ -392,6 +395,34 @@ def test_build_falls_back_to_pinned_source_for_vendored_services():
         assert _run("--root", str(root), "add", str(fake))[0] == 0     # workspace add: no lock pin
         rc, _, err = _run("--root", str(root), "image", "build", "--dry-run")
         assert rc == 1 and "no source pin for 'handsvc'" in err
+
+
+def test_services_from_one_repo_share_one_source_checkout():
+    # The src cache is keyed by (repo, rev), not the installing service (v0.2.25): two services
+    # released from one collection repo share a checkout, so their common `../base/build.sh`
+    # resolves to ONE file and build's base dedupe holds across services — not just within one.
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        root, _ = _world()
+        assert _run("--root", str(root), "pkg", "add", "testns/routerish")[0] == 0
+        assert _run("--root", str(root), "pkg", "add", "testns/camish")[0] == 0
+        src_cache = pathlib.Path(os.environ["RIG_HOME"]) / "cache" / "src"
+        assert len(list(src_cache.iterdir())) == 1     # one clone serves both installs
+
+
+def test_fetch_source_adopts_legacy_per_service_cache_offline():
+    # Re-keying the cache must not strand an offline machine: a pre-v0.2.25 `<service>-<rev>` dir
+    # is RENAMED to the repo-keyed name and reused — proven by deleting the upstream before the
+    # fetch, so any reclone attempt would fail.
+    from rig_cli.install import _fetch_source, _repo_slug
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        repo, rev = _code_repo()
+        legacy = pathlib.Path(os.environ["RIG_HOME"]) / "cache" / "src" / f"routerish-{rev[:12]}"
+        legacy.parent.mkdir(parents=True)
+        assert _git("clone", "-q", str(repo), str(legacy), cwd=repo.parent).returncode == 0
+        shutil.rmtree(repo)                            # offline: the upstream is GONE
+        got = _fetch_source("routerish", {"repo": str(repo), "rev": rev, "path": "routerish"})
+        assert got == legacy.parent / f"{_repo_slug(str(repo))}-{rev[:12]}" / "routerish"
+        assert got.is_dir() and not legacy.exists()
 
 
 def test_pkg_list_shows_installed_users_and_upgrades():

@@ -23,6 +23,7 @@ content hash is the guarantee, so a moved registry HEAD with identical payload s
 """
 from __future__ import annotations
 
+import hashlib
 import re
 import subprocess
 from pathlib import Path
@@ -152,11 +153,31 @@ def _resolve_required_service(entry: Entry, reg: Registry, profile: Package) -> 
     return svc_entry, service
 
 
+def _repo_slug(url: str) -> str:
+    """Cache key for a source repo URL: ``<basename>-<8 hex>`` of the NORMALIZED url (scheme,
+    ``user@``, ``:`` vs ``/``, trailing ``.git`` — one repo spelled two ways is one key). The src
+    cache is keyed by (repo, rev) rather than by the installing service so services released from
+    one collection repo (rig-infra) SHARE a checkout: their common ``../base/build.sh`` then
+    resolves to ONE file and build's base-provider dedupe holds across services, instead of two
+    per-service clones of identical content reading as two different base builds."""
+    norm = re.sub(r"^[a-z+]+://", "", url.strip().lower())  # scheme
+    norm = re.sub(r"^[^/@:]+@", "", norm)                   # user@ (ssh / scp-like)
+    norm = norm.replace(":", "/").rstrip("/")
+    norm = norm[:-4] if norm.endswith(".git") else norm
+    stem = re.sub(r"[^a-z0-9._-]", "-", norm.rsplit("/", 1)[-1]) or "repo"
+    return f"{stem}-{hashlib.sha256(norm.encode()).hexdigest()[:8]}"
+
+
 def _fetch_source(name: str, source: dict) -> Path:
     """Clone the service's code repo at the pinned rev into the src cache (reused when already
-    present at that rev — offline after first fetch). Returns the service dir (source.path aware)."""
+    present at that rev — offline after first fetch). Keyed by (repo, rev) via _repo_slug, so
+    every service pinned at one repo rev shares one checkout. Returns the service dir
+    (source.path aware)."""
     repo_url, rev = str(source.get("repo") or ""), str(source.get("rev") or "")
-    dest = rig_home() / "cache" / "src" / f"{name}-{rev[:12]}"
+    dest = rig_home() / "cache" / "src" / f"{_repo_slug(repo_url)}-{rev[:12]}"
+    legacy = dest.parent / f"{name}-{rev[:12]}"  # pre-v0.2.25 per-service key: adopt, don't reclone
+    if not dest.exists() and legacy != dest and (legacy / ".git").is_dir():
+        legacy.rename(dest)  # same repo at the same rev — the tamper check below still verifies
 
     def git(*args):
         return subprocess.run(["git", "-C", str(dest), *args], capture_output=True, text=True)
