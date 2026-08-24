@@ -135,6 +135,46 @@ def test_single_ros_image_says_no_comparison_exists():
     assert "no cross-image comparison" in out and "versions agree" not in out
 
 
+def test_non_ros_package_divergence_is_one_summarized_warn():
+    # The camera-service finding: libtiff6 diverged across two ROS images and the audit printed
+    # "versions agree". Non-ros-* divergence is now ONE summarized WARN — never an error (ubuntu
+    # revision bumps are usually benign), never silence (a diverging libstdc++ is a real ABI hazard).
+    ros = {"ros-lyrical-rmw-zenoh-cpp": "0.3.2"}
+    rc, out = _run_audit(
+        {"cam": "bridge:v1", "logger": "fleet-ros:v1"},
+        {"bridge": _ros_out("lyrical", ros) + "libtiff6 4.7.0-3ubuntu5\\n",
+         "fleet-ros": _ros_out("lyrical", ros) + "libtiff6 4.7.0-3ubuntu4\\n"})
+    assert rc == 0                                     # WARN, exit code untouched
+    assert "1 non-ROS package(s) differ" in out and "libtiff6" in out
+    assert "versions agree" in out                     # the ros-* verdict is separate and still OK
+    assert out.count("libtiff6") == 1                  # summarized: one line, not per-package spam
+
+
+def test_plain_debian_image_with_system_packages_stays_non_ros():
+    # The widened probe returns EVERY dpkg entry — classification must still key on /opt/ros +
+    # ros-* only, or a plain debian image (eclipse/zenoh) becomes "ROS" and trips the rmw check.
+    rc, out = _run_audit(
+        {"cam": "cam-core:v1", "zen": "eclipse/zenoh:1.0"},
+        {"cam-core": _ros_out("lyrical", {"ros-lyrical-rmw-zenoh-cpp": "0.3.2"}),
+         "eclipse/zenoh": f"{_MARK}\\nlibc6 2.39-0ubuntu8\\nlibstdc++6 14.2.0-4ubuntu2\\n"})
+    assert rc == 0
+    assert "non-ROS image" in out and "not installed" not in out
+
+
+def test_version_skew_hint_names_the_base_and_no_upgrade():
+    # rig resolved the base ref, so a skew involving it gets a DIAGNOSIS, not generic advice: the
+    # consumer re-installed a base-pinned package and upgraded it — `--no-upgrade` is the fix.
+    ros_yaml = ("ros: {distro: lyrical, rmw: rmw_zenoh_cpp}\n"
+                "images: {base: 'fleet-ros:v1'}")
+    cases = {"bridge": _ros_out("lyrical", {"ros-lyrical-rclcpp": "32.0.2-new"}),
+             "fleet-ros": _ros_out("lyrical", {"ros-lyrical-rclcpp": "32.0.2-old"})}
+    rc, out = _run_audit({"cam": "bridge:v1", "logger": "fleet-ros:v1"}, cases, ros=ros_yaml)
+    assert rc == 1 and "version skew: ros-lyrical-rclcpp" in out
+    assert "--no-upgrade" in out and "fleet-ros:v1 is the deployment base" in out
+    rc, out = _run_audit({"cam": "bridge:v1", "logger": "fleet-ros:v1"}, cases)  # no base declared
+    assert rc == 1 and "--no-upgrade" not in out       # no base -> no false diagnosis
+
+
 def test_non_ros_excluded_and_uninspectable_skipped_without_failing():
     pkgs = {"ros-lyrical-rmw-zenoh-cpp": "0.3.2"}
     rc, out = _run_audit(

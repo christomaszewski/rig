@@ -10,11 +10,17 @@ docker (`ls /opt/ros` + the dpkg ``ros-*`` package list), and cross-checks:
                lyrical vehicle breaks the shared graph at runtime, silently)
   - rmw        the declared ``ros.rmw`` package (``ros-<distro>-rmw-…``) is installed in every
                image matching the declared distro — nodes fall back to another RMW otherwise
-  - versions   every ``ros-*`` package present in two or more images has ONE version across them.
-               Independent images apt-install at different times against a moving ros repo, and a
-               skewed rmw package between two images means sessions that can't talk. A shared base
-               (RIG_BASE_IMAGE) prevents the skew by construction for base packages; ``rig build
-               --no-cache`` re-converges a fleet that already drifted.
+  - versions   every ``ros-*`` package present in two or more images has ONE version across them
+               (ERROR). Independent images apt-install at different times against a moving ros repo,
+               and a skewed rmw package between two images means sessions that can't talk. A shared
+               base (RIG_BASE_IMAGE) prevents the skew for base packages — PROVIDED the consumer
+               doesn't reinstall them (plain ``apt-get install`` of a package the base already
+               carries silently upgrades it; consumers use ``--no-upgrade``). ``rig build
+               --no-cache`` re-converges a fleet that already drifted (base first, then every
+               consumer, in one invocation). Non-``ros-*`` packages diverging across the ROS images
+               are reported as ONE summarized WARN, never an error: ubuntu revision bumps are
+               usually benign, but ABI-relevant divergence (libstdc++, boost, an image codec a ROS
+               node links against) can still break nodes — the WARN is the clue, not a verdict.
 
 Non-ROS images (no /opt/ros, no ros-* packages) are excluded from the checks; an image without a
 shell/dpkg is reported and skipped (uninspectable this way); a ROS image with zero ros-* dpkg
@@ -40,29 +46,34 @@ _MARK = "::rig-image-audit::"
 # One in-container probe: the /opt/ros distro dirs, a marker, then `pkg version` lines. Runs under
 # /bin/sh (every debian/ubuntu ROS image has it); dpkg-query errors (no matches, no dpkg) are
 # normalized away — absence is DATA here, not failure.
+# The FULL package list, not just ros-*: the cross-image WARN covers system libs too (the ros-*
+# subset is split out in parsing — it alone decides ROS-ness and feeds the ERROR checks).
 _INSPECT_SH = (f"ls /opt/ros 2>/dev/null; echo '{_MARK}'; "
-               "dpkg-query -W -f '${Package} ${Version}\\n' 'ros-*' 2>/dev/null; true")
+               "dpkg-query -W -f '${Package} ${Version}\\n' 2>/dev/null; true")
 _DOCKER_TIMEOUT = 600  # seconds; covers a cold pull of a multi-GB image, not a hung daemon forever
 
 
-def _inspect(ref: str) -> tuple[list[str], dict[str, str], str | None]:
-    """(distro dirs under /opt/ros, ros-* package -> version, error). error set = uninspectable."""
+def _inspect(ref: str) -> tuple[list[str], dict[str, str], dict[str, str], str | None]:
+    """(distro dirs under /opt/ros, ros-* pkg -> version, OTHER pkg -> version, error).
+    The ros subset alone classifies an image as ROS and feeds the ERROR checks — a plain debian
+    image full of system packages must stay non-ROS. error set = uninspectable."""
     cmd = ["docker", "run", "--rm", "--entrypoint", "/bin/sh", ref, "-c", _INSPECT_SH]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=_DOCKER_TIMEOUT)
     except subprocess.TimeoutExpired:
-        return [], {}, f"inspect timed out after {_DOCKER_TIMEOUT}s"
+        return [], {}, {}, f"inspect timed out after {_DOCKER_TIMEOUT}s"
     if proc.returncode != 0 or _MARK not in proc.stdout:
         detail = (proc.stderr or proc.stdout).strip().splitlines()
-        return [], {}, (detail[-1][:160] if detail else f"docker run exited {proc.returncode}")
+        return [], {}, {}, (detail[-1][:160] if detail else f"docker run exited {proc.returncode}")
     head, tail = proc.stdout.split(_MARK, 1)
     distros = [ln.strip() for ln in head.splitlines() if ln.strip()]
-    pkgs: dict[str, str] = {}
+    ros_pkgs: dict[str, str] = {}
+    sys_pkgs: dict[str, str] = {}
     for ln in tail.splitlines():
         parts = ln.strip().split(None, 1)
-        if len(parts) == 2 and parts[0].startswith("ros-"):
-            pkgs[parts[0]] = parts[1]
-    return distros, pkgs, None
+        if len(parts) == 2:
+            (ros_pkgs if parts[0].startswith("ros-") else sys_pkgs)[parts[0]] = parts[1]
+    return distros, ros_pkgs, sys_pkgs, None
 
 
 def _collect_refs(manifest: Manifest, descriptors: dict[str, Descriptor], env: dict[str, str],
@@ -106,18 +117,19 @@ def audit(manifest: Manifest, descriptors: dict[str, Descriptor], env: dict[str,
     distro = manifest.ros.distro
     rmw_pkg = (f"ros-{distro}-{manifest.ros.rmw.replace('_', '-')}"
                if distro and manifest.ros.rmw else None)
-    ros_images: list[tuple[str, list[str], dict[str, str]]] = []  # (ref, distro dirs, pkgs)
+    ros_images: list[tuple[str, list[str], dict[str, str], dict[str, str]]] = []
     distro_bad = rmw_bad = 0
     for ref, stacks in refs.items():
-        distros, pkgs, err = _inspect(ref)
+        distros, pkgs, sys_pkgs, err = _inspect(ref)
         label = f"{ref} [{', '.join(stacks)}]"
         if err:
             issues.append((WARN, f"{label}: uninspectable (no shell/dpkg? unpullable?) — {err}"))
             continue
-        if not distros and not pkgs:
+        if not distros and not pkgs:  # ROS-ness keys on /opt/ros + ros-* ONLY — a plain debian
+            #                           image is full of system packages and must stay excluded
             issues.append((INFO, f"{label}: non-ROS image — excluded from the ROS checks"))
             continue
-        ros_images.append((ref, distros, pkgs))
+        ros_images.append((ref, distros, pkgs, sys_pkgs))
         if distro and distros and distro not in distros:
             distro_bad += 1
             issues.append((ERROR, f"{label}: carries ROS distro {distros}, but vehicle.yaml "
@@ -135,15 +147,42 @@ def audit(manifest: Manifest, descriptors: dict[str, Descriptor], env: dict[str,
     # Cross-image agreement: any ros-* package that appears with two different versions is skew —
     # exactly the "two images, two rmw_zenoh_cpp builds, no session" failure this exists to catch.
     by_pkg: dict[str, dict[str, list[str]]] = {}  # pkg -> version -> image refs
-    for ref, _, pkgs in ros_images:
+    for ref, _, pkgs, _sys in ros_images:
         for pkg, ver in pkgs.items():
             by_pkg.setdefault(pkg, {}).setdefault(ver, []).append(ref)
     shared = {p: v for p, v in by_pkg.items() if sum(len(r) for r in v.values()) > 1}
     skewed = {p: v for p, v in shared.items() if len(v) > 1}
+    base_ref = env.get("RIG_BASE_IMAGE")  # fleet_env resolved it (images.base or the provider)
     for pkg, versions in sorted(skewed.items()):
         detail = "; ".join(f"{ver} in {', '.join(sorted(refs_))}"
                            for ver, refs_ in sorted(versions.items()))
-        issues.append((ERROR, f"version skew: {pkg} — {detail}"))
+        hint = ""
+        if base_ref and any(base_ref in refs_ for refs_ in versions.values()):
+            # rig KNOWS which image is the base, so it can diagnose, not just advise: an image
+            # built FROM the base that apt-installs this package explicitly has upgraded it
+            # (plain `apt-get install` of an already-installed package pulls the repo's current
+            # candidate). `--no-upgrade` keeps base-pinned packages pinned.
+            hint = (f" — {base_ref} is the deployment base; an image built FROM it that installs "
+                    f"this package explicitly should use `apt-get install --no-upgrade` "
+                    f"(then `rig build --no-cache` to re-converge)")
+        issues.append((ERROR, f"version skew: {pkg} — {detail}{hint}"))
+
+    # Non-ros-* divergence across the SAME ROS images: one summarized WARN, never an error, never
+    # per-package lines. Ubuntu revision bumps (3ubuntu4 -> 3ubuntu5) are usually benign — but a
+    # diverging libstdc++/boost/codec that ROS nodes link against is a real ABI hazard the ros-*
+    # check cannot see, and "versions agree" must not certify it as clean silently.
+    by_sys: dict[str, dict[str, list[str]]] = {}
+    for ref, _, _pkgs, sys_pkgs in ros_images:
+        for pkg, ver in sys_pkgs.items():
+            by_sys.setdefault(pkg, {}).setdefault(ver, []).append(ref)
+    sys_skewed = {p: v for p, v in by_sys.items() if len(v) > 1}
+    if sys_skewed:
+        sample = ", ".join(f"{p} ({' vs '.join(sorted(v))})" for p, v in sorted(sys_skewed.items())[:3])
+        more = f", +{len(sys_skewed) - 3} more" if len(sys_skewed) > 3 else ""
+        issues.append((WARN, f"{len(sys_skewed)} non-ROS package(s) differ across the ROS images "
+                             f"(e.g. {sample}{more}) — usually benign revision drift, but "
+                             f"ABI-relevant divergence can still break nodes; `rig build "
+                             f"--no-cache` re-converges"))
 
     if ros_images and distro and not distro_bad:
         issues.append((OK, f"every ROS image carries /opt/ros/{distro}"))

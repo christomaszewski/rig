@@ -678,4 +678,22 @@ times → two package versions → zenoh sessions that can't talk. Prevention, d
   never told which rmw the fleet runs. Rig-owned (set-or-popped), deliberately NOT named
   RMW_IMPLEMENTATION — that name is exported in most ROS shells, and a dev box's `.bashrc` must not
   decide what a fleet image contains.
+- **v0.2.24** closed the consumer-side hole the camera-service adoption surfaced: `FROM
+  ${RIG_BASE_IMAGE}` is necessary but NOT sufficient — a consumer that then plain-`apt-get install`s
+  a package the base already carries silently upgrades it to the repo's current candidate (base
+  built earlier, ROS apt repo moved in between), re-creating the skew under a new package name.
+  Docs now state the precondition and the fix (`apt-get install --no-upgrade`; base packages then
+  update only through a base rebuild — deliberate fleet posture). Audit gained two things: the
+  version-skew ERROR is base-AWARE (when a skewed ref IS the resolved base, the message diagnoses
+  the consumer reinstall and names `--no-upgrade`, instead of generic advice), and the cross-image
+  check widened past `ros-*` — non-ROS packages diverging across the ROS images (the `libtiff6`
+  case: a transitive dep moved even under `--no-upgrade`) are reported as ONE summarized WARN,
+  never an error and never per-package spam. Rationale: ubuntu revision bumps are usually benign,
+  but a diverging libstdc++/boost/codec that ROS nodes link against is a real ABI hazard the old
+  audit certified as "versions agree"; a rejected alternative was an allowlist of ABI-relevant
+  libs (ongoing curation of per-distro package names that goes stale). The probe now captures the
+  full dpkg list; ROS-ness still keys on /opt/ros + ros-* only, so plain debian images stay
+  excluded. Declined: a certify-level Dockerfile lint for missing `--no-upgrade` (certify executes
+  launchers, doesn't parse Dockerfiles; trivially evaded, false confidence both ways — the dynamic
+  audit already catches the real thing).
 

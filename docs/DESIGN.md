@@ -52,7 +52,16 @@ template — it adapts to each via `rigging.yaml`'s `verbs` map (e.g. cam-up tak
   <tag>` — the fleet-ros pattern) resolves to `RIG_BASE_IMAGE`, exported to every build command AND
   every launcher (a router compose can RUN the base directly). `rig build` builds the provider FIRST
   (dedup'd across riggings sharing one build script), so dependent images `FROM ${RIG_BASE_IMAGE}`
-  and the fleet's distro+rmw packages come from one layer by construction. An explicit `images.base`
+  and the fleet's distro+rmw packages come from one layer — **provided the consumer doesn't
+  reinstall them**. Plain `apt-get install` of a package the base already carries silently UPGRADES
+  it to the repo's current candidate (the base was built earlier; the ROS apt repo moved in
+  between), moving the skew to a new package name with no pin and no operator error anywhere.
+  Consumers therefore install their own extras with `apt-get install --no-upgrade`: base-pinned
+  packages stay pinned, genuinely new packages install normally, and a rig-less build on a stock
+  base still produces a complete image. The accepted tradeoff is deliberate fleet posture:
+  base-provided packages then update ONLY through a base rebuild — the base is the single point of
+  update, not each consumer's build date. (Transitive dependencies of a new package can still move
+  a system lib; the audit's non-ros WARN is the detector for that residue.) An explicit `images.base`
   always wins. Providers of ONE base must agree on every input to the resolved ref: a different image
   name, a different `build.platforms` (the composed `<tag>-<platform>` would follow descriptor order),
   or a different build script (two builds racing for one tag) is an ERROR in doctor and/or build — rig

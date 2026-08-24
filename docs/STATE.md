@@ -1,8 +1,15 @@
 # rig — project state & handoff (resume here)
 
 > Snapshot for picking the project up cold in a new session. Read this first, then `CHEATSHEET.md` /
-> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.2.23**,
-> branch **`main`**, 474 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.2.24**,
+> branch **`main`**, 477 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> **v0.2.24 (2026-08-22) — rebasing alone doesn't stop skew** (camera-service consumer finding):
+> a consumer that plain-`apt-get install`s a package the base already carries silently upgrades it
+> (base built earlier, ROS apt repo moved) — docs now mandate `--no-upgrade` for consumer extras;
+> audit's skew ERROR is base-aware (diagnoses the reinstall + names the fix when a skewed ref IS
+> the resolved base) and the cross-image check widened past ros-*: non-ROS divergence across ROS
+> images is ONE summarized WARN (the libtiff6 case — real ABI hazards were being certified as
+> "versions agree"), never an error, exit code untouched.
 > **v0.2.23 (2026-08-22) — the zenoh guardrail goes both ways**: doctor warns on an ENABLED zenoh
 > router under a non-zenoh `ros.rmw`. Load-bearing since v0.2.22 — the router runs `rmw_zenohd` out
 > of a base built for the DECLARED rmw, so on a DDS fleet that image carries no zenoh at all: it

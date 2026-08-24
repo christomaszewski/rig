@@ -347,6 +347,14 @@ manifest-order guess (the last one would have two builds racing for one tag). `r
 **RIG_ROS_RMW** so a base build installs the rmw the vehicle declares — the prevention counterpart to
 audit's rmw check.
 
+Consumer rule: rebasing alone is NOT enough. A plain `apt-get install` of a package the base already
+carries silently UPGRADES it (the base was built earlier; the ROS apt repo moved in between) —
+re-creating the skew under a new package name with no pin and no operator error anywhere. Install your
+own extras with `apt-get install --no-upgrade`: base-pinned packages stay pinned, new packages install
+normally, and a rig-less build on a stock base still completes. Base packages then update only through
+a base rebuild — that single point of update is the point. Audit reports any residual non-ROS drift
+(transitive pulls) as one summarized WARN.
+
 ## 4 — bake a deployable artifact
 
 ```bash
