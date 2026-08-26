@@ -1,8 +1,21 @@
 # rig — project state & handoff (resume here)
 
 > Snapshot for picking the project up cold in a new session. Read this first, then `CHEATSHEET.md` /
-> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.2.25**,
-> branch **`main`**, 482 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.2.26**,
+> branch **`main`**, 537 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> **v0.2.26 (2026-08-26) — TAB completion** (`rig-completion-plan.md`): a hidden `rig _complete`
+> engine (intercepted before argparse; introspects the parser ⊕ `_GROUP_VERBS`, so grouped and
+> flat spellings complete equally) + `rig completion bash|zsh` emitters. Menu teaches the
+> CANONICAL grammar only (legacy flat spellings/aliases parse forever, never suggested); dynamic
+> values raw-read vehicle.yaml/services.yaml/fleet.yaml/`~/.rig` index.jsons — instance names,
+> pkg refs (kind-filtered for `overlay apply`; `overlay remove` completes the row's BOUND refs),
+> registry names, `sensor:<id>`, artifacts, fleet rosters. Fail-soft absolutely (broken state
+> completes to nothing, never stderr). bash protocol = COMP_LINE/COMP_POINT parsed in Python
+> (colon/equals wordbreak trimming tested, not shell-scripted); zsh gets verb descriptions via
+> `--describe`. deb ships both scripts; `setup --shell` writes an `eval "$(rig completion …)"`
+> line even when rig is already on PATH. **Release tail: the brew formula needs
+> `generate_completions_from_executable(bin/"rig", "completion", shells: [:bash, :zsh])` in the
+> tap when bumping.** Deferred by plan: fish, `--platform` values, `@version` completion.
 > **v0.2.25 (2026-08-24) — the phantom base race**: registry installs fetched a per-SERVICE clone of
 > the collection repo, so zenoh-router + ros2-bag-logger — both declaring rig-infra's
 > `../base/build.sh` — resolved it to two paths and every fresh install refused `rig build` as a

@@ -17,6 +17,9 @@ On a **vehicle**, provision its identity once — `sudo rig provision --id 7 --n
 (writes `/etc/rig/vehicle.local.yaml`; every fleet artifact on the machine reads it; bare
 `rig provision` shows/checks it). Uninstall: `rig setup --purge`, then the package manager.
 
+TAB completion (bash/zsh): the deb and brew packages ship it; pipx/checkout installs get it via
+`rig setup --shell` (writes an `eval "$(rig completion …)"` line into the managed rc block).
+
 ## Prerequisites
 
 - **Docker + Compose v2** (`docker compose version` ≥ 2.20 for `include:`).

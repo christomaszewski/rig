@@ -77,6 +77,7 @@ No workspace checkouts needed — services/profiles install from registries, pin
 
 ```bash
 rig setup                          # once per machine: ~/.rig + the default `public` registry
+rig setup --shell                  # + TAB completion in your rc (deb/brew installs ship it already)
 rig registry sync                  # clone/ff-pull the caches; everything below is OFFLINE after this
 rig init my-vehicle --vehicle-id 7 && cd my-vehicle    # born a git repo (--no-git opts out);
                                    #   without --vehicle-id the tree carries per-host identity

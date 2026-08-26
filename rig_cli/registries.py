@@ -355,16 +355,23 @@ def setup(*, shell: bool, no_default_registry: bool, purge: bool, yes: bool) -> 
         eprint(f"  registries.yaml: exists ({names}) — left untouched")
 
     if shell:
+        rc = _shell_rc()
+        lines: list[str] = []
         if shutil.which("rig"):
-            eprint("  shell: `rig` already resolves on PATH — no rc block needed")
+            eprint("  shell: `rig` already resolves on PATH — no PATH line needed")
         else:
             tool_dir = Path(__file__).resolve().parent.parent  # the checkout holding the ./rig shim
-            rc = _shell_rc()
+            lines.append(f'fish_add_path "{tool_dir}"' if rc.suffix == ".fish"
+                         else f'export PATH="{tool_dir}:$PATH"')
+        if rc.suffix == ".fish":
+            eprint("  shell: fish TAB completion isn't shipped yet (bash/zsh: `rig completion`)")
+        else:  # eval keeps completion current across versions (completion plan, OQ-B)
+            lines.append(f'eval "$(rig completion {"zsh" if rc.name == ".zshrc" else "bash"} '
+                         f'2>/dev/null)"  # TAB completion')
+        if lines:
             rc.parent.mkdir(parents=True, exist_ok=True)
-            line = (f'fish_add_path "{tool_dir}"' if rc.suffix == ".fish"
-                    else f'export PATH="{tool_dir}:$PATH"')
-            block = f"{_BLOCK_BEGIN}\n{line}\n{_BLOCK_END}\n"
+            block = _BLOCK_BEGIN + "\n" + "\n".join(lines) + f"\n{_BLOCK_END}\n"
             text = _strip_block(rc.read_text()) if rc.is_file() else ""
             rc.write_text((text.rstrip("\n") + "\n\n" if text.strip() else "") + block)
-            eprint(f"  shell: PATH block written to {rc} (restart your shell, or `source {rc}`)")
+            eprint(f"  shell: rig block written to {rc} (restart your shell, or `source {rc}`)")
     return 0

@@ -543,6 +543,7 @@ def build_parser() -> argparse.ArgumentParser:
                "  rig pkg      search | info | list | outdated | add | remove | upgrade | lock | "
                "save | promote | repin | rebase | yank\n"
                "  rig overlay  apply | remove | reorder | list     rig setup (first-run host setup)\n"
+               "  rig completion bash|zsh (TAB completion — deb/brew ship it; `rig setup --shell` wires it)\n"
                "  rig service  rigify | vendor | certify\n"
                "  rig artifact bake | unbake | list   rig image    build | pull | audit\n"
                "  rig fleet    list | status | sync | up | down    (GCS-side fan-out; fleet.yaml)")
@@ -997,9 +998,14 @@ def build_parser() -> argparse.ArgumentParser:
                     help="allow CHANGING an existing identity (renames compose projects — "
                          "bring the vehicle down first)")
 
+    cmp_ = sub.add_parser("completion", help="print the TAB-completion script for a shell — "
+                                             "`rig setup --shell` wires it, or eval/install it "
+                                             "yourself (brew/deb ship it)")
+    cmp_.add_argument("shell", choices=["bash", "zsh"], help="target shell")
+
     st = sub.add_parser("setup", help="first-run host setup: ~/.rig + the default public registry; "
-                                      "--shell wires a source checkout onto PATH; --purge removes "
-                                      "user state")
+                                      "--shell wires a source checkout onto PATH + shell "
+                                      "completion; --purge removes user state")
     st.add_argument("--shell", action="store_true",
                     help="append a delimited PATH block to your shell rc (skipped when `rig` is "
                          "already on PATH — deb/brew/pipx installs need no wiring)")
@@ -1013,6 +1019,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv=None) -> int:
     argv = list(sys.argv[1:]) if argv is None else list(argv)
+    if argv and argv[0] == "_complete":  # hidden, intercepted before ANY parsing: the TAB path
+        from . import completions
+        return completions.main(argv[1:])
     try:
         argv = translate_argv(argv)
     except RigError as exc:
@@ -1090,6 +1099,10 @@ def main(argv=None) -> int:
                 return yank_mod.yank(args.ref, from_=args.from_, dry_run=args.dry_run,
                                      root=_optional_root(args))
             return cmd_pkg(args)  # search/info consult ~/.rig only
+        if args.cmd == "completion":  # a pure emitter — no deployment, no user state
+            from . import completions
+            print(completions.script(args.shell), end="")
+            return 0
         if args.cmd == "setup":  # host/user environment — the one command whose object is the HOST
             return registries_mod.setup(shell=args.shell, no_default_registry=args.no_default_registry,
                                         purge=args.purge, yes=args.yes)

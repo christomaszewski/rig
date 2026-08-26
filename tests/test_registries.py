@@ -286,8 +286,25 @@ def test_setup_shell_block_idempotent_and_purged():
         rcfile = pathlib.Path(fake_home) / ".zshrc"
         body = rcfile.read_text()
         assert body.count("# >>> rig >>>") == 1 and 'export PATH="' in body
+        assert 'eval "$(rig completion zsh' in body  # TAB completion rides the same block
         rc, _, _ = _run("setup", "--purge", "--yes")
         assert rc == 0 and "# >>> rig >>>" not in rcfile.read_text()
+
+
+def test_setup_shell_completion_line_even_when_on_path():
+    # rig already resolving on PATH (pipx/deb/brew) still gets the completion eval — only
+    # the PATH line is skipped.
+    fake_home = _home()
+    bindir = pathlib.Path(fake_home) / "bin"
+    bindir.mkdir(parents=True)
+    (bindir / "rig").write_text("#!/bin/sh\nexit 0\n")
+    (bindir / "rig").chmod(0o755)
+    with _env(RIG_HOME=_home(), HOME=fake_home, SHELL="/bin/bash",
+              PATH=f"{bindir}:/usr/bin:/bin"):
+        rc, _, err = _run("setup", "--shell", "--no-default-registry")
+        assert rc == 0 and "already resolves on PATH" in err
+        body = (pathlib.Path(fake_home) / ".bashrc").read_text()
+        assert 'eval "$(rig completion bash' in body and "export PATH" not in body
 
 
 def test_init_git_default_and_no_git():

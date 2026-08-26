@@ -63,6 +63,10 @@ Then, per user: `rig setup` (creates `~/.rig` + subscribes the default `public` 
 **vehicle**, also provision its identity once: `sudo rig provision --id 7 --name skiff-07`
 (writes `/etc/rig/vehicle.local.yaml` — every fleet artifact on the machine reads it).
 
+**TAB completion** (verbs, instance names, package refs, registries): deb and brew installs ship
+it for bash + zsh — new shells just have it. pipx/checkout installs: `rig setup --shell` wires it
+into your rc (or eval `rig completion bash|zsh` yourself).
+
 Upgrades ride the package manager (`apt`/`brew upgrade`) — rig never self-updates. Uninstall:
 `rig setup --purge` (user state), then the package manager (the package never touches `~/.rig`).
 Releases are cut by tag: every `vX.Y.Z` tag publishes the deb/wheel/sdist and bumps the Homebrew

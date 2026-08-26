@@ -18,6 +18,15 @@ mkdir -p "$STAGE/DEBIAN" "$STAGE/usr/bin" "$STAGE/usr/lib/python3/dist-packages"
 cp -R rig_cli "$STAGE/usr/lib/python3/dist-packages/rig_cli"
 find "$STAGE" -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
 
+# TAB completion, generated from the STAGED tree (the deb ships exactly what it stages).
+mkdir -p "$STAGE/usr/share/bash-completion/completions" "$STAGE/usr/share/zsh/vendor-completions"
+PYTHONPATH="$STAGE/usr/lib/python3/dist-packages" python3 -c \
+  "import sys; from rig_cli.completions import script; sys.stdout.write(script('bash'))" \
+  > "$STAGE/usr/share/bash-completion/completions/rig"
+PYTHONPATH="$STAGE/usr/lib/python3/dist-packages" python3 -c \
+  "import sys; from rig_cli.completions import script; sys.stdout.write(script('zsh'))" \
+  > "$STAGE/usr/share/zsh/vendor-completions/_rig"
+
 cat > "$STAGE/usr/bin/rig" <<'LAUNCHER'
 #!/usr/bin/python3
 """rig — installed entry point. First run: `rig setup` (creates ~/.rig + the default registry)."""
