@@ -116,6 +116,7 @@ def _poison_env(base_env: dict[str, str], name: str, desc: Descriptor | None = N
     }
     env.pop("RIG_TARGET_PLATFORM", None)  # never inherit a real one from the caller's shell
     env.pop("RIG_BASE_IMAGE", None)  # ditto — RIG_BASE_IMAGE is optional; launchers carry a fallback
+    env.pop("RIG_MSGS_IMAGE", None)  # ditto — certify exercises the compose's own fallback chain
     if desc is not None and platform:
         env["RIG_TARGET_PLATFORM"] = platform
         env = service_env(env, desc)

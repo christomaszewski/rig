@@ -274,6 +274,15 @@ sensor/autonomy services get a commented menu row to uncomment):
   to every other build (and to launchers) as `RIG_BASE_IMAGE`, so one image pins the fleet's
   distro+rmw packages; `vehicle.yaml images.base` (or `rig build --base-image`) overrides it with an
   external ref.
+- **`msgs/`** — the `fleet-ros-msgs` overlay: base + the union of the interface packages the fleet's
+  services declare in their riggings' `msgs:` blocks. rosbag2 cannot record a topic whose message
+  package isn't installed in the recorder's image (it logs "unknown type" and keeps going), so a
+  fleet with custom types silently gets bags missing them. When services declare `msgs:` and a base
+  provider declares `build.msgs_overlay`, `rig build` renders the union manifest
+  (`RIG_MSGS_MANIFEST`), builds the overlay right after the base (FROM `RIG_BASE_IMAGE` — an
+  external `images.base` gets an overlay too), and exports the ref as `RIG_MSGS_IMAGE`; the bag
+  logger's compose prefers it over the bare base. No declarations → no overlay → the bare base,
+  which is correct.
 
 Each is just a launcher + compose around a stock tool — the same contract any service meets; rig-infra's
 CI runs `rig certify` against every one.
@@ -310,6 +319,18 @@ launch_surface:                              # the minimal file set `rig vendor`
 #                                            #   other build + launcher (vehicle.yaml images.base overrides).
 #                                            #   Providers of one base must agree on build.platforms AND
 #                                            #   the build script — rig refuses rather than pick by order.
+# build: { command: ../base/build.sh, images: [fleet-ros], provides: base,
+#          msgs_overlay: { command: ../msgs/build-msgs.sh, image: fleet-ros-msgs } }  # base providers may
+#                                            #   also declare the msgs OVERLAY build: base + the union of
+#                                            #   the riggings' `msgs:` blocks, exported as RIG_MSGS_IMAGE
+#                                            #   (the bag logger prefers it over the bare base)
+# msgs:                                      # interface packages THIS service's topics use (beyond
+#   apt: [mavros_msgs]                       #   ros-base/common_interfaces) — rosbag2 can't record a topic
+#   source:                                  #   whose message package isn't installed in the recorder's
+#     - repo: https://github.com/PX4/px4_msgs.git   # image. ROS names (underscores) in apt:; source pins
+#       ref: v1.16.0                         #   are MANDATORY and must equal the pin the service builds
+#       packages: [px4_msgs]                 #   against. rig unions the blocks fleet-wide; one repo at two
+#                                            #   refs is refused ("align the riggings"), never guessed.
 # platform: { auto_detect: /etc/nv_tegra_release, override_env: CAM_PLATFORM }  # the launcher's standalone
 #                                            #   host probe + the env var it honors; rig mirrors the vehicle's
 #                                            #   declared `platform:` into it (RIG_TARGET_PLATFORM sibling)

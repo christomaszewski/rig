@@ -22,15 +22,21 @@ def fleet_env(manifest: Manifest, descriptors: dict[str, Descriptor] | None = No
 
     `descriptors` (when the caller has them) lets the deployment's base image resolve from a
     `provides: base` service, not just vehicle.yaml images.base — a compose that RUNS the base
-    directly (zenoh-router on fleet-ros) reads `${RIG_BASE_IMAGE}`. A provider conflict resolves to
-    NOTHING here (the var is popped): doctor reports it as the ERROR, and `up` blocks on that."""
+    directly (zenoh-router on fleet-ros) reads `${RIG_BASE_IMAGE}`. The msgs-overlay image
+    (RIG_MSGS_IMAGE) resolves the same way: exported only when services declare `msgs:` AND a base
+    provider declares the overlay build — the bag logger's compose prefers it over the bare base,
+    so exporting it is all it takes for bags to carry the fleet's custom types. A provider conflict
+    resolves to NOTHING here (the var is popped): doctor reports it as the ERROR, and `up` blocks
+    on that."""
     if getattr(manifest, "missing_identity", ()):  # belt — _load gates first
         from .manifest import require_identity
         require_identity(manifest, what="fleet env")
     base_ref = manifest.image_base
+    msgs_ref = None
     if descriptors is not None:
-        from .build import resolve_base_image
+        from .build import resolve_base_image, resolve_msgs_image
         base_ref, _, _ = resolve_base_image(manifest, descriptors)
+        msgs_ref, _, _ = resolve_msgs_image(manifest, descriptors)
     env = dict(os.environ)
     env["ROS_DOMAIN_ID"] = str(manifest.ros.domain_id)
     env["RMW_IMPLEMENTATION"] = manifest.ros.rmw
@@ -41,6 +47,7 @@ def fleet_env(manifest: Manifest, descriptors: dict[str, Descriptor] | None = No
                        ("RIG_IMAGE_REGISTRY", manifest.image_registry),
                        ("RIG_IMAGE_TAG", manifest.image_tag),
                        ("RIG_BASE_IMAGE", base_ref),
+                       ("RIG_MSGS_IMAGE", msgs_ref),
                        ("RIG_TARGET_PLATFORM", manifest.platform),
                        ("RIG_DATA_DIR", manifest.data_dir)):
         if value not in (None, ""):
@@ -114,7 +121,8 @@ def run(
         envline = (f"COMPOSE_PROJECT_NAME={env['COMPOSE_PROJECT_NAME']} "
                    f"ROS_DOMAIN_ID={env['ROS_DOMAIN_ID']} RMW_IMPLEMENTATION={env['RMW_IMPLEMENTATION']}")
         for key in ("VEHICLE_ID", "RIG_IMAGE_REGISTRY", "RIG_IMAGE_TAG", "RIG_BASE_IMAGE",
-                    "RIG_TARGET_PLATFORM", "RIG_DATA_DIR", desc.platform_override_env or ""):
+                    "RIG_MSGS_IMAGE", "RIG_TARGET_PLATFORM", "RIG_DATA_DIR",
+                    desc.platform_override_env or ""):
             if key and env.get(key):
                 envline += f" {key}={env[key]}"
         eprint(f"  {sensor.name} [{sensor.service}]  (cwd={desc.repo})")

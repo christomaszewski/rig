@@ -697,3 +697,60 @@ times → two package versions → zenoh sessions that can't talk. Prevention, d
   launchers, doesn't parse Dockerfiles; trivially evaded, false confidence both ways — the dynamic
   audit already catches the real thing).
 
+## 14. The msgs overlay: `fleet-ros-msgs` — ✅ implemented (v0.2.28)
+
+Plan doc: `rig-msgs-plan.md` (untracked); frozen provider/consumer contract:
+`~/ws/infra/rig-msgs-image-handoff.md` (rig-infra `ed94cbc`). The motivating failure, verified
+live: rosbag2 cannot record a topic whose message package isn't installed in the recorder's image
+— even though it never deserializes, the generic subscription needs the typesupport `.so` and the
+mcap writer needs the `.msg`/`.idl` sources. It logs "unknown type" and KEEPS GOING, so a fleet
+with custom types silently gets bags missing them. (REP 2011 plumbing ships in the distro but
+rosbag2 doesn't use it, and its dynamic backend is FastRTPS-only.)
+
+The fix is ONE thin image per deployment: `fleet-ros-msgs` = base + the union of the interface
+packages the fleet's services declare. rig-infra ships the builder (`msgs/build-msgs.sh`, container-
+side validation in `build_msgs.py`, the manifest baked at `/opt/fleet-msgs/manifest.yaml` as
+provenance) and the consumer (the logger compose's fallback chain `BAG_LOGGER_IMAGE →
+RIG_MSGS_IMAGE → RIG_BASE_IMAGE → composed fleet-ros ref`). rig owns the aggregation — only rig
+knows the deployment's resolved service set:
+
+- **`msgs:`** (rigging, top-level — independent of `build:`/`mirror:`; mirror-only services publish
+  types too): `apt:` distro-released interface packages (ROS names, underscores — the build maps
+  `ros-<distro>-<'_'→'-'>` itself), `source:` pinned from-source repos (repo/ref/packages all
+  mandatory; the ref MUST equal the pin the service builds against — a drifted pin is a silent
+  schema mismatch in the bag). Strictly validated: unknown keys fail loudly (the `platform:`
+  pattern).
+- **`build.msgs_overlay: {command, image}`** — the trigger, an optional sub-block on base-provider
+  riggings (`provides: base` required: the overlay builds FROM the base, and the provider of the
+  base also knows how to overlay it). Chosen over a launcher-less build-only rigging (needs certify
+  surgery) and over convention discovery (against rig's grain). Several providers dedupe by script
+  identity exactly like the base build.
+- **Union + refusals** (`build.msgs_union`/`resolve_msgs_image`): `apt` dedupes; `source` merges by
+  repo — same ref unions the package lists, DIFFERENT refs are refused naming the declaring
+  services ("align the riggings"), never a manifest-order guess. Providers disagreeing on the
+  overlay image or the platform matrix: refused the same way. All refusals land BEFORE anything
+  builds. Empty union ⇒ no overlay build, no export — the logger falls back to the bare base,
+  which is correct.
+- **The build stage**: right after stage 0, sequential — rig renders the union manifest to a temp
+  file (`RIG_MSGS_MANIFEST`, rig-owned/set-or-popped like the rest of the build channel) and runs
+  `<command> <registry> [tag]` with `RIG_BASE_IMAGE` et al. The tag composes `<tag>-<platform>`
+  through the provider's matrix — the overlay inherits the base's. An EXTERNAL `images.base` skips
+  the provider's base build but NOT the overlay (an external base still needs one; the build runs
+  FROM the external ref). Overlay failure flips rc but doesn't stop dependents — nothing builds
+  FROM the overlay.
+- **`RIG_MSGS_IMAGE`** — `fleet_env` composes/exports it exactly like `RIG_BASE_IMAGE` (rig-owned,
+  set-or-popped, `env:` can't shadow it, certify keeps it unset so the compose's own fallback chain
+  is what gets certified). The day this ships, the logger silently upgrades — no logger-side change.
+- **Doctor**: OK line naming the composed ref; conflict ERRORs (block `up`); and the preflight the
+  whole feature exists for — WARN when services declare `msgs:` but no provider declares
+  `msgs_overlay` (the recorder would run the bare base and bags silently miss those topics).
+- **Queued (don't block; specced in `rig-msgs-plan.md` as the v0.2.29 fast-follow)**: `rig image
+  audit` comparing the overlay's baked manifest + dpkg state against the union of the riggings'
+  declarations — the stale-overlay catch (declaration changed, build forgotten, `up` pulls the old
+  image under the same tag). The deeper check — each `source:` pin against the declaring service's
+  own image — first needs a provider-side provenance convention (service images record which ref
+  they built from); dpkg can't see source builds and package.xml versions miss ref drift.
+- **rig-infra follow-ups** (tracked in `rig-msgs-plan.md`): declare `msgs_overlay` on the
+  zenoh-router + ros2-bag-logger riggings, drop the "rig does not export this var yet" caveats
+  (logger compose comment, README §Custom-message-types, build-msgs.sh header), one registry
+  release carrying the complete feature.

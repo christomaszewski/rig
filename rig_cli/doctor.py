@@ -122,6 +122,26 @@ def collect(
                                   "build `provides: base`) to build every ROS service FROM one image; "
                                   "builds get no RIG_BASE_IMAGE until then"))
 
+    # The msgs overlay (fleet-ros-msgs = base + the union of the riggings' `msgs:` blocks). rosbag2
+    # cannot record a topic whose message package isn't installed in the recorder's image — it logs
+    # "unknown type" and KEEPS GOING, so a fleet with custom types silently gets bags missing them.
+    # Declarations without the overlay mechanism are that failure waiting to happen: WARN at
+    # preflight. Conflicts (one repo pinned at two refs; providers disagreeing) are ERRORs — `rig
+    # build` refuses on the same conditions, and `up` blocks here.
+    from .build import resolve_msgs_image
+    msgs_ref, msgs_origin, msgs_err = resolve_msgs_image(manifest, descriptors)
+    msgs_declaring = sorted(s for s, d in descriptors.items() if d.msgs_apt or d.msgs_source)
+    if msgs_err:
+        issues.append(Issue(ERROR, msgs_err))
+    elif msgs_ref:
+        issues.append(Issue(OK, f"msgs overlay: {msgs_ref} ({msgs_origin}) -> RIG_MSGS_IMAGE"))
+    elif msgs_declaring:
+        issues.append(Issue(WARN, f"{', '.join(msgs_declaring)} declare `msgs:` but no base provider "
+                                  f"declares build.msgs_overlay — the bag logger records from the "
+                                  f"bare base and bags silently miss those types; add "
+                                  f"`msgs_overlay: {{command: ../msgs/build-msgs.sh, image: "
+                                  f"fleet-ros-msgs}}` to the base provider's build block"))
+
     # Platform targeting: `platform:` is the host's declared hardware/OS target; a service's
     # build.platforms is its matrix. The declared platform must be IN each in-use matrix (a typo'd
     # platform means composed <tag>-<platform> refs that don't exist); a matrix service with no

@@ -1,8 +1,24 @@
 # rig — project state & handoff (resume here)
 
 > Snapshot for picking the project up cold in a new session. Read this first, then `CHEATSHEET.md` /
-> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.2.27**,
-> branch **`main`**, 537 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.2.28**,
+> branch **`main`**, 557 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> **v0.2.28 (2026-08-27) — the msgs overlay** (`rig-msgs-plan.md`; ROADMAP §14; contract:
+> `~/ws/infra/rig-msgs-image-handoff.md`, rig-infra `ed94cbc`): rosbag2 can't record a topic whose
+> message package isn't in the recorder's image (logs "unknown type", keeps going — bags silently
+> missing the fleet's custom types). Riggings now declare `msgs: {apt, source[repo/ref/packages]}`
+> (top-level, strict, independent of build:/mirror:) and base providers declare
+> `build.msgs_overlay: {command, image}` (trigger option (b) from the handoff). `rig build` unions
+> the declarations (same repo at two refs = refusal naming the services, BEFORE anything builds),
+> renders the union to a temp file → `RIG_MSGS_MANIFEST`, and runs the overlay right after stage 0
+> (FROM `RIG_BASE_IMAGE`; an external images.base gets an overlay too; tag platform-composes
+> through the provider's matrix). `fleet_env` exports `RIG_MSGS_IMAGE` exactly like
+> `RIG_BASE_IMAGE` (rig-owned/set-or-popped/certify-unset) — rig-infra's logger compose already
+> prefers it, so the logger upgraded the moment this shipped. Doctor: OK ref line, conflict
+> ERRORs, and WARN on `msgs:` declarations with no overlay mechanism. Empty union = no overlay =
+> bare base, by design. **Release tail: rig-infra follow-ups pending** (declare `msgs_overlay` on
+> the router+logger riggings, drop the "rig does not export this var yet" caveats, one registry
+> release) — list in `rig-msgs-plan.md`. Queued: the `rig image audit` manifest/pin-skew checks.
 > **v0.2.27 (2026-08-26) — zsh eval route self-initializes compsys**: macOS ships no default
 > ~/.zshrc, so a stock zsh has never run compinit — compdef doesn't exist, the eval'd completion
 > script errored at startup and bound nothing. The emitted zsh script now runs

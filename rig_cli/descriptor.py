@@ -41,6 +41,17 @@ DEFAULT_VERBS = {
 }
 
 
+@dataclass(frozen=True)
+class MsgsSource:
+    """One `msgs.source` entry: an interface-package repo the fleet builds from source. `ref` is
+    MANDATORY and must equal the pin the declaring service itself builds against — a drifted pin
+    means the overlay's definitions are wire-incompatible with what the service publishes, and the
+    failure (schema mismatch in the bag) is silent."""
+    repo: str
+    ref: str
+    packages: tuple[str, ...]  # colcon --packages-up-to selection
+
+
 @dataclass
 class Descriptor:
     service: str
@@ -61,6 +72,14 @@ class Descriptor:
     #                                              base image (build.images[0]) — rig builds it FIRST and
     #                                              exports it as RIG_BASE_IMAGE; vehicle.yaml images.base
     #                                              overrides (see build.resolve_base_image)
+    msgs_overlay_command: str | None = None      # build.msgs_overlay.command — the overlay build
+    #                                              (base + the fleet's msgs union); base providers only
+    msgs_overlay_image: str | None = None        # build.msgs_overlay.image — the image repo it
+    #                                              produces; rig composes/exports it as RIG_MSGS_IMAGE
+    msgs_apt: list[str] = field(default_factory=list)  # `msgs.apt`: distro-released interface pkgs
+    #                                              (ROS names, underscores) this service's topics need
+    msgs_source: list[MsgsSource] = field(default_factory=list)  # `msgs.source`: pinned from-source
+    #                                              interface repos (see MsgsSource)
     platform_auto_detect: str | None = None      # the launcher's standalone host probe (e.g.
     #                                              /etc/nv_tegra_release) — informational; declared wins
     platform_override_env: str | None = None     # env var the launcher honors as platform override (e.g.
@@ -120,10 +139,12 @@ def load_descriptor(service: str, repo: Path) -> Descriptor:
         raise RigError(f"{path}: tier must be 'infra', 'sensor', or 'autonomy', not '{tier}'")
 
     build_raw = data.get("build")  # `build: <cmd>` or `build: { command: <cmd>, images: [...],
-    #                                 platforms: [...], provides: base }`
+    #                                 platforms: [...], provides: base, msgs_overlay: {...} }`
     build_images: list[str] = []
     build_platforms: list[str] = []
     build_provides: str | None = None
+    msgs_overlay_command: str | None = None
+    msgs_overlay_image: str | None = None
     if isinstance(build_raw, str):
         build_command = build_raw
     elif isinstance(build_raw, dict):
@@ -132,6 +153,20 @@ def load_descriptor(service: str, repo: Path) -> Descriptor:
         build_platforms = [str(p) for p in (build_raw.get("platforms") or [])]
         if build_raw.get("provides") is not None:
             build_provides = str(build_raw["provides"])
+        overlay_raw = build_raw.get("msgs_overlay")
+        if overlay_raw is not None:
+            if not isinstance(overlay_raw, dict):
+                raise RigError(f"{path}: build.msgs_overlay must be a mapping with command, image")
+            unknown = set(overlay_raw) - {"command", "image"}
+            if unknown:  # a typo'd sub-key must not silently drop the overlay build
+                raise RigError(f"{path}: build.msgs_overlay: unknown key(s) "
+                               f"{', '.join(sorted(unknown))} — it carries only command, image")
+            if not overlay_raw.get("command") or not overlay_raw.get("image"):
+                raise RigError(f"{path}: build.msgs_overlay needs both `command` (the overlay build "
+                               f"script, e.g. ../msgs/build-msgs.sh) and `image` (the repo it "
+                               f"produces, e.g. fleet-ros-msgs)")
+            msgs_overlay_command = str(overlay_raw["command"])
+            msgs_overlay_image = str(overlay_raw["image"])
     else:
         build_command = None
     for p in build_platforms:  # platform names suffix image tags — they must be tag-safe fragments
@@ -144,6 +179,45 @@ def load_descriptor(service: str, repo: Path) -> Descriptor:
     if build_provides == "base" and not build_images:
         raise RigError(f"{path}: build.provides: base needs build.images — the FIRST entry names the "
                        f"base image this build produces (what rig exports as RIG_BASE_IMAGE)")
+    if msgs_overlay_command and build_provides != "base":
+        raise RigError(f"{path}: build.msgs_overlay belongs on a base provider — the overlay builds "
+                       f"FROM the deployment's base, so declare `provides: base` alongside it")
+
+    msgs_raw = data.get("msgs")  # `msgs: { apt: [...], source: [{repo, ref, packages}] }` — the
+    #                               interface packages this service's TOPICS use; rig unions these
+    #                               across the fleet into the fleet-ros-msgs overlay the bag logger
+    #                               records with. Independent of build:/mirror: — mirror-only
+    #                               services publish types too.
+    msgs_apt: list[str] = []
+    msgs_source: list[MsgsSource] = []
+    if msgs_raw is not None:
+        if not isinstance(msgs_raw, dict):
+            raise RigError(f"{path}: `msgs` must be a mapping with apt/source")
+        unknown = set(msgs_raw) - {"apt", "source"}
+        if unknown:  # a typo'd sub-key would silently drop packages from the overlay — fail loudly
+            raise RigError(f"{path}: msgs: unknown key(s) {', '.join(sorted(unknown))} — it carries "
+                           f"only apt, source")
+        for name in (msgs_raw.get("apt") or []):
+            name = str(name)
+            if not re.match(r"^[a-z][a-z0-9_]*$", name):
+                raise RigError(f"{path}: msgs.apt entry '{name}' is not a ROS package name — use the "
+                               f"underscore form (e.g. mavros_msgs); the build maps it to "
+                               f"ros-<distro>-<name with '_'→'-'> itself")
+            msgs_apt.append(name)
+        for i, entry in enumerate(msgs_raw.get("source") or []):
+            if not isinstance(entry, dict):
+                raise RigError(f"{path}: msgs.source #{i} must be a mapping with repo, ref, packages")
+            unknown = set(entry) - {"repo", "ref", "packages"}
+            if unknown:
+                raise RigError(f"{path}: msgs.source #{i}: unknown key(s) "
+                               f"{', '.join(sorted(unknown))} — it carries only repo, ref, packages")
+            repo_url, ref, packages = entry.get("repo"), entry.get("ref"), entry.get("packages")
+            if not repo_url or not ref or not packages:
+                raise RigError(f"{path}: msgs.source #{i} needs `repo`, `ref` (the pin the service "
+                               f"builds against — a drifted overlay pin is a silent schema mismatch "
+                               f"in the bag), and `packages` (colcon --packages-up-to selection)")
+            msgs_source.append(MsgsSource(repo=str(repo_url), ref=str(ref),
+                                          packages=tuple(str(p) for p in packages)))
 
     platform_raw = data.get("platform") or {}  # `platform: { auto_detect: <path>, override_env: <VAR> }`
     if not isinstance(platform_raw, dict):
@@ -175,6 +249,10 @@ def load_descriptor(service: str, repo: Path) -> Descriptor:
         build_images=build_images,
         build_platforms=build_platforms,
         build_provides=build_provides,
+        msgs_overlay_command=msgs_overlay_command,
+        msgs_overlay_image=msgs_overlay_image,
+        msgs_apt=msgs_apt,
+        msgs_source=msgs_source,
         platform_auto_detect=(str(platform_raw["auto_detect"]) if platform_raw.get("auto_detect")
                               else None),
         platform_override_env=override_env,

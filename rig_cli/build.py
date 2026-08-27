@@ -13,7 +13,9 @@ leakage can't flip them): RIG_BASE_IMAGE (the deployment's one base image — FR
 resolve_base_image below), RIG_BUILD_NO_CACHE=1 (`rig build --no-cache` — pass e.g.
 `docker build ${RIG_BUILD_NO_CACHE:+--no-cache}` to force a full rebuild), and RIG_ROS_RMW
 (vehicle.yaml `ros.rmw` — install THIS rmw, so `rig image audit`'s rmw check has a prevention
-counterpart instead of flagging an image the builder was never told about).
+counterpart instead of flagging an image the builder was never told about). The msgs-overlay build
+additionally gets RIG_MSGS_MANIFEST — the path to the rendered union of the riggings' `msgs:`
+blocks (see msgs_union / resolve_msgs_image below).
 """
 from __future__ import annotations
 
@@ -21,7 +23,10 @@ import concurrent.futures
 import os
 import shlex
 import subprocess
+import tempfile
 from pathlib import Path
+
+import yaml
 
 from .refs import unqualified
 from .common import eprint
@@ -72,11 +77,91 @@ def resolve_base_image(manifest: Manifest, descriptors: dict[str, Descriptor], *
     return ref, f"provided by {', '.join(sorted(svcs))}", None
 
 
-def _build_cmd(desc: Descriptor, cwd: Path, reg, tag):
+def msgs_union(descriptors: dict[str, Descriptor]):
+    """The deduped union of every service's `msgs:` declaration, as (manifest_dict, error).
+    (None, None) = no declarations anywhere (no overlay to build — the logger compose falls back
+    to the bare base, which is correct). `apt` dedupes; `source` merges by repo — the same repo at
+    the same ref unions the package lists, at DIFFERENT refs it is refused naming the declaring
+    services ("align the riggings"), never resolved by manifest order: a drifted pin is a silent
+    schema mismatch in the recorded bags."""
+    apt: dict[str, None] = {}
+    by_repo: dict[str, dict[str, dict]] = {}  # repo -> ref -> {packages: set, services: set}
+    for svc in sorted(descriptors):
+        desc = descriptors[svc]
+        for name in desc.msgs_apt:
+            apt.setdefault(name)
+        for src in desc.msgs_source:
+            slot = by_repo.setdefault(src.repo, {}).setdefault(
+                src.ref, {"packages": set(), "services": set()})
+            slot["packages"].update(src.packages)
+            slot["services"].add(svc)
+    for repo, refs in sorted(by_repo.items()):
+        if len(refs) > 1:
+            detail = "; ".join(f"'{ref}' from {', '.join(sorted(info['services']))}"
+                               for ref, info in sorted(refs.items()))
+            return None, (f"msgs: services pin '{repo}' at different refs: {detail} — the overlay "
+                          f"can bake only one; align the riggings on the pin the services actually "
+                          f"build against")
+    if not apt and not by_repo:
+        return None, None
+    manifest: dict = {}
+    if apt:
+        manifest["apt"] = sorted(apt)
+    if by_repo:
+        manifest["source"] = [
+            {"repo": repo, "ref": next(iter(refs)),
+             "packages": sorted(next(iter(refs.values()))["packages"])}
+            for repo, refs in sorted(by_repo.items())]
+    return manifest, None
+
+
+def resolve_msgs_image(manifest: Manifest, descriptors: dict[str, Descriptor], *,
+                       registry: str | None = None, tag: str | None = None,
+                       platform: str | None = None):
+    """The deployment's msgs-overlay image, as (ref, origin, error) — RIG_BASE_IMAGE's shape.
+    (None, None, None) when there is nothing to overlay: no `msgs:` declared anywhere (empty
+    union = no overlay = the bare base is correct), or declarations but no base provider carries
+    `build.msgs_overlay` (doctor WARNs there — bags would silently miss the declared types).
+    The ref composes exactly like the pull side, `<registry>/<msgs_overlay.image>:<tag>`, with the
+    tag platform-composed through the PROVIDER's matrix — the overlay is FROM the base, so it
+    inherits the base's matrix. Providers disagreeing on the overlay image or the matrix are an
+    error, never a manifest-order guess."""
+    union, err = msgs_union(descriptors)
+    if err:
+        return None, None, err
+    if union is None:
+        return None, None, None
+    providers: dict[str, list[str]] = {}  # overlay image repo -> the services declaring it
+    for svc, desc in descriptors.items():
+        if desc.msgs_overlay_image:
+            providers.setdefault(desc.msgs_overlay_image, []).append(svc)
+    if not providers:
+        return None, None, None
+    if len(providers) > 1:
+        detail = "; ".join(f"'{repo}' from {', '.join(sorted(svcs))}"
+                           for repo, svcs in sorted(providers.items()))
+        return None, None, (f"msgs-overlay providers disagree on the image: {detail} — align the "
+                            f"riggings, or drop `msgs_overlay` from one")
+    repo, svcs = next(iter(providers.items()))
+    matrices = {tuple(descriptors[s].build_platforms) for s in svcs}
+    if len(matrices) > 1:  # same order-dependence hole resolve_base_image refuses for the base
+        detail = "; ".join(f"{s}: {descriptors[s].build_platforms or '(none)'}" for s in sorted(svcs))
+        return None, None, (f"msgs-overlay providers for '{repo}' declare different build.platforms "
+                            f"({detail}) — the composed overlay tag would depend on manifest order; "
+                            f"align the riggings")
+    reg = registry or manifest.image_registry
+    composed = _service_tag(descriptors[svcs[0]], tag or manifest.image_tag,
+                            platform or manifest.platform)
+    ref = (f"{reg}/{repo}" if reg else repo) + (f":{composed}" if composed else "")
+    return ref, f"provided by {', '.join(sorted(svcs))}", None
+
+
+def _build_cmd(desc: Descriptor, cwd: Path, reg, tag, command: str | None = None):
+    command = command or desc.build_command  # `command` override: the msgs-overlay build script
     args = [a for a in (reg, tag) if a]  # build-images.sh takes: <registry> [tag]
-    script = cwd / desc.build_command
+    script = cwd / command
     cmd = ([str(script), *args] if script.exists()
-           else ["bash", "-lc", " ".join([desc.build_command, *map(shlex.quote, args)])])
+           else ["bash", "-lc", " ".join([command, *map(shlex.quote, args)])])
     return cmd, args
 
 
@@ -109,7 +194,8 @@ def _resolve_build_cwd(service: str, desc: Descriptor, root: Path | None):
 
 
 def _build_env(distro: str | None, desc: Descriptor | None = None, platform: str | None = None,
-               base_image: str | None = None, no_cache: bool = False, rmw: str | None = None):
+               base_image: str | None = None, no_cache: bool = False, rmw: str | None = None,
+               msgs_manifest: str | None = None):
     """Env for a service's build command: vehicle.yaml `ros.distro` rides along as ROS_DISTRO, so a
     base-image build (fleet-ros) bakes the SAME distro the vehicle declares — the router/session
     version-match must not depend on the operator remembering an env var. (ROS_DISTRO is a
@@ -131,6 +217,7 @@ def _build_env(distro: str | None, desc: Descriptor | None = None, platform: str
     for key, value in (("RIG_BASE_IMAGE", base_image),
                        ("RIG_BUILD_NO_CACHE", "1" if no_cache else None),
                        ("RIG_ROS_RMW", rmw),
+                       ("RIG_MSGS_MANIFEST", msgs_manifest),  # the union manifest — overlay build only
                        ("RIG_TARGET_PLATFORM", platform if plat_active else None)):
         if value:
             env[key] = value
@@ -151,10 +238,12 @@ def _service_tag(desc: Descriptor, tag: str | None, platform: str | None) -> str
 
 
 def _env_note(distro: str | None, platform: str | None = None, base: str | None = None,
-              no_cache: bool = False, rmw: str | None = None) -> str:
+              no_cache: bool = False, rmw: str | None = None,
+              msgs_manifest: str | None = None) -> str:
     parts = [f"{k}={v}" for k, v in (("ROS_DISTRO", distro), ("RIG_ROS_RMW", rmw),
                                      ("RIG_TARGET_PLATFORM", platform),
                                      ("RIG_BASE_IMAGE", base),
+                                     ("RIG_MSGS_MANIFEST", msgs_manifest),
                                      ("RIG_BUILD_NO_CACHE", "1" if no_cache else None)) if v]
     return (" " + " ".join(parts)) if parts else ""
 
@@ -325,8 +414,46 @@ def build(manifest: Manifest, descriptors: dict[str, Descriptor], *, registry: s
                    f"external base instead")
             return 1
 
+    # Msgs-overlay staging (fleet-ros-msgs = base + the union of the riggings' `msgs:` blocks — the
+    # image the bag logger records with, so bags carry the fleet's custom types). Every refusal
+    # (one repo pinned at two refs, providers disagreeing on the overlay image, two overlay scripts
+    # that aren't content-identical) lands HERE, before anything builds. An empty union skips the
+    # overlay entirely: the logger compose falls back to the bare base, which is correct. Note an
+    # EXTERNAL images.base does NOT skip this (unlike the provider's own base build): an external
+    # base still needs its overlay — the build runs FROM the external ref via RIG_BASE_IMAGE.
+    msgs_ref, msgs_origin, msgs_err = resolve_msgs_image(
+        manifest, descriptors, registry=reg, tag=tag, platform=platform)
+    if msgs_err:
+        eprint(f"rig build: {msgs_err}")
+        return 1
+    msgs_declaring = sorted(s for s, d in descriptors.items() if d.msgs_apt or d.msgs_source)
+    if msgs_declaring and not msgs_ref:
+        eprint(f"rig build: WARNING — {', '.join(msgs_declaring)} declare `msgs:` but no base "
+               f"provider declares build.msgs_overlay — no fleet-ros-msgs overlay is built, and "
+               f"the bag logger records from the bare base, silently missing those types")
+    msgs_runner: str | None = None
+    if msgs_ref:
+        union, _ = msgs_union(descriptors)
+        overlay_provs = [s for s in services if descriptors[s].msgs_overlay_command]
+        idents: dict[tuple, str] = {}  # overlay-script identity -> first provider carrying it
+        opaths: dict[str, Path] = {}
+        for s in overlay_provs:
+            script = (cwds[s] / shlex.split(descriptors[s].msgs_overlay_command)[0]).resolve()
+            opaths[s] = script
+            idents.setdefault(_script_identity(script), s)
+        if len(idents) > 1:  # same doctrine as the base race: two builds for one tag — refuse
+            detail = "; ".join(f"{s}: {opaths[s]}{_script_rev(opaths[s])}"
+                               for s in idents.values())
+            eprint(f"rig build: msgs-overlay providers for '{msgs_ref}' run different overlay "
+                   f"builds: {detail} — two builds would race for one tag; align their source pins "
+                   f"(identical overlay content dedupes to ONE build)")
+            return 1
+        msgs_runner = next(iter(idents.values()), None)
+
     if base_ref:
         eprint(f"rig build: base image {base_ref} ({base_origin}) -> RIG_BASE_IMAGE")
+    if msgs_ref and msgs_runner:
+        eprint(f"rig build: msgs overlay {msgs_ref} ({msgs_origin}) -> RIG_MSGS_IMAGE")
     for s in stage0:  # stage 0: the base — sequential, live-streamed, before any dependent build
         desc = descriptors[s]
         cmd, args = _build_cmd(desc, cwds[s], reg, _service_tag(desc, tag, platform))
@@ -339,6 +466,28 @@ def build(manifest: Manifest, descriptors: dict[str, Descriptor], *, registry: s
             eprint(f"  build {s} FAILED — the other services build FROM {base_ref}; stopping here")
             return 1
         skip_build[s] = "built in the base stage above"
+
+    if msgs_runner:  # the overlay: an ordinary dependent build (FROM the base) — right after stage 0
+        s, desc = msgs_runner, descriptors[msgs_runner]
+        if not reg:
+            eprint(f"build {s} [msgs]: no registry (pass --registry or set images.registry); skipped")
+        else:
+            fd, msgs_path = tempfile.mkstemp(prefix="rig-msgs-manifest-", suffix=".yaml")
+            with os.fdopen(fd, "w") as fh:  # the rendered union — build-msgs.sh's RIG_MSGS_MANIFEST
+                yaml.safe_dump(union, fh, sort_keys=False)
+            cmd, args = _build_cmd(desc, cwds[s], reg, _service_tag(desc, tag, platform),
+                                   command=desc.msgs_overlay_command)
+            note = _env_note(distro, platform if desc.build_platforms else None, base_ref, no_cache,
+                             rmw, msgs_path)
+            eprint(f"build {s} [msgs]: {desc.msgs_overlay_command} {' '.join(args)}  "
+                   f"(cwd={cwds[s]}){note}")
+            if not dry_run and subprocess.run(
+                    cmd, cwd=str(cwds[s]),
+                    env=_build_env(distro, desc, platform, base_ref, no_cache, rmw,
+                                   msgs_manifest=msgs_path)).returncode:
+                rc = 1  # no dependents build FROM the overlay — flag it, keep going
+                eprint(f"  build {s} [msgs] FAILED — {msgs_ref} is unpushed; `rig up` pulls will "
+                       f"fail until it succeeds")
 
     if jobs > 1 and len(services) > 1 and not dry_run:  # concurrent: capture + print grouped per service
         eprint(f"rig build: {len(services)} services, up to {jobs} concurrent (output grouped per service)")
