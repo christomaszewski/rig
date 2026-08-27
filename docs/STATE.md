@@ -16,9 +16,12 @@
 > `RIG_BASE_IMAGE` (rig-owned/set-or-popped/certify-unset) — rig-infra's logger compose already
 > prefers it, so the logger upgraded the moment this shipped. Doctor: OK ref line, conflict
 > ERRORs, and WARN on `msgs:` declarations with no overlay mechanism. Empty union = no overlay =
-> bare base, by design. **Release tail: rig-infra follow-ups pending** (declare `msgs_overlay` on
-> the router+logger riggings, drop the "rig does not export this var yet" caveats, one registry
-> release) — list in `rig-msgs-plan.md`. Queued: the `rig image audit` manifest/pin-skew checks.
+> bare base, by design. Rig-infra follow-ups landed the same day (**rig-infra v1.5.0**, `a64c7c5`:
+> `msgs_overlay` declared on the router+logger riggings, the "rig does not export this var yet"
+> caveats dropped, registry release auto-pinned zenoh-router/ros2-bag-logger/ros1-bag-logger at
+> 1.5.0). Queued as the **v0.2.29 fast-follow** (specced in `rig-msgs-plan.md`): audit's
+> stale-overlay check (baked manifest vs current union + declared apt vs dpkg); the
+> source-pin-vs-service-image check first needs a provider-side provenance convention.
 > **v0.2.27 (2026-08-26) — zsh eval route self-initializes compsys**: macOS ships no default
 > ~/.zshrc, so a stock zsh has never run compinit — compdef doesn't exist, the eval'd completion
 > script errored at startup and bound nothing. The emitted zsh script now runs
