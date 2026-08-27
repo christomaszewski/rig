@@ -1,8 +1,14 @@
 # rig — project state & handoff (resume here)
 
 > Snapshot for picking the project up cold in a new session. Read this first, then `CHEATSHEET.md` /
-> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.2.26**,
+> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.2.27**,
 > branch **`main`**, 537 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> **v0.2.27 (2026-08-26) — zsh eval route self-initializes compsys**: macOS ships no default
+> ~/.zshrc, so a stock zsh has never run compinit — compdef doesn't exist, the eval'd completion
+> script errored at startup and bound nothing. The emitted zsh script now runs
+> `autoload -Uz compinit && compinit -i` iff compdef is absent; brew/deb's fpath file route still
+> needs the user's own fpath+compinit (HOST_SETUP documents the caveat). Found live on the dev
+> Mac minutes after v0.2.26.
 > **v0.2.26 (2026-08-26) — TAB completion** (`rig-completion-plan.md`): a hidden `rig _complete`
 > engine (intercepted before argparse; introspects the parser ⊕ `_GROUP_VERBS`, so grouped and
 > flat spellings complete equally) + `rig completion bash|zsh` emitters. Menu teaches the
