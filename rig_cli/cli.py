@@ -121,6 +121,9 @@ def cmd_down(args, manifest, catalog, descriptors) -> int:
         eprint("rig: no enabled stacks to tear down")
         return 0
     eprint(f"rig down: {manifest.vehicle} — {stack_summary([p[0] for p in pairs])}")
+    if args.end_run and not args.dry_run and manifest.data_dir:
+        # BEFORE the verb: `compose down` removes the containers — their docker logs go with them
+        runs_mod.capture_docker_logs(manifest)
     rc = _summarize(dispatch.run_verb(pairs, env, "down", dry_run=args.dry_run))
     if args.purge:
         eprint("rig: purging external volumes (final teardown)")
@@ -568,7 +571,8 @@ def build_parser() -> argparse.ArgumentParser:
     down.add_argument("--dry-run", action="store_true")
     down.add_argument("--purge", action="store_true", help="also remove declared external volumes (FINAL teardown)")
     down.add_argument("--end-run", action="store_true", dest="end_run",
-                      help="after a successful FULL down, seal the open run (stamps ended: + size)")
+                      help="capture every container's docker logs into the run (.rig/logs/), then "
+                           "after a successful FULL down, seal it (stamps ended: + size)")
 
     cl = sub.add_parser("cleanup", help="decommission: remove this deployment's docker images + "
                                         "volumes from the host (after the final `rig down`, "
@@ -951,7 +955,8 @@ def build_parser() -> argparse.ArgumentParser:
                                                        "also removes the SIL network)")
     fld.add_argument("names", nargs="*", default=[], help="vehicle name(s); default: all")
     fld.add_argument("--end-run", action="store_true", dest="end_run",
-                     help="forwarded: seal each vehicle's run after a successful down")
+                     help="forwarded: capture docker logs into each vehicle's run, then seal it "
+                          "after a successful down")
     fld.add_argument("--force", action="store_true", help="forwarded to each vehicle's down")
     fld.add_argument("--dry-run", action="store_true")
     fly = flsub.add_parser("sync", parents=[flc], help="harvest SEALED runs (ended: present = "

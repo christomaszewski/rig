@@ -1,8 +1,20 @@
 # rig — project state & handoff (resume here)
 
 > Snapshot for picking the project up cold in a new session. Read this first, then `CHEATSHEET.md` /
-> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.2.30**,
-> branch **`main`**, 576 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.2.31**,
+> branch **`main`**, 582 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> **v0.2.31 (2026-08-27) — docker log capture at seal** (ROADMAP §3c): `down --end-run` now saves
+> `docker logs --timestamps` (stderr merged — one file reads like the terminal) from every container
+> of the deployment's compose projects into the sealing run, `runs/<id>/.rig/logs/<sensor>/
+> <container>.log` (under `.rig/` so a data kind named `logs` under `current/<kind>/` can't collide).
+> Capture happens in cmd_down BEFORE the down verb dispatches — `compose down` REMOVES the
+> containers, their stdout/stderr goes with them, so seal time is too late (standalone `end-run`,
+> guarded to run only after teardown, therefore cannot capture). `docker ps -a` per compose project,
+> so crashed containers' logs are kept too; a partial down retried later composes (per-file
+> overwrite, each capture writes only what still exists). Manifest gains `docker_logs:`
+> (`at`/`containers`) when anything was captured. Fail-SOFT like config snapshots — capture never
+> wedges `down`; rig-only like the flagged forms (`run.sh down --end-run` routes through the bundled
+> rig, so baked artifacts and `fleet down --end-run` get it with no extra plumbing).
 > **v0.2.30 (2026-08-27) — the provenance pin-skew tiers**: `rig image audit` consumes the
 > rig-infra ≥ v1.6.0 provenance convention (`/opt/fleet-msgs/provenance.yaml` schema v1:
 > repo/ref/rev per built interface repo; frozen in `~/ws/infra/rig-msgs-provenance-handoff.md`

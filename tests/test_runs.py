@@ -1,8 +1,9 @@
 """runs — the session registry state machine (ROADMAP §3c). Run: python3 tests/test_runs.py
 
-A fake `docker` on PATH controls the rotation/seal guard (`docker compose ls`); everything else is real
-filesystem. The invariant under test throughout: at most one run is ever OPEN, and only explicit verbs
-rotate or seal — `up`'s ensure never does either.
+A fake `docker` on PATH controls the rotation/seal guard (`docker compose ls`) and the end-run log
+capture (`docker ps` / `docker logs` via SHIM_PS / SHIM_LOGS); everything else is real filesystem.
+The invariant under test throughout: at most one run is ever OPEN, and only explicit verbs rotate or
+seal — `up`'s ensure never does either.
 """
 import json
 import os
@@ -21,6 +22,15 @@ _SHIM = """\
 if [ "$1" = "compose" ] && [ "$2" = "ls" ]; then
   if [ "$SHIM_COMPOSE_LS" = "__fail__" ]; then echo "daemon wedged" >&2; exit 1; fi
   echo "${SHIM_COMPOSE_LS:-[]}"; exit 0
+fi
+if [ "$1" = "ps" ]; then
+  if [ "$SHIM_PS" = "__fail__" ]; then echo "daemon wedged" >&2; exit 1; fi
+  [ -n "$SHIM_PS" ] && printf '%s\\n' "$SHIM_PS"; exit 0
+fi
+if [ "$1" = "logs" ]; then
+  if [ "$SHIM_LOGS" = "__fail__" ]; then echo "no such container" >&2; exit 1; fi
+  for a; do :; done
+  echo "2026-01-01T00:00:00Z shim log for $a"; exit 0
 fi
 exit 0
 """
@@ -457,6 +467,87 @@ def test_deployment_id_minted_once_and_stable():
     assert a and runs.deployment_id(root) == a                  # stable across calls
     _, other, _ = _world()
     assert runs.deployment_id(other) != a                       # a fresh tree is a fresh instance
+
+
+def _ps(names: list[str]) -> None:
+    """Point the shim's `docker ps` at these container names (and reset `docker logs` to succeed)."""
+    if names:
+        os.environ["SHIM_PS"] = "\n".join(names)
+    else:
+        os.environ.pop("SHIM_PS", None)
+    os.environ.pop("SHIM_LOGS", None)
+
+
+def test_capture_docker_logs_writes_files_and_manifest():
+    _mark_idle()
+    _ps(["cam-vehicle-1-camera-1", "cam-vehicle-1-encoder-1"])
+    data = pathlib.Path(tempfile.mkdtemp())
+    m = _manifest(data)
+    rid = runs.ensure(m, data)
+    assert runs.capture_docker_logs(m) == 2
+    log_dir = data / "runs" / rid / ".rig" / "logs" / "cam"
+    assert sorted(p.name for p in log_dir.iterdir()) == [
+        "cam-vehicle-1-camera-1.log", "cam-vehicle-1-encoder-1.log"]
+    assert "shim log for cam-vehicle-1-camera-1" in (log_dir / "cam-vehicle-1-camera-1.log").read_text()
+    doc = _run_doc(data, rid)
+    assert doc["docker_logs"]["containers"] == 2 and doc["docker_logs"]["at"]
+    assert "ended" not in doc                                   # capture never seals
+
+
+def test_capture_docker_logs_no_open_run_is_soft():
+    _mark_idle()
+    _ps(["cam-vehicle-1-camera-1"])
+    assert runs.capture_docker_logs(_manifest(pathlib.Path(tempfile.mkdtemp()))) == 0
+
+
+def test_capture_docker_logs_no_containers_writes_nothing():
+    _mark_idle()
+    _ps([])
+    data = pathlib.Path(tempfile.mkdtemp())
+    m = _manifest(data)
+    rid = runs.ensure(m, data)
+    assert runs.capture_docker_logs(m) == 0
+    assert not (data / "runs" / rid / ".rig" / "logs").exists()
+    assert "docker_logs" not in _run_doc(data, rid)
+
+
+def test_capture_docker_logs_survives_docker_ps_failure():
+    _mark_idle()
+    _ps([])
+    os.environ["SHIM_PS"] = "__fail__"
+    data = pathlib.Path(tempfile.mkdtemp())
+    m = _manifest(data)
+    rid = runs.ensure(m, data)
+    assert runs.capture_docker_logs(m) == 0                     # warns, never raises
+    assert "docker_logs" not in _run_doc(data, rid)
+    _ps([])
+
+
+def test_capture_docker_logs_failed_container_not_counted():
+    _mark_idle()
+    _ps(["cam-vehicle-1-camera-1"])
+    os.environ["SHIM_LOGS"] = "__fail__"
+    data = pathlib.Path(tempfile.mkdtemp())
+    m = _manifest(data)
+    rid = runs.ensure(m, data)
+    assert runs.capture_docker_logs(m) == 0
+    # the daemon's stderr landed IN the file — a record of why capture failed
+    log = data / "runs" / rid / ".rig" / "logs" / "cam" / "cam-vehicle-1-camera-1.log"
+    assert "no such container" in log.read_text()
+    assert "docker_logs" not in _run_doc(data, rid)
+    _ps([])
+
+
+def test_capture_docker_logs_then_seal_keeps_the_entry():
+    _mark_idle()
+    _ps(["cam-vehicle-1-camera-1"])
+    data = pathlib.Path(tempfile.mkdtemp())
+    m = _manifest(data)
+    rid = runs.ensure(m, data)
+    runs.capture_docker_logs(m)                                 # cmd_down's order: capture, down, seal
+    assert runs.end_run(m, data) == rid
+    doc = _run_doc(data, rid)
+    assert doc["docker_logs"]["containers"] == 1 and doc["ended"]
 
 
 if __name__ == "__main__":

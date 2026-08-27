@@ -279,6 +279,19 @@ temporal attribution: which config each stretch of the run's data was recorded u
   config is fully determined by its recorded `artifact:` tag, and fleet artifacts route every verb
   through the bundled rig anyway.
 
+### Docker log capture (v0.2.31) — what did the containers say?
+`down --end-run` saves `docker logs --timestamps` (stderr merged, so one file reads like the terminal)
+from every container of the deployment's compose projects into the sealing run:
+`runs/<id>/.rig/logs/<sensor>/<container>.log` — under `.rig/` so a data kind literally named `logs`
+under `current/<kind>/` can never collide. The capture point is **before the down verb dispatches**:
+`compose down` REMOVES the containers and their stdout/stderr goes with them — seal time is too late,
+which is also why standalone `end-run` (guarded to run only after teardown) cannot capture. `ps -a`,
+so a crashed container's logs — exactly the ones worth keeping — are captured too. A partial down
+retried later composes: each capture writes only the containers that still exist, per-file overwrite
+keeps earlier captures. The manifest gains `docker_logs:` (`at` / `containers` count) when anything
+was captured. Fail-SOFT like snapshots (never wedges `down`); rig-only like the other flagged forms
+(`run.sh down --end-run` routes through the bundled rig, so artifacts get it for free).
+
 ### Compose-only parity
 bake emits `new-run.sh` / `end-run.sh` / `runs.sh` (pure sh; manifest fields are grep-able flat keys),
 an ensure-guard in `up.sh`, and the run header in `status.sh` — all with `data_dir` and the project-name

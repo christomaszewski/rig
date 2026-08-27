@@ -394,7 +394,10 @@ under `data_dir`, camera log shows `health: frames=N, no drops`. After the first
 `up` auto-opens an `_auto` run if none is open — it NEVER rotates; rotation/sealing are explicit and
 refuse while stacks run. Each `up` also snapshots the effective config into the run
 (`.rig/config/<digest>/`, deduplicated) — the manifest's `config:`/`ups:` say exactly which config each
-stretch of data was recorded under, and sealing warns if config changed after the last `up`:
+stretch of data was recorded under, and sealing warns if config changed after the last `up`.
+`down --end-run` additionally captures every container's `docker logs` into the run
+(`.rig/logs/<sensor>/<container>.log`) before tearing down — compose down removes the containers, so
+that is the last moment their logs exist:
 ```bash
 ssh $VEHICLE 'cd ~/ws/v1 && ./run.sh up --run dock-test'   # open a labeled session + up (idempotent)
 ssh $VEHICLE 'cd ~/ws/v1 && ./run.sh runs'                 # registry: OPEN / sealed / interrupted

@@ -31,6 +31,11 @@ staged by bake, so every untar/clone is a fresh instance): sealing run A from a 
 tree must not read as "A's config was edited". Snapshot writes fail SOFT — provenance must never wedge
 `up`. Compose-only up.sh does not snapshot (resolved artifacts are tag-determined; fleet artifacts
 route every verb through the bundled rig anyway).
+
+Docker log capture: ``down --end-run`` saves every container's ``docker logs`` into the sealing run
+(``.rig/logs/<sensor>/<container>.log``) BEFORE the down verb dispatches — ``compose down`` REMOVES
+the containers and their stdout/stderr goes with them, so seal time is too late. Fail-soft like
+snapshots; compose-only down.sh doesn't capture (same rig-only boundary as the flagged forms).
 """
 from __future__ import annotations
 
@@ -252,6 +257,64 @@ def snapshot(manifest: Manifest, root: Path, *, stacks: list[str]) -> str | None
     except Exception as exc:  # noqa: BLE001 — fail SOFT: never wedge `up` on provenance
         eprint(f"rig: warning: config snapshot failed ({exc}) — continuing without it")
         return None
+
+
+def capture_docker_logs(manifest: Manifest) -> int:
+    """Save `docker logs` from every container of this manifest's compose projects into the OPEN run.
+    cmd_down calls this BEFORE dispatching the down verb when --end-run was asked: `compose down`
+    REMOVES the containers, and their stdout/stderr goes with them — seal time is too late.
+
+    Layout: runs/<id>/.rig/logs/<sensor>/<container>.log — under .rig/ (rig's namespace in the run
+    dir), so a data kind literally named `logs` under current/<kind>/ can never collide. stderr is
+    merged into stdout with --timestamps, so one file reads like the terminal and stays ordered.
+    A partial down retried later composes: each capture writes only the containers that still exist,
+    and per-file overwrite keeps earlier captures intact. Stopped containers count too (`ps -a`) —
+    a crashed stack's logs are exactly the ones worth keeping. Fail SOFT throughout: like config
+    snapshots, provenance must never wedge `down`. Returns the number of containers captured."""
+    captured = 0
+    try:
+        data = _root(manifest)
+        cur = current_run(data)
+        if cur is None:
+            eprint("rig: warning: no open run to capture docker logs into")
+            return 0
+        run_id, run_dir, doc = cur
+        for sensor in manifest.sensors:
+            if not sensor.enabled:
+                continue
+            project = project_name(sensor.name, manifest.vehicle_id)
+            try:
+                proc = subprocess.run(
+                    ["docker", "ps", "-a", "--filter",
+                     f"label=com.docker.compose.project={project}", "--format", "{{.Names}}"],
+                    capture_output=True, text=True, timeout=15)
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                return 0  # no docker / wedged daemon — nothing to save; down itself will surface it
+            if proc.returncode != 0:
+                eprint(f"rig: warning: `docker ps` failed for {project} — skipping its log capture")
+                continue
+            for name in (n.strip() for n in proc.stdout.splitlines() if n.strip()):
+                dest = run_dir / ".rig" / "logs" / sensor.name / f"{name}.log"
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    with open(dest, "wb") as fh:  # stream to disk — a chatty container won't OOM us
+                        rc = subprocess.run(["docker", "logs", "--timestamps", name],
+                                            stdout=fh, stderr=subprocess.STDOUT,
+                                            timeout=120).returncode
+                    if rc == 0:
+                        captured += 1
+                    else:  # the daemon's error lands IN the file — a record of why capture failed
+                        eprint(f"rig: warning: `docker logs {name}` exited {rc}")
+                except (OSError, subprocess.TimeoutExpired) as exc:
+                    eprint(f"rig: warning: could not capture logs for {name}: {exc}")
+        if captured:
+            doc["docker_logs"] = {"at": _iso_now(), "containers": captured}
+            (run_dir / "manifest.yaml").write_text(yaml.safe_dump(doc, sort_keys=False))
+            eprint(f"rig: run {run_id}: captured docker logs for {captured} container(s) "
+                   f"-> runs/{run_id}/.rig/logs/")
+    except Exception as exc:  # noqa: BLE001 — fail SOFT: never wedge `down` on provenance
+        eprint(f"rig: warning: docker log capture failed ({exc}) — continuing")
+    return captured
 
 
 def _open_run(manifest: Manifest, root: Path, data: Path, label: str | None) -> str:
