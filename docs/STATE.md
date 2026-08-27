@@ -1,8 +1,22 @@
 # rig — project state & handoff (resume here)
 
 > Snapshot for picking the project up cold in a new session. Read this first, then `CHEATSHEET.md` /
-> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.2.29**,
-> branch **`main`**, 567 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.2.30**,
+> branch **`main`**, 576 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> **v0.2.30 (2026-08-27) — the provenance pin-skew tiers**: `rig image audit` consumes the
+> rig-infra ≥ v1.6.0 provenance convention (`/opt/fleet-msgs/provenance.yaml` schema v1:
+> repo/ref/rev per built interface repo; frozen in `~/ws/infra/rig-msgs-provenance-handoff.md`
+> §ADDENDUM) — each `msgs.source` pin is checked against what the declaring service's OWN
+> image(s) recorded building. Tiers per contract §A4: file absent → WARN unadopted (names
+> `provenance-record.sh`); declared repo missing from a present file → ERROR; ref mismatch →
+> ERROR naming both sides; refs equal but service and overlay `rev` SHAs differ → ERROR ("same
+> ref, different tree — rebuild the older side": a moved tag or a branch built twice, the drift
+> only SHAs can see); `rev: unknown` (vendored) or malformed file (bad YAML/wrong
+> version/duplicate normalized repos) → WARN, never ERROR. Repo join per §A3 normalization
+> (scheme dropped, scp form rewritten, one `.git` dropped, host lowercased) so https/ssh
+> spellings of one repo match. Overlay absent provenance = pre-provenance build WARN (§A2:
+> v1.6.0+ overlays always write it, `source: []` when apt-only). This completes the msgs arc:
+> prevention (v0.2.28 refusals) → stale detection (v0.2.29) → pin-skew detection (v0.2.30).
 > **v0.2.29 (2026-08-27) — the stale-overlay audit** (`rig-msgs-plan.md` §Fast-follow): the overlay
 > in the registry is whatever the LAST `rig build` baked — a `msgs:` declaration added or a pin
 > bumped since then leaves `up` pulling the OLD fleet-ros-msgs under the SAME tag, and the new

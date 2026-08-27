@@ -29,6 +29,14 @@ docker (`ls /opt/ros` + the dpkg ``ros-*`` package list), and cross-checks:
               image under the same tag and the new types silently vanish from bags), and every
               declared ``apt`` interface package must be installed in it (the same
               ``ros-<distro>-<'_'→'-'>`` mapping the builder uses).
+  - pins      each ``msgs.source`` pin against what the declaring service's OWN image actually
+              built, via the baked ``/opt/fleet-msgs/provenance.yaml`` (the rig-infra ≥ v1.6.0
+              convention: repo/ref/rev per built interface repo — the overlay always bakes it,
+              services adopt via provenance-record.sh). Absent → WARN (unadopted, pin skew
+              unverifiable); a declared repo missing from a present file, a ref mismatch, or —
+              refs equal — service and overlay `rev` SHAs differing (a moved tag, a branch built
+              twice: the tier only SHAs give) → ERROR; ``rev: unknown`` (vendored snapshot) or a
+              malformed file → WARN, never ERROR.
 
 Non-ROS images (no /opt/ros, no ros-* packages) are excluded from the checks; an image without a
 shell/dpkg is reported and skipped (uninspectable this way); a ROS image with zero ros-* dpkg
@@ -226,11 +234,115 @@ def _msgs_stale_issues(manifest: Manifest, descriptors: dict[str, Descriptor], m
     return issues
 
 
+def _parse_provenance(text: str):
+    """(normalized repo -> entry dict, malformed-reason | None). The contract (§A4): an
+    unparseable file, wrong `version`, a non-list `source`, an entry missing repo/ref/rev, or two
+    entries collapsing to one normalized repo are MALFORMED — reported as WARN by the caller,
+    never ERROR (the service-side helper appends blindly and never dedupes, so duplicates are the
+    expected misuse; a helper mistake must not fail a fleet)."""
+    try:
+        data = yaml.safe_load(text)
+    except yaml.YAMLError:
+        return {}, "not valid YAML"
+    if not isinstance(data, dict):
+        return {}, "not a YAML mapping"
+    if data.get("version") != 1:
+        return {}, f"unknown schema version {data.get('version')!r} (expected 1)"
+    source = data.get("source")
+    if source is None:
+        source = []
+    if not isinstance(source, list):
+        return {}, "`source` is not a list"
+    entries: dict[str, dict] = {}
+    for i, entry in enumerate(source):
+        if not isinstance(entry, dict) or not all(entry.get(k) for k in ("repo", "ref", "rev")):
+            return {}, f"source #{i} lacks repo/ref/rev"
+        key = _norm_repo(str(entry["repo"]))
+        if key in entries:
+            return {}, f"duplicate entries for {key}"
+        entries[key] = entry
+    return entries, None
+
+
+def _msgs_provenance_issues(descriptors: dict[str, Descriptor], svc_refs: dict[str, list[str]],
+                            prov_by_ref: dict[str, tuple[dict, str | None] | None],
+                            overlay: dict[str, dict]) -> list[tuple[str, str]]:
+    """The pin-skew tiers (rig-msgs-provenance-handoff.md §A4): each `msgs.source` pin vs what the
+    declaring service's OWN image recorded it built. `prov_by_ref` maps every probed image ref to
+    (parsed entries, malformed-reason) — or None when the file is absent; `overlay` is the overlay
+    image's parsed provenance ({} when absent/malformed — the SHA tier just doesn't fire).
+    A drifted pin means the overlay's definitions are wire-incompatible with what the service
+    publishes; equal refs with different SHAs (a moved tag, a branch built twice) are the drift
+    only this check can see."""
+    issues: list[tuple[str, str]] = []
+    verified = sha_checked = 0
+    for svc in sorted(s for s, d in descriptors.items() if d.msgs_source):
+        readable = [(ref, prov_by_ref[ref]) for ref in svc_refs.get(svc, [])
+                    if ref in prov_by_ref]  # uninspectable images were already WARNed upstream
+        if not readable:
+            continue  # no rendered image to check against (config failure already reported)
+        present = [(ref, parsed) for ref, parsed in readable if parsed is not None]
+        if not present:
+            issues.append((WARN, f"{svc}: declares msgs.source but none of its image(s) "
+                                 f"({', '.join(r for r, _ in readable)}) bake "
+                                 f"{_MSGS_PROVENANCE} — pin skew unverifiable; adopt "
+                                 f"msgs/provenance-record.sh (rig-infra >= v1.6.0)"))
+            continue
+        valid: list[tuple[str, dict[str, dict]]] = []
+        for ref, (entries, malformed) in present:
+            if malformed:
+                issues.append((WARN, f"{svc}: {ref}: malformed provenance ({malformed}) — "
+                                     f"unverifiable"))
+            else:
+                valid.append((ref, entries))
+        if not valid:
+            continue
+        for src in descriptors[svc].msgs_source:
+            key = _norm_repo(src.repo)
+            matches = [(ref, entries[key]) for ref, entries in valid if key in entries]
+            if not matches:
+                issues.append((ERROR, f"{svc}: {src.repo} is declared in msgs.source but no image "
+                                      f"provenance records building it "
+                                      f"({', '.join(r for r, _ in valid)}) — the image didn't "
+                                      f"build what the rigging declares"))
+                continue
+            for ref, entry in matches:
+                got_ref, got_rev = str(entry["ref"]), str(entry["rev"])
+                if got_ref != src.ref:
+                    issues.append((ERROR, f"{svc}: {src.repo} — rigging declares ref '{src.ref}' "
+                                          f"but {ref} built '{got_ref}'; a drifted pin is a "
+                                          f"silent schema mismatch in the bags — align them in "
+                                          f"one change, then `rig build`"))
+                    continue
+                if got_rev == "unknown":
+                    issues.append((WARN, f"{svc}: {src.repo} @ {src.ref} in {ref} — rev unknown "
+                                         f"(vendored snapshot): pin verified by ref only"))
+                    verified += 1
+                    continue
+                verified += 1
+                over = overlay.get(key)
+                over_rev = str(over["rev"]) if over else None
+                if over_rev and over_rev != "unknown":
+                    sha_checked += 1
+                    if over_rev != got_rev:
+                        issues.append((ERROR, f"{svc}: {src.repo} @ {src.ref} — same ref, "
+                                              f"different tree: {ref} built {got_rev[:12]}, the "
+                                              f"overlay baked {over_rev[:12]} (a moved tag, or a "
+                                              f"branch built twice) — rebuild the older side"))
+    if verified and not any(lvl == ERROR for lvl, _ in issues):
+        issues.append((OK, f"{verified} msgs.source pin(s) verified against image provenance "
+                           f"({sha_checked} to the SHA tier)"))
+    return issues
+
+
 def _collect_refs(manifest: Manifest, descriptors: dict[str, Descriptor], env: dict[str, str],
-                  names: list[str]) -> tuple[dict[str, list[str]], list[str]]:
-    """Render each enabled stack's compose; return (image ref -> stack names, per-stack failures)."""
+                  names: list[str]) -> tuple[dict[str, list[str]], dict[str, list[str]], list[str]]:
+    """Render each enabled stack's compose; return (image ref -> stack names,
+    service -> its image refs, per-stack failures). The service map keys the provenance check —
+    a `msgs.source` pin is audited against the declaring SERVICE's own images."""
     from .bake import _service_images
     refs: dict[str, list[str]] = {}
+    svc_refs: dict[str, list[str]] = {}
     failures: list[str] = []
     for sensor in manifest.select(names, enabled_only=True):
         desc = descriptors[sensor.service]
@@ -250,7 +362,10 @@ def _collect_refs(manifest: Manifest, descriptors: dict[str, Descriptor], env: d
             stacks = refs.setdefault(ref, [])
             if sensor.name not in stacks:
                 stacks.append(sensor.name)
-    return refs, failures
+            by_svc = svc_refs.setdefault(sensor.service, [])
+            if ref not in by_svc:
+                by_svc.append(ref)
+    return refs, svc_refs, failures
 
 
 def audit(manifest: Manifest, descriptors: dict[str, Descriptor], env: dict[str, str], *,
@@ -258,7 +373,7 @@ def audit(manifest: Manifest, descriptors: dict[str, Descriptor], env: dict[str,
     if shutil.which("docker") is None:
         eprint("rig image audit: docker not found on PATH — audit inspects images with `docker run`")
         return 1
-    refs, failures = _collect_refs(manifest, descriptors, env, names or [])
+    refs, svc_refs, failures = _collect_refs(manifest, descriptors, env, names or [])
     if not refs and not failures:
         eprint("rig image audit: no enabled stack resolves any image — nothing to audit")
         return 0
@@ -339,6 +454,7 @@ def audit(manifest: Manifest, descriptors: dict[str, Descriptor], env: dict[str,
     # when no rendered compose pulls it (a BAG_LOGGER_IMAGE override, say): the export makes it
     # the deployment's overlay, and any consumer that appears next pulls exactly this ref.
     msgs_ref = env.get("RIG_MSGS_IMAGE")
+    overlay_prov: dict[str, dict] = {}
     if msgs_ref:
         msgs_files, msgs_err = _read_msgs_files(msgs_ref)
         if msgs_err:
@@ -347,6 +463,36 @@ def audit(manifest: Manifest, descriptors: dict[str, Descriptor], env: dict[str,
         else:
             pkgs_by_ref = {r: p for r, _, p, _ in ros_images}
             issues += _msgs_stale_issues(manifest, descriptors, msgs_ref, msgs_files, pkgs_by_ref)
+            any_source = any(d.msgs_source for d in descriptors.values())
+            prov_text = msgs_files.get(_MSGS_PROVENANCE)
+            if prov_text is None:
+                # rig-infra >= v1.6.0 overlays ALWAYS bake the file (`source: []` when apt-only) —
+                # absence means a pre-provenance build, never a source-less union (contract §A2).
+                if any_source:
+                    issues.append((WARN, f"msgs overlay {msgs_ref}: no baked {_MSGS_PROVENANCE} — "
+                                         f"pre-provenance overlay build (rig-infra < v1.6.0); "
+                                         f"`rig build` re-bakes it and enables the SHA tier"))
+            else:
+                overlay_prov, malformed = _parse_provenance(prov_text)
+                if malformed:
+                    issues.append((WARN, f"msgs overlay {msgs_ref}: malformed provenance "
+                                         f"({malformed}) — SHA tier unavailable"))
+
+    # The pin-skew tiers: probe provenance on each msgs.source-declaring service's own image(s).
+    prov_svcs = sorted(s for s, d in descriptors.items() if d.msgs_source and s in svc_refs)
+    if prov_svcs:
+        prov_by_ref: dict[str, tuple[dict, str | None] | None] = {}
+        for svc in prov_svcs:
+            for ref in svc_refs[svc]:
+                if ref in prov_by_ref:
+                    continue
+                files, err = _read_msgs_files(ref)
+                if err:
+                    issues.append((WARN, f"{svc}: {ref}: provenance unreadable — {err}"))
+                    continue
+                text = files.get(_MSGS_PROVENANCE)
+                prov_by_ref[ref] = None if text is None else _parse_provenance(text)
+        issues += _msgs_provenance_issues(descriptors, svc_refs, prov_by_ref, overlay_prov)
 
     if ros_images and distro and not distro_bad:
         issues.append((OK, f"every ROS image carries /opt/ros/{distro}"))

@@ -749,7 +749,7 @@ knows the deployment's resolved service set:
   union (drift = ERROR — declaration changed, build forgotten, `up` pulls the old image under the
   same tag), and every declared `apt` package installed (shared name mapping). Absent/malformed
   baked manifest = WARN, never ERROR.
-- **The provenance pin-skew tiers — v0.2.30**: the deeper check — each `source:` pin against the
+- **The provenance pin-skew tiers — ✅ v0.2.30**: the deeper check — each `source:` pin against the
   declaring service's own image — consumes the provenance convention rig-infra froze
   (`~/ws/infra/rig-msgs-provenance-handoff.md` ADDENDUM; rig-infra v1.6.0: every participating
   image bakes `/opt/fleet-msgs/provenance.yaml` v1 — repo/ref/rev(+packages, cloned_from), the

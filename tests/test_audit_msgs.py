@@ -1,8 +1,11 @@
 """rig image audit — the msgs checks. v0.2.29: the stale-overlay check (the overlay in the
 registry is whatever the LAST `rig build` baked; a declaration added or a pin bumped since then
 leaves `up` pulling the old image under the same tag, and the new types silently vanish from
-bags) + declared-apt-installed. Docker is STUBBED (test_audit's technique, extended: the msgs file
-probe is keyed on its script marker, the dpkg inspection on the ref alone).
+bags) + declared-apt-installed. v0.2.30: the provenance pin-skew tiers (rig-infra >= v1.6.0
+convention, contract in rig-msgs-provenance-handoff.md §ADDENDUM) — each msgs.source pin vs what
+the declaring service's own image recorded it built, with the SHA tier catching same-ref
+different-tree drift. Docker is STUBBED (test_audit's technique, extended: the msgs file probe is
+keyed on its script marker, the dpkg inspection on the ref alone).
 Run: python3 tests/test_audit_msgs.py"""
 import contextlib
 import io
@@ -107,7 +110,24 @@ def _msgs_deployment(mav_image="mav-core:v1", logger_image=OVERLAY, mav_msgs=Non
     return manifest, descriptors
 
 
+SHA_A = "8f3ce2a09b41a0eb69041d1a08d7cb1857c00c92"
+SHA_B = "1d4c1b2f9a41a0eb69041d1a08d7cb1857c00777"
+
+
+def _prov(entries, version=1) -> str:
+    """Provenance file text (escaped for the stub): entries = [(repo, ref, rev)]."""
+    if not entries:
+        return f"version: {version}\\nsource: []\\n"
+    out = f"version: {version}\\nsource:\\n"
+    for repo, ref, rev in entries:
+        out += f"- repo: {repo}\\n  ref: {ref}\\n  rev: {rev}\\n"
+    return out
+
+
 def _run(manifest, descriptors, inspect, probes) -> tuple[int, str]:
+    # mav's image is file-probed by the pin-skew check whenever mav declares msgs.source — default
+    # its provenance to ABSENT so the v0.2.29-era tests read as "not adopted", not a stub error
+    probes = {"mav-core": _files_out(None), **probes}
     bin_dir = _fake_docker(inspect, probes)
     old = os.environ["PATH"]
     os.environ["PATH"] = f"{bin_dir}:{old}"
@@ -204,6 +224,106 @@ def test_no_msgs_export_no_msgs_lines():
     rc, out = _run(m, d, _INSPECT_OK, {})
     assert rc == 0, out
     assert "msgs overlay" not in out
+
+
+# --- v0.2.30: the provenance pin-skew tiers ------------------------------------------------------
+
+OVERLAY_FULL = _files_out(FRESH_MANIFEST, _prov([(PX4, "v1.16.0", SHA_A)]))
+
+
+def test_matching_provenance_verifies_to_the_sha_tier():
+    m, d = _msgs_deployment()
+    rc, out = _run(m, d, _INSPECT_OK,
+                   {"fleet-ros-msgs": OVERLAY_FULL,
+                    "mav-core": _files_out(None, _prov([(PX4, "v1.16.0", SHA_A)]))})
+    assert rc == 0, out
+    assert "1 msgs.source pin(s) verified" in out and "(1 to the SHA tier)" in out
+
+
+def test_scp_spelled_service_provenance_still_joins():
+    # the service recorded the ssh spelling of the declared https repo — §A3 normalization joins
+    m, d = _msgs_deployment()
+    rc, out = _run(m, d, _INSPECT_OK,
+                   {"fleet-ros-msgs": OVERLAY_FULL,
+                    "mav-core": _files_out(None, _prov(
+                        [("git@github.com:PX4/px4_msgs.git", "v1.16.0", SHA_A)]))})
+    assert rc == 0, out
+    assert "1 msgs.source pin(s) verified" in out
+
+
+def test_unadopted_service_is_a_warn_naming_the_helper():
+    m, d = _msgs_deployment()
+    rc, out = _run(m, d, _INSPECT_OK, {"fleet-ros-msgs": OVERLAY_FULL})  # mav defaults to absent
+    assert rc == 0, out
+    assert "pin skew unverifiable" in out and "provenance-record.sh" in out
+
+
+def test_ref_mismatch_is_an_error_naming_both_sides():
+    m, d = _msgs_deployment()
+    rc, out = _run(m, d, _INSPECT_OK,
+                   {"fleet-ros-msgs": OVERLAY_FULL,
+                    "mav-core": _files_out(None, _prov([(PX4, "v1.17.0", SHA_B)]))})
+    assert rc == 1
+    assert "declares ref 'v1.16.0'" in out and "built 'v1.17.0'" in out and "silent schema" in out
+
+
+def test_declared_repo_missing_from_present_file_is_an_error():
+    # the file exists (adoption happened) but never records the declared repo — the image didn't
+    # build what the rigging declares
+    m, d = _msgs_deployment()
+    rc, out = _run(m, d, _INSPECT_OK,
+                   {"fleet-ros-msgs": OVERLAY_FULL, "mav-core": _files_out(None, _prov([]))})
+    assert rc == 1
+    assert "didn't build what the rigging declares" in out
+
+
+def test_same_ref_different_tree_is_the_sha_tier_error():
+    # refs agree, SHAs don't: a moved tag or a branch built twice — the drift only SHAs can see
+    m, d = _msgs_deployment()
+    rc, out = _run(m, d, _INSPECT_OK,
+                   {"fleet-ros-msgs": OVERLAY_FULL,
+                    "mav-core": _files_out(None, _prov([(PX4, "v1.16.0", SHA_B)]))})
+    assert rc == 1
+    assert "same ref, different tree" in out and "rebuild the older side" in out
+    assert SHA_A[:12] in out and SHA_B[:12] in out
+
+
+def test_rev_unknown_is_a_warn_verified_by_ref_only():
+    m, d = _msgs_deployment()
+    rc, out = _run(m, d, _INSPECT_OK,
+                   {"fleet-ros-msgs": OVERLAY_FULL,
+                    "mav-core": _files_out(None, _prov([(PX4, "v1.16.0", "unknown")]))})
+    assert rc == 0, out
+    assert "vendored snapshot" in out and "verified by ref only" in out
+    assert "(0 to the SHA tier)" in out  # unknown never reaches the SHA comparison
+
+
+def test_malformed_provenance_is_a_warn_never_error():
+    m, d = _msgs_deployment()
+    # wrong schema version
+    rc, out = _run(m, d, _INSPECT_OK,
+                   {"fleet-ros-msgs": OVERLAY_FULL,
+                    "mav-core": _files_out(None, _prov([(PX4, "v1.16.0", SHA_A)], version=2))})
+    assert rc == 0, out
+    assert "malformed provenance" in out and "unknown schema version" in out
+    # duplicate normalized repos (the append-blindly helper misuse the contract expects)
+    dup = _prov([(PX4, "v1.16.0", SHA_A), ("git@github.com:PX4/px4_msgs.git", "v1.16.0", SHA_A)])
+    rc, out = _run(m, d, _INSPECT_OK,
+                   {"fleet-ros-msgs": OVERLAY_FULL, "mav-core": _files_out(None, dup)})
+    assert rc == 0, out
+    assert "malformed provenance" in out and "duplicate" in out
+
+
+def test_pre_provenance_overlay_warns_and_ref_tier_still_runs():
+    # overlay predates rig-infra v1.6.0 (no provenance file): §A2 says absence = pre-provenance
+    # build. The service's pin still verifies by ref; the SHA tier just can't fire.
+    m, d = _msgs_deployment()
+    rc, out = _run(m, d, _INSPECT_OK,
+                   {"fleet-ros-msgs": _files_out(FRESH_MANIFEST, None),
+                    "mav-core": _files_out(None, _prov([(PX4, "v1.16.0", SHA_A)]))})
+    assert rc == 0, out
+    assert "pre-provenance overlay build" in out
+    assert "1 msgs.source pin(s) verified" in out and "(0 to the SHA tier)" in out
 
 
 def test_norm_repo_contract_a3():
