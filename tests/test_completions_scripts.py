@@ -75,6 +75,9 @@ def test_completion_verb_emits_zsh():
     assert rc == 0
     assert out.startswith("#compdef rig")
     assert "compdef _rig rig" in out and "_describe" in out and "_files" in out
+    # the eval route must self-initialize compsys on a vanilla zsh (no compinit run yet) —
+    # macOS ships no default ~/.zshrc, so without this guard the eval line errors at startup
+    assert "compinit" in out and "$+functions[compdef]" in out
 
 
 def test_completion_verb_is_in_its_own_menu():

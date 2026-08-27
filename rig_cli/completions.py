@@ -588,6 +588,11 @@ _rig() {{
 if [ "$funcstack[1]" = "_rig" ]; then
     _rig "$@"
 else
+    # eval'd from a shell rc: a vanilla zsh may not have run compinit yet (macOS ships no
+    # default ~/.zshrc) — without it compdef doesn't exist and NO completion works at all.
+    if ! (( $+functions[compdef] )); then
+        autoload -Uz compinit && compinit -i
+    fi
     compdef _rig rig
 fi
 """

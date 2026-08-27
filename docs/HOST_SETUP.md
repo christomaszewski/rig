@@ -19,6 +19,10 @@ On a **vehicle**, provision its identity once — `sudo rig provision --id 7 --n
 
 TAB completion (bash/zsh): the deb and brew packages ship it; pipx/checkout installs get it via
 `rig setup --shell` (writes an `eval "$(rig completion …)"` line into the managed rc block).
+zsh caveat: brew's shipped file needs zsh's completion system active — macOS ships NO default
+`~/.zshrc`, so make yours run `fpath+=(/opt/homebrew/share/zsh/site-functions)` then
+`autoload -Uz compinit && compinit` (without compinit, no completion works for anything). The
+eval line self-initializes compsys if absent.
 
 ## Prerequisites
 
