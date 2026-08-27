@@ -22,6 +22,14 @@ docker (`ls /opt/ros` + the dpkg ``ros-*`` package list), and cross-checks:
                usually benign, but ABI-relevant divergence (libstdc++, boost, an image codec a ROS
                node links against) can still break nodes — the WARN is the clue, not a verdict.
 
+  - msgs      when the deployment exports RIG_MSGS_IMAGE (the fleet-ros-msgs overlay), the
+              overlay's baked ``/opt/fleet-msgs/manifest.yaml`` must equal the CURRENT union of
+              the riggings' ``msgs:`` declarations (ERROR on drift — the stale-overlay case: a
+              declaration added or a pin bumped, ``rig build`` forgotten, ``up`` pulls the old
+              image under the same tag and the new types silently vanish from bags), and every
+              declared ``apt`` interface package must be installed in it (the same
+              ``ros-<distro>-<'_'→'-'>`` mapping the builder uses).
+
 Non-ROS images (no /opt/ros, no ros-* packages) are excluded from the checks; an image without a
 shell/dpkg is reported and skipped (uninspectable this way); a ROS image with zero ros-* dpkg
 packages (source-built workspace) gets a WARN — dpkg cannot see inside it. Needs docker and the
@@ -29,6 +37,7 @@ images local or pullable: run right after ``rig build`` (or ``rig pull``).
 """
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 
@@ -74,6 +83,147 @@ def _inspect(ref: str) -> tuple[list[str], dict[str, str], dict[str, str], str |
         if len(parts) == 2:
             (ros_pkgs if parts[0].startswith("ros-") else sys_pkgs)[parts[0]] = parts[1]
     return distros, ros_pkgs, sys_pkgs, None
+
+
+# The msgs files a fleet-ros-msgs overlay (and, for provenance, any participating service image)
+# bakes. Probed together in one docker run — the script marker also lets test stubs tell this
+# probe apart from the dpkg inspection above.
+_MSGS_MANIFEST = "/opt/fleet-msgs/manifest.yaml"
+_MSGS_PROVENANCE = "/opt/fleet-msgs/provenance.yaml"
+_FILE_MARK = "::rig-msgs-file::"
+_FILE_ABSENT = "::rig-msgs-absent::"
+
+
+def _read_msgs_files(ref: str) -> tuple[dict[str, str | None], str | None]:
+    """({path: content or None when absent}, error). One probe per image for both msgs files —
+    absence is DATA (None), only a docker failure is an error."""
+    script = "; ".join(
+        f"echo '{_FILE_MARK}{p}'; if [ -f {p} ]; then cat {p}; echo; else echo '{_FILE_ABSENT}'; fi"
+        for p in (_MSGS_MANIFEST, _MSGS_PROVENANCE))
+    cmd = ["docker", "run", "--rm", "--entrypoint", "/bin/sh", ref, "-c", script]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=_DOCKER_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return {}, f"probe timed out after {_DOCKER_TIMEOUT}s"
+    if proc.returncode != 0 or _FILE_MARK not in proc.stdout:
+        detail = (proc.stderr or proc.stdout).strip().splitlines()
+        return {}, (detail[-1][:160] if detail else f"docker run exited {proc.returncode}")
+    files: dict[str, str | None] = {}
+    for chunk in proc.stdout.split(_FILE_MARK)[1:]:
+        path, _, body = chunk.partition("\n")
+        files[path.strip()] = None if _FILE_ABSENT in body else body
+    return files, None
+
+
+def _norm_repo(url: str) -> str:
+    """The provenance-contract join normalization (rig-msgs-provenance-handoff.md §A3): drop the
+    scheme (and any userinfo), rewrite the scp form ``git@host:path`` -> ``host/path``, drop ONE
+    trailing ``.git``, lowercase the host — https/ssh spellings of one repo match; genuinely
+    different remotes do NOT (a mirror names itself in `cloned_from`, which audit ignores)."""
+    u = url.strip()
+    m = re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://(.*)$", u)
+    if m:
+        u = re.sub(r"^[^/@]+@", "", m.group(1))
+    else:
+        m = re.match(r"^[^/@]+@([^:/]+):(.*)$", u)
+        if m:
+            u = f"{m.group(1)}/{m.group(2)}"
+    if u.endswith(".git"):
+        u = u[:-4]
+    host, sep, path = u.partition("/")
+    return host.lower() + sep + path
+
+
+def _norm_msgs_manifest(data: dict) -> tuple[list[str], dict[str, tuple[str, tuple[str, ...]]]]:
+    """(sorted apt names, normalized-repo -> (ref, sorted packages)) — order- and
+    spelling-insensitive, so a hand-authored baked manifest compares fairly against rig's
+    rendered union."""
+    apt = sorted(str(a) for a in (data.get("apt") or []))
+    src: dict[str, tuple[str, tuple[str, ...]]] = {}
+    for entry in (data.get("source") or []):
+        if isinstance(entry, dict) and entry.get("repo"):
+            src[_norm_repo(str(entry["repo"]))] = (
+                str(entry.get("ref")), tuple(sorted(str(p) for p in (entry.get("packages") or []))))
+    return apt, src
+
+
+def _msgs_stale_issues(manifest: Manifest, descriptors: dict[str, Descriptor], msgs_ref: str,
+                       msgs_files: dict[str, str | None],
+                       pkgs_by_ref: dict[str, dict[str, str]]) -> list[tuple[str, str]]:
+    """The stale-overlay check: the overlay in the registry is whatever the LAST `rig build` baked
+    — a `msgs:` declaration added or a pin bumped since then leaves `up` pulling the old image
+    under the same tag, and the new types silently vanish from bags. The baked manifest is the
+    build's declared union verbatim, so diffing it against the CURRENT union is exact."""
+    from .build import msgs_union
+    issues: list[tuple[str, str]] = []
+    union, _ = msgs_union(descriptors)  # fleet_env exported RIG_MSGS_IMAGE, so the union is valid
+    label = f"msgs overlay {msgs_ref}"
+
+    baked_text = msgs_files.get(_MSGS_MANIFEST)
+    if baked_text is None:
+        issues.append((WARN, f"{label}: no baked {_MSGS_MANIFEST} — not a fleet-ros-msgs build? "
+                             f"staleness unverifiable"))
+    else:
+        try:
+            baked = yaml.safe_load(baked_text)
+        except yaml.YAMLError:
+            baked = None
+        if not isinstance(baked, dict):
+            issues.append((WARN, f"{label}: baked {_MSGS_MANIFEST} is not valid YAML — "
+                                 f"staleness unverifiable"))
+        else:
+            b_apt, b_src = _norm_msgs_manifest(baked)
+            c_apt, c_src = _norm_msgs_manifest(union or {})
+            diffs: list[str] = []
+            for name in c_apt:
+                if name not in b_apt:
+                    diffs.append(f"apt +{name}")
+            for name in b_apt:
+                if name not in c_apt:
+                    diffs.append(f"apt -{name}")
+            for repo in c_src:
+                if repo not in b_src:
+                    diffs.append(f"source +{repo}")
+                elif b_src[repo][0] != c_src[repo][0]:
+                    diffs.append(f"{repo}: baked ref '{b_src[repo][0]}' vs declared "
+                                 f"'{c_src[repo][0]}'")
+                elif b_src[repo][1] != c_src[repo][1]:
+                    diffs.append(f"{repo}: baked packages {list(b_src[repo][1])} vs declared "
+                                 f"{list(c_src[repo][1])}")
+            for repo in b_src:
+                if repo not in c_src:
+                    diffs.append(f"source -{repo}")
+            if diffs:
+                issues.append((ERROR, f"{label} is STALE: its baked manifest differs from the "
+                                      f"current `msgs:` declarations ({'; '.join(diffs)}) — "
+                                      f"`rig build` rebuilds it; until then bags silently miss "
+                                      f"the changed types"))
+            else:
+                issues.append((OK, f"{label}: baked manifest matches the current `msgs:` "
+                                   f"declarations"))
+
+    # Declared apt interface packages must be INSTALLED in the overlay — same name mapping the
+    # builder uses, so builder and checker agree by construction (the rmw-check pattern).
+    distro = manifest.ros.distro
+    apt_names = sorted((union or {}).get("apt") or [])
+    if distro and apt_names:
+        pkgs = pkgs_by_ref.get(msgs_ref)
+        if pkgs is None:
+            _, pkgs, _, err = _inspect(msgs_ref)
+            if err:
+                issues.append((WARN, f"{label}: uninspectable for the apt check — {err}"))
+                pkgs = None
+        if pkgs is not None:
+            missing = [n for n in apt_names
+                       if f"ros-{distro}-{n.replace('_', '-')}" not in pkgs]
+            if missing:
+                issues.append((ERROR, f"{label}: declared apt interface package(s) not installed: "
+                                      f"{', '.join(missing)} — the recorder cannot record their "
+                                      f"types; `rig build` rebuilds the overlay"))
+            else:
+                issues.append((OK, f"{label}: all {len(apt_names)} declared apt interface "
+                                   f"package(s) installed"))
+    return issues
 
 
 def _collect_refs(manifest: Manifest, descriptors: dict[str, Descriptor], env: dict[str, str],
@@ -183,6 +333,20 @@ def audit(manifest: Manifest, descriptors: dict[str, Descriptor], env: dict[str,
                              f"(e.g. {sample}{more}) — usually benign revision drift, but "
                              f"ABI-relevant divergence can still break nodes; `rig build "
                              f"--no-cache` re-converges"))
+
+    # The msgs overlay: exported by fleet_env only when services declare `msgs:` AND a base
+    # provider wires the overlay build — so its presence in the env IS the trigger. Audited even
+    # when no rendered compose pulls it (a BAG_LOGGER_IMAGE override, say): the export makes it
+    # the deployment's overlay, and any consumer that appears next pulls exactly this ref.
+    msgs_ref = env.get("RIG_MSGS_IMAGE")
+    if msgs_ref:
+        msgs_files, msgs_err = _read_msgs_files(msgs_ref)
+        if msgs_err:
+            issues.append((WARN, f"msgs overlay {msgs_ref}: uninspectable (unpullable? no shell?) "
+                                 f"— {msgs_err}"))
+        else:
+            pkgs_by_ref = {r: p for r, _, p, _ in ros_images}
+            issues += _msgs_stale_issues(manifest, descriptors, msgs_ref, msgs_files, pkgs_by_ref)
 
     if ros_images and distro and not distro_bad:
         issues.append((OK, f"every ROS image carries /opt/ros/{distro}"))

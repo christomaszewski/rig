@@ -744,12 +744,19 @@ knows the deployment's resolved service set:
 - **Doctor**: OK line naming the composed ref; conflict ERRORs (block `up`); and the preflight the
   whole feature exists for — WARN when services declare `msgs:` but no provider declares
   `msgs_overlay` (the recorder would run the bare base and bags silently miss those topics).
-- **Queued (don't block; specced in `rig-msgs-plan.md` as the v0.2.29 fast-follow)**: `rig image
-  audit` comparing the overlay's baked manifest + dpkg state against the union of the riggings'
-  declarations — the stale-overlay catch (declaration changed, build forgotten, `up` pulls the old
-  image under the same tag). The deeper check — each `source:` pin against the declaring service's
-  own image — first needs a provider-side provenance convention (service images record which ref
-  they built from); dpkg can't see source builds and package.xml versions miss ref drift.
+- **The stale-overlay audit — ✅ v0.2.29**: `rig image audit` probes the resolved RIG_MSGS_IMAGE
+  (even when no rendered compose pulls it): baked `/opt/fleet-msgs/manifest.yaml` vs the CURRENT
+  union (drift = ERROR — declaration changed, build forgotten, `up` pulls the old image under the
+  same tag), and every declared `apt` package installed (shared name mapping). Absent/malformed
+  baked manifest = WARN, never ERROR.
+- **The provenance pin-skew tiers — v0.2.30**: the deeper check — each `source:` pin against the
+  declaring service's own image — consumes the provenance convention rig-infra froze
+  (`~/ws/infra/rig-msgs-provenance-handoff.md` ADDENDUM; rig-infra v1.6.0: every participating
+  image bakes `/opt/fleet-msgs/provenance.yaml` v1 — repo/ref/rev(+packages, cloned_from), the
+  overlay always, services via `provenance-record.sh`). Tiers: absent → WARN (unadopted);
+  declared repo missing from a present file → ERROR; ref mismatch → ERROR; both revs real and
+  unequal → ERROR even under equal refs (the moved-tag tier only SHAs give); `rev: unknown` or a
+  malformed file → WARN unverifiable, never ERROR. Repo join normalized per contract §A3.
 - **rig-infra follow-ups** (tracked in `rig-msgs-plan.md`): declare `msgs_overlay` on the
   zenoh-router + ros2-bag-logger riggings, drop the "rig does not export this var yet" caveats
   (logger compose comment, README §Custom-message-types, build-msgs.sh header), one registry

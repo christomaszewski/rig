@@ -1,8 +1,21 @@
 # rig — project state & handoff (resume here)
 
 > Snapshot for picking the project up cold in a new session. Read this first, then `CHEATSHEET.md` /
-> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.2.28**,
-> branch **`main`**, 557 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.2.29**,
+> branch **`main`**, 567 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> **v0.2.29 (2026-08-27) — the stale-overlay audit** (`rig-msgs-plan.md` §Fast-follow): the overlay
+> in the registry is whatever the LAST `rig build` baked — a `msgs:` declaration added or a pin
+> bumped since then leaves `up` pulling the OLD fleet-ros-msgs under the SAME tag, and the new
+> types silently vanish from bags. `rig image audit` now probes the resolved RIG_MSGS_IMAGE (even
+> when no rendered compose pulls it — a BAG_LOGGER_IMAGE override still leaves it the deployment's
+> overlay): baked `/opt/fleet-msgs/manifest.yaml` vs the CURRENT union — drift = ERROR naming what
+> changed (comparison normalizes repo spellings per the provenance contract §A3 and sorts lists,
+> so hand-authored manifests compare by content); each declared `apt` package installed via the
+> shared `ros-<distro>-<'_'→'-'>` mapping — missing = ERROR. Absent/unparseable baked manifest or
+> unpullable overlay = WARN, never ERROR. The file probe reads manifest + provenance in one docker
+> run — the provenance half feeds v0.2.30's pin-skew tiers (contract frozen in
+> `~/ws/infra/rig-msgs-provenance-handoff.md` ADDENDUM; rig-infra v1.6.0/`b1b5bea` ships the
+> provider side: overlay always writes provenance, `provenance-record.sh` for services).
 > **v0.2.28 (2026-08-27) — the msgs overlay** (`rig-msgs-plan.md`; ROADMAP §14; contract:
 > `~/ws/infra/rig-msgs-image-handoff.md`, rig-infra `ed94cbc`): rosbag2 can't record a topic whose
 > message package isn't in the recorder's image (logs "unknown type", keeps going — bags silently
