@@ -19,9 +19,17 @@
 > source ≠ the OPEN run; unsealed WARN; no bags = refuse; CLEAN-HOST (refuses while ANY manifest
 > stack runs — recorders pin their run dir at start, survivors would write into the OLD run;
 > fail-closed, --force overrides; this subsumes the planned sensor-overlap guard and is why
-> new_run is then called force=True — one guard, not two docker calls). **RELEASE HELD** until
-> rig-infra v1.8.0 (the player, in progress against the frozen handoff) lands + one live
-> integration smoke; v0.2.34 (doctor + `replay: {sim_time}` rigging adoption) follows.
+> new_run is then called force=True — one guard, not two docker calls). RELEASED after rig-infra
+> **v1.8.0** landed (`d0553b3` — every handoff §5 unknown answered live: three selector modes
+> exact, absent-topics tolerated, splits play as one, transient-local restores with a
+> start_offset caveat, /clock 40 Hz scaling with -r, loop wrap README'd, ro mount enforced) and
+> the integration smoke passed: dry-run through the real CLI (selector exact, player LAST,
+> replay env on every launcher) + the real player launcher's `config` verb driven under rig's
+> exact exports (play.sh renders `--clock --topics …`, compose shows restart:'no' + /replay ro).
+> This deployment now carries the wiring: services.yaml routes ros2-bag-player, vehicle.yaml
+> grew the `autonomy:` list with the bag_player row (enabled: false, order 999),
+> config/autonomy/bag_player.yaml is the shipped example. NEXT: v0.2.34 — doctor layer +
+> `replay: {sim_time: true}` rigging adoption by the autonomy/service launchers.
 > **v0.2.32 (2026-08-27) — graph topology as a run artifact** (ROADMAP §15; plan
 > `rig-graph-plan.md`, contract `~/ws/infra/rig-graph-capture-handoff.md`): rig-infra v1.7.0's
 > graph-snapshotter sidecar (in ros2-bag-logger, profile-gated by the logger config's `graph:`

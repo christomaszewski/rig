@@ -9,6 +9,7 @@
 # LOCAL DEVELOPMENT, point at sibling checkouts, as below. See docs/HOST_SETUP.md.
 services:
   zenoh-router:   { path: ../rig-infra/zenoh-router }  # shared infra (rig-infra checkout beside this repo)
+  ros2-bag-player: { path: ../rig-infra/ros2-bag-player }  # SIL replay player (rig-infra ≥ v1.8.0)
   camera-service: { path: ../camera-service }
   novatel:     { path: ../novatel }
   sbg:         { path: ../sbg_driver }

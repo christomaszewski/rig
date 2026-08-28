@@ -47,3 +47,9 @@ sensors:
   - { name: gnss_primary, service: novatel,     config: config/sensors/gnss_primary.yaml, enabled: true, order: 10 }
   - { name: ins_main,     service: sbg,         config: config/sensors/ins_main.yaml,     enabled: true, order: 20 }
   - { name: cam_front,    service: camera-service, config: config/sensors/cam_front.yaml,     enabled: true, order: 30 }
+
+# autonomy: graph consumers, up LAST / down FIRST. The bag player stays enabled: false — `rig replay`
+# selects it by explicit name (a normal `rig up` never starts it); order 999 keeps it after every
+# service under test, so subscriptions stand before data flows.
+autonomy:
+  - { name: bag_player, service: ros2-bag-player, config: config/autonomy/bag_player.yaml, enabled: false, order: 999 }
