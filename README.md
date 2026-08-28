@@ -341,6 +341,9 @@ launch_surface:                              # the minimal file set `rig vendor`
 #       ref: v1.16.0                         #   are MANDATORY and must equal the pin the service builds
 #       packages: [px4_msgs]                 #   against. rig unions the blocks fleet-wide; one repo at two
 #                                            #   refs is refused ("align the riggings"), never guessed.
+# replay: { sim_time: true }                # the launcher wires use_sim_time from RIG_SIM_TIME (rig's
+#                                            #   one clock token under `rig replay`; explicit config wins
+#                                            #   both ways). Undeclared services under test WARN at replay
 # interface:                                 # the service's declared topic/service contract — checked
 #   publishes:                               #   WARN-only against a run's OBSERVED graph epochs
 #     - {topic: fix, type: sensor_msgs/msg/NavSatFix}   # relative = instance-namespace; absolute

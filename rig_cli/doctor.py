@@ -267,3 +267,29 @@ def run(manifest: Manifest, catalog: dict[str, ServiceEntry], descriptors: dict[
                                   certify.certify_target(desc, sensor.config, dict(os.environ)))
             errors += e
     return 1 if errors else 0
+
+
+def replay_issues(manifest: Manifest, descriptors: dict[str, Descriptor],
+                  with_names: list[str], *, sim_time: bool) -> list[Issue]:
+    """Replay-specific preflight (called by `rig replay`, dry-run included — never by plain
+    `doctor`, which has no with-set). WARN-only: replay is a bench workflow and the operator may
+    know better — but an undeclared launcher under sim time is the silent failure class this
+    check exists for (the service runs WALL clock while the player stamps BAG time; TF and every
+    stamp comparison quietly rejects the replayed data)."""
+    if not sim_time:
+        return [Issue(INFO, "wall clock: replayed stamps are historical — services comparing "
+                            "them to now() will reject old data (this is the --wall-clock "
+                            "trade-off, fine for topic-flow smoke tests)")]
+    issues = []
+    rows = [s for s in manifest.sensors if s.name in set(with_names)]
+    undeclared = [s for s in rows
+                  if not getattr(descriptors[s.service], "replay_sim_time", False)]
+    for s in undeclared:
+        issues.append(Issue(WARN, f"{s.name} [{s.service}]: under sim time but its rigging does "
+                                  f"not declare `replay: {{sim_time: true}}` — the launcher "
+                                  f"likely runs wall clock against bag-time stamps (TF lookups "
+                                  f"and stamp gates will reject the replayed data). Adopt "
+                                  f"RIG_SIM_TIME in the launcher, or run --wall-clock"))
+    if rows and not undeclared:
+        issues.append(Issue(OK, "every service under test declares replay sim-time adoption"))
+    return issues

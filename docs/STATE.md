@@ -1,8 +1,20 @@
 # rig — project state & handoff (resume here)
 
 > Snapshot for picking the project up cold in a new session. Read this first, then `CHEATSHEET.md` /
-> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.2.33**,
-> branch **`main`**, 608 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.2.34**,
+> branch **`main`**, 611 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> **v0.2.34 (2026-08-28) — replay doctor + sim-time adoption** (the replay arc's fast-follow,
+> closing it): rigging grows `replay: {sim_time: true}` (strict parse; block-shaped for future
+> replay capabilities like a per-sensor SOURCE declaration) — the launcher's PROMISE to wire
+> `use_sim_time` from RIG_SIM_TIME. `doctor.replay_issues()` (called by replay preflight, dry-run
+> included — never by plain doctor, which has no with-set): WARN per service under test lacking
+> the declaration when sim time is on (the silent wall-clock-vs-bag-time failure class), OK when
+> all declare, INFO on --wall-clock. Replay's clean-host guard DEMOTES to a WARN under --dry-run
+> (a preview must not require a quiet host). rig-infra **v1.9.0**: the bag-logger adopted
+> (bag_cmd `sim_time_env` fills `control.use_sim_time`'s default, explicit config wins both
+> ways) + declares the promise — replay-run bags record on BAG time, the A/B pair aligns by
+> timestamp; the player needs no declaration (it is the clock source). Service repos adopt via
+> `~/ws/infra/service-sim-time-adoption-prompt.md` (novatel/sbg/camera pending, WARN-visible).
 > **v0.2.33 (2026-08-28) — the replay verb (core)** (ROADMAP §2's replay half; plan
 > `rig-replay-plan.md`, player contract `~/ws/infra/rig-replay-player-handoff.md` §1):
 > `rig replay <run> <names…> [--label] [--wall-clock] [--force] [--dry-run]` opens a NEW

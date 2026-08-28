@@ -237,6 +237,75 @@ def test_cmd_dry_run_env_and_ordering():
         replay.doctor_mod.collect, replay.dispatch.fleet_env, replay.dispatch.run_verb = orig
 
 
+def test_descriptor_replay_block_and_strictness():
+    import tempfile as tf
+    repo = pathlib.Path(tf.mkdtemp())
+    from rig_cli.descriptor import load_descriptor
+
+    def _load(block):
+        (repo / "rigging.yaml").write_text("service: svc\nlauncher: svc-up\n" + block)
+        return load_descriptor("svc", repo)
+
+    assert _load("replay: { sim_time: true }\n").replay_sim_time is True
+    assert _load("replay: { sim_time: false }\n").replay_sim_time is False
+    assert _load("").replay_sim_time is False
+    for bad in ("replay: { simtime: true }\n",        # typo'd key
+                "replay: { sim_time: yes please }\n",  # not a bool
+                "replay: sim_time\n"):                 # not a mapping
+        try:
+            _load(bad)
+            assert False, f"must refuse: {bad!r}"
+        except RigError:
+            pass
+
+
+def test_replay_issues_warn_ok_and_wallclock():
+    from rig_cli import doctor
+
+    class D:  # the one attribute replay_issues reads
+        def __init__(self, adopted):
+            self.replay_sim_time = adopted
+
+    m = _manifest([_row("planner", service="plan", tier="autonomy"),
+                   _row("gnss_primary", service="nov")])
+    both = ["planner", "gnss_primary"]
+    warns = doctor.replay_issues(m, {"plan": D(True), "nov": D(False)}, both, sim_time=True)
+    assert [i.level for i in warns] == [doctor.WARN]
+    assert "gnss_primary" in warns[0].message and "sim_time" in warns[0].message
+    ok = doctor.replay_issues(m, {"plan": D(True), "nov": D(True)}, both, sim_time=True)
+    assert [i.level for i in ok] == [doctor.OK]
+    info = doctor.replay_issues(m, {"plan": D(False), "nov": D(False)}, both, sim_time=False)
+    assert [i.level for i in info] == [doctor.INFO]  # wall clock: informational, never nagging
+
+
+def test_cmd_dry_run_survives_a_busy_host():
+    src = _source_run()
+    rows = [_row("planner", service="plan", tier="autonomy", order=20), PLAYER]
+    m = _manifest(rows)
+    descriptors = {s.service: object() for s in rows}
+    orig = (replay.doctor_mod.collect, replay.dispatch.fleet_env, replay.dispatch.run_verb,
+            replay.runs_mod.running_projects)
+    try:
+        replay.doctor_mod.collect = lambda *a, **k: []
+        replay.dispatch.fleet_env = lambda *a, **k: {}
+        replay.dispatch.run_verb = lambda pairs, env, verb, dry_run=False, **k: []
+        replay.runs_mod.running_projects = lambda _m: ["planner-vehicle-1"]  # busy host
+        rc = replay.cmd(m, {}, descriptors, pathlib.Path("."), run_ref=str(src),
+                        names=["planner"], label=None, wall_clock=False, force=False,
+                        dry_run=True)
+        assert rc == 0  # dry-run WARNs about the would-be refusal instead of dying
+        try:
+            replay.cmd(m, {}, descriptors, pathlib.Path("."), run_ref=str(src),
+                       names=["planner"], label=None, wall_clock=False, force=False,
+                       dry_run=False)
+            assert False, "a REAL replay on a busy host must refuse"
+        except RigError:
+            pass
+    finally:
+        (replay.doctor_mod.collect, replay.dispatch.fleet_env, replay.dispatch.run_verb,
+         replay.runs_mod.running_projects) = orig
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

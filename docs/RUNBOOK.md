@@ -225,7 +225,10 @@ CURRENT build/config; the player plays exactly the topics they consumed in the s
 (selected from its graph epochs — observed subscribes minus observed publishes, so a service
 never hears its own past outputs; pre-epoch runs fall back to a namespace heuristic, loudly).
 By default the player publishes `/clock` (`RIG_SIM_TIME=1`) — services whose launchers adopted
-sim-time pace to bag time; `--wall-clock` disables both sides at once.
+sim-time pace to bag time; `--wall-clock` disables both sides at once. Replay preflight WARNs per
+service under test whose rigging lacks `replay: {sim_time: true}` (the adoption promise — one
+launcher change per service, see `~/ws/infra/service-sim-time-adoption-prompt.md`; the bag-logger
+adopted in rig-infra v1.9.0, so replay-run bags record on bag time and the A/B pair aligns).
 
 ```bash
 rig down                                   # replay starts from a quiet host (recorders pin their

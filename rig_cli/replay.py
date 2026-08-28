@@ -180,6 +180,9 @@ def cmd(manifest, catalog, descriptors, root: Path, *, run_ref: str, names: list
     mode, value, notices = select_topics(src_dir, names)
     for n in notices:
         eprint(f"rig replay: {n}")
+    for issue in doctor_mod.replay_issues(manifest, descriptors, names,
+                                          sim_time=not wall_clock):
+        eprint(f"  [{doctor_mod._SYMBOL[issue.level]}] {issue.message}")
 
     # Up-set: enabled infra (logger + its graph sidecar ride along, recording the A/B outputs)
     # + the with-set + the player — explicit names, so select's tier/order gives producers-first
@@ -193,7 +196,13 @@ def cmd(manifest, catalog, descriptors, root: Path, *, run_ref: str, names: list
                f"row in `autonomy:` with a high `order` (a player starting before its "
                f"subscribers drops the bag head)")
 
-    _guard_clean_host(manifest, force)
+    if dry_run:  # a preview must not require a quiet host — surface the refusal, keep going
+        try:
+            _guard_clean_host(manifest, force)
+        except RigError as exc:
+            eprint(f"  [!] dry-run: a real replay would refuse here — {exc}")
+    else:
+        _guard_clean_host(manifest, force)
 
     env = dispatch.fleet_env(manifest, descriptors)
     env["RIG_REPLAY_SOURCE"] = str(src_dir)
