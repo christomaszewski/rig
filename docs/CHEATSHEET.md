@@ -408,6 +408,9 @@ ssh $VEHICLE 'cd ~/ws/v1 && ./run.sh runs'                 # registry: OPEN / se
 ssh $VEHICLE 'cd ~/ws/v1 && ./run.sh down --end-run'       # stop everything, then seal the session
 scp -r $VEHICLE:<data_dir>/runs/<stamp>_dock-test .        # the whole session, data + manifest
 rig graph <stamp>_dock-test --check                        # topology + declared-vs-observed WARNs
+rig replay <stamp>_dock-test planner                       # SIL: play planner's recorded inputs at
+                                                           #   the CURRENT planner build/config —
+                                                           #   new run links back via replay-of
 ```
 (bare-Docker hosts: `./new-run.sh dock-test && ./up.sh` — the flagged forms need the bundled rig.)
 

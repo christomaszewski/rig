@@ -197,6 +197,34 @@ docker rm -f registry                                      # stop the dev-box re
 
 ---
 
+## SIL replay — test a service change against a recorded run (rig ≥ v0.2.33)
+
+Needs the `ros2-bag-player` row in vehicle.yaml (`autonomy:`, `enabled: false`, high `order` —
+rig-infra ≥ v1.8.0) and a sealed source run with bags. The named instances come up LIVE at their
+CURRENT build/config; the player plays exactly the topics they consumed in the source run
+(selected from its graph epochs — observed subscribes minus observed publishes, so a service
+never hears its own past outputs; pre-epoch runs fall back to a namespace heuristic, loudly).
+By default the player publishes `/clock` (`RIG_SIM_TIME=1`) — services whose launchers adopted
+sim-time pace to bag time; `--wall-clock` disables both sides at once.
+
+```bash
+rig down                                   # replay starts from a quiet host (recorders pin their
+                                           #   run dir at start — survivors would write elsewhere)
+rig replay <stamp>_fieldtest planner       # new run opens, labeled replay-<source> (--label to name)
+rig down --end-run                         # seal the replay session like any run
+rig runs                                   # the REPLAY-OF column links the pair
+```
+
+The A/B artifact: the SOURCE run's bag holds the original outputs, the replay run's bag holds the
+new ones, and `replay:` in the new run's manifest links them. `rig graph <replay-run>` shows the
+SIL topology. Known limits (by design): `/tf` is shared-bus — the bag replays the ORIGINAL
+stack's transforms, and frames the service under test re-publishes will conflict (the player
+config's `play.exclude` is the hatch); ROS services/actions are not in bags, so
+request/response-driven behavior does not SIL; replay is current-code-against-old-data, never a
+bit-exact rerun (tag pins, not digests).
+
+---
+
 ## Notes & prerequisites
 
 **Platform (`platform:`) vs version (`images.tag`).** Two orthogonal *host-level* properties, both in

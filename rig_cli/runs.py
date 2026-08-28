@@ -317,7 +317,8 @@ def capture_docker_logs(manifest: Manifest) -> int:
     return captured
 
 
-def _open_run(manifest: Manifest, root: Path, data: Path, label: str | None) -> str:
+def _open_run(manifest: Manifest, root: Path, data: Path, label: str | None,
+              replay: dict | None = None) -> str:
     runs = data / "runs"
     runs.mkdir(parents=True, exist_ok=True)
     run_id = f"{_now()}_{label or 'auto'}"
@@ -341,6 +342,8 @@ def _open_run(manifest: Manifest, root: Path, data: Path, label: str | None) -> 
         doc["artifact"] = tag
     if (dep := deployment_id(root)) is not None:
         doc["deployment"] = dep  # the OPENING deployment instance; each ups: entry re-attributes
+    if replay:  # a SIL replay session: {of: <source-run-id>, source: <abs path>, with: [names]}
+        doc["replay"] = replay
     (run_dir / "manifest.yaml").write_text(yaml.safe_dump(doc, sort_keys=False))
     cur = _current(data)
     if cur.exists() and not cur.is_symlink():
@@ -397,8 +400,11 @@ def ensure(manifest: Manifest, root: Path) -> str | None:
     return run_id
 
 
-def new_run(manifest: Manifest, root: Path, label: str | None, *, force: bool = False) -> str:
-    """Rotate: seal the open run (if any) and open a new one. Guarded while our stacks run."""
+def new_run(manifest: Manifest, root: Path, label: str | None, *, force: bool = False,
+            replay: dict | None = None) -> str:
+    """Rotate: seal the open run (if any) and open a new one. Guarded while our stacks run.
+    `replay` stamps the new run as a SIL replay session (replay.py passes it; see the manifest's
+    `replay:` key)."""
     if label and not _LABEL_RE.match(label):
         raise RigError(f"new-run: label '{label}' must match [A-Za-z0-9][A-Za-z0-9_-]* "
                        f"(it becomes a directory name)")
@@ -408,7 +414,7 @@ def new_run(manifest: Manifest, root: Path, label: str | None, *, force: bool = 
         digest, dep = _live_state(manifest, root)
         _seal(cur[1], None, live_digest=digest, live_deployment=dep)
         eprint(f"rig: sealed run {cur[0]}")
-    run_id = _open_run(manifest, root, data, label)
+    run_id = _open_run(manifest, root, data, label, replay=replay)
     eprint(f"rig: opened run {run_id}")
     return run_id
 
@@ -450,6 +456,7 @@ class RunRow:
     started: str
     ended: str
     disk_kb: int | None
+    replay_of: str | None = None  # SIL replay sessions name their source run
 
 
 def list_runs(manifest: Manifest) -> list[RunRow]:
@@ -471,9 +478,12 @@ def list_runs(manifest: Manifest) -> list[RunRow]:
             continue
         ended = str(doc.get("ended") or "")
         state = "OPEN" if d.name == open_id else ("sealed" if ended else "interrupted")
+        replay = doc.get("replay")
         rows.append(RunRow(run=d.name, label=str(doc.get("label") or "—"), state=state,
                            started=str(doc.get("started") or "?"), ended=ended or "—",
-                           disk_kb=doc.get("disk_kb")))
+                           disk_kb=doc.get("disk_kb"),
+                           replay_of=str(replay["of"]) if isinstance(replay, dict)
+                           and replay.get("of") else None))
     return rows
 
 

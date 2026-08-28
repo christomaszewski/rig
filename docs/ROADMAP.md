@@ -81,6 +81,15 @@ No launcher changes; no semantic interpretation of config bodies by rig; no simu
 
 ## 2. SIL / HIL via per-sensor source × per-run footprint (related)
 
+> **Status:** the REPLAY half is implemented — §15's graph epochs (v0.2.32) select the topic set,
+> and **`rig replay`** (v0.2.33; plan `rig-replay-plan.md`, player contract
+> `~/ws/infra/rig-replay-player-handoff.md`) plays a sealed run's recorded inputs at the named
+> instances via rig-infra's `ros2-bag-player` (≥ v1.8.0), in a new provenance-linked run
+> (`replay: {of, source, with}`) with one rig-owned clock token (`RIG_SIM_TIME` → the player's
+> `--clock` + adopted launchers' `use_sim_time`). The per-sensor source axis and the footprint
+> token below remain open — `RIG_REPLAY_SOURCE` is deliberately fleet-general so a per-sensor
+> replay source (e.g. camera-service replaying its own mkv+csv recordings) consumes the same hook.
+
 Not modeled as enforced vehicle-wide modes. Two independent axes:
 - **Data source** — per *sensor*: live | replay | sim (a config / override concern, §1).
 - **Footprint** — per *run*: vehicle | bench | laptop (images / runtime / net; cam-up's existing `--dev`).

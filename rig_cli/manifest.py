@@ -31,7 +31,10 @@ LOCAL_KEYS = {"vehicle", "vehicle_id", "vars", "env", "data_dir", "images", "pla
 RIG_OWNED_ENV = {"VEHICLE_ID", "ROS_DOMAIN_ID", "RMW_IMPLEMENTATION", "RIG_IMAGE_REGISTRY",
                  "RIG_IMAGE_TAG", "RIG_TARGET_PLATFORM", "RIG_DATA_DIR", "COMPOSE_PROJECT_NAME",
                  "RIG_BASE_IMAGE", "RIG_BUILD_NO_CACHE", "RIG_ROS_RMW", "RIG_MSGS_IMAGE",
-                 "RIG_MSGS_MANIFEST"}
+                 "RIG_MSGS_MANIFEST",
+                 # the SIL replay channel (replay.py sets them; every other verb POPS them — a
+                 # leaked selector or sim-time token would silently corrupt a live session)
+                 "RIG_REPLAY_SOURCE", "RIG_REPLAY_TOPICS", "RIG_REPLAY_EXCLUDE", "RIG_SIM_TIME"}
 
 
 @dataclass(frozen=True)

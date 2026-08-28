@@ -115,6 +115,12 @@ python3 -m venv .venv && .venv/bin/pip install pyyaml
                           #   logger's `graph:` sidecar, rig-infra ≥ v1.7.0); --check compares vs the
                           #   riggings' declared interface: (WARN-only), --contract <instance>
                           #   scaffolds that block from observation, -o writes the union YAML
+./rig replay <run> planner  # SIL: NEW provenance-linked run; the named instances come up LIVE and
+                          #   the ros2-bag-player (rig-infra ≥ v1.8.0) plays the topics they
+                          #   consumed in <run> (selected from its graph epochs — observed
+                          #   subscribes minus publishes; namespace fallback for pre-epoch runs).
+                          #   The bag-logger records the new outputs: source bag vs replay bag is
+                          #   the A/B pair. Refuses while stacks run; teardown = down --end-run
 ./rig down                # tear down in reverse (autonomy FIRST); --purge also GCs external volumes
 ./rig cleanup             # decommission: remove this deployment's images + volumes from the host
                           #   (after the final down, before deleting the tree; --dry-run to preview)

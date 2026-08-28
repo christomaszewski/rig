@@ -1,8 +1,27 @@
 # rig — project state & handoff (resume here)
 
 > Snapshot for picking the project up cold in a new session. Read this first, then `CHEATSHEET.md` /
-> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.2.32**,
-> branch **`main`**, 597 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.2.33**,
+> branch **`main`**, 608 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> **v0.2.33 (2026-08-28) — the replay verb (core)** (ROADMAP §2's replay half; plan
+> `rig-replay-plan.md`, player contract `~/ws/infra/rig-replay-player-handoff.md` §1):
+> `rig replay <run> <names…> [--label] [--wall-clock] [--force] [--dry-run]` opens a NEW
+> provenance-linked run (`replay: {of, source, with}`; `rig runs` grows a REPLAY-OF column when
+> one exists) and dispatches `up` over enabled-infra + the with-set + the deployment's
+> `ros2-bag-player` row (service-name detected; declared `autonomy:`/`enabled: false`/order 999 —
+> explicit names win in select; missing row = pointed error carrying the row to paste). Topic
+> selection: PRIMARY from the source run's graph epochs — with-set observed subscribes minus
+> observed publishes (the self-echo guard, eprinted) with plumbing filtered; FALLBACK namespace
+> exclude regex + loud WARN (no epochs, or ANY named instance unobserved). Exports
+> `RIG_REPLAY_SOURCE` (fleet-general by design — future per-sensor replay sources consume it),
+> `RIG_REPLAY_TOPICS` XOR `RIG_REPLAY_EXCLUDE`, and `RIG_SIM_TIME=1` unless `--wall-clock` — all
+> four joined RIG_OWNED_ENV + the fleet_env pop loop (leak-proof on every other verb). Guards:
+> source ≠ the OPEN run; unsealed WARN; no bags = refuse; CLEAN-HOST (refuses while ANY manifest
+> stack runs — recorders pin their run dir at start, survivors would write into the OLD run;
+> fail-closed, --force overrides; this subsumes the planned sensor-overlap guard and is why
+> new_run is then called force=True — one guard, not two docker calls). **RELEASE HELD** until
+> rig-infra v1.8.0 (the player, in progress against the frozen handoff) lands + one live
+> integration smoke; v0.2.34 (doctor + `replay: {sim_time}` rigging adoption) follows.
 > **v0.2.32 (2026-08-27) — graph topology as a run artifact** (ROADMAP §15; plan
 > `rig-graph-plan.md`, contract `~/ws/infra/rig-graph-capture-handoff.md`): rig-infra v1.7.0's
 > graph-snapshotter sidecar (in ros2-bag-logger, profile-gated by the logger config's `graph:`

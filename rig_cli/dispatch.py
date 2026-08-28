@@ -49,7 +49,12 @@ def fleet_env(manifest: Manifest, descriptors: dict[str, Descriptor] | None = No
                        ("RIG_BASE_IMAGE", base_ref),
                        ("RIG_MSGS_IMAGE", msgs_ref),
                        ("RIG_TARGET_PLATFORM", manifest.platform),
-                       ("RIG_DATA_DIR", manifest.data_dir)):
+                       ("RIG_DATA_DIR", manifest.data_dir),
+                       # the replay channel: None here on EVERY verb (popped) — replay.py alone
+                       # sets them on its env copy after this returns (per-invocation, never
+                       # manifest state)
+                       ("RIG_REPLAY_SOURCE", None), ("RIG_REPLAY_TOPICS", None),
+                       ("RIG_REPLAY_EXCLUDE", None), ("RIG_SIM_TIME", None)):
         if value not in (None, ""):
             env[key] = str(value)
         else:
@@ -122,7 +127,8 @@ def run(
                    f"ROS_DOMAIN_ID={env['ROS_DOMAIN_ID']} RMW_IMPLEMENTATION={env['RMW_IMPLEMENTATION']}")
         for key in ("VEHICLE_ID", "RIG_IMAGE_REGISTRY", "RIG_IMAGE_TAG", "RIG_BASE_IMAGE",
                     "RIG_MSGS_IMAGE", "RIG_TARGET_PLATFORM", "RIG_DATA_DIR",
-                    desc.platform_override_env or ""):
+                    "RIG_REPLAY_SOURCE", "RIG_REPLAY_TOPICS", "RIG_REPLAY_EXCLUDE",
+                    "RIG_SIM_TIME", desc.platform_override_env or ""):
             if key and env.get(key):
                 envline += f" {key}={env[key]}"
         eprint(f"  {sensor.name} [{sensor.service}]  (cwd={desc.repo})")

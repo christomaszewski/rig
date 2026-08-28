@@ -195,15 +195,25 @@ def cmd_runs(args, manifest, catalog, descriptors) -> int:
             return f"{kb}K"
         return f"{kb / 1024:.0f}M" if kb < 1024 * 1024 else f"{kb / (1024 * 1024):.1f}G"
 
-    headers = ("RUN", "LABEL", "STATE", "STARTED", "ENDED", "SIZE")
+    replayed = any(r.replay_of for r in rows)  # the column appears only when a replay run exists
+    headers = ("RUN", "LABEL", "STATE", "STARTED", "ENDED", "SIZE") \
+        + (("REPLAY-OF",) if replayed else ())
     table = [headers] + [
         (r.run, r.label, r.state, r.started, r.ended, _size(r.disk_kb))
+        + ((r.replay_of or "—",) if replayed else ())
         for r in rows
     ]
     widths = [max(len(row[i]) for row in table) for i in range(len(headers))]
     for row in table:
         print("  ".join(cell.ljust(widths[i]) for i, cell in enumerate(row)))
     return 0
+
+
+def cmd_replay(args, manifest, catalog, descriptors) -> int:
+    from . import replay as replay_mod
+    return replay_mod.cmd(manifest, catalog, descriptors, args.rig_root, run_ref=args.run,
+                          names=args.names, label=args.label, wall_clock=args.wall_clock,
+                          force=args.force, dry_run=args.dry_run)
 
 
 def cmd_graph(args, manifest, catalog, descriptors) -> int:
@@ -493,6 +503,7 @@ _HANDLERS = {
     "end-run": cmd_end_run,
     "runs": cmd_runs,
     "graph": cmd_graph,
+    "replay": cmd_replay,
     "config-render": cmd_config_render,
 }
 
@@ -604,6 +615,22 @@ def build_parser() -> argparse.ArgumentParser:
 
     rn = sub.add_parser("runs", help="list the run registry (OPEN / sealed / interrupted)")
     rn.add_argument("names", nargs="*", default=[], help=argparse.SUPPRESS)
+
+    rp = sub.add_parser("replay", help="SIL: play a sealed run's recorded topics back through "
+                                       "the named instances (needs the ros2-bag-player row, "
+                                       "rig-infra ≥ v1.8.0; selection from the run's graph epochs)")
+    rp.add_argument("run", help="SOURCE run id or run-dir path")
+    rp.add_argument("names", nargs="*",
+                    help="instance(s) under test — brought up live, their recorded inputs played")
+    rp.add_argument("--label", default=None,
+                    help="label for the NEW replay run (default: replay-<source-run>)")
+    rp.add_argument("--wall-clock", action="store_true", dest="wall_clock",
+                    help="no /clock, no use_sim_time (default: RIG_SIM_TIME=1 — player publishes "
+                         "/clock, adopted services pace to it)")
+    rp.add_argument("--force", action="store_true",
+                    help="proceed past preflight errors and the clean-host guard")
+    rp.add_argument("--dry-run", action="store_true",
+                    help="print selection + the exact launcher invocations; open no run")
 
     gr = sub.add_parser("graph", help="observed pub/sub/service topology from a run's graph "
                                       "epochs (the bag-logger's graph-snapshotter sidecar, "

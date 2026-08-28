@@ -534,6 +534,8 @@ _POSITIONAL_SOURCES: dict = {
     (("vendor",), "service"): _services,
     (("unbake",), "artifact"): _artifacts,
     (("graph",), "run"): _run_ids,
+    (("replay",), "run"): _run_ids,
+    (("replay",), "names"): _instances,
     (("pkg", "add"), "spec"): _add_specs,
     (("pkg", "remove"), "specs"): _remove_specs,
     (("pkg", "save"), "spec"): _save_specs,
