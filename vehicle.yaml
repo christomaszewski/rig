@@ -42,6 +42,9 @@ data_dir: ""
 # vehicle) lives here for rmw_zenoh; omit it (or enabled: false) for a DDS RMW or a ROS-less vehicle.
 infra:
   - { name: zenoh-router, service: zenoh-router, config: config/infra/zenoh-router.yaml, enabled: true, order: 0 }
+  # The logger sits just above the router so it records (bags + graph epochs) from the moment the
+  # sensors come up. Needs `data_dir` (set per-machine in /etc/rig/vehicle.local.yaml) to be run-aware.
+  - { name: bag_logger,   service: ros2-bag-logger, config: config/infra/bag_logger.yaml,   enabled: true, order: 1 }
 
 sensors:
   - { name: gnss_primary, service: novatel,     config: config/sensors/gnss_primary.yaml, enabled: true, order: 10 }

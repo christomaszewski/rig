@@ -197,6 +197,26 @@ docker rm -f registry                                      # stop the dev-box re
 
 ---
 
+## Field day — collecting a dataset worth replaying
+
+What can't be retrofitted is decided at RECORD time: bags need the logger row up, replay's exact
+topic selection needs the graph sidecar's epochs, and replay-from-any-offset needs latched topics
+re-written into every split (`record.repeat_transient_local: true`). All three are wired in this
+tree's `config/infra/bag_logger.yaml`. The night before:
+
+```bash
+# on the vehicle: data_dir + platform are MACHINE-local (/etc/rig/vehicle.local.yaml)
+rig build && rig image audit         # images current (logger/sidecar/player ride fleet-ros ≥ infra v1.8.0)
+rig bake --tag <t>                   # ship; on the vehicle: doctor, then a DRESS REHEARSAL —
+./run.sh up --run rehearsal          #   a 3-minute run, then verify the run dir has bags/ +
+./run.sh down --end-run              #   graph/<name>/epoch_*.yaml + camera video, and
+rig graph <rehearsal-run> --check    #   the topology looks right. Cheap today, priceless tomorrow.
+```
+
+On the day: `up --run <label>` (label every session), `down --end-run` after landing (captures
+docker logs, seals), copy the SEALED run dir off (`ended:` present = safe to sync), and leave
+disk headroom ≥ 2× the expected bag+video volume.
+
 ## SIL replay — test a service change against a recorded run (rig ≥ v0.2.33)
 
 Needs the `ros2-bag-player` row in vehicle.yaml (`autonomy:`, `enabled: false`, high `order` —
