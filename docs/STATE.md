@@ -1,8 +1,21 @@
 # rig — project state & handoff (resume here)
 
 > Snapshot for picking the project up cold in a new session. Read this first, then `CHEATSHEET.md` /
-> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.2.31**,
-> branch **`main`**, 582 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.2.32**,
+> branch **`main`**, 597 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> **v0.2.32 (2026-08-27) — graph topology as a run artifact** (ROADMAP §15; plan
+> `rig-graph-plan.md`, contract `~/ws/infra/rig-graph-capture-handoff.md`): rig-infra v1.7.0's
+> graph-snapshotter sidecar (in ros2-bag-logger, profile-gated by the logger config's `graph:`
+> block) records append-only change-deduped EPOCH files — per-node pubs/subs/service
+> servers/clients with validity windows — into `<run>/graph/<name>/`; rig v0.2.32 ships the READER
+> (`rig_cli/graph.py`, pure YAML — rig stays ROS-free): `rig graph [run] [--check]
+> [--contract INSTANCE] [-o FILE]` derives union/instance-grouping at read time (no union at
+> seal — one path for sealed/unsealed/crashed runs), plus the rigging `interface:` block
+> (publishes/subscribes/provides/requires; relative = instance-ns, absolute = shared-bus) with
+> WARN-only declared-vs-observed checks both directions; `--contract` prints the scaffold from
+> observation, never auto-edits a rigging. Plumbing (rosout, parameter/type-description services)
+> recorded raw, hidden from derived views. NEXT: the replay arc (`rig-replay-plan.md`, renumbered
+> v0.2.33/34 + rig-infra v1.8.0) consumes these epochs as its topic selector.
 > **v0.2.31 (2026-08-27) — docker log capture at seal** (ROADMAP §3c): `down --end-run` now saves
 > `docker logs --timestamps` (stderr merged — one file reads like the terminal) from every container
 > of the deployment's compose projects into the sealing run, `runs/<id>/.rig/logs/<sensor>/

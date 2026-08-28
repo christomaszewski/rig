@@ -188,6 +188,7 @@ Open `http://<ORIN-IP>:8080` from a laptop on the mesh.
 ## 8 — Iterate / teardown
 ```bash
 ssh $ORIN 'cd /opt/rig/test1 && ./run.sh logs cam_usb'    # or: down
+rig graph --check          # after a run: observed topology vs declared interface: blocks (WARN-only)
 # re-deploy after a change: edit configs -> rig build (if images changed) -> rig bake --tag test2 -> scp -> tar xzf -> ./run.sh up
 # retiring a deployment from the Orin entirely: down, then decommission, then delete the tree —
 ssh $ORIN 'cd /opt/rig/test1 && ./run.sh down && ./run.sh cleanup && cd .. && rm -rf test1'

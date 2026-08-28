@@ -111,6 +111,10 @@ python3 -m venv .venv && .venv/bin/pip install pyyaml
 ./rig status -v           # expand per-container detail
 ./rig logs cam_front -f   # follow one sensor's logs
 ./rig config gnss_primary # render a sensor's merged compose (delegates to the launcher's `config`)
+./rig graph               # observed pub/sub/service topology from a run's graph epochs (the bag
+                          #   logger's `graph:` sidecar, rig-infra ≥ v1.7.0); --check compares vs the
+                          #   riggings' declared interface: (WARN-only), --contract <instance>
+                          #   scaffolds that block from observation, -o writes the union YAML
 ./rig down                # tear down in reverse (autonomy FIRST); --purge also GCs external volumes
 ./rig cleanup             # decommission: remove this deployment's images + volumes from the host
                           #   (after the final down, before deleting the tree; --dry-run to preview)
@@ -331,6 +335,13 @@ launch_surface:                              # the minimal file set `rig vendor`
 #       ref: v1.16.0                         #   are MANDATORY and must equal the pin the service builds
 #       packages: [px4_msgs]                 #   against. rig unions the blocks fleet-wide; one repo at two
 #                                            #   refs is refused ("align the riggings"), never guessed.
+# interface:                                 # the service's declared topic/service contract — checked
+#   publishes:                               #   WARN-only against a run's OBSERVED graph epochs
+#     - {topic: fix, type: sensor_msgs/msg/NavSatFix}   # relative = instance-namespace; absolute
+#     - /tf                                  #   (/tf) = shared-bus; bare string = name only. Bootstrap
+#   subscribes: [{topic: rtcm}]              #   from observation: `rig graph --contract <instance>`
+#   provides: [{service: reset, type: std_srvs/srv/Trigger}]   # service servers
+#   requires: []                             #   service clients (what this service NEEDS)
 # platform: { auto_detect: /etc/nv_tegra_release, override_env: CAM_PLATFORM }  # the launcher's standalone
 #                                            #   host probe + the env var it honors; rig mirrors the vehicle's
 #                                            #   declared `platform:` into it (RIG_TARGET_PLATFORM sibling)

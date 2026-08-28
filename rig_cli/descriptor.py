@@ -41,6 +41,20 @@ DEFAULT_VERBS = {
 }
 
 
+# The four `interface:` kinds, and the entry key each carries (`topic:` vs `service:`).
+INTERFACE_KINDS = {"publishes": "topic", "subscribes": "topic",
+                   "provides": "service", "requires": "service"}
+
+
+@dataclass(frozen=True)
+class InterfaceEdge:
+    """One declared `interface:` entry. `name` without a leading `/` is instance-namespace-relative
+    (instance `name` is the ROS namespace); a leading `/` means shared-bus (`/tf`). `type` is
+    optional on hand-authored entries — `rig graph --contract` scaffolds always carry it."""
+    name: str
+    type: str | None
+
+
 @dataclass(frozen=True)
 class MsgsSource:
     """One `msgs.source` entry: an interface-package repo the fleet builds from source. `ref` is
@@ -84,6 +98,11 @@ class Descriptor:
     #                                              /etc/nv_tegra_release) — informational; declared wins
     platform_override_env: str | None = None     # env var the launcher honors as platform override (e.g.
     #                                              CAM_PLATFORM) — rig mirrors RIG_TARGET_PLATFORM into it
+    interface: dict[str, tuple[InterfaceEdge, ...]] | None = None  # `interface:` — the service's
+    #                                              declared topic/service contract (publishes/
+    #                                              subscribes/provides/requires). None = undeclared
+    #                                              (distinct from declared-empty). Checked WARN-only
+    #                                              against observed graph epochs (`rig graph --check`)
     mirror: list[str] = field(default_factory=list)  # third-party images to copy into the registry
     tier: str = "sensor"         # optional hint: "infra" = shared, up-first (dashboard, routers, loggers);
     #                              "autonomy" = graph consumer, up-last / down-first (planners, SLAM)
@@ -219,6 +238,52 @@ def load_descriptor(service: str, repo: Path) -> Descriptor:
             msgs_source.append(MsgsSource(repo=str(repo_url), ref=str(ref),
                                           packages=tuple(str(p) for p in packages)))
 
+    interface_raw = data.get("interface")  # `interface: { publishes/subscribes: [{topic, type?}],
+    #                               provides/requires: [{service, type?}] }` — the service's declared
+    #                               topic/service contract, checked WARN-only against a run's observed
+    #                               graph epochs (`rig graph --check`). Bootstrap from observation:
+    #                               `rig graph --contract <instance>` prints the block. A bare string
+    #                               entry is shorthand for {topic|service: <it>} (no type).
+    interface: dict[str, tuple[InterfaceEdge, ...]] | None = None
+    if interface_raw is not None:
+        if not isinstance(interface_raw, dict):
+            raise RigError(f"{path}: `interface` must be a mapping with "
+                           f"{'/'.join(INTERFACE_KINDS)}")
+        unknown = set(interface_raw) - set(INTERFACE_KINDS)
+        if unknown:  # a typo'd kind would silently drop half the contract from the checks
+            raise RigError(f"{path}: interface: unknown key(s) {', '.join(sorted(unknown))} — it "
+                           f"carries only {', '.join(INTERFACE_KINDS)}")
+        interface = {}
+        for kind, key in INTERFACE_KINDS.items():
+            edges: list[InterfaceEdge] = []
+            for i, entry in enumerate(interface_raw.get(kind) or []):
+                if isinstance(entry, str):
+                    entry = {key: entry}
+                if not isinstance(entry, dict):
+                    raise RigError(f"{path}: interface.{kind} #{i} must be a mapping "
+                                   f"{{{key}, type?}} or a bare name")
+                unknown = set(entry) - {key, "type"}
+                if unknown:
+                    raise RigError(f"{path}: interface.{kind} #{i}: unknown key(s) "
+                                   f"{', '.join(sorted(unknown))} — it carries only {key}, type "
+                                   f"({'topics' if key == 'topic' else 'services'} here)")
+                name = str(entry.get(key) or "")
+                # Relative (instance-namespace) or absolute (shared-bus); never `~` (node-private
+                # is not an instance-level concept) and never empty/trailing-slash/doubled-slash.
+                if not re.match(r"^/?[A-Za-z0-9_][A-Za-z0-9_/]*$", name) or "//" in name \
+                        or name.endswith("/"):
+                    raise RigError(f"{path}: interface.{kind} #{i}: '{name}' is not a "
+                                   f"{key} name — relative (fix) or absolute (/tf), "
+                                   f"[A-Za-z0-9_/] only")
+                etype = entry.get("type")
+                if etype is not None:
+                    etype = str(etype)
+                    if not re.match(r"^[A-Za-z0-9_]+/(msg|srv|action)/[A-Za-z0-9_]+$", etype):
+                        raise RigError(f"{path}: interface.{kind} #{i}: type '{etype}' is not the "
+                                       f"full form (pkg/msg/Type, pkg/srv/Type)")
+                edges.append(InterfaceEdge(name=name, type=etype))
+            interface[kind] = tuple(edges)
+
     platform_raw = data.get("platform") or {}  # `platform: { auto_detect: <path>, override_env: <VAR> }`
     if not isinstance(platform_raw, dict):
         raise RigError(f"{path}: `platform` must be a mapping with auto_detect/override_env")
@@ -253,6 +318,7 @@ def load_descriptor(service: str, repo: Path) -> Descriptor:
         msgs_overlay_image=msgs_overlay_image,
         msgs_apt=msgs_apt,
         msgs_source=msgs_source,
+        interface=interface,
         platform_auto_detect=(str(platform_raw["auto_detect"]) if platform_raw.get("auto_detect")
                               else None),
         platform_override_env=override_env,

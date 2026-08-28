@@ -206,6 +206,12 @@ def cmd_runs(args, manifest, catalog, descriptors) -> int:
     return 0
 
 
+def cmd_graph(args, manifest, catalog, descriptors) -> int:
+    from . import graph as graph_mod
+    return graph_mod.cmd(manifest, descriptors, run_ref=args.run, do_check=args.check,
+                         contract_instance=args.contract, out=args.out)
+
+
 def cmd_logs(args, manifest, catalog, descriptors) -> int:
     env = dispatch.fleet_env(manifest, descriptors)
     pairs = _pairs(manifest, descriptors, args.names)
@@ -486,6 +492,7 @@ _HANDLERS = {
     "new-run": cmd_new_run,
     "end-run": cmd_end_run,
     "runs": cmd_runs,
+    "graph": cmd_graph,
     "config-render": cmd_config_render,
 }
 
@@ -597,6 +604,20 @@ def build_parser() -> argparse.ArgumentParser:
 
     rn = sub.add_parser("runs", help="list the run registry (OPEN / sealed / interrupted)")
     rn.add_argument("names", nargs="*", default=[], help=argparse.SUPPRESS)
+
+    gr = sub.add_parser("graph", help="observed pub/sub/service topology from a run's graph "
+                                      "epochs (the bag-logger's graph-snapshotter sidecar, "
+                                      "rig-infra ≥ v1.7.0)")
+    gr.add_argument("run", nargs="?", default=None,
+                    help="run id or run-dir path (default: the open run, else the newest)")
+    gr.add_argument("--check", action="store_true",
+                    help="compare observed vs the riggings' declared interface: blocks (WARN-only)")
+    gr.add_argument("--contract", metavar="INSTANCE", default=None,
+                    help="print an interface: scaffold from the instance's observed edges "
+                         "(paste into the service repo's rigging.yaml)")
+    gr.add_argument("-o", "--out", metavar="FILE", default=None,
+                    help="write the materialized union (epoch-shaped YAML) instead of the report")
+    gr.add_argument("names", nargs="*", default=[], help=argparse.SUPPRESS)
 
     st = add("status", "fleet status table")
     st.add_argument("-v", "--verbose", action="store_true", help="expand per-container detail")

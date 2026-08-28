@@ -482,6 +482,27 @@ def _artifacts(root_arg, positionals, words):
 
 
 @_soft
+def _run_ids(root_arg, positionals, words):
+    """Run-registry ids (newest first — the run you want is almost always recent). Raw-read
+    doctrine: data_dir comes from vehicle.local.yaml/vehicle.yaml verbatim; an unresolvable
+    {{var}} value bails to the file fallback rather than guessing."""
+    root = _deployment(root_arg)
+    if not root:
+        return []
+    data_dir = None
+    for path in (Path("/etc/rig/vehicle.local.yaml"), root / "vehicle.local.yaml",
+                 root / "vehicle.yaml"):  # local overrides win, as in the manifest load
+        if path.is_file() and _read_yaml(path).get("data_dir"):
+            data_dir = str(_read_yaml(path)["data_dir"])
+            break
+    if not data_dir or "{{" in data_dir:
+        return []
+    runs = Path(data_dir) / "runs"
+    return sorted((d.name for d in runs.iterdir() if d.is_dir()), reverse=True) \
+        if runs.is_dir() else []
+
+
+@_soft
 def _fleet_vehicles(root_arg, positionals, words):
     import os
     explicit = None  # the standard chain: --fleet > $RIG_FLEET > upward walk (fleet.py)
@@ -512,6 +533,7 @@ _POSITIONAL_SOURCES: dict = {
     (("add",), "service"): _add_specs,
     (("vendor",), "service"): _services,
     (("unbake",), "artifact"): _artifacts,
+    (("graph",), "run"): _run_ids,
     (("pkg", "add"), "spec"): _add_specs,
     (("pkg", "remove"), "specs"): _remove_specs,
     (("pkg", "save"), "spec"): _save_specs,
@@ -543,6 +565,7 @@ _OPTION_SOURCES: dict = {
     (("pkg", "yank"), "--from"): _registry_names,
     (("pkg", "search"), "--registry"): _registry_names,
     (("pkg", "outdated"), "--registry"): _registry_names,
+    (("graph",), "--contract"): _instances,
 }
 
 

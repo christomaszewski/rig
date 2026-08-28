@@ -774,3 +774,33 @@ knows the deployment's resolved service set:
   zenoh-router + ros2-bag-logger riggings, drop the "rig does not export this var yet" caveats
   (logger compose comment, README §Custom-message-types, build-msgs.sh header), one registry
   release carrying the complete feature.
+
+## 15. Graph topology capture — ✅ implemented (v0.2.32 + rig-infra v1.7.0)
+
+Plan doc: `rig-graph-plan.md` (untracked); frozen artifact contract:
+`~/ws/infra/rig-graph-capture-handoff.md` (rig-infra `30c8bf1`, released v1.7.0). Bags record
+data, not topology — rosbag2 keeps no node identity (ROS 1's `callerid` didn't survive), nothing
+about subscribers, no services — so a run couldn't answer WHO talked to WHAT, and a service's
+inputs were invisible from its own bag (exactly what §2's replay needs). Static source analysis
+was rejected (remaps, parameterized names, lazy subscriptions); the live NodeGraph API is the
+instrument, and it works under rmw_zenoh.
+
+Split per the handoff: **rig-infra** ships the capture (a `graph-snapshotter` SIDECAR container in
+ros2-bag-logger, compose-profile-gated by the logger config's `graph:` block — not a standalone
+service, and not rig-run docker: rig stays ROS-free, and a fleet with no ROS keeps a ROS-free
+rig). It appends append-only, change-deduped EPOCH files (`<run>/graph/<name>/epoch_<stamp>.yaml`,
+schema 1: per-node pubs/subs/service servers/clients with types, `first`/`last` validity window;
+unchanged graph bumps `last:` in place — the liveness signal; any change opens a new file; restart
+always opens a new epoch; run pinned at start per record.sh doctrine). **rig** ships the reader
+(`rig_cli/graph.py` — pure YAML, no ROS): union + namespace→instance grouping derived at READ time
+(no union at seal — one code path serves sealed/unsealed/crashed runs), the `rig graph [run]
+[--check] [--contract INSTANCE] [-o FILE]` verb, the rigging **`interface:`** block
+(publishes/subscribes/provides/requires; relative = instance-namespace, absolute = shared-bus),
+and WARN-only declared-vs-observed checks in both directions (an observed graph is per-config
+truth; the declaration is the superset). Contracts bootstrap from observation — `--contract`
+PRINTS the scaffold, never auto-edits a vendored rigging. Universal node plumbing (rosout,
+parameter/type-description services) is recorded raw but hidden from derived views.
+
+Downstream: §2's replay arc (`rig-replay-plan.md`) consumes the source run's epochs as its topic
+selector — with-set observed subscribes minus observed publishes. Queued in the plan: actions as
+first-class contract entries, QoS in contracts, `rig graph diff <A> <B>`, `--contract --write`.

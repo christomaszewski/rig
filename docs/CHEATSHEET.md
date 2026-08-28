@@ -397,12 +397,17 @@ refuse while stacks run. Each `up` also snapshots the effective config into the 
 stretch of data was recorded under, and sealing warns if config changed after the last `up`.
 `down --end-run` additionally captures every container's `docker logs` into the run
 (`.rig/logs/<sensor>/<container>.log`) before tearing down — compose down removes the containers, so
-that is the last moment their logs exist:
+that is the last moment their logs exist. With the bag logger's `graph:` sidecar enabled
+(rig-infra ≥ v1.7.0) the run also records the live graph TOPOLOGY as epoch files
+(`graph/<name>/epoch_*.yaml` — who published/subscribed/served what, when); `rig graph [run]`
+derives the union view at read time, `--check` WARNs on drift vs the riggings' `interface:` blocks,
+`--contract <instance>` scaffolds that block from observation:
 ```bash
 ssh $VEHICLE 'cd ~/ws/v1 && ./run.sh up --run dock-test'   # open a labeled session + up (idempotent)
 ssh $VEHICLE 'cd ~/ws/v1 && ./run.sh runs'                 # registry: OPEN / sealed / interrupted
 ssh $VEHICLE 'cd ~/ws/v1 && ./run.sh down --end-run'       # stop everything, then seal the session
 scp -r $VEHICLE:<data_dir>/runs/<stamp>_dock-test .        # the whole session, data + manifest
+rig graph <stamp>_dock-test --check                        # topology + declared-vs-observed WARNs
 ```
 (bare-Docker hosts: `./new-run.sh dock-test && ./up.sh` — the flagged forms need the bundled rig.)
 
