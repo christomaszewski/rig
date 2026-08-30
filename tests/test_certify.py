@@ -48,12 +48,14 @@ services:
 EOF
     ;;
   ps) echo "[]" ;;
+@EXTRAVERBS@
   *) exit 0 ;;
 esac
 """
 
 DEFAULTS = {
     "@PRELUDE@": "",
+    "@EXTRAVERBS@": "",
     "@PROJECT@": "$COMPOSE_PROJECT_NAME",
     "@IMAGE@": "$RIG_IMAGE_REGISTRY/fak-core:$RIG_IMAGE_TAG",
     "@ENVBLOCK@": ("    environment:\n"
@@ -130,6 +132,68 @@ def test_status_failure_without_docker_daemon_is_a_skip_not_an_error():
         assert "status" in errors
     finally:
         certify._DAEMON_OK = old
+
+
+# --- the operational-state trio (v0.2.35) --------------------------------------------------------
+
+RIGGING_STATES = RIGGING + "verbs: { standby: standby, activate: activate, state: state }\n"
+_STATE_CASE = """  state) printf '{"state": "down", "detail": "no containers"}\\n' ;;"""
+
+
+def test_state_trio_conformant_is_green():
+    checks, errors, warns, oks = run_certify(
+        make_service(RIGGING_STATES, **{"@EXTRAVERBS@": _STATE_CASE}))
+    assert not errors, [(c.name, c.detail) for c in checks if c.level == "ERROR"]
+    assert "state-verbs" in oks
+
+
+def test_partial_state_trio_fails():
+    # All three or none — the declaration is the claim rig dispatches on; a partial trio is a
+    # broken claim even when the declared half works.
+    partial = RIGGING + "verbs: { standby: standby }\n"
+    _, errors, _, _ = run_certify(make_service(partial, **{"@EXTRAVERBS@": _STATE_CASE}))
+    assert errors == {"state-verbs"}
+
+
+def test_state_chatter_on_stdout_fails():
+    chatter = """  state) echo "checking..."; printf '{"state": "down"}\\n' ;;"""
+    _, errors, _, _ = run_certify(make_service(RIGGING_STATES, **{"@EXTRAVERBS@": chatter}))
+    assert "state-verbs" in errors  # two lines on stdout = not one JSON object
+
+
+def test_state_foreign_vocabulary_fails():
+    foreign = """  state) printf '{"state": "lifecycle:inactive"}\\n' ;;"""
+    _, errors, _, _ = run_certify(make_service(RIGGING_STATES, **{"@EXTRAVERBS@": foreign}))
+    assert "state-verbs" in errors  # raw internals belong in `detail`, not `state`
+
+
+def test_state_failure_without_docker_daemon_is_a_skip_not_an_error():
+    # `state` ultimately asks compose which containers exist — same daemon caveat as `status`.
+    from rig_cli import certify
+
+    repo = make_service(RIGGING_STATES, **{"@EXTRAVERBS@": "  state) exit 1 ;;"})
+    old = certify._DAEMON_OK
+    try:
+        certify._DAEMON_OK = False
+        checks, errors, _, _ = run_certify(repo)
+        assert "state-verbs" not in errors
+        assert any(c.name == "state-verbs" and c.level == "INFO" and "skipped" in c.detail
+                   for c in checks)
+        certify._DAEMON_OK = True
+        _, errors, _, _ = run_certify(repo)
+        assert "state-verbs" in errors
+    finally:
+        certify._DAEMON_OK = old
+
+
+def test_poisoned_target_state_trips_launchers_validating_beyond_up():
+    # The posture token is honored/validated at `up` ONLY: a launcher that hard-fails every verb
+    # on a bogus RIG_TARGET_STATE would break certify's own rendering — the poison makes that a
+    # visible discipline failure instead of a silent field surprise.
+    prelude = ('    if [ -n "$RIG_TARGET_STATE" ]; then '
+               'echo "bad RIG_TARGET_STATE" >&2; exit 1; fi')
+    _, errors, _, _ = run_certify(make_service(**{"@PRELUDE@": prelude}))
+    assert "discipline" in errors
 
 
 def test_hardcoded_project_name_fails():

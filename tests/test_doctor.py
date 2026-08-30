@@ -210,6 +210,24 @@ def test_launcher_missing_errors_and_non_executable_warns():
     assert not any("launcher missing" in i.message for i in issues2)
 
 
+def test_partial_state_trio_warns_full_trio_and_none_stay_silent():
+    # Operational-state verbs are declared all-three-or-none: a partial trio is a broken support
+    # claim (certify ERRORs service-side; doctor is the non-blocking deployment-side echo). A
+    # complete trio and no declaration at all are both silent.
+    fixture = ("vehicle: t\nsensors: [{name: cam0, service: cam, config: config/c.yaml}]\n",
+               {"c.yaml": "service: cam\nname: cam0\n"})
+    partial = _svc_repo("cam", "service: cam\nlauncher: cam-up\nverbs: {standby: standby}\n")
+    issues = _collect_from(fixture[0], {"cam": partial}, fixture[1])
+    assert any(i.level == "WARN" and "partial operational-state verbs" in i.message for i in issues)
+    trio = _svc_repo("cam", "service: cam\nlauncher: cam-up\n"
+                            "verbs: {standby: standby, activate: activate, state: state}\n")
+    issues2 = _collect_from(fixture[0], {"cam": trio}, fixture[1])
+    assert not any("operational-state" in i.message for i in issues2)
+    none = _svc_repo("cam", "service: cam\nlauncher: cam-up\n")
+    issues3 = _collect_from(fixture[0], {"cam": none}, fixture[1])
+    assert not any("operational-state" in i.message for i in issues3)
+
+
 def test_warns_autonomy_with_no_enabled_sensors():
     # a brain with no eyes: enabled autonomy + zero enabled sensors -> WARN; with a sensor on, silent
     issues = _three_tier_fixture(sensor_enabled=False)

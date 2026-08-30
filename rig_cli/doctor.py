@@ -190,6 +190,13 @@ def collect(
             issues.append(Issue(ERROR, f"{svc}: launcher missing: {lp}"))
         elif not lp.stat().st_mode & 0o111:
             issues.append(Issue(WARN, f"{svc}: launcher not executable: {lp}"))
+        # Operational-state trio is declared all-three-or-none (certify ERRORs service-side; this
+        # is the deployment-side echo — non-blocking, rig just skips the service on standby/activate).
+        declared = desc.declared_state_verbs
+        if declared and not desc.supports_states:
+            issues.append(Issue(WARN, f"{svc}: partial operational-state verbs {declared} — all "
+                                      f"three or none (standby/activate/state); rig skips this "
+                                      f"service on standby/activate until the trio is complete"))
 
     # ROS stacks (sensor AND autonomy tiers) namespace a node by the instance name, and ROS 2 names allow
     # only [A-Za-z_][A-Za-z0-9_]* (no hyphens, no leading digit). Flag a name that would be an invalid namespace.

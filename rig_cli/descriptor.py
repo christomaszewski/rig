@@ -40,6 +40,16 @@ DEFAULT_VERBS = {
     "pull": "pull",
 }
 
+# The operational-state trio (contract: the service-state adoption prompt; reference adoption
+# ouster v0.2.0). NEVER in DEFAULT_VERBS: declaring all three in rigging `verbs:` IS the support
+# claim — and `verb_args`'s bare-token fallback would otherwise hand `standby` to a
+# compose-forwarding launcher as a compose subcommand. Undeclared = always active; rig skips the
+# service on standby/activate fan-out. `state` reports exactly one JSON object on stdout with a
+# `state` from STATE_VOCAB (state and HEALTH are read as a pair: transitioning+healthy = wait,
+# transitioning+unhealthy = stuck).
+STATE_VERBS = ("standby", "activate", "state")
+STATE_VOCAB = ("active", "standby", "transitioning", "down")
+
 
 # The four `interface:` kinds, and the entry key each carries (`topic:` vs `service:`).
 INTERFACE_KINDS = {"publishes": "topic", "subscribes": "topic",
@@ -124,6 +134,18 @@ class Descriptor:
         if spec is None:
             spec = DEFAULT_VERBS.get(verb, verb)
         return spec.split()
+
+    @property
+    def declared_state_verbs(self) -> list[str]:
+        """The operational-state verbs this rigging declares (membership in `verbs` IS the claim —
+        STATE_VERBS never enter DEFAULT_VERBS, so declared ⇔ present)."""
+        return [v for v in STATE_VERBS if v in self.verbs]
+
+    @property
+    def supports_states(self) -> bool:
+        """All-three-or-none: only a complete trio counts (a partial declaration is a broken claim
+        — certify ERRORs on it, doctor WARNs, and dispatch skips the service)."""
+        return len(self.declared_state_verbs) == len(STATE_VERBS)
 
 
 def load_descriptor(service: str, repo: Path) -> Descriptor:

@@ -97,6 +97,9 @@ def cmd_up(args, manifest, catalog, descriptors) -> int:
             eprint(f"  [✗] {issue.message}")
         return 1
     env = dispatch.fleet_env(manifest, descriptors)
+    if args.target_state:  # --standby/--active: the up-dispatch-only posture token (fleet_env pops
+        env["RIG_TARGET_STATE"] = args.target_state  # it on every other verb; launchers honor it at
+        #                                              `up` only, over the config's initial_state)
     if args.run and not manifest.data_dir:  # an EXPLICIT --run must never be silently dropped
         raise RigError("up --run needs `data_dir` in vehicle.yaml (the run registry lives under it)")
     pairs = _pairs(manifest, descriptors, args.names)  # ascending order: producers before consumers
@@ -142,6 +145,43 @@ def cmd_config(args, manifest, catalog, descriptors) -> int:
     env = dispatch.fleet_env(manifest, descriptors)
     pairs = _pairs(manifest, descriptors, args.names)
     return _summarize(dispatch.run_verb(pairs, env, "config", dry_run=args.dry_run))
+
+
+def _cmd_state_transition(args, manifest, descriptors, verb: str) -> int:
+    """`rig standby` / `rig activate`: fan the operational-state verb out over the stacks that
+    DECLARE the trio (rigging `verbs:` — the declaration is the support claim; `verb_args`'s
+    bare-token fallback would otherwise hand `standby` to a compose-forwarding launcher as a
+    compose subcommand). Undeclared = always active, skipped with a note — "everything that can
+    park, parks" is the deployment semantics, so a skip is success, not an error. Ordering mirrors
+    up/down: activate producers-first, standby consumers-first. rig adds NO timeouts — launchers
+    own their transition budgets (activate can be O(minute+) per device: mode restore + spin-up)
+    and exit nonzero on their own deadlines, exactly like `up`."""
+    env = dispatch.fleet_env(manifest, descriptors)
+    pairs = _pairs(manifest, descriptors, args.names, reverse=(verb == "standby"))
+    if not pairs:
+        eprint(f"rig: no enabled stacks to {verb}")
+        return 0
+    partial = sorted({d.service for _, d in pairs if d.declared_state_verbs and not d.supports_states})
+    if partial:
+        eprint(f"rig: partial operational-state declaration (all three or none — standby/activate/"
+               f"state), skipping: {', '.join(partial)}")
+    declared = [(s, d) for s, d in pairs if d.supports_states]
+    skipped = [s.name for s, d in pairs if not d.declared_state_verbs]
+    if skipped:
+        eprint(f"rig: no state verbs (always active), skipping: {', '.join(skipped)}")
+    if not declared:
+        eprint(f"rig {verb}: nothing to do — no selected stack declares the operational-state verbs")
+        return 0
+    eprint(f"rig {verb}: {manifest.vehicle} — {stack_summary([p[0] for p in declared])}")
+    return _summarize(dispatch.run_verb(declared, env, verb, dry_run=args.dry_run))
+
+
+def cmd_standby(args, manifest, catalog, descriptors) -> int:
+    return _cmd_state_transition(args, manifest, descriptors, "standby")
+
+
+def cmd_activate(args, manifest, catalog, descriptors) -> int:
+    return _cmd_state_transition(args, manifest, descriptors, "activate")
 
 
 def cmd_pull(args, manifest, catalog, descriptors) -> int:
@@ -492,6 +532,8 @@ def cmd_unbake(args, root: Path) -> int:
 _HANDLERS = {
     "up": cmd_up,
     "down": cmd_down,
+    "standby": cmd_standby,
+    "activate": cmd_activate,
     "cleanup": cmd_cleanup,
     "config": cmd_config,
     "pull": cmd_pull,
@@ -584,6 +626,20 @@ def build_parser() -> argparse.ArgumentParser:
     up.add_argument("--force", action="store_true", help="bring up even if preflight reports errors")
     up.add_argument("--run", default=None, metavar="LABEL",
                     help="join the open run with this label, or rotate to a new one (bare up never rotates)")
+    posture = up.add_mutually_exclusive_group()
+    posture.add_argument("--standby", action="store_const", const="standby", dest="target_state",
+                         help="come up parked: export RIG_TARGET_STATE=standby (overrides each "
+                              "config's initial_state; declared-state services only)")
+    posture.add_argument("--active", action="store_const", const="active", dest="target_state",
+                         help="come up running: export RIG_TARGET_STATE=active (overrides "
+                              "initial_state: standby configs)")
+
+    sb = add("standby", "park declared stacks (reverse order): ready but quiet — lifecycle idle, "
+                        "devices in low-power mode; health is unaffected")
+    sb.add_argument("--dry-run", action="store_true", help="print the exact launcher invocations only")
+
+    ac = add("activate", "wake declared stacks (producers first): devices to normal, running")
+    ac.add_argument("--dry-run", action="store_true", help="print the exact launcher invocations only")
 
     down = add("down", "tear sensors down (reverse order)")
     down.add_argument("--dry-run", action="store_true")

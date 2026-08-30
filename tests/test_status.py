@@ -108,10 +108,12 @@ def test_as_json_stable_shape_and_sorted_keys():
         "vehicle_id": 7,
         "run": "20260101T000000Z_auto (open)",
         "stacks": [
+            # op_state joined in v0.2.35 (ADDITIVE — the pre-existing keys are the stable contract):
+            # null for services that don't declare the operational-state trio.
             {"sensor": "cam", "service": "camsvc", "state": "running", "health": "healthy",
-             "running": 2, "total": 2},
+             "op_state": None, "running": 2, "total": 2},
             {"sensor": "gnss", "service": "gnsssvc", "state": "down", "health": "-",
-             "running": 0, "total": 0},
+             "op_state": None, "running": 0, "total": 0},
         ],
     }
     # Byte-for-byte against a sort_keys dump: proves the exact keys/values AND that the

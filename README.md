@@ -107,8 +107,17 @@ python3 -m venv .venv && .venv/bin/pip install pyyaml
 ./rig up --dry-run        # print the exact launcher invocations + fleet ROS env, run nothing
 ./rig up                  # bring everything up: infra → sensors → autonomy (order within a tier)
 ./rig pull                # pre-pull every stack's images, NO container changes (prime a cache, then run offline)
-./rig status             # one rolled-up row per sensor (state + health from compose ps)
+./rig status             # one rolled-up row per sensor (state + health from compose ps; OP =
+                          #   observed operational state for services declaring the state verbs —
+                          #   read OP and HEALTH as a pair)
 ./rig status -v           # expand per-container detail
+./rig standby             # park declared stacks (reverse order): ready but quiet — lifecycle idle,
+                          #   devices low-power (ouster: motor stopped, laser off); HEALTH unaffected.
+                          #   Services without the verbs are always-active, skipped. `up --standby`
+                          #   comes up parked (RIG_TARGET_STATE beats each config's initial_state)
+./rig activate            # wake declared stacks (producers first; launchers own the budgets —
+                          #   device spin-up can take a minute). Trigger-style stacks (SLAM) may
+                          #   instead be activated by the mission layer via ROS lifecycle directly
 ./rig logs cam_front -f   # follow one sensor's logs
 ./rig config gnss_primary # render a sensor's merged compose (delegates to the launcher's `config`)
 ./rig graph               # observed pub/sub/service topology from a run's graph epochs (the bag
@@ -302,6 +311,9 @@ CI runs `rig certify` against every one.
 A repo is rig-compatible when its launcher exposes `up/down/status/logs/config` on one config, accepts a
 config at any host path, honors fleet ROS env, observes **stdout/stderr discipline** (machine output on
 stdout, human lines on stderr), and ships a `rigging.yaml` (the legacy name `deploy.yaml` is still accepted).
+Optionally it also implements the **operational-state trio** — `standby`/`activate`/`state`, declared in
+`verbs:` all-three-or-none (the declaration is the support claim; contract + reference adoption: the
+service-state adoption prompt in `~/ws/infra`, ouster ≥ v0.2.0) — and honors `RIG_TARGET_STATE` at `up`.
 **Start from `rig rigify <dir>`**: it generates the descriptor + a contract-correct launcher skeleton +
 an example config in an existing software dir, pre-wired from a read-only analysis (found composes get
 `-f`-wired; ports/volumes/images/Dockerfiles become commented `host_ports`/`external_volumes`/`mirror`/

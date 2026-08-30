@@ -11,7 +11,7 @@ import json
 import subprocess
 from dataclasses import dataclass
 
-from .descriptor import Descriptor
+from .descriptor import Descriptor, STATE_VOCAB
 from .dispatch import launcher_cmd, service_env
 from .manifest import Sensor
 
@@ -42,6 +42,12 @@ class Row:
     running: int
     total: int
     containers: list[dict]
+    # Observed OPERATIONAL state (the launcher's `state` verb), only for services declaring the
+    # trio: active|standby|transitioning|down, "unknown" when the probe can't answer, None when
+    # undeclared (always active — rendered "-"). Read NEXT TO health: the pair disambiguates
+    # (transitioning+healthy = wait, e.g. a post-activate self-reset; transitioning+unhealthy =
+    # stuck). rig prints the pair; it never re-interprets it.
+    op_state: str | None = None
 
 
 def _rollup(containers: list[dict]) -> tuple[str, str, int, int]:
@@ -64,6 +70,18 @@ def _rollup(containers: list[dict]) -> tuple[str, str, int, int]:
     return state, health, running, total
 
 
+def _op_state(stdout: str) -> str:
+    """The `state` verb's single JSON line -> contract vocabulary. Anything else — chatter on
+    stdout, a missing/foreign `state` value — is 'unknown', never a crash (status must render on a
+    half-broken vehicle)."""
+    try:
+        doc = json.loads(stdout.strip())
+    except (json.JSONDecodeError, ValueError):
+        return "unknown"
+    state = doc.get("state") if isinstance(doc, dict) else None
+    return state if state in STATE_VOCAB else "unknown"
+
+
 def gather(pairs: list[tuple[Sensor, Descriptor]], env: dict[str, str]) -> list[Row]:
     rows: list[Row] = []
     for sensor, desc in pairs:
@@ -75,7 +93,16 @@ def gather(pairs: list[tuple[Sensor, Descriptor]], env: dict[str, str]) -> list[
         except Exception:
             containers = []
         state, health, running, total = _rollup(containers)
-        rows.append(Row(sensor, state, health, running, total, containers))
+        op = None
+        if desc.supports_states:  # declared trio only — the declaration is the support claim
+            try:
+                proc_op = subprocess.run(launcher_cmd(sensor, desc, "state"),
+                                         env=service_env(env, desc), cwd=str(desc.repo),
+                                         capture_output=True, text=True)
+                op = _op_state(proc_op.stdout) if proc_op.returncode == 0 else "unknown"
+            except Exception:
+                op = "unknown"
+        rows.append(Row(sensor, state, health, running, total, containers, op))
     return rows
 
 
@@ -87,17 +114,23 @@ def as_json(manifest, rows: list[Row], run_line: str | None) -> str:
         "vehicle": manifest.vehicle,
         "vehicle_id": manifest.vehicle_id,
         "run": run_line,
+        # op_state is ADDITIVE (v0.2.35): observed operational state, null for services that don't
+        # declare the trio. The pre-existing keys — `state` especially (the compose rollup) — are
+        # the stable contract older consumers parse; never repurpose them.
         "stacks": [{"sensor": r.sensor.name, "service": r.sensor.service, "state": r.state,
-                    "health": r.health, "running": r.running, "total": r.total} for r in rows],
+                    "health": r.health, "op_state": r.op_state,
+                    "running": r.running, "total": r.total} for r in rows],
     }, sort_keys=True)
 
 
 def render(rows: list[Row], *, verbose: bool = False) -> str:
-    headers = ("SENSOR", "SERVICE", "STATE", "HEALTH", "CONTAINERS")
+    # OP (operational state) sits NEXT TO health — the contract reads them as a pair.
+    headers = ("SENSOR", "SERVICE", "STATE", "HEALTH", "OP", "CONTAINERS")
     table = [headers]
     for row in rows:
         table.append(
-            (row.sensor.name, row.sensor.service, row.state, row.health, f"{row.running}/{row.total}")
+            (row.sensor.name, row.sensor.service, row.state, row.health, row.op_state or "-",
+             f"{row.running}/{row.total}")
         )
     widths = [max(len(r[i]) for r in table) for i in range(len(headers))]
     lines = []

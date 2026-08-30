@@ -813,3 +813,35 @@ parameter/type-description services) is recorded raw but hidden from derived vie
 Downstream: §2's replay arc (`rig-replay-plan.md`) consumes the source run's epochs as its topic
 selector — with-set observed subscribes minus observed publishes. Queued in the plan: actions as
 first-class contract entries, QoS in contracts, `rig graph diff <A> <B>`, `--contract --write`.
+
+## 16. Operational states: standby/active — ✅ implemented (v0.2.35)
+
+Plan doc: `rig-state-plan.md` (untracked); service-side contract + first-adoption feedback:
+`~/ws/infra/service-state-adoption-{prompt,feedback-ouster}.md` (reference adoption **ouster
+v0.2.0**: lifecycle `inactive` + the sensor's own STANDBY operating mode — motor stopped, laser
+off; upstream deactivate alone leaves the sensor spinning). A vehicle had only up and down;
+parking — sensors in low-power modes, trigger-style compute (SLAM, planning) idle until a mission
+phase — is a per-service verb trio (`standby`/`activate`/`state`, declared all-three-or-none in
+rigging `verbs:`; the declaration IS the support claim) that rig commands and observes but never
+supervises.
+
+rig-side (this release): declaration-GATED `rig standby`/`rig activate` fan-out (never
+`verb_args`' bare-token fallback — that would hand `standby` to a compose-forwarding launcher as
+a compose subcommand; undeclared = always-active, skipped) in up/down order — activate
+producers-first, standby reversed — with NO rig timeouts (launcher budgets, like `up`). `rig up
+--standby|--active` exports RIG_TARGET_STATE for the up dispatch only (rig-owned, popped
+everywhere else; launcher precedence RIG_TARGET_STATE > `initial_state` > active, validated at
+`up` only). `rig status`: OP column + ADDITIVE `op_state` JSON key (the `state` key stays the
+compose rollup) — OP and HEALTH read as a PAIR (transitioning+healthy = wait, e.g. the legitimate
+post-activate self-reset; transitioning+unhealthy = stuck); health itself is state-INDEPENDENT
+(readiness, never data flow — a healthy standby produces nothing by design). certify: the
+`state-verbs` check (trio completeness; `state` answers a down project with exit 0 + one JSON
+object in vocabulary, daemon-caveat like `status`) and a poisoned RIG_TARGET_STATE across the
+suite; doctor WARNs on a partial trio. Known limitation (ratified): device modes are applied not
+persisted — after a vehicle power event a parked deployment re-parks with `rig standby` (repeat =
+CONVERGE, by contract). Mission-layer lifecycle transitions are first-class, not drift; rig
+records no commanded state.
+
+Queued: `/diagnostics` aggregation as the dashboard-facing status layer (separate arc, rig-infra
+sidecar shape); the boilerplate template growing the trio for new services; `state --deep`
+(launcher verifies the physical device mode) if power-event drift bites in practice.

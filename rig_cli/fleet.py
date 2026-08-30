@@ -297,6 +297,7 @@ def cmd_status(fleet: Fleet, names: list[str], *, verbose: bool, jobs: int) -> i
         if verbose:
             detail.append(f"{o.vehicle.name}:")
             detail += [f"  {s.get('sensor')}  {s.get('state')}  {s.get('health')}  "
+                       f"{s.get('op_state') or '-'}  "  # additive v0.2.35 key; '-' from older vehicles
                        f"{s.get('running')}/{s.get('total')}" for s in stacks]
     print_table(rows)
     for line in detail:

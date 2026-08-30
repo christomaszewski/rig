@@ -389,6 +389,20 @@ Quick verification: containers up (`docker ps`), dashboard at `http://<vehicle>:
 under `data_dir`, camera log shows `health: frames=N, no drops`. After the first pull the vehicle runs
 **offline** — the registry is only needed for updates.
 
+**Operational states** (rig ≥ v0.2.35; services declaring `standby`/`activate`/`state` in rigging
+`verbs:` — e.g. ouster ≥ v0.2.0. Others are always-active and skipped):
+```bash
+rig standby [name…]        # park: ready but quiet (lifecycle idle, device low-power) — HEALTH unaffected
+rig activate [name…]       # wake (producers first; launchers own the budgets — device spin-up ≈ a minute)
+rig up --standby           # come up parked: RIG_TARGET_STATE=standby beats each config's initial_state
+rig status                 # OP column, next to HEALTH — read as a PAIR: transitioning+healthy = wait
+                           #   (post-activate self-reset), transitioning+unhealthy = stuck; '-' = undeclared
+```
+Trigger-style stacks (SLAM, planning) idle in standby until a mission layer activates them — direct
+lifecycle transitions are expected, not drift. After a vehicle POWER event, re-run `rig standby` if
+parked: device modes are applied, not persisted (a power-cycled sensor boots back NORMAL while
+`state` still reads standby); the repeat converges the full standby definition.
+
 **Run directories** (needs `data_dir`; ROADMAP §3c): one session = one folder under
 `data_dir/runs/<stamp>_<label>/`, with a provenance manifest (`ended:` present = sealed = safe to sync).
 `up` auto-opens an `_auto` run if none is open — it NEVER rotates; rotation/sealing are explicit and

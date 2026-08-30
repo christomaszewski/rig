@@ -188,6 +188,12 @@ Open `http://<ORIN-IP>:8080` from a laptop on the mesh.
 ## 8 — Iterate / teardown
 ```bash
 ssh $ORIN 'cd /opt/rig/test1 && ./run.sh logs cam_usb'    # or: down
+# parking between sorties (services declaring the state trio, e.g. ouster ≥ v0.2.0; rig ≥ v0.2.35):
+ssh $ORIN 'cd /opt/rig/test1 && ./rig standby'            # lidar motor stops, laser off; HEALTH stays green
+ssh $ORIN 'cd /opt/rig/test1 && ./rig status'             # OP column: standby · read OP+HEALTH as a pair
+ssh $ORIN 'cd /opt/rig/test1 && ./rig activate'           # wake — device spin-up takes tens of seconds
+# after a vehicle POWER event while parked: re-run `./rig standby` (device modes are applied, not
+# persisted — a power-cycled sensor boots back NORMAL while state still reads standby)
 rig graph --check          # after a run: observed topology vs declared interface: blocks (WARN-only)
 # re-deploy after a change: edit configs -> rig build (if images changed) -> rig bake --tag test2 -> scp -> tar xzf -> ./run.sh up
 # retiring a deployment from the Orin entirely: down, then decommission, then delete the tree —

@@ -26,6 +26,11 @@ that cannot occur in real life (``certify.invalid:5000``, ``certify-tag-x``, ins
                      docker daemon reachable is a skip, not an error — `docker compose ps` needs a
                      daemon while every other check renders client-side, and certify must stay
                      honest on daemon-less hosts: build containers, thin CI runners)
+  - state-verbs      the operational-state trio (standby/activate/state), when declared: declared
+                     all-three-or-none, and `state` answers a down project with exit 0 + exactly
+                     one JSON object in the contract vocabulary (same daemon caveat as `status`).
+                     The whole suite also runs under a poisoned RIG_TARGET_STATE — the posture
+                     token is honored at `up` only, so no other verb may choke on a bogus value
 
 Certify is per-service and host-agnostic, so it runs in a service repo's CI with no deployment tree
 (``rig certify --repo . --config examples/usb.yaml``). One contract property a single machine cannot prove
@@ -36,6 +41,7 @@ dev box and on the vehicle; byte-identical means a dev-box bake is correct for t
 from __future__ import annotations
 
 import difflib
+import json
 import shutil
 import subprocess
 import tempfile
@@ -47,7 +53,7 @@ import yaml
 from . import RigError
 from .bake import _repo_of, _service_images, _services
 from .common import eprint, load_yaml
-from .descriptor import Descriptor
+from .descriptor import Descriptor, STATE_VERBS, STATE_VOCAB
 from .dispatch import service_env
 from .manifest import project_name
 from .status import _parse_ps
@@ -62,6 +68,9 @@ POISON_TAG = "certify-tag-x"
 POISON_DATA = "/certify/data"
 POISON_VID = "42"
 POISON_RMW = "rmw_certify_cpp"
+POISON_STATE = "certify-state-x"  # bogus RIG_TARGET_STATE: launchers validate/honor the posture
+#                                   token at `up` ONLY, so every certify check (config/status/
+#                                   state — never up) must succeed underneath it
 NAME_A, NAME_B = "certifyname0", "certifyname1"
 
 # `docker compose config` output is exactly these top-level keys; anything else on stdout is launcher
@@ -112,6 +121,7 @@ def _poison_env(base_env: dict[str, str], name: str, desc: Descriptor | None = N
         "RIG_IMAGE_REGISTRY": POISON_REGISTRY,
         "RIG_IMAGE_TAG": POISON_TAG,
         "RIG_DATA_DIR": POISON_DATA,
+        "RIG_TARGET_STATE": POISON_STATE,
         "COMPOSE_PROJECT_NAME": project_name(name, POISON_VID),
     }
     env.pop("RIG_TARGET_PLATFORM", None)  # never inherit a real one from the caller's shell
@@ -367,6 +377,44 @@ def certify_target(desc: Descriptor, config_path: Path, base_env: dict[str, str]
                 ok("status")
             except Exception:  # noqa: BLE001
                 fail("status", f"`status --format json` stdout is not JSON: {run_s.stdout.strip()[:120]!r}")
+
+        # state-verbs: the operational-state trio is all-three-or-none (the declaration IS the
+        # support claim rig dispatches on). When declared, `state` is a side-effect-free read on
+        # ANY project state: exit 0, stdout EXACTLY one JSON object, contract vocabulary (`down`
+        # on this never-upped instance; internals belong in `detail`). It runs under the poisoned
+        # RIG_TARGET_STATE like every check here — the posture token is honored at `up` only.
+        # Same daemon caveat as `status`: the launcher asks compose which containers exist.
+        declared_states = [v for v in STATE_VERBS if v in desc.verbs]
+        if declared_states and len(declared_states) != len(STATE_VERBS):
+            missing = [v for v in STATE_VERBS if v not in desc.verbs]
+            fail("state-verbs", f"partial operational-state declaration — all three or none: "
+                                f"declares {declared_states}, missing {missing} (rig skips this "
+                                f"service on standby/activate until the trio is complete)")
+        elif declared_states:
+            run_t = _run_launcher(desc, cfg_a, desc.verb_args("state"), env_a)
+            if run_t.returncode != 0 and not _docker_daemon_ok():
+                checks.append(Check(INFO, "state-verbs", "skipped — `state` failed with no docker "
+                                                         "daemon reachable (the launcher asks compose "
+                                                         "which containers exist). Re-run certify on a "
+                                                         "docker-capable host to prove this check"))
+            elif run_t.returncode != 0:
+                fail("state-verbs", f"`state` exited {run_t.returncode} — it must answer on a down "
+                                    f"project too: {(run_t.stderr or '').strip()[:160]}")
+            else:
+                out = run_t.stdout.strip()
+                try:
+                    doc = json.loads(out)
+                except json.JSONDecodeError:
+                    doc = None
+                if not isinstance(doc, dict):
+                    fail("state-verbs", f"`state` stdout is not one JSON object (human lines go to "
+                                        f"stderr): {out[:120]!r}")
+                elif doc.get("state") not in STATE_VOCAB:
+                    fail("state-verbs", f"`state` reports {doc.get('state')!r} — the contract "
+                                        f"vocabulary is {'|'.join(STATE_VOCAB)} (raw internals "
+                                        f"belong in `detail`)")
+                else:
+                    ok("state-verbs")
 
         # platform: the DECLARED platform must win over host probing. Every remaining matrix entry
         # must render on THIS host (bake renders on dev boxes that aren't the target), pull built

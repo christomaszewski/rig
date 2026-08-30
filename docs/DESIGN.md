@@ -81,6 +81,30 @@ template — it adapts to each via `rigging.yaml`'s `verbs` map (e.g. cam-up tak
 - **Status/health.** rig calls each launcher's `status` (`ps --format json`) and rolls a project up to one
   row: healthy iff every *healthchecked* container is healthy and all are running (a plugin without a probe
   doesn't drag the sensor to "unknown"). ROS `/diagnostics` aggregation is a planned second layer.
+- **Operational states (standby/active) — command + observe, never supervise (v0.2.35).** A running
+  instance can be `active` (doing its job) or `standby` (up, configured, ready — lifecycle idle,
+  device in its low-power mode: the parked vehicle). Services declare the trio
+  `standby`/`activate`/`state` in rigging `verbs:` — ALL THREE OR NONE; the declaration IS the
+  support claim (never defaulted: `verb_args`' bare-token fallback would hand `standby` to a
+  compose-forwarding launcher as a compose subcommand), and undeclared services are always-active,
+  skipped on fan-out. `rig standby`/`rig activate` fan out in up/down order (activate
+  producers-first, standby reversed) with NO rig-side timeouts — launchers own their transition
+  budgets and exit nonzero on their own deadlines, exactly like `up` (activate can be O(minute+)
+  per device: mode restore + spin-up). `rig up --standby|--active` exports **RIG_TARGET_STATE**
+  for the up dispatch ONLY (rig-owned, popped on every other verb like RIG_SIM_TIME — a leaked
+  shell value must never park a fleet); launcher-side precedence is RIG_TARGET_STATE > config
+  `initial_state` > active, validated at `up` only (certify poisons the token across the other
+  verbs). `rig status` reads the observed state via the `state` verb (one JSON object:
+  active|standby|transitioning|down) into an OP column and an ADDITIVE `op_state` JSON key — the
+  pre-existing `state` key stays the compose rollup, untouched. State and HEALTH are read as a
+  PAIR: transitioning+healthy = wait (a post-activate self-reset is legitimate),
+  transitioning+unhealthy = stuck. Health itself is state-INDEPENDENT — "can it run" (configured,
+  device reachable), identical in both states, so healthchecks probe readiness, never data flow.
+  Mission-layer software driving a node's lifecycle directly is EXPECTED, not drift (rig records
+  no commanded state and never polls); device modes are applied NOT persisted, so after a vehicle
+  power event a parked deployment re-parks with `rig standby` (a converging repeat, by contract).
+  Reference adoption: ouster v0.2.0; contract + first-adoption feedback live in
+  `~/ws/infra/service-state-adoption-{prompt,feedback-ouster}.md`.
 - **Lifecycle/cleanup.** Restart/boot/teardown are the substrate's job (Docker Compose now;
   systemd/Quadlet/k3s later). External volumes survive `down` by design (a consumer may still be attached);
   `rig down --purge` removes the `rigging.yaml`-declared `external_volumes` on **final** teardown only —

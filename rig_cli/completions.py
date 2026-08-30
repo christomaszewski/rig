@@ -525,8 +525,8 @@ def _fleet_vehicles(root_arg, positionals, words):
             if isinstance(v, dict) and v.get("name")]
 
 
-_INSTANCE_VERBS = ("up", "down", "config", "config-render", "config-diff", "pull", "status",
-                   "logs", "image-audit", "cleanup", "certify", "doctor")
+_INSTANCE_VERBS = ("up", "down", "standby", "activate", "config", "config-render", "config-diff",
+                   "pull", "status", "logs", "image-audit", "cleanup", "certify", "doctor")
 
 _POSITIONAL_SOURCES: dict = {
     **{((verb,), "names"): _instances for verb in _INSTANCE_VERBS},
