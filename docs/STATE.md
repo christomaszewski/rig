@@ -6,8 +6,18 @@
 > **v0.2.37 (2026-08-31) — service-call replay, rig side** (plan `rig-svc-replay-plan.md`;
 > contract FROZEN in `~/ws/infra/rig-replay-calls-handoff.md` — supersedes the player handoff's
 > §6 sketch; rig-infra v1.10.0 implements the player half in parallel, kickoff prompt
-> `~/ws/infra/rig-bag-player-calls-prompt.md`. **RELEASE HELD** until v1.10.0 + one integration
-> smoke, the v0.2.33 pattern). Verbatim selection: `select_services` = with-set observed
+> `~/ws/infra/rig-bag-player-calls-prompt.md`. RELEASED after rig-infra **v1.10.0** (`3940e83`)
+> landed with the full §4 checklist live-verified on lyrical — round-trip fidelity ~20 ms, slow
+> servers do NOT stall the topic timeline (fire-and-forget requests), lyrical play spellings
+> pinned (`--publish-service-requests`, `--services … [greedy]`,
+> `--service-requests-source {service_introspection,client_introspection}`), registry at 1.10.0
+> (also covering v1.9.0, which had been tagged but never released) — and the integration smoke
+> here: the real launcher renders `--publish-service-requests --services …` under
+> RIG_REPLAY_SERVICES, and under RIG_REPLAY_CALLS suppresses them + arms the injector profile.
+> One finding folded back BEFORE release: lyrical's exclude regex removes topics AND SERVICES
+> alike, so `select_services` now arms ONLY in topics mode — beside the namespace-fallback
+> EXCLUDE, the regex would silently kill the very calls rig selected (the injector is immune:
+> it issues calls itself, outside bag playback). Verbatim selection: `select_services` = with-set observed
 > `provides` − `requires` (the topic rule's twin; EPOCHS-ONLY — no namespace fallback for
 > ACTIONS), exported as `RIG_REPLAY_SERVICES` alongside the topic mode. `--calls <file>` = the
 > injector script (schema 1, shallow-validated — request bodies are the srv types' schemas, the

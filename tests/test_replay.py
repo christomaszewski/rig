@@ -485,6 +485,54 @@ def test_descriptor_replay_block_service_introspection():
         assert "service_introspection" in str(exc)
 
 
+
+
+def test_services_never_armed_under_the_exclude_fallback():
+    """rig-infra v1.10.0's live finding: lyrical's exclude regex removes topics AND services —
+    SERVICES beside the fallback EXCLUDE would be silently killed by the very regex rig exports.
+    The hazard case: epochs present, all observed, provides exist, but NO external subscribes →
+    topic mode falls back to exclude; services must NOT arm."""
+    epoch = textwrap.dedent("""\
+        schema: 1
+        first: 2026-08-27T10:00:00Z
+        last: 2026-08-27T11:00:00Z
+        rmw: rmw_zenoh_cpp
+        domain: 7
+        nodes:
+          /planner/planner_node:
+            pubs:
+            - {topic: /planner/cmd_vel, type: geometry_msgs/msg/Twist}
+            subs: []
+            provides:
+            - {service: /planner/set_mode, type: my_msgs/srv/SetMode}
+            requires: []
+        """)
+    src = _source_run(epochs=(epoch,))
+    rows = [_row("planner", service="plan", tier="autonomy", order=20), PLAYER]
+    m = _manifest(rows)
+    descriptors = {s.service: object() for s in rows}
+    seen = {}
+    orig = (replay.doctor_mod.collect, replay.dispatch.fleet_env, replay.dispatch.run_verb)
+    try:
+        replay.doctor_mod.collect = lambda *a, **k: []
+        replay.dispatch.fleet_env = lambda *a, **k: {}
+        def _run_verb(pairs, env, verb, dry_run=False, **k):
+            seen.update(env=env)
+            class O:  # noqa: N801
+                returncode = 0
+                sensor = pairs[0][0]
+            return [O()]
+        replay.dispatch.run_verb = _run_verb
+        rc = replay.cmd(m, {}, descriptors, pathlib.Path("."), run_ref=str(src),
+                        names=["planner"], label=None, wall_clock=False, force=False,
+                        dry_run=True)
+        assert rc == 0
+        assert "RIG_REPLAY_EXCLUDE" in seen["env"]          # the fallback fired…
+        assert "RIG_REPLAY_SERVICES" not in seen["env"]     # …so services stayed unarmed
+    finally:
+        replay.doctor_mod.collect, replay.dispatch.fleet_env, replay.dispatch.run_verb = orig
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

@@ -294,7 +294,11 @@ def cmd(manifest, catalog, descriptors, root: Path, *, run_ref: str, names: list
     calls_path = Path(calls).expanduser().resolve() if calls else None
     calls_sha = validate_calls(calls_path) if calls_path else None
     services = None
-    if calls_path is None:
+    if calls_path is None and mode == "topics":
+        # TOPICS mode only: lyrical's exclude regex knocks out topics AND services alike
+        # (rig-infra v1.10.0's live finding), so arming SERVICES beside the namespace-fallback
+        # EXCLUDE would let the regex silently kill the very calls rig selected. The injector
+        # (--calls) is unaffected — it issues calls itself, outside bag playback.
         services, svc_notices = select_services(src_dir, names)
         notices += svc_notices
     for n in notices:
