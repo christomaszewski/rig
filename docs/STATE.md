@@ -1,8 +1,28 @@
 # rig — project state & handoff (resume here)
 
 > Snapshot for picking the project up cold in a new session. Read this first, then `CHEATSHEET.md` /
-> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.2.34**,
-> branch **`main`**, 611 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.2.36**,
+> branch **`main`**, 638 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> **v0.2.36 (2026-08-31) — run capture + reconstruct** (ROADMAP §17; plan
+> `rig-reconstruct-plan.md` — the design settled across five discussion rounds, final shape the
+> operator's): every opened run now carries the tree that ran. `_open_run` invokes a LEAN bake
+> (`bake.capture_run` — the deploy bake's staging steps 1–3 factored into `_stage_tree`: vendored
+> surfaces for ALL rows incl. disabled, all configs, resolved vehicle.yaml, bundled rig; SKIPS
+> compose-only render/registry pinning/image bundling — fast, network-free) into
+> `<run>/.rig/artifact.tar.gz`, stamps `capture: {sha256, rig_version}` (sha = INTEGRITY, dedup
+> explicitly rejected — self-containment is the point), and best-effort pins image IDENTITY via
+> local-daemon digests into `.rig/images.yaml` (bytes stay in the registry; arm64 runs still need
+> an arm64 host or a platform rebuild). Fail-soft — capture never blocks a session; opt-out
+> `run_capture: false` (vehicle.yaml or vehicle.local, LOCAL_KEYS). **`rig reconstruct <run-dir>
+> [--into] [--config <digest12>]`** works with NO deployment handy: extract + sha verify +
+> config-snapshot overlay (snapshots re-verified against their own content-address) + LOCALIZE
+> (tree-local vehicle.local.yaml re-points data_dir) + prints the `rig replay` next step.
+> **`rig run retrofit <run…>`** stamps pre-capture runs with the deploy artifact their manifests
+> name (tag→var/artifacts resolution; mismatches refused; `retrofitted:` marker is LOAD-BEARING —
+> retrofit tarballs are as-shipped, so reconstruct overlays the run's LAST ups: snapshot by
+> default; native captures default to as-opened). Capture inside an extracted artifact keeps the
+> bake parent-lineage chain. NEXT: the service-call replay arc (`rig-svc-replay-plan.md`) — its
+> Phase 1 record-time flip (`record.services: all`) should ride the next bake.
 > **v0.2.34 (2026-08-28) — replay doctor + sim-time adoption** (the replay arc's fast-follow,
 > closing it): rigging grows `replay: {sim_time: true}` (strict parse; block-shaped for future
 > replay capabilities like a per-sensor SOURCE declaration) — the launcher's PROMISE to wire

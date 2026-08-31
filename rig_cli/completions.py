@@ -536,6 +536,8 @@ _POSITIONAL_SOURCES: dict = {
     (("graph",), "run"): _run_ids,
     (("replay",), "run"): _run_ids,
     (("replay",), "names"): _instances,
+    (("reconstruct",), "run"): _run_ids,
+    (("run-retrofit",), "runs"): _run_ids,
     (("pkg", "add"), "spec"): _add_specs,
     (("pkg", "remove"), "specs"): _remove_specs,
     (("pkg", "save"), "spec"): _save_specs,

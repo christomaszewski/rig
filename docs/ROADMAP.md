@@ -845,3 +845,24 @@ records no commanded state.
 Queued: `/diagnostics` aggregation as the dashboard-facing status layer (separate arc, rig-infra
 sidecar shape); the boilerplate template growing the trio for new services; `state --deep`
 (launcher verifies the physical device mode) if power-event drift bites in practice.
+
+## 17. Run capture + reconstruct — ✅ implemented (v0.2.36)
+
+Plan doc: `rig-reconstruct-plan.md` (untracked; the design settled across five rounds on
+2026-08-31 — the final shape is the operator's). Problem: a run dir held the data and the
+effective configs but not the machinery, so replaying an archived run required the deployment.
+Rejected along the way, deliberately: bake-at-SEAL (seal stays minimal; a seal-time tree may
+contain edits that never ran), a shared/deduped artifact store (pointers outside the run dir
+break self-containment; per-run config changes defeat dedup anyway), and synthesizing a
+deployment from the config snapshot alone (snapshots carry no launch surfaces).
+
+Shipped: at run OPEN, a LEAN bake (`bake.capture_run`, sharing `_stage_tree` with the deploy
+bake) lands the tree in `<run>/.rig/artifact.tar.gz` — all rows' surfaces and configs, bundled
+rig, no compose-only render, no registry pinning, no image bytes; local-daemon image DIGESTS to
+`.rig/images.yaml` (identity-not-bytes; the platform boundary is §2's footprint axis, still
+open). Fail-soft, `run_capture:` opt-out. `rig reconstruct` extracts anywhere with sha + snapshot
+content-address verification, config-snapshot overlay, and tree-local localization;
+`rig run retrofit` stamps pre-capture runs with the deploy artifact their manifests name (the
+`retrofitted:` marker flips the overlay default to the run's last `ups:` snapshot — retrofit
+tarballs are as-shipped). Reproduction (reconstructed tree) vs SIL (current tree) stays an
+explicit distinction; replay's config-drift report is the faithfulness proof.

@@ -223,6 +223,24 @@ On the day: `up --run <label>` (label every session), `down --end-run` after lan
 docker logs, seals), copy the SEALED run dir off (`ended:` present = safe to sync), and leave
 disk headroom ≥ 2× the expected bag+video volume.
 
+## Archive → laptop replay (rig ≥ v0.2.36)
+
+Every run opened with `run_capture` on (the default) carries the tree that ran —
+`.rig/artifact.tar.gz` (surfaces + configs + rig; sha-stamped) and `.rig/images.yaml` (the image
+digests that were live). A downloaded run dir is all anyone needs:
+
+```bash
+rig reconstruct <path-to-run> --into flight1-tree/   # extract + verify + overlay + localize
+cd flight1-tree && ./rig doctor                      # then: ./rig replay <path-to-run> <names…>
+```
+
+Image BYTES come from the registry (fetch by the recorded digests) — and an arm64 run needs an
+arm64 host, emulation, or a platform rebuild at the same pins. Runs recorded BEFORE v0.2.36:
+`rig run retrofit <run…>` (in the deployment, with var/artifacts/ populated) stamps them with the
+deploy artifact their manifest names; reconstruct then overlays each run's own sealed config
+snapshot, so between-run config edits reconstruct correctly per run. `--config <digest12>` picks
+any mid-run state (`ups:` in the run manifest lists them).
+
 ## SIL replay — test a service change against a recorded run (rig ≥ v0.2.33)
 
 Needs the `ros2-bag-player` row in vehicle.yaml (`autonomy:`, `enabled: false`, high `order` —

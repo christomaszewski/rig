@@ -555,7 +555,7 @@ _HANDLERS = {
 # when it lands) are NOT here — argparse owns them directly.
 _GROUP_VERBS: dict[str, dict[str, str]] = {
     "config": {"show": "config", "render": "config-render", "diff": "config-diff"},
-    "run": {"new": "new-run", "end": "end-run", "list": "runs"},
+    "run": {"new": "new-run", "end": "end-run", "list": "runs", "retrofit": "run-retrofit"},
     "artifact": {"bake": "bake", "unbake": "unbake", "list": "artifact-list"},
     "image": {"build": "build", "pull": "pull", "audit": "image-audit"},
     "service": {"rigify": "rigify", "vendor": "vendor", "certify": "certify"},
@@ -601,7 +601,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="rig", description="vehicle-level stack orchestrator (infra · sensors · autonomy)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="noun groups (canonical forms; the flat spellings above stay as permanent aliases):\n"
-               "  rig config   show | render          rig run      new | end | list\n"
+               "  rig config   show | render          rig run      new | end | list | retrofit\n"
                "  rig registry init | add | remove | list | sync | validate | index\n"
                "  rig pkg      search | info | list | outdated | add | remove | upgrade | lock | "
                "save | promote | repin | rebase | yank\n"
@@ -701,6 +701,25 @@ def build_parser() -> argparse.ArgumentParser:
     gr.add_argument("-o", "--out", metavar="FILE", default=None,
                     help="write the materialized union (epoch-shaped YAML) instead of the report")
     gr.add_argument("names", nargs="*", default=[], help=argparse.SUPPRESS)
+
+    rec = sub.add_parser("reconstruct", help="a run dir back into a runnable tree — extract its "
+                                             "captured artifact (verified), overlay a config "
+                                             "snapshot, localize; works with no deployment handy")
+    rec.add_argument("run", help="run dir path (an id resolves only inside a deployment)")
+    rec.add_argument("--into", default=None, metavar="DIR",
+                     help="destination tree (default: ./<run-id>-tree)")
+    rec.add_argument("--config", default=None, metavar="DIGEST12",
+                     help="overlay this config snapshot from the run's .rig/config/ (default: "
+                          "as-opened for native captures, the LAST ups snapshot for retrofits)")
+
+    rf = sub.add_parser("run-retrofit", help="stamp pre-capture runs with the deploy artifact "
+                                             "their manifests name (canonical: run retrofit)")
+    rf.add_argument("runs", nargs="+", help="run id(s) or run-dir path(s)")
+    rf.add_argument("--artifact", default=None, metavar="TAR",
+                    help="explicit tarball for ALL named runs (must match their `artifact:` tag; "
+                         "required for dev-tree runs with no tag)")
+    rf.add_argument("--from", dest="from_dir", default=None, metavar="DIR",
+                    help="artifacts dir to resolve tags against (default: var/artifacts)")
 
     st = add("status", "fleet status table")
     st.add_argument("-v", "--verbose", action="store_true", help="expand per-container detail")
@@ -1230,6 +1249,15 @@ def main(argv=None) -> int:
             return cmd_vendor(args, root)
         if args.cmd == "unbake":  # operates on an artifact, not the manifest
             return cmd_unbake(args, root)
+        if args.cmd == "reconstruct":  # a run dir + nothing else — no deployment, no registry
+            from . import reconstruct as reconstruct_mod
+            return reconstruct_mod.cmd_reconstruct(
+                root if (root / "vehicle.yaml").exists() else None,
+                run_ref=args.run, into=args.into, config=args.config)
+        if args.cmd == "run-retrofit":  # reads run dirs + var/artifacts, not the manifest
+            from . import reconstruct as reconstruct_mod
+            return reconstruct_mod.cmd_retrofit(root, run_refs=args.runs,
+                                                artifact=args.artifact, from_dir=args.from_dir)
         if args.cmd == "artifact-list":  # reads var/artifacts, not the manifest
             return cmd_artifact_list(args, root)
         if args.cmd == "config-diff":  # needs the RAW rows (working files), not the rendered output

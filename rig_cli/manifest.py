@@ -26,7 +26,8 @@ from .interpolate import MAP, MARKER, resolve_map, substitute_scalar
 MACHINE_LOCAL_DEFAULT = "/etc/rig/vehicle.local.yaml"
 # The only keys a vehicle-local file may carry: the per-host knobs that genuinely vary across a
 # fleet. Never sensor rows — a local file silently flipping stacks makes fleet debugging miserable.
-LOCAL_KEYS = {"vehicle", "vehicle_id", "vars", "env", "data_dir", "images", "platform"}
+LOCAL_KEYS = {"vehicle", "vehicle_id", "vars", "env", "data_dir", "images", "platform",
+              "run_capture"}
 # Env keys rig owns end-to-end (fleet_env sets them; an `env:` map may not shadow them).
 RIG_OWNED_ENV = {"VEHICLE_ID", "ROS_DOMAIN_ID", "RMW_IMPLEMENTATION", "RIG_IMAGE_REGISTRY",
                  "RIG_IMAGE_TAG", "RIG_TARGET_PLATFORM", "RIG_DATA_DIR", "COMPOSE_PROJECT_NAME",
@@ -78,6 +79,9 @@ class Manifest:
     platform: str | None = None      # THIS host's hardware/OS target (e.g. jp7) -> RIG_TARGET_PLATFORM;
     #                                  matrix services pull <tag>-<platform> (see dispatch.service_env)
     data_dir: str | None = None      # host dir for recordings/logs/outputs; -> RIG_DATA_DIR
+    run_capture: bool = True         # lean-bake the tree into each opened run (.rig/artifact.tar.gz)
+    #                                  so every run dir is self-contained for `rig reconstruct`;
+    #                                  disk-tight vehicles opt out here or in vehicle.local.yaml
     vars: dict = field(default_factory=dict)      # resolved {{var}} context (built-ins + vars:)
     extra_env: dict = field(default_factory=dict)  # `env:` map, interpolated — fleet_env exports it
     missing_identity: tuple = ()  # mandatory per-vehicle keys nothing provides — loading stays
@@ -371,5 +375,8 @@ def load_manifest(root: Path) -> Manifest:
                     sensors=infra + sensors + autonomy,
                     image_registry=eff_images["registry"], vehicle_id=vehicle_id,
                     image_tag=eff_images["tag"], image_base=eff_images["base"], platform=platform,
-                    data_dir=data_dir, vars=ctx, extra_env=extra_env,
+                    data_dir=data_dir,
+                    run_capture=bool(_effective("run_capture", sources,
+                                                data.get("run_capture")) is not False),
+                    vars=ctx, extra_env=extra_env,
                     missing_identity=tuple(unresolved))

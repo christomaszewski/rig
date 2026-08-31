@@ -344,6 +344,14 @@ def _open_run(manifest: Manifest, root: Path, data: Path, label: str | None,
         doc["deployment"] = dep  # the OPENING deployment instance; each ups: entry re-attributes
     if replay:  # a SIL replay session: {of: <source-run-id>, source: <abs path>, with: [names]}
         doc["replay"] = replay
+    if manifest.run_capture:  # every run dir carries the tree that ran (rig-reconstruct plan) —
+        try:                  # fail-soft: capture must NEVER block a field session
+            from . import bake as bake_mod
+            doc["capture"] = bake_mod.capture_run(root, manifest, run_dir)
+        except Exception as exc:  # noqa: BLE001
+            eprint(f"rig: warning: run capture failed ({exc}) — opening without "
+                   f".rig/artifact.tar.gz (config snapshots still cover the config layer; "
+                   f"`rig run retrofit` can supply the tree later)")
     (run_dir / "manifest.yaml").write_text(yaml.safe_dump(doc, sort_keys=False))
     cur = _current(data)
     if cur.exists() and not cur.is_symlink():

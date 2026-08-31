@@ -200,7 +200,7 @@ Registries: `rig registry init <dir>` scaffolds a new one (usable immediately vi
 hash; `rig pkg add <ref> --locked` reproduces byte-identical configs on a second machine.
 
 Canonical grouped commands (old flat spellings stay as permanent aliases): `config show|render|diff` ·
-`run new|end|list` · `registry init|add|remove|list|sync|pending|push|discard|validate|index` · `pkg
+`run new|end|list|retrofit` · `registry init|add|remove|list|sync|pending|push|discard|validate|index` · `pkg
 search|info|list|outdated|add|remove|upgrade|lock|save|promote|repin|rebase|yank` · `overlay
 apply|remove|reorder|list` · `service rigify|vendor|certify` · `artifact bake|unbake|list` ·
 `image build|pull`.
@@ -422,6 +422,9 @@ ssh $VEHICLE 'cd ~/ws/v1 && ./run.sh runs'                 # registry: OPEN / se
 ssh $VEHICLE 'cd ~/ws/v1 && ./run.sh down --end-run'       # stop everything, then seal the session
 scp -r $VEHICLE:<data_dir>/runs/<stamp>_dock-test .        # the whole session, data + manifest
 rig graph <stamp>_dock-test --check                        # topology + declared-vs-observed WARNs
+rig reconstruct <path-to-run> --into tree/                 # the run dir back into a runnable tree
+                                                           #   (its .rig/artifact.tar.gz capture;
+                                                           #   old runs: `rig run retrofit` first)
 rig replay <stamp>_dock-test planner                       # SIL: play planner's recorded inputs at
                                                            #   the CURRENT planner build/config —
                                                            #   new run links back via replay-of

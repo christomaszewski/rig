@@ -497,22 +497,15 @@ def _stage_rig(staging: Path) -> None:
     (staging / "rig").chmod(0o755)
 
 
-def bake(root: Path, manifest, catalog, descriptors, env, tag: str, *, registry: str | None = None,
-         bundle_images: bool = False) -> Path:
-    if registry:
-        env = {**env, "RIG_IMAGE_REGISTRY": registry}  # override vehicle.yaml images.registry for this bake
-    staging = root / "var" / "bake" / tag
-    if staging.exists():
-        shutil.rmtree(staging)
-    staging.mkdir(parents=True)
-
-    # 1. rig itself (so the artifact is self-contained for the Python path).
+def _stage_tree(staging: Path, manifest, catalog, *, registry: str | None = None) -> None:
+    """Steps 1–3 shared by the deploy bake and the run-open capture: bundled rig + resolved
+    per-sensor configs + a COMPLETE resolved vehicle.yaml (overrides/profiles already baked in;
+    images / vehicle_id / all three tiers preserved so a `rig up` on the unbaked tree exports the
+    same fleet env and keeps the tier ordering) + every service's vendored launch surface with a
+    catalog that points at them. ALL rows stage, disabled included — a reconstruction (or a
+    later `rig replay`) needs their surfaces and configs too."""
     _stage_rig(staging)
 
-    # 2. resolved per-sensor configs + a COMPLETE resolved vehicle.yaml (overrides/profiles already baked
-    #    in; images / vehicle_id / all three tiers preserved so a `rig up` on the unbaked tree exports
-    #    the same fleet env — RIG_IMAGE_REGISTRY/RIG_IMAGE_TAG/VEHICLE_ID/ROS_DOMAIN_ID — and keeps the
-    #    tier ordering (infra first, autonomy last / down-first)).
     cfg_dir = staging / "config" / "sensors"
     cfg_dir.mkdir(parents=True)
     tier_rows: dict[str, list] = {"infra": [], "sensor": [], "autonomy": []}
@@ -540,12 +533,24 @@ def bake(root: Path, manifest, catalog, descriptors, env, tag: str, *, registry:
         veh["autonomy"] = tier_rows["autonomy"]
     (staging / "vehicle.yaml").write_text(yaml.safe_dump(veh, sort_keys=False))
 
-    # 3. vendor each service's launch surface in + a catalog that points at them
     catalog_out = {}
     for service in sorted({s.service for s in manifest.sensors}):
         vendor(service, catalog[service].path, staging)
         catalog_out[service] = {"path": f"services/{service}"}
     (staging / "services.yaml").write_text(yaml.safe_dump({"services": catalog_out}, sort_keys=False))
+
+
+def bake(root: Path, manifest, catalog, descriptors, env, tag: str, *, registry: str | None = None,
+         bundle_images: bool = False) -> Path:
+    if registry:
+        env = {**env, "RIG_IMAGE_REGISTRY": registry}  # override vehicle.yaml images.registry for this bake
+    staging = root / "var" / "bake" / tag
+    if staging.exists():
+        shutil.rmtree(staging)
+    staging.mkdir(parents=True)
+
+    # 1.–3. rig + configs/vehicle.yaml + vendored surfaces (shared with the run-open capture).
+    _stage_tree(staging, manifest, catalog, registry=registry)
 
     # 4. compose-only resolved form (best-effort) + scripts + bootstrap. Bundle mode also `docker save`s
     #    the image set into the artifact: zero registry at deploy time, integrity = the artifact's sha256.
@@ -633,6 +638,95 @@ def bake(root: Path, manifest, catalog, descriptors, env, tag: str, *, registry:
     lineage = f" · parent: {parent['tag']}" if parent else ""
     eprint(f"  {stack_summary(manifest.sensors)} · {len(entries)} compose-only · {pin_note}{lineage}")
     return tarpath
+
+
+def capture_run(root: Path, manifest, run_dir: Path) -> dict:
+    """The LEAN run-open capture (rig-reconstruct plan): the deployment tree as it stands, into
+    ``<run>/.rig/artifact.tar.gz`` — vendored surfaces for ALL rows (disabled included), all
+    configs, the resolved vehicle.yaml, bundled rig. Deliberately SKIPS the deploy bake's
+    compose-only render (slow — runs every launcher), registry digest-pinning (offline-hostile),
+    and image bundling: fast and network-free by construction, so `_open_run` can call it on a
+    field vehicle. Image identity still lands: LOCAL docker-daemon digests (what is actually
+    present to run — stronger than a registry tag) into ``<run>/.rig/images.yaml``, best-effort
+    per ref. Returns the manifest ``capture:`` stamp ({sha256, rig_version}).
+
+    Loads its own catalog/descriptors from ``root`` (self-contained — runs.py's signatures stay
+    stable); the caller wraps the whole call fail-soft: capture must never block a session."""
+    import tempfile
+
+    from .catalog import load_catalog
+    from .descriptor import load_descriptor
+
+    catalog = load_catalog(root)
+    descriptors = {}
+    for s in manifest.sensors:
+        if s.service not in descriptors and s.service in catalog:
+            descriptors[s.service] = load_descriptor(s.service, catalog[s.service].path)
+
+    work = Path(tempfile.mkdtemp(prefix="rig-capture-"))
+    staging = work / "capture"
+    staging.mkdir()
+    try:
+        _stage_tree(staging, manifest, catalog)
+        meta = {
+            "kind": "run-capture",  # reconstruct treats deploy artifacts (retrofits) and captures alike
+            "tag": f"run-capture-{run_dir.name}",
+            "vehicle": manifest.vehicle,
+            "created": datetime.datetime.now().isoformat(timespec="seconds"),
+            "rig_version": __version__,
+            "platform": manifest.platform,
+            "data_dir": manifest.data_dir,
+        }
+        if (root / "metadata.yaml").exists():  # capture INSIDE an extracted artifact: keep lineage
+            try:
+                pmeta = load_yaml(root / "metadata.yaml")
+                meta["parent"] = {k: pmeta[k] for k in ("tag", "vehicle", "created", "rig_version")
+                                  if pmeta.get(k)}
+            except RigError:
+                pass
+        (staging / "metadata.yaml").write_text(yaml.safe_dump(meta, sort_keys=False))
+
+        rig_dir = run_dir / ".rig"
+        rig_dir.mkdir(parents=True, exist_ok=True)
+        tarpath = rig_dir / "artifact.tar.gz"
+        tmp = rig_dir / ".artifact.tar.gz.tmp"
+        with tarfile.open(tmp, "w:gz") as tf:
+            tf.add(staging, arcname="capture")
+        tmp.replace(tarpath)
+
+        # Image IDENTITY, not bytes: local daemon digests for the refs the manifest implies —
+        # base, msgs overlay, each service's own build images (platform-composed like the pull
+        # side) and mirrored third-party refs. Unresolvable refs record null (absent image, no
+        # daemon): the capture still stands, the pin is just weaker there.
+        images: dict[str, str | None] = {}
+        try:
+            from .build import _service_tag, resolve_base_image, resolve_msgs_image
+            refs: set[str] = set()
+            for resolver in (resolve_base_image, resolve_msgs_image):
+                try:
+                    ref = resolver(manifest, descriptors)[0]
+                    if ref:
+                        refs.add(ref)
+                except RigError:
+                    pass  # provider conflicts are doctor's ERROR, not capture's problem
+            prefix = f"{manifest.image_registry}/" if manifest.image_registry else ""
+            for desc in descriptors.values():
+                composed = _service_tag(desc, manifest.image_tag, manifest.platform) or "latest"
+                refs.update(f"{prefix}{img}:{composed}" for img in desc.build_images)
+                refs.update(desc.mirror)
+            images = {ref: _resolve_digest(ref, local_only=True) for ref in sorted(refs)}
+            (rig_dir / "images.yaml").write_text(yaml.safe_dump(
+                {"schema": 1, "images": images}, sort_keys=True))
+        except Exception:  # noqa: BLE001 — identity capture is best-effort, never blocks
+            pass
+
+        stamp = {"sha256": _sha256(tarpath), "rig_version": __version__}
+        pinned = sum(1 for d in images.values() if d)
+        eprint(f"rig: run capture -> .rig/artifact.tar.gz "
+               f"({tarpath.stat().st_size // 1024} KB, {pinned}/{len(images)} image digests)")
+        return stamp
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
 
 
 def is_fleet(root: Path) -> bool:
