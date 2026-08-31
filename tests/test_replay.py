@@ -306,6 +306,185 @@ def test_cmd_dry_run_survives_a_busy_host():
          replay.runs_mod.running_projects) = orig
 
 
+
+
+# --- the service-call half (rig-svc-replay plan; rig-replay-calls-handoff §1) ----------------
+
+EPOCH_SVC = textwrap.dedent("""\
+    schema: 1
+    first: 2026-08-27T10:00:00Z
+    last: 2026-08-27T11:00:00Z
+    rmw: rmw_zenoh_cpp
+    domain: 7
+    nodes:
+      /gnss_primary/novatel_node:
+        pubs:
+        - {topic: /gnss_primary/fix, type: sensor_msgs/msg/NavSatFix}
+        subs: []
+        provides:
+        - {service: /gnss_primary/reset, type: std_srvs/srv/Trigger}
+        requires: []
+      /planner/planner_node:
+        pubs:
+        - {topic: /planner/set_mode/_service_event, type: my_msgs/srv/SetMode_Event}
+        subs:
+        - {topic: /gnss_primary/fix, type: sensor_msgs/msg/NavSatFix}
+        provides:
+        - {service: /planner/set_mode, type: my_msgs/srv/SetMode}
+        - {service: /planner/planner_node/get_parameters, type: rcl_interfaces/srv/GetParameters}
+        requires:
+        - {service: /gnss_primary/reset, type: std_srvs/srv/Trigger}
+    """)
+
+
+def test_select_services_provides_minus_requires_and_plumbing():
+    src = _source_run(epochs=(EPOCH_SVC,))
+    services, notices = replay.select_services(src, ["planner"])
+    assert services == "/planner/set_mode"  # parameter plumbing dropped; requires untouched here
+    # requires subtraction: planner+gnss together — gnss's reset is provided AND required in-set
+    services2, notices2 = replay.select_services(src, ["planner", "gnss_primary"])
+    assert services2 == "/planner/set_mode"
+    assert any("self-echo" in n and "/gnss_primary/reset" in n for n in notices2)
+
+
+def test_select_services_epochs_only_no_fallback():
+    assert replay.select_services(_source_run(epochs=()), ["planner"])[0] is None
+    assert replay.select_services(_source_run(epochs=(EPOCH_SVC,)), ["planner", "ghost"])[0] is None
+
+
+def test_service_event_topics_stay_out_of_the_topic_selector():
+    mode, value, _ = replay.select_topics(_source_run(epochs=(EPOCH_SVC,)), ["planner"])
+    assert mode == "topics" and value == "/gnss_primary/fix"
+    assert "_service_event" not in value  # the service CHANNEL replays as calls, never as topics
+
+
+def test_validate_calls_good_and_refusals():
+    d = pathlib.Path(tempfile.mkdtemp())
+    good = d / "calls.yaml"
+    good.write_text(textwrap.dedent("""\
+        schema: 1
+        timeout_s: 5
+        calls:
+          - {t: 12.5, service: /planner/set_mode, type: my_msgs/srv/SetMode, request: {mode: A}}
+          - {t: 0, service: /planner/set_mode, type: my_msgs/srv/SetMode}
+        """))
+    assert len(replay.validate_calls(good)) == 64  # sha256 back for provenance
+    for bad, needle in ((("schema: 2\ncalls: [{t: 1, service: /s, type: t/srv/T}]\n"), "schema"),
+                        (("schema: 1\ncalls: []\n"), "non-empty"),
+                        (("schema: 1\ncalls: [{t: -1, service: /s, type: t/srv/T}]\n"), "≥ 0"),
+                        (("schema: 1\ncalls: [{t: 1, type: t/srv/T}]\n"), "service"),
+                        (("schema: 1\ncalls: [{t: 1, service: /s, type: t/srv/T, "
+                          "request: nope}]\n"), "mapping")):
+        p = d / "bad.yaml"
+        p.write_text(bad)
+        try:
+            replay.validate_calls(p)
+            assert False, f"must refuse: {needle}"
+        except RigError as exc:
+            assert needle in str(exc)
+    try:
+        replay.validate_calls(d / "missing.yaml")
+        assert False
+    except RigError as exc:
+        assert "no file" in str(exc)
+
+
+def test_cmd_services_verbatim_vs_calls_script_xor():
+    src = _source_run(epochs=(EPOCH_SVC,))
+    rows = [_row("gnss_primary", service="nov", tier="sensor", order=10),
+            _row("planner", service="plan", tier="autonomy", order=20), PLAYER]
+    m = _manifest(rows)
+    descriptors = {s.service: object() for s in rows}
+    seen = {}
+    orig = (replay.doctor_mod.collect, replay.dispatch.fleet_env, replay.dispatch.run_verb)
+    try:
+        replay.doctor_mod.collect = lambda *a, **k: []
+        replay.dispatch.fleet_env = lambda *a, **k: {}
+        def _run_verb(pairs, env, verb, dry_run=False, **k):
+            seen.update(env=env)
+            class O:  # noqa: N801
+                returncode = 0
+                sensor = pairs[0][0]
+            return [O()]
+        replay.dispatch.run_verb = _run_verb
+
+        rc = replay.cmd(m, {}, descriptors, pathlib.Path("."), run_ref=str(src),
+                        names=["planner"], label=None, wall_clock=False, force=False,
+                        dry_run=True)
+        assert rc == 0
+        assert seen["env"]["RIG_REPLAY_SERVICES"] == "/planner/set_mode"  # verbatim armed
+        assert "RIG_REPLAY_CALLS" not in seen["env"]
+
+        script = pathlib.Path(tempfile.mkdtemp()) / "calls.yaml"
+        script.write_text("schema: 1\ncalls: [{t: 1.0, service: /planner/set_mode, "
+                          "type: my_msgs/srv/SetMode, request: {mode: A}}]\n")
+        rc = replay.cmd(m, {}, descriptors, pathlib.Path("."), run_ref=str(src),
+                        names=["planner"], label=None, wall_clock=False, force=False,
+                        dry_run=True, calls=str(script))
+        assert rc == 0
+        assert seen["env"]["RIG_REPLAY_CALLS"] == str(script.resolve())
+        assert "RIG_REPLAY_SERVICES" not in seen["env"]  # script XOR verbatim
+    finally:
+        replay.doctor_mod.collect, replay.dispatch.fleet_env, replay.dispatch.run_verb = orig
+
+
+def test_doctor_warns_undeclared_introspection_only_when_services_in_play():
+    from rig_cli import doctor
+    rows = [_row("planner", service="plan", tier="autonomy")]
+    m = _manifest(rows)
+
+    class _D:  # sim-time declared, introspection NOT
+        replay_sim_time = True
+        replay_service_introspection = False
+    issues = doctor.replay_issues(m, {"plan": _D()}, ["planner"], sim_time=True, services=True)
+    assert any("service_introspection" in i.message for i in issues)
+    issues = doctor.replay_issues(m, {"plan": _D()}, ["planner"], sim_time=True, services=False)
+    assert not any("service_introspection" in i.message for i in issues)
+
+
+def test_alignment_report_stacks_and_drift():
+    src = _source_run(epochs=(EPOCH_SVC,))
+    # source manifest: ran planner only, with a sealed snapshot of planner's rendered config
+    files = {"rendered/planner.yaml": b"service: plan\nname: planner\ngain: 1\n"}
+    digest = runs._config_digest(files)
+    snap = src / ".rig" / "config" / digest
+    for rel, blob in files.items():
+        (snap / rel).parent.mkdir(parents=True, exist_ok=True)
+        (snap / rel).write_bytes(blob)
+    import yaml as _y
+    (src / "manifest.yaml").write_text(_y.safe_dump(
+        {"run": src.name, "ended": "x", "stacks": ["planner"],
+         "ups": [{"at": "x", "config": digest}]}))
+    cfg = pathlib.Path(tempfile.mkdtemp()) / "planner.yaml"
+    cfg.write_text("service: plan\nname: planner\ngain: 1\n")  # identical
+    rows = [Sensor(name="planner", service="plan", config=cfg, enabled=True, order=1,
+                   tier="autonomy"),
+            Sensor(name="newsvc", service="ns", config=cfg, enabled=True, order=2,
+                   tier="autonomy")]
+    lines, drifted = replay._alignment_report(_manifest(rows), ["planner", "newsvc"], src)
+    text = "\n".join(lines)
+    assert "planner: config identical" in text and drifted == []
+    assert "newsvc: not in the source run's recorded stacks" in text
+    cfg.write_text("service: plan\nname: planner\ngain: 2\n")  # now drifted
+    lines, drifted = replay._alignment_report(_manifest(rows), ["planner"], src)
+    assert drifted == ["planner"] and any("DIFFERS" in ln for ln in lines)
+
+
+def test_descriptor_replay_block_service_introspection():
+    d = pathlib.Path(tempfile.mkdtemp())
+    from rig_cli.descriptor import load_descriptor
+    (d / "rigging.yaml").write_text(
+        "service: svc\nlauncher: svc-up\nreplay: {sim_time: true, service_introspection: true}\n")
+    desc = load_descriptor("svc", d)
+    assert desc.replay_sim_time and desc.replay_service_introspection
+    (d / "rigging.yaml").write_text("service: svc\nlauncher: svc-up\nreplay: {introspection: true}\n")
+    try:
+        load_descriptor("svc", d)
+        assert False, "typo'd replay key must refuse"
+    except RigError as exc:
+        assert "service_introspection" in str(exc)
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

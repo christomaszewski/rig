@@ -113,6 +113,12 @@ class Descriptor:
     #                                              token; the player's --clock derives from the same
     #                                              var). Undeclared services WARN under `rig replay`
     #                                              sim time: they run wall clock against bag stamps
+    replay_service_introspection: bool = False  # `replay: {service_introspection: true}` — the
+    #                                              launcher enables CONTENTS-level service
+    #                                              introspection (servers+clients), so calls RECORD
+    #                                              into bags and REPLAY at this service's servers.
+    #                                              Undeclared services WARN when replay selects
+    #                                              services (their recorded calls likely absent)
     interface: dict[str, tuple[InterfaceEdge, ...]] | None = None  # `interface:` — the service's
     #                                              declared topic/service contract (publishes/
     #                                              subscribes/provides/requires). None = undeclared
@@ -265,23 +271,28 @@ def load_descriptor(service: str, repo: Path) -> Descriptor:
             msgs_source.append(MsgsSource(repo=str(repo_url), ref=str(ref),
                                           packages=tuple(str(p) for p in packages)))
 
-    replay_raw = data.get("replay")  # `replay: { sim_time: true }` — the launcher wires
-    #                               use_sim_time from RIG_SIM_TIME (a promise doctor trusts; the
-    #                               adoption itself is one launcher line — see the adoption prompt
-    #                               in ~/ws/infra). Block-shaped for future replay capabilities
+    replay_raw = data.get("replay")  # `replay: { sim_time: true, service_introspection: true }` —
+    #                               the launcher's PROMISES: use_sim_time wired from RIG_SIM_TIME,
+    #                               and CONTENTS-level service introspection on its servers/clients
+    #                               (each adoption is a small launcher change — see the prompts in
+    #                               ~/ws/infra). Block-shaped for future replay capabilities
     #                               (e.g. a per-sensor replay SOURCE declaration).
     replay_sim_time = False
+    replay_service_introspection = False
     if replay_raw is not None:
         if not isinstance(replay_raw, dict):
-            raise RigError(f"{path}: `replay` must be a mapping with sim_time")
-        unknown = set(replay_raw) - {"sim_time"}
+            raise RigError(f"{path}: `replay` must be a mapping with "
+                           f"sim_time/service_introspection")
+        unknown = set(replay_raw) - {"sim_time", "service_introspection"}
         if unknown:  # a typo'd key would silently drop the promise doctor relies on
             raise RigError(f"{path}: replay: unknown key(s) {', '.join(sorted(unknown))} — it "
-                           f"carries only sim_time")
-        if not isinstance(replay_raw.get("sim_time"), bool):
-            raise RigError(f"{path}: replay.sim_time must be true or false (a bare declaration "
-                           f"is a promise the launcher wires use_sim_time from RIG_SIM_TIME)")
-        replay_sim_time = replay_raw["sim_time"]
+                           f"carries only sim_time, service_introspection")
+        for key in ("sim_time", "service_introspection"):
+            if key in replay_raw and not isinstance(replay_raw[key], bool):
+                raise RigError(f"{path}: replay.{key} must be true or false (a declaration is a "
+                               f"promise the launcher wires the capability from the fleet env)")
+        replay_sim_time = bool(replay_raw.get("sim_time"))
+        replay_service_introspection = bool(replay_raw.get("service_introspection"))
 
     interface_raw = data.get("interface")  # `interface: { publishes/subscribes: [{topic, type?}],
     #                               provides/requires: [{service, type?}] }` — the service's declared
@@ -364,6 +375,7 @@ def load_descriptor(service: str, repo: Path) -> Descriptor:
         msgs_apt=msgs_apt,
         msgs_source=msgs_source,
         replay_sim_time=replay_sim_time,
+        replay_service_introspection=replay_service_introspection,
         interface=interface,
         platform_auto_detect=(str(platform_raw["auto_detect"]) if platform_raw.get("auto_detect")
                               else None),

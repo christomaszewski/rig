@@ -1,8 +1,28 @@
 # rig — project state & handoff (resume here)
 
 > Snapshot for picking the project up cold in a new session. Read this first, then `CHEATSHEET.md` /
-> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.2.36**,
-> branch **`main`**, 638 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.2.37**,
+> branch **`main`**, 646 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> **v0.2.37 (2026-08-31) — service-call replay, rig side** (plan `rig-svc-replay-plan.md`;
+> contract FROZEN in `~/ws/infra/rig-replay-calls-handoff.md` — supersedes the player handoff's
+> §6 sketch; rig-infra v1.10.0 implements the player half in parallel, kickoff prompt
+> `~/ws/infra/rig-bag-player-calls-prompt.md`. **RELEASE HELD** until v1.10.0 + one integration
+> smoke, the v0.2.33 pattern). Verbatim selection: `select_services` = with-set observed
+> `provides` − `requires` (the topic rule's twin; EPOCHS-ONLY — no namespace fallback for
+> ACTIONS), exported as `RIG_REPLAY_SERVICES` alongside the topic mode. `--calls <file>` = the
+> injector script (schema 1, shallow-validated — request bodies are the srv types' schemas, the
+> injector validates those), exported as `RIG_REPLAY_CALLS`, SUPPRESSES verbatim (script XOR
+> verbatim), copied + sha'd into the replay run (`.rig/replay-calls.yaml`, `replay.calls_sha`).
+> Both env vars join RIG_OWNED_ENV + the pop loop. graph.py newly treats `…/_service_event`
+> topics as plumbing (the service CHANNEL — replays as calls, never as topics; snapshotter
+> unchanged, schema 1 already carries provides/requires). Rigging `replay:` grows
+> `service_introspection` (strict); doctor WARNs per with-set service lacking it when calls are
+> in play. NEW alignment layer (independent of services): WARN when a with-set name is absent
+> from the source run's `stacks:`, and a per-instance CONFIG-DRIFT report vs the source's last
+> sealed snapshot — drifted names recorded as `replay.config_drift` (the diff IS the
+> experiment). Deployment logger config flips `record.services: all` + `record.actions: all`
+> (record-time-or-never — rides the next bake). Per-service introspection adoption prompt:
+> `~/ws/infra/service-introspection-adoption-prompt.md`.
 > **v0.2.36 (2026-08-31) — run capture + reconstruct** (ROADMAP §17; plan
 > `rig-reconstruct-plan.md` — the design settled across five discussion rounds, final shape the
 > operator's): every opened run now carries the tree that ran. `_open_run` invokes a LEAN bake

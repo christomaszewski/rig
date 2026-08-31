@@ -124,6 +124,115 @@ def select_topics(source_dir: Path, with_names: list[str]) -> tuple[str, str, li
     return "exclude", pattern, notices
 
 
+def select_services(source_dir: Path, with_names: list[str]) -> tuple[str | None, list[str]]:
+    """(space-joined service allow-list | None, notices) — the topic rule's twin: the with-set's
+    observed `provides` MINUS its observed `requires` (a with-set client re-issues its own calls
+    live; replaying them double-calls), plumbing-filtered. EPOCHS-ONLY, no namespace fallback:
+    a heuristic guess about which CALLS to re-issue is an action, not a subscription — without
+    observation rig selects none (verbatim service replay simply doesn't arm)."""
+    notices: list[str] = []
+    epochs = graph_mod.load_epochs(source_dir)
+    if not epochs:
+        return None, notices  # the topic selector already WARNed about missing epochs
+    u = graph_mod.union(epochs)
+    groups = graph_mod.group_nodes(u.nodes, with_names)
+    if any(n not in groups for n in with_names):
+        return None, notices  # unobserved instance: the topic selector already fell back + WARNed
+    provides: set[str] = set()
+    requires: set[str] = set()
+    for name in with_names:
+        for fqn in groups[name]:
+            for e in u.nodes[fqn]:
+                if graph_mod.is_plumbing(e):
+                    continue
+                if e.kind == "provides":
+                    provides.add(e.name)
+                elif e.kind == "requires":
+                    requires.add(e.name)
+    echo = sorted(provides & requires)
+    if echo:
+        notices.append(f"service self-echo guard: {', '.join(echo)} — provided AND required "
+                       f"inside the with-set; the live client re-issues those calls")
+    allow = sorted(provides - requires)
+    if not allow:
+        return None, notices
+    notices.append(f"service replay: {len(allow)} recorded call target(s) — {', '.join(allow)}")
+    return " ".join(allow), notices
+
+
+def validate_calls(path: Path) -> str:
+    """Shallow-validate a call script (rig-replay-calls-handoff §1.2) and return its sha256 for
+    the run's provenance. SHALLOW on purpose: schema/t/shape here; the request BODIES are the srv
+    types' own schemas — the injector validates those against the types at load (rig has no ROS
+    and stays opaque). Refusals name the entry index, never a YAML line."""
+    import hashlib
+
+    if not path.is_file():
+        raise RigError(f"replay --calls: no file at {path}")
+    doc = load_yaml(path)
+    if doc.get("schema") != 1:
+        raise RigError(f"replay --calls: {path.name}: schema must be 1, not "
+                       f"{doc.get('schema')!r}")
+    calls = doc.get("calls")
+    if not isinstance(calls, list) or not calls:
+        raise RigError(f"replay --calls: {path.name}: `calls` must be a non-empty list")
+    for i, entry in enumerate(calls):
+        if not isinstance(entry, dict):
+            raise RigError(f"replay --calls: {path.name}: calls #{i} must be a mapping")
+        t = entry.get("t")
+        if not isinstance(t, (int, float)) or isinstance(t, bool) or t < 0:
+            raise RigError(f"replay --calls: {path.name}: calls #{i}: t must be a number ≥ 0 "
+                           f"(seconds from play start on the sim clock)")
+        for key in ("service", "type"):
+            if not isinstance(entry.get(key), str) or not entry[key]:
+                raise RigError(f"replay --calls: {path.name}: calls #{i} needs `{key}`")
+        if not isinstance(entry.get("request", {}), dict):
+            raise RigError(f"replay --calls: {path.name}: calls #{i}: `request` must be a "
+                           f"mapping (the srv type's own fields)")
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _alignment_report(manifest, with_names: list[str], src_dir: Path) -> tuple[list[str], list[str]]:
+    """(eprint lines, drifted instance names) — the source↔current alignment layer. The drift IS
+    the experiment: each with-set instance's CURRENT rendered config vs the source run's LAST
+    sealed snapshot, byte-compared; plus a WARN when the source run never ran an instance at all
+    (its `stacks:`). All read-side and fail-soft — a sparse old run degrades to 'unknown'."""
+    lines: list[str] = []
+    drifted: list[str] = []
+    doc: dict = {}
+    mpath = src_dir / "manifest.yaml"
+    if mpath.exists():
+        try:
+            doc = load_yaml(mpath)
+        except RigError:
+            pass
+    stacks = {str(s) for s in (doc.get("stacks") or [])}
+    if stacks:
+        for name in with_names:
+            if name not in stacks:
+                lines.append(f"[!] {name}: not in the source run's recorded stacks — its "
+                             f"'recorded inputs' come from a session it never ran in")
+    ups = doc.get("ups") or []
+    digest = (ups[-1] or {}).get("config") if ups and isinstance(ups[-1], dict) else None
+    snap = (src_dir / ".rig" / "config" / str(digest)) if digest else None
+    for s in (row for row in manifest.sensors if row.name in set(with_names)):
+        recorded = snap / "rendered" / f"{s.name}.yaml" if snap else None
+        if recorded is None or not recorded.exists():
+            lines.append(f"[·] {s.name}: no rendered config in the source snapshot — drift unknown")
+            continue
+        try:
+            same = Path(s.config).read_bytes() == recorded.read_bytes()
+        except OSError:
+            same = False
+        if same:
+            lines.append(f"[✓] {s.name}: config identical to the source run")
+        else:
+            drifted.append(s.name)
+            lines.append(f"[≠] {s.name}: config DIFFERS from the source run — this diff is the "
+                         f"experiment (recorded in the replay manifest)")
+    return lines, drifted
+
+
 def _player_row(manifest):
     """The deployment's ros2-bag-player row — service-name detection (the doctor's zenoh-router
     precedent: rig knows its OWN companion services). Enabled state is irrelevant: replay selects
@@ -160,7 +269,8 @@ def _guard_clean_host(manifest, force: bool) -> None:
 
 
 def cmd(manifest, catalog, descriptors, root: Path, *, run_ref: str, names: list[str],
-        label: str | None, wall_clock: bool, force: bool, dry_run: bool) -> int:
+        label: str | None, wall_clock: bool, force: bool, dry_run: bool,
+        calls: str | None = None) -> int:
     if not names:
         raise RigError("replay: name the instance(s) under test — `rig replay <run> <name>…` "
                        "(they come up live; their recorded inputs are played at them)")
@@ -178,10 +288,23 @@ def cmd(manifest, catalog, descriptors, root: Path, *, run_ref: str, names: list
 
     src_id, src_dir = resolve_source(manifest, run_ref)
     mode, value, notices = select_topics(src_dir, names)
+    # Services ride the SAME session: verbatim (recorded requests at the with-set's servers,
+    # provides − requires) — unless a call SCRIPT is given, which subsumes and SUPPRESSES
+    # verbatim (script XOR verbatim: double-call discipline; rig-replay-calls-handoff §1.2).
+    calls_path = Path(calls).expanduser().resolve() if calls else None
+    calls_sha = validate_calls(calls_path) if calls_path else None
+    services = None
+    if calls_path is None:
+        services, svc_notices = select_services(src_dir, names)
+        notices += svc_notices
     for n in notices:
         eprint(f"rig replay: {n}")
+    align_lines, drifted = _alignment_report(manifest, names, src_dir)
+    for line in align_lines:
+        eprint(f"  {line}")
     for issue in doctor_mod.replay_issues(manifest, descriptors, names,
-                                          sim_time=not wall_clock):
+                                          sim_time=not wall_clock,
+                                          services=bool(services or calls_path)):
         eprint(f"  [{doctor_mod._SYMBOL[issue.level]}] {issue.message}")
 
     # Up-set: enabled infra (logger + its graph sidecar ride along, recording the A/B outputs)
@@ -207,6 +330,10 @@ def cmd(manifest, catalog, descriptors, root: Path, *, run_ref: str, names: list
     env = dispatch.fleet_env(manifest, descriptors)
     env["RIG_REPLAY_SOURCE"] = str(src_dir)
     env["RIG_REPLAY_TOPICS" if mode == "topics" else "RIG_REPLAY_EXCLUDE"] = value
+    if calls_path is not None:
+        env["RIG_REPLAY_CALLS"] = str(calls_path)  # SERVICES stays unset: script XOR verbatim
+    elif services:
+        env["RIG_REPLAY_SERVICES"] = services
     if not wall_clock:
         env["RIG_SIM_TIME"] = "1"
 
@@ -214,15 +341,26 @@ def cmd(manifest, catalog, descriptors, root: Path, *, run_ref: str, names: list
         if manifest.data_dir:
             run_label = label or re.sub(r"[^A-Za-z0-9_-]", "-", f"replay-{src_id}")
             replay_doc = {"of": src_id, "source": str(src_dir), "with": list(names)}
+            if drifted:
+                replay_doc["config_drift"] = drifted  # the diff IS the experiment — name it
+            if calls_sha:
+                replay_doc["calls_sha"] = calls_sha
             # our clean-host guard already ran (same evidence, replay-flavored message) — don't
             # fail-closed twice on one docker call
-            runs_mod.new_run(manifest, root, run_label, force=True, replay=replay_doc)
+            run_id = runs_mod.new_run(manifest, root, run_label, force=True, replay=replay_doc)
+            if calls_path is not None:  # the script is provenance the standard snapshot can't
+                import shutil            # see (an arbitrary file) — copy + hash it explicitly
+                rig_dir = Path(manifest.data_dir) / "runs" / run_id / ".rig"
+                rig_dir.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(calls_path, rig_dir / "replay-calls.yaml")
             runs_mod.snapshot(manifest, root, stacks=[s.name for s, _ in pairs])
         else:
             eprint("rig replay: warning: no `data_dir` — this session gets no run dir, no "
                    "provenance, and no recording of the new outputs")
     count = f"{len(value.split())} topics" if mode == "topics" else "namespace-exclude"
-    eprint(f"rig replay: {src_id} → {', '.join(names)}  [{mode}: {count}"
+    svc_note = (", scripted calls" if calls_path is not None
+                else f", {len(services.split())} services" if services else "")
+    eprint(f"rig replay: {src_id} → {', '.join(names)}  [{mode}: {count}{svc_note}"
            f"{', wall clock' if wall_clock else ', sim time'}]")
     outcomes = dispatch.run_verb(pairs, env, "up", dry_run=dry_run)
     failed = [o for o in outcomes if o.returncode != 0]

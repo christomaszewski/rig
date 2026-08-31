@@ -262,6 +262,24 @@ rig down --end-run                         # seal the replay session like any ru
 rig runs                                   # the REPLAY-OF column links the pair
 ```
 
+**Service calls** (rig ≥ v0.2.37 + rig-infra ≥ v1.10.0, sources recorded with `record.services`
+and CONTENTS-level introspection adopted): by default replay also re-issues the recorded calls at
+the with-set's servers — observed `provides` minus `requires`, the topic rule's twin. To RETIME
+or INJECT calls instead, pass a call script (script XOR verbatim — never both):
+
+```bash
+../rig-infra/ros2-bag-player/ros2-bag-player-up config/autonomy/bag_player.yaml export-calls > calls.yaml
+```
+
+```bash
+rig replay <run> planner --calls calls.yaml
+```
+
+Edit `calls.yaml` between the two — move a `t:`, add a new call — the injector executes it on
+the sim clock (so `-r` scales it) and appends each result to `<run>/calls/<name>/results.yaml`;
+the script itself is copied + hashed into the replay run (`.rig/replay-calls.yaml`). Responses go
+to the player/injector, not to original callers — this tests SERVERS.
+
 The A/B artifact: the SOURCE run's bag holds the original outputs, the replay run's bag holds the
 new ones, and `replay:` in the new run's manifest links them. `rig graph <replay-run>` shows the
 SIL topology. Known limits (by design): `/tf` is shared-bus — the bag replays the ORIGINAL

@@ -55,6 +55,7 @@ def fleet_env(manifest: Manifest, descriptors: dict[str, Descriptor] | None = No
                        # manifest state)
                        ("RIG_REPLAY_SOURCE", None), ("RIG_REPLAY_TOPICS", None),
                        ("RIG_REPLAY_EXCLUDE", None), ("RIG_SIM_TIME", None),
+                       ("RIG_REPLAY_SERVICES", None), ("RIG_REPLAY_CALLS", None),
                        # the operational-state posture token: None on EVERY verb (popped — a
                        # leaked shell value must never park a fleet); cmd_up alone sets it on its
                        # env copy when --standby/--active is passed (honored by launchers at `up`
@@ -133,7 +134,8 @@ def run(
         for key in ("VEHICLE_ID", "RIG_IMAGE_REGISTRY", "RIG_IMAGE_TAG", "RIG_BASE_IMAGE",
                     "RIG_MSGS_IMAGE", "RIG_TARGET_PLATFORM", "RIG_DATA_DIR",
                     "RIG_REPLAY_SOURCE", "RIG_REPLAY_TOPICS", "RIG_REPLAY_EXCLUDE",
-                    "RIG_SIM_TIME", "RIG_TARGET_STATE", desc.platform_override_env or ""):
+                    "RIG_SIM_TIME", "RIG_REPLAY_SERVICES", "RIG_REPLAY_CALLS",
+                    "RIG_TARGET_STATE", desc.platform_override_env or ""):
             if key and env.get(key):
                 envline += f" {key}={env[key]}"
         eprint(f"  {sensor.name} [{sensor.service}]  (cwd={desc.repo})")

@@ -13,9 +13,9 @@ record:
   # exclude_images_regex: '.*/image_raw(/.*)?$'   # the default; widen for image_color/_rect if needed
   # include_hidden_topics: true       # also record ROS-internal (hidden) topics
   # include_unpublished_topics: true  # also subscribe to discovered topics that have no publisher yet
-  # services: all                     # record service calls: all | [/exact/service, ...] — captured via
-  #                                   # service EVENT topics, so only servers with introspection ON appear
-  # actions: all                      # record action activity: all | [/exact/action, ...]
+  services: all                     # record service calls: all | [/exact/service, ...] — captured via
+  #                                 # service EVENT topics, so only servers with introspection ON appear
+  actions: all                      # record action activity: all | [/exact/action, ...]
   repeat_transient_local: true      # re-write latched topics (/tf_static, maps) into every split /
   #                                   # snapshot file: true = last msg per topic, N = depth, ['/tf_static=1', ...]
 

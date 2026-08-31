@@ -76,7 +76,11 @@ class GraphUnion:
 
 def is_plumbing(edge: Edge) -> bool:
     if edge.kind in ("pubs", "subs"):
-        return edge.name in _PLUMBING_TOPICS
+        # `…/_service_event` topics are the SERVICE channel's wire form (introspection events) —
+        # data for rosbag2, plumbing for every derived view: an interface contract lists the
+        # service itself, and replay's TOPIC selector must not double-carry the service channel
+        # (RIG_REPLAY_SERVICES replays it properly, as calls).
+        return edge.name in _PLUMBING_TOPICS or edge.name.endswith("/_service_event")
     return edge.name.endswith(_PLUMBING_SERVICE_SUFFIXES)
 
 

@@ -277,7 +277,8 @@ def run(manifest: Manifest, catalog: dict[str, ServiceEntry], descriptors: dict[
 
 
 def replay_issues(manifest: Manifest, descriptors: dict[str, Descriptor],
-                  with_names: list[str], *, sim_time: bool) -> list[Issue]:
+                  with_names: list[str], *, sim_time: bool,
+                  services: bool = False) -> list[Issue]:
     """Replay-specific preflight (called by `rig replay`, dry-run included — never by plain
     `doctor`, which has no with-set). WARN-only: replay is a bench workflow and the operator may
     know better — but an undeclared launcher under sim time is the silent failure class this
@@ -299,4 +300,14 @@ def replay_issues(manifest: Manifest, descriptors: dict[str, Descriptor],
                                   f"RIG_SIM_TIME in the launcher, or run --wall-clock"))
     if rows and not undeclared:
         issues.append(Issue(OK, "every service under test declares replay sim-time adoption"))
+    if services:  # calls are in play (verbatim OR scripted): the with-set's servers must have
+        #           had introspection ON when the source was RECORDED — the declaration is the
+        #           best preflight proxy for that (WARN-only, the adoption posture)
+        for s in rows:
+            if not getattr(descriptors[s.service], "replay_service_introspection", False):
+                issues.append(Issue(WARN, f"{s.name} [{s.service}]: service calls in play but "
+                                          f"its rigging does not declare `replay: "
+                                          f"{{service_introspection: true}}` — recorded calls "
+                                          f"for its servers are likely absent from the source "
+                                          f"bag (see service-introspection-adoption-prompt)"))
     return issues
