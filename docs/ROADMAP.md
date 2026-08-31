@@ -335,8 +335,17 @@ non-"autonomous" perception/estimation stacks.
   FIRST** — the decider dies before its eyes, a safety default even for retry-tolerant stacks).
 - Ordering stays a courtesy, not correctness: consumers must still retry (zenoh discovery is dynamic).
 - **The future payoff this tier structure enables**: when the `health` verb lands, `up --wait-healthy`
-  gates between TIER BOUNDARIES — and sensors→autonomy is the boundary that matters (no planner arming
-  before GNSS has a fix). Do not build the gating in this slice; build the structure it attaches to.
+  gates between TIER BOUNDARIES on READINESS — sensors→autonomy is the boundary that matters. (Amended
+  for the operational-state contract, v0.2.35, which fixed health fleet-wide as "could it run":
+  healthchecks probe readiness, NEVER data flow — a healthy GNSS in standby has no fix by design. The
+  original motivating example here, "no planner arming before GNSS has a fix", is exactly what this
+  gate does NOT do.) The gate proves every earlier tier COULD run — which now works parked, a payoff
+  in its own right: `up --standby --wait-healthy` proves the whole vehicle is ready while quiet.
+  Data-readiness gating (a planner waiting for an actual fix) is a DIFFERENT mechanism — the OP+HEALTH
+  pairing, mission-layer activation, or the /diagnostics layer — never the health verb. Adopters keep
+  time-to-healthy from `up` BOUNDED and STATED (HEALTHCHECK start-period/interval/timeout budgets;
+  ouster bumped timeout 15→20s for its standby HTTP probe) — a future `--wait-healthy` waits on
+  exactly that surface. Do not build the gating in this slice; build the structure it attaches to.
 
 ### Changes (≈ half day)
 1. `manifest.py`: parse a top-level `autonomy:` list (same row schema); `tier="autonomy"`; rank map in
@@ -451,7 +460,20 @@ CI checkout secret-free like rig/camera-service).
   their own composes. Still deferred: `provision`/`deploy` (sudo + fresh machines — after the
   plumbing hardens in the field), `fleet doctor` (cross-deployment host_ports aggregation).
 - **Boot-time bring-up**: a systemd unit running `rig up` (Compose handles per-stack restart thereafter).
-- **ROS `/diagnostics`** as the second health layer in `rig status`.
+- **ROS `/diagnostics` as the second health layer — SHAPE decided, design deferred.** The
+  state-contract rollout (§16) generates a per-adopter "where does X get surfaced" question — real
+  temperatures and parked-time device state live only on the device's control channel (ouster: its
+  HTTP API), and the contract rightly forbids bespoke status topics — so this is the standing answer
+  keeping adopters aligned until the arc runs. Shape: **one rig-infra diagnostics SIDECAR per
+  deployment** (the graph-snapshotter mold — a compose-profile-gated container riding existing infra,
+  rig stays ROS-free), not N per-service publishers. It consumes two surfaces that already exist:
+  (a) `/diagnostics` where a service's node publishes it natively (lifecycle `transition_event` comes
+  free), and (b) the device control channels, POLLED — endpoints are already in the instance configs
+  (`connection.*`; ouster's statectl/healthcheck show the read pattern), and pull beats push exactly
+  when parked, because a healthy standby service produces nothing by design. Services therefore add
+  NO status code: native diagnostics are consumed where present, never required. The design itself
+  (schema, rates, dashboard surface) is DEFERRED until 2–3 diverse adopters exist — the rollout is
+  the requirements-gathering.
 - **Host-facing port-clash** extraction for list-structured configs — ✅ done: `host_ports` supports an
   enabled-aware `plugins[name=webrtc-bridge,enabled=true].params.port` selector, and rig flags clashes
   across instances. The service must declare `host_ports` (camera-service: ✅ declares the webrtc port path).
