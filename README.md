@@ -124,6 +124,10 @@ python3 -m venv .venv && .venv/bin/pip install pyyaml
                           #   logger's `graph:` sidecar, rig-infra ≥ v1.7.0); --check compares vs the
                           #   riggings' declared interface: (WARN-only), --contract <instance>
                           #   scaffolds that block from observation, -o writes the union YAML
+./rig run rm <id> / run import <path>  # registry lifecycle: reclaim disk (sealed freely,
+                          #   interrupted --force, the OPEN run never) / adopt archived runs so
+                          #   id-based verbs + TAB cover them. The registry home is a machine
+                          #   fact: `sudo rig provision --data-dir /data/rig` (minted lazily)
 ./rig reconstruct <run-dir>  # a run dir back into a runnable tree, anywhere: every opened run
                           #   captures the deployment (surfaces + configs + rig, no image bytes)
                           #   into .rig/artifact.tar.gz — extract, verify, overlay a config
