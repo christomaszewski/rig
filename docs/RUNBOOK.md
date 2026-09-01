@@ -279,7 +279,7 @@ the with-set's servers — observed `provides` minus `requires`, the topic rule'
 or INJECT calls instead, pass a call script (script XOR verbatim — never both):
 
 ```bash
-../rig-infra/ros2-bag-player/ros2-bag-player-up config/autonomy/bag_player.yaml export-calls > calls.yaml
+rig replay <run> --export-calls > calls.yaml
 ```
 
 ```bash

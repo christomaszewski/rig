@@ -270,7 +270,28 @@ def _guard_clean_host(manifest, force: bool) -> None:
 
 def cmd(manifest, catalog, descriptors, root: Path, *, run_ref: str, names: list[str],
         label: str | None, wall_clock: bool, force: bool, dry_run: bool,
-        calls: str | None = None) -> int:
+        calls: str | None = None, export_calls: bool = False) -> int:
+    if export_calls:
+        # NOT a session: one launcher-verb dispatch (the export runs in a one-shot container —
+        # ROS stays on the player's side of the line; rig resolves run + row + launcher, which
+        # is exactly what it resolves for a replay anyway). Clean YAML rides the child's stdout
+        # (`> calls.yaml`); rig's own chatter stays on stderr like everything else.
+        if names:
+            raise RigError("replay --export-calls: takes no instance names — it derives the "
+                           "call timeline from the SOURCE run's recorded service events")
+        if calls:
+            raise RigError("replay --export-calls: exports a script; --calls plays one — "
+                           "one direction per invocation")
+        src_id, src_dir = resolve_source(manifest, run_ref)
+        player = _player_row(manifest)
+        env = dispatch.fleet_env(manifest, descriptors)
+        env["RIG_REPLAY_SOURCE"] = str(src_dir)
+        eprint(f"rig replay: exporting recorded calls from {src_id} "
+               f"(empty output = the run recorded no service events — introspection is "
+               f"record-time-or-never)")
+        outcomes = dispatch.run_verb([(player, descriptors[player.service])], env,
+                                     "export-calls", dry_run=dry_run)
+        return 0 if all(o.returncode == 0 for o in outcomes) else 1
     if not names:
         raise RigError("replay: name the instance(s) under test — `rig replay <run> <name>…` "
                        "(they come up live; their recorded inputs are played at them)")

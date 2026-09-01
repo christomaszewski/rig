@@ -533,6 +533,47 @@ def test_services_never_armed_under_the_exclude_fallback():
         replay.doctor_mod.collect, replay.dispatch.fleet_env, replay.dispatch.run_verb = orig
 
 
+
+
+def test_export_calls_dispatches_the_launcher_verb_without_a_session():
+    src = _source_run(epochs=(EPOCH_SVC,))
+    rows = [_row("planner", service="plan", tier="autonomy", order=20), PLAYER]
+    m = _manifest(rows)
+    descriptors = {s.service: object() for s in rows}
+    seen = {}
+    orig = (replay.dispatch.fleet_env, replay.dispatch.run_verb)
+    try:
+        replay.dispatch.fleet_env = lambda *a, **k: {}
+        def _run_verb(pairs, env, verb, dry_run=False, **k):
+            seen.update(pairs=pairs, env=env, verb=verb)
+            class O:  # noqa: N801
+                returncode = 0
+                sensor = pairs[0][0]
+            return [O()]
+        replay.dispatch.run_verb = _run_verb
+        rc = replay.cmd(m, {}, descriptors, pathlib.Path("."), run_ref=str(src), names=[],
+                        label=None, wall_clock=False, force=False, dry_run=False,
+                        export_calls=True)
+        assert rc == 0
+        assert seen["verb"] == "export-calls"
+        assert [s.name for s, _ in seen["pairs"]] == ["bag_player"]  # the player ALONE — no session
+        assert seen["env"]["RIG_REPLAY_SOURCE"] == str(src)
+        for absent in ("RIG_REPLAY_TOPICS", "RIG_REPLAY_SERVICES", "RIG_REPLAY_CALLS",
+                       "RIG_SIM_TIME"):
+            assert absent not in seen["env"]  # a derivation, not a replay — no session env
+        for kwargs, needle in (({"names": ["planner"]}, "no instance names"),
+                               ({"calls": "x.yaml"}, "one direction")):
+            try:
+                replay.cmd(m, {}, descriptors, pathlib.Path("."), run_ref=str(src),
+                           label=None, wall_clock=False, force=False, dry_run=False,
+                           export_calls=True, **{"names": [], **kwargs})
+                assert False, f"must refuse {kwargs}"
+            except RigError as exc:
+                assert needle in str(exc)
+    finally:
+        replay.dispatch.fleet_env, replay.dispatch.run_verb = orig
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

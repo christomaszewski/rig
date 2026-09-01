@@ -1,8 +1,17 @@
 # rig — project state & handoff (resume here)
 
 > Snapshot for picking the project up cold in a new session. Read this first, then `CHEATSHEET.md` /
-> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.2.38**,
-> branch **`main`**, 652 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.2.39**,
+> branch **`main`**, 653 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> **v0.2.39 (2026-09-01) — `rig replay <run> --export-calls`**: the call-script bootstrap as a
+> rig flag instead of a hand-invoked launcher verb. NOT a session: rig resolves the source run +
+> player row/launcher (everything replay resolves anyway) and dispatches the player's
+> `export-calls` verb in a one-shot container with `RIG_REPLAY_SOURCE` set — no run opened, no
+> stacks, no session env (TOPICS/SERVICES/CALLS/SIM_TIME all absent by test). Clean YAML rides
+> the child's stdout (`> calls.yaml`); rig chatter stays on stderr. Refuses instance names and
+> `--calls` (export vs play — one direction per invocation). ROS stays launcher-side per the
+> calls-handoff doctrine — rig added dispatch, not deserialization. QoL still queued from
+> discussion: `reconstruct --enable-replay`, `reconstruct`/`provision --registry`.
 > **v0.2.38 (2026-09-01) — run-registry lifecycle QoL**: the registry belongs to `data_dir`
 > (per-deployment, machine-local overridable), is minted LAZILY on first up/new-run, and brew/deb
 > installs carry no state — so no `init` verb exists ON PURPOSE. What was missing was ergonomics:

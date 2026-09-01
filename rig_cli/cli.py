@@ -261,7 +261,8 @@ def cmd_replay(args, manifest, catalog, descriptors) -> int:
     from . import replay as replay_mod
     return replay_mod.cmd(manifest, catalog, descriptors, args.rig_root, run_ref=args.run,
                           names=args.names, label=args.label, wall_clock=args.wall_clock,
-                          force=args.force, dry_run=args.dry_run, calls=args.calls)
+                          force=args.force, dry_run=args.dry_run, calls=args.calls,
+                          export_calls=args.export_calls)
 
 
 def cmd_graph(args, manifest, catalog, descriptors) -> int:
@@ -692,10 +693,14 @@ def build_parser() -> argparse.ArgumentParser:
                     help="instance(s) under test — brought up live, their recorded inputs played")
     rp.add_argument("--label", default=None,
                     help="label for the NEW replay run (default: replay-<source-run>)")
+    rp.add_argument("--export-calls", action="store_true", dest="export_calls",
+                    help="print the source run's recorded service calls as a schema-1 call "
+                         "script on stdout (redirect to a file, edit, replay with --calls). "
+                         "No session: one one-shot player container; takes no instance names")
     rp.add_argument("--calls", default=None, metavar="FILE",
                     help="call-script YAML (schema 1): inject/retime service calls on the sim "
                          "clock — SUPPRESSES verbatim service replay (script XOR verbatim); "
-                         "bootstrap one from the source bag with the player's export-calls verb")
+                         "bootstrap one with --export-calls")
     rp.add_argument("--wall-clock", action="store_true", dest="wall_clock",
                     help="no /clock, no use_sim_time (default: RIG_SIM_TIME=1 — player publishes "
                          "/clock, adopted services pace to it)")
