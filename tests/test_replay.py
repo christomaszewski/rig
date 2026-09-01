@@ -574,6 +574,64 @@ def test_export_calls_dispatches_the_launcher_verb_without_a_session():
         replay.dispatch.fleet_env, replay.dispatch.run_verb = orig
 
 
+
+
+def test_auto_end_waits_then_downs_reversed_and_seals():
+    src = _source_run(epochs=(EPOCH_SVC,))
+    data = pathlib.Path(tempfile.mkdtemp())
+    rows = [_row("zenoh-router", service="zr", tier="infra", order=0),
+            _row("planner", service="plan", tier="autonomy", order=20), PLAYER]
+    m = _manifest(rows, data_dir=str(data))
+    descriptors = {s.service: object() for s in rows}
+    events = []
+    finished = iter([False, False, None, True])  # a transient cannot-tell mid-wait is tolerated
+    orig = (replay.doctor_mod.collect, replay.dispatch.fleet_env, replay.dispatch.run_verb,
+            replay._player_finished, replay.runs_mod.capture_docker_logs,
+            replay.runs_mod.end_run, replay.runs_mod.new_run, replay.runs_mod.snapshot,
+            replay._guard_clean_host)
+    import time as _time
+    orig_sleep = _time.sleep
+    try:
+        replay.doctor_mod.collect = lambda *a, **k: []
+        replay.dispatch.fleet_env = lambda *a, **k: {}
+        def _run_verb(pairs, env, verb, dry_run=False, **k):
+            events.append((verb, [s.name for s, _ in pairs]))
+            class O:  # noqa: N801
+                returncode = 0
+                sensor = pairs[0][0]
+            return [O()]
+        replay.dispatch.run_verb = _run_verb
+        replay._player_finished = lambda *_a: next(finished)
+        replay.runs_mod.capture_docker_logs = lambda *_a: events.append(("logs", []))
+        replay.runs_mod.end_run = lambda *a, **k: events.append(("seal", []))
+        replay.runs_mod.new_run = lambda *a, **k: "rid"
+        replay.runs_mod.snapshot = lambda *a, **k: None
+        replay._guard_clean_host = lambda *a, **k: None
+        _time.sleep = lambda *_a: None
+        rc = replay.cmd(m, {}, descriptors, pathlib.Path("."), run_ref=str(src),
+                        names=["planner"], label=None, wall_clock=False, force=False,
+                        dry_run=False, auto_end_grace=0)
+        assert rc == 0
+        assert [e[0] for e in events] == ["up", "logs", "down", "seal"]
+        up_names, down_names = events[0][1], events[2][1]
+        assert down_names == list(reversed(up_names))  # player FIRST on the way down
+
+        # cannot-tell forever -> gives up WITHOUT tearing down (fail-safe)
+        events.clear()
+        replay._player_finished = lambda *_a: None
+        rc = replay.cmd(m, {}, descriptors, pathlib.Path("."), run_ref=str(src),
+                        names=["planner"], label=None, wall_clock=False, force=False,
+                        dry_run=False, auto_end_grace=0)
+        assert rc == 1
+        assert [e[0] for e in events] == ["up"]  # no logs, no down, no seal
+    finally:
+        (replay.doctor_mod.collect, replay.dispatch.fleet_env, replay.dispatch.run_verb,
+         replay._player_finished, replay.runs_mod.capture_docker_logs,
+         replay.runs_mod.end_run, replay.runs_mod.new_run, replay.runs_mod.snapshot,
+         replay._guard_clean_host) = orig
+        _time.sleep = orig_sleep
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

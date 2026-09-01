@@ -270,6 +270,9 @@ rig down                                   # replay starts from a quiet host (re
                                            #   run dir at start — survivors would write elsewhere)
 rig replay <stamp>_fieldtest planner       # new run opens, labeled replay-<source> (--label to name)
 rig down --end-run                         # seal the replay session like any run
+# unattended/batch: --auto-end waits for the bag to finish, breathes (default 10 s) so consumers
+# drain, then runs the down --end-run itself — never tears down on uncertainty; sweeps become
+#   for c in a b c; do …edit config…; rig replay fieldtest planner --auto-end; done
 rig runs                                   # the REPLAY-OF column links the pair
 ```
 

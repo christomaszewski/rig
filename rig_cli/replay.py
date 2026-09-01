@@ -273,9 +273,79 @@ def _guard_clean_host(manifest, force: bool) -> None:
                        f"--force")
 
 
+def _player_finished(manifest, player) -> bool | None:
+    """True = the player's compose project is no longer running, False = still running, None =
+    docker couldn't answer (the caller must FAIL SAFE: never auto-tear-down on uncertainty).
+    Direct project check — `running_projects` covers enabled rows only, and the player row is
+    disabled by doctrine."""
+    import json
+    import subprocess
+
+    from .manifest import project_name
+    expected = project_name(player.name, manifest.vehicle_id)
+    try:
+        proc = subprocess.run(["docker", "compose", "ls", "-a", "--format", "json"],
+                              capture_output=True, text=True, timeout=15)
+        if proc.returncode != 0:
+            return None
+        rows = json.loads(proc.stdout or "[]")
+    except Exception:  # noqa: BLE001 — timeout/parse/missing docker: cannot tell
+        return None
+    for row in rows if isinstance(rows, list) else []:
+        if isinstance(row, dict) and row.get("Name") == expected:
+            return "running" not in str(row.get("Status", "")).lower()
+    return True  # project gone entirely = finished
+
+
+def auto_end(manifest, descriptors, root: Path, pairs, env, player, grace_s: int) -> int:
+    """`--auto-end`: wait for the player to finish the bag, breathe `grace_s` (the last message
+    PUBLISHES when the player exits — consumers are still draining callbacks and the B-side bag
+    is still being written), then run cmd_down's exact end-run sequence over the session's own
+    up-set: capture docker logs BEFORE down (compose removes the containers), down in reverse
+    (player first — it already exited), seal only on a clean full down. Ctrl+C and every
+    cannot-tell docker failure LEAVE THE STACK UP with the manual command named — an unattended
+    teardown must never fire on uncertainty."""
+    import time
+    eprint(f"rig replay: waiting for {player.name} to finish the bag "
+           f"(Ctrl+C leaves the session running)…")
+    misses = 0
+    try:
+        while True:
+            state = _player_finished(manifest, player)
+            if state is True:
+                break
+            if state is None:
+                misses += 1
+                if misses >= 5:
+                    eprint("rig replay: docker cannot answer — leaving the session UP "
+                           "(auto-end never tears down on uncertainty); "
+                           "`rig down --end-run` when ready")
+                    return 1
+            else:
+                misses = 0
+            time.sleep(3)
+    except KeyboardInterrupt:
+        eprint("rig replay: interrupted — session left running; `rig down --end-run` when ready")
+        return 130
+    eprint(f"rig replay: bag finished — {grace_s}s grace for consumers to drain, then sealing")
+    time.sleep(grace_s)
+    if manifest.data_dir:
+        runs_mod.capture_docker_logs(manifest)
+    outcomes = dispatch.run_verb(list(reversed(pairs)), env, "down")
+    failed = [o for o in outcomes if o.returncode != 0]
+    if failed:
+        eprint(f"rig: down failed for {', '.join(o.sensor.name for o in failed)} — leaving the "
+               f"run open (cannot seal with stacks possibly live)")
+        return 1
+    if manifest.data_dir:
+        runs_mod.end_run(manifest, root)
+    return 0
+
+
 def cmd(manifest, catalog, descriptors, root: Path, *, run_ref: str, names: list[str],
         label: str | None, wall_clock: bool, force: bool, dry_run: bool,
-        calls: str | None = None, export_calls: bool = False) -> int:
+        calls: str | None = None, export_calls: bool = False,
+        auto_end_grace: int | None = None) -> int:
     if export_calls:
         # NOT a session: one launcher-verb dispatch (the export runs in a one-shot container —
         # ROS stays on the player's side of the line; rig resolves run + row + launcher, which
@@ -398,4 +468,8 @@ def cmd(manifest, catalog, descriptors, root: Path, *, run_ref: str, names: list
         eprint(f"rig: {len(failed)}/{len(outcomes)} failed: "
                f"{', '.join(o.sensor.name for o in failed)}")
         return 1
+    if auto_end_grace is not None and not dry_run:
+        # NOTE: incompatible with the player config's `loop: true` (the player never exits —
+        # rig can't see that knob, schema-opaque; the wait just runs until Ctrl+C).
+        return auto_end(manifest, descriptors, root, pairs, env, player, auto_end_grace)
     return 0

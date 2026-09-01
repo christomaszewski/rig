@@ -263,7 +263,7 @@ def cmd_replay(args, manifest, catalog, descriptors) -> int:
     return replay_mod.cmd(manifest, catalog, descriptors, args.rig_root, run_ref=args.run,
                           names=args.names, label=args.label, wall_clock=args.wall_clock,
                           force=args.force, dry_run=args.dry_run, calls=args.calls,
-                          export_calls=args.export_calls)
+                          export_calls=args.export_calls, auto_end_grace=args.auto_end)
 
 
 def cmd_graph(args, manifest, catalog, descriptors) -> int:
@@ -717,6 +717,13 @@ def build_parser() -> argparse.ArgumentParser:
                          "/clock, adopted services pace to it)")
     rp.add_argument("--force", action="store_true",
                     help="proceed past preflight errors and the clean-host guard")
+    rp.add_argument("--auto-end", nargs="?", type=int, const=10, default=None, metavar="GRACE_S",
+                    dest="auto_end",
+                    help="wait for the player to finish the bag, breathe GRACE_S seconds "
+                         "(default 10 — consumers drain, the B-side bag finishes writing), then "
+                         "run the full `down --end-run` — unattended/batch SIL. Never tears "
+                         "down on uncertainty; Ctrl+C leaves the session up. Incompatible with "
+                         "the player config's loop: true (the bag never ends)")
     rp.add_argument("--dry-run", action="store_true",
                     help="print selection + the exact launcher invocations; open no run")
 

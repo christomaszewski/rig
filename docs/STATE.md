@@ -1,8 +1,18 @@
 # rig — project state & handoff (resume here)
 
 > Snapshot for picking the project up cold in a new session. Read this first, then `CHEATSHEET.md` /
-> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.2.41**,
-> branch **`main`**, 656 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.2.42**,
+> branch **`main`**, 657 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> **v0.2.42 (2026-09-01) — `rig replay --auto-end [GRACE_S]`**: unattended/batch SIL — after up,
+> rig polls the PLAYER's compose project directly (`running_projects` covers enabled rows only;
+> the player row is disabled by doctrine) until the bag finishes, breathes GRACE_S (default 10 —
+> the last message merely PUBLISHED; consumers drain, the B-side bag finishes writing), then
+> runs cmd_down's exact end-run sequence over the session's own up-set: capture docker logs
+> BEFORE down, down REVERSED (player first), seal only on a clean full down. FAIL-SAFE posture
+> throughout: repeated docker cannot-tell gives up leaving the session UP with the manual
+> command named; Ctrl+C likewise — an unattended teardown never fires on uncertainty.
+> Incompatible with player `loop: true` (schema-opaque — documented, the wait just runs).
+> Sweeps are now a shell loop of `rig replay <label> <svc> --auto-end`.
 > **v0.2.41 (2026-09-01) — `ls` aliases `list` everywhere**: one rewrite in `translate_argv`
 > (before both the group translation and the real subparsers, so neither's dispatch changes)
 > maps `<noun> ls` → `<noun> list` for every noun with a listing (run/artifact/registry/pkg/
