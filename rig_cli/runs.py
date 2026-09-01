@@ -465,6 +465,8 @@ class RunRow:
     ended: str
     disk_kb: int | None
     replay_of: str | None = None  # SIL replay sessions name their source run
+    linked: bool = False          # a symlinked registry entry (reconstruct's import) — a
+    #                               reference to the archive, not a local copy
 
 
 def list_runs(manifest: Manifest) -> list[RunRow]:
@@ -476,6 +478,10 @@ def list_runs(manifest: Manifest) -> list[RunRow]:
     rows = []
     runs = data / "runs"
     for d in sorted(runs.iterdir()) if runs.is_dir() else []:
+        if d.is_symlink() and not d.is_dir():  # dangling link: the archive moved — say so,
+            rows.append(RunRow(run=d.name, label="—", state="dangling", started="?",
+                               ended="—", disk_kb=None, linked=True))  # never silently vanish
+            continue
         if not d.is_dir():
             continue
         try:
@@ -489,10 +495,23 @@ def list_runs(manifest: Manifest) -> list[RunRow]:
         replay = doc.get("replay")
         rows.append(RunRow(run=d.name, label=str(doc.get("label") or "—"), state=state,
                            started=str(doc.get("started") or "?"), ended=ended or "—",
-                           disk_kb=doc.get("disk_kb"),
+                           disk_kb=doc.get("disk_kb"), linked=d.is_symlink(),
                            replay_of=str(replay["of"]) if isinstance(replay, dict)
                            and replay.get("of") else None))
     return rows
+
+
+def by_label(manifest: Manifest, ref: str) -> str | None:
+    """The NEWEST run id whose label matches `ref` (ids are `<stamp>_<label>`, so this is a pure
+    dirname check — no manifest reads at resolution time). Lets every run-ref verb accept the
+    label a human remembers (`rig replay flight1 …`); an exact id always wins upstream."""
+    data = _root(manifest)
+    runs = data / "runs"
+    if not runs.is_dir():
+        return None
+    matches = sorted(d.name for d in runs.iterdir() if d.is_dir()
+                     and d.name.endswith(f"_{ref}"))
+    return matches[-1] if matches else None
 
 
 def remove_runs(manifest: Manifest, run_ids: list[str], *, force: bool = False) -> int:
@@ -511,6 +530,12 @@ def remove_runs(manifest: Manifest, run_ids: list[str], *, force: bool = False) 
     freed_kb = 0
     for rid in run_ids:
         run_dir = data / "runs" / rid
+        if "/" not in rid and run_dir.is_symlink():
+            # a LINKED run (reconstruct's registry import): the entry is a reference — remove
+            # the link, NEVER the archive target, and no seal gate (unlinking loses nothing)
+            run_dir.unlink()
+            eprint(f"rig run rm: unlinked {rid} (the archived run itself is untouched)")
+            continue
         if "/" in rid or not run_dir.is_dir() or run_dir.resolve().parent != runs:
             eprint(f"rig run rm: no run '{rid}' in this registry (ids only — see `rig runs`)")
             rc = 1

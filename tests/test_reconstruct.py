@@ -219,6 +219,31 @@ def test_retrofit_refuses_mismatch_and_corrupt_snapshot_refused():
         assert "content-address" in str(exc)
 
 
+
+
+def test_reconstruct_links_source_into_tree_registry_by_default():
+    root, m = _deployment()
+    rid, data = _open(m, root)
+    run_dir = data / "runs" / rid
+    dest = pathlib.Path(tempfile.mkdtemp()) / "tree"
+    with contextlib.redirect_stdout(io.StringIO()):
+        assert reconstruct.cmd_reconstruct(None, run_ref=str(run_dir), into=str(dest),
+                                           config=None) == 0
+    entry = dest / "var" / "data" / "runs" / rid
+    assert entry.is_symlink() and entry.resolve() == run_dir.resolve()  # a reference, not a copy
+    dest2 = dest.parent / "tree2"
+    with contextlib.redirect_stdout(io.StringIO()):
+        assert reconstruct.cmd_reconstruct(None, run_ref=str(run_dir), into=str(dest2),
+                                           config=None, copy_run=True) == 0
+    e2 = dest2 / "var" / "data" / "runs" / rid
+    assert e2.is_dir() and not e2.is_symlink()  # --copy-run: a real copy
+    dest3 = dest.parent / "tree3"
+    with contextlib.redirect_stdout(io.StringIO()):
+        assert reconstruct.cmd_reconstruct(None, run_ref=str(run_dir), into=str(dest3),
+                                           config=None, no_import=True) == 0
+    assert not (dest3 / "var" / "data" / "runs" / rid).exists()  # opted out
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

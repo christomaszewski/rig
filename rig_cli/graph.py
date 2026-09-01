@@ -304,9 +304,13 @@ def resolve_run(manifest, ref: str | None) -> tuple[str, Path]:
             return as_path.name, as_path
         data = runs_mod._root(manifest)
         run_dir = data / "runs" / ref
-        if not run_dir.is_dir():
-            raise RigError(f"graph: no run '{ref}' under {data / 'runs'} (see `rig runs`)")
-        return ref, run_dir
+        if not run_dir.is_dir():  # not an id — a LABEL resolves to its newest run
+            labeled = runs_mod.by_label(manifest, ref)
+            if labeled is None:
+                raise RigError(f"graph: no run '{ref}' under {data / 'runs'} — not an id, a "
+                               f"label, or a path (see `rig runs`)")
+            run_dir = data / "runs" / labeled
+        return run_dir.name, run_dir
     data = runs_mod._root(manifest)
     cur = runs_mod.current_run(data)
     if cur is not None:

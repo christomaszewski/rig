@@ -47,13 +47,18 @@ def _resolve_run(root: Path | None, ref: str) -> Path:
     if root is not None and (root / "vehicle.yaml").exists():
         try:
             from .manifest import load_manifest
-            data_dir = load_manifest(root).data_dir
-            if data_dir and (Path(data_dir) / "runs" / ref).is_dir():
-                return Path(data_dir) / "runs" / ref
+            from .runs import by_label
+            manifest = load_manifest(root)
+            if manifest.data_dir:
+                if (Path(manifest.data_dir) / "runs" / ref).is_dir():
+                    return Path(manifest.data_dir) / "runs" / ref
+                labeled = by_label(manifest, ref)  # a LABEL resolves to its newest run
+                if labeled is not None:
+                    return Path(manifest.data_dir) / "runs" / labeled
         except RigError:
             pass
     raise RigError(f"reconstruct: no run dir at '{ref}' (pass a path to the run directory — "
-                   f"an id resolves only inside a deployment with a run registry)")
+                   f"an id or label resolves only inside a deployment with a run registry)")
 
 
 def _sha256(path: Path) -> str:
@@ -100,7 +105,8 @@ def _overlay(tree: Path, snap_dir: Path) -> list[str]:
 
 
 def cmd_reconstruct(root: Path | None, *, run_ref: str, into: str | None,
-                    config: str | None) -> int:
+                    config: str | None, copy_run: bool = False,
+                    no_import: bool = False) -> int:
     run_dir = _resolve_run(root, run_ref)
     doc = _run_manifest(run_dir)
     tarpath = run_dir / ".rig" / "artifact.tar.gz"
@@ -176,11 +182,30 @@ def cmd_reconstruct(root: Path | None, *, run_ref: str, into: str | None,
     import yaml
     (dest / "vehicle.local.yaml").write_text(yaml.safe_dump(local, sort_keys=False))
 
+    # Import the source run into the tree's OWN registry so every verb and TAB completion work
+    # by id/label inside the experiment workspace. Default = SYMLINK (a reference — the archive
+    # stays the canonical home, and multi-GB bags are never silently duplicated; `run rm` on a
+    # linked entry unlinks the link, never the target). --copy-run for a fully portable tree;
+    # --no-import to opt out.
+    run_arg: str | Path = run_dir.resolve()
+    if not no_import:
+        reg = dest / "var" / "data" / "runs"
+        reg.mkdir(parents=True, exist_ok=True)
+        entry = reg / run_dir.name
+        if copy_run:
+            shutil.copytree(run_dir, entry, symlinks=True)
+            eprint(f"rig reconstruct: source run COPIED into the tree's registry ({run_dir.name})")
+        else:
+            entry.symlink_to(run_dir.resolve())
+            eprint(f"rig reconstruct: source run LINKED into the tree's registry "
+                   f"({run_dir.name} -> archive; `--copy-run` for a portable copy)")
+        run_arg = run_dir.name
+
     images = run_dir / ".rig" / "images.yaml"
     image_note = " · image digests: .rig/images.yaml (fetch by digest, or run on a matching host)" \
         if images.exists() else ""
     eprint(f"rig reconstruct: {run_dir.name} -> {dest}{image_note}")
-    print(f"cd {dest} && ./rig doctor && ./rig replay {run_dir.resolve()} <names…>")
+    print(f"cd {dest} && ./rig doctor && ./rig replay {run_arg} <names…>")
     return 0
 
 

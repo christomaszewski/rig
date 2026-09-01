@@ -122,6 +122,35 @@ def test_provision_data_dir_absolute_only_and_shown():
         del os.environ["RIG_VEHICLE_LOCAL"]
 
 
+
+
+def test_by_label_newest_and_rm_unlinks_linked_entries():
+    data = pathlib.Path(tempfile.mkdtemp())
+    _run(data, "20260901T000000Z_flight1")
+    _run(data, "20260902T000000Z_flight1")
+    m = _manifest(data)
+    assert runs.by_label(m, "flight1") == "20260902T000000Z_flight1"  # newest wins
+    assert runs.by_label(m, "nope") is None
+    # a LINKED entry (reconstruct import): rm unlinks the link, never the target — no seal gate
+    archive = pathlib.Path(tempfile.mkdtemp()) / "20260903T000000Z_arch"
+    archive.mkdir()
+    (archive / "manifest.yaml").write_text("run: x\n")  # unsealed on purpose
+    (data / "runs" / archive.name).symlink_to(archive)
+    assert runs.by_label(m, "arch") == archive.name  # links count for label resolution
+    rows = {r.run: r for r in runs.list_runs(m)}
+    assert rows[archive.name].linked and rows[archive.name].state == "interrupted"
+    import contextlib as _ctx
+    import io as _io
+    with _ctx.redirect_stderr(_io.StringIO()):
+        assert runs.remove_runs(m, [archive.name]) == 0  # no --force needed for a reference
+    assert archive.exists()  # the archive target untouched
+    assert not (data / "runs" / archive.name).exists()
+    # dangling link (archive moved): listed as such, never silently vanished
+    (data / "runs" / "20260904T000000Z_gone").symlink_to(archive.parent / "moved-away")
+    rows = {r.run: r for r in runs.list_runs(m)}
+    assert rows["20260904T000000Z_gone"].state == "dangling"
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

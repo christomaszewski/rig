@@ -1,8 +1,20 @@
 # rig — project state & handoff (resume here)
 
 > Snapshot for picking the project up cold in a new session. Read this first, then `CHEATSHEET.md` /
-> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.2.39**,
-> branch **`main`**, 653 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.2.40**,
+> branch **`main`**, 655 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> **v0.2.40 (2026-09-01) — reconstruct auto-import + run refs by LABEL**: `rig reconstruct` now
+> puts the source run into the tree's own registry — as a SYMLINK by default (a reference: the
+> archive stays canonical, multi-GB bags never silently duplicate; `--copy-run` for a portable
+> tree, `--no-import` to opt out), so id/label UX and TAB work inside the experiment workspace.
+> `run rm` on a linked entry UNLINKS the link, never the archive target (no seal gate — a
+> reference loses nothing); dangling links list as `dangling`, never silently vanish; `rig runs`
+> marks links `(link)`. Run REFS accept LABELS everywhere (replay/graph/reconstruct sources:
+> `rig replay flight1 …` → newest run ending `_flight1`; exact id always wins; `run rm` stays
+> ids-only — deleting by label is a footgun). Completion: `_run_ids` now offers labels too, and
+> two fixes — the data_dir raw-read had INVERTED precedence (machine file before tree-local,
+> opposite of the manifest — wrong registry completed in reconstructed trees on provisioned
+> benches) and now honors RIG_VEHICLE_LOCAL. 2 new tests — total 655.
 > **v0.2.39 (2026-09-01) — `rig replay <run> --export-calls`**: the call-script bootstrap as a
 > rig flag instead of a hand-invoked launcher verb. NOT a session: rig resolves the source run +
 > player row/launcher (everything replay resolves anyway) and dispatches the player's

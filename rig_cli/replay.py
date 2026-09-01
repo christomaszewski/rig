@@ -56,9 +56,14 @@ def resolve_source(manifest, ref: str) -> tuple[str, Path]:
     else:
         data = runs_mod._root(manifest)  # same registry root/validation as every run verb
         run_dir = data / "runs" / ref
-        if not run_dir.is_dir():
-            raise RigError(f"replay: no run '{ref}' under {data / 'runs'} (see `rig runs`)")
-        run_id = ref
+        if not run_dir.is_dir():  # not an id — a LABEL resolves to its newest run
+            labeled = runs_mod.by_label(manifest, ref)
+            if labeled is None:
+                raise RigError(f"replay: no run '{ref}' under {data / 'runs'} — not an id, a "
+                               f"label, or a path (see `rig runs`)")
+            eprint(f"rig replay: '{ref}' -> {labeled} (newest run with that label)")
+            run_dir = data / "runs" / labeled
+        run_id = run_dir.name
     if manifest.data_dir:
         try:
             cur = runs_mod.current_run(runs_mod._root(manifest))

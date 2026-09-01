@@ -483,23 +483,30 @@ def _artifacts(root_arg, positionals, words):
 
 @_soft
 def _run_ids(root_arg, positionals, words):
-    """Run-registry ids (newest first — the run you want is almost always recent). Raw-read
-    doctrine: data_dir comes from vehicle.local.yaml/vehicle.yaml verbatim; an unresolvable
-    {{var}} value bails to the file fallback rather than guessing."""
+    """Run-registry ids (newest first — the run you want is almost always recent) plus the
+    distinct LABELS (ids are `<stamp>_<label>` — no human types the stamp; the verbs resolve a
+    label to its newest run). Raw-read doctrine: data_dir verbatim from the same precedence the
+    manifest uses — TREE-local vehicle.local.yaml first, then the machine file (honoring
+    RIG_VEHICLE_LOCAL), then vehicle.yaml; an unresolvable {{var}} value bails to the file
+    fallback rather than guessing."""
+    import os
     root = _deployment(root_arg)
     if not root:
         return []
+    machine = Path(os.environ.get("RIG_VEHICLE_LOCAL") or "/etc/rig/vehicle.local.yaml")
     data_dir = None
-    for path in (Path("/etc/rig/vehicle.local.yaml"), root / "vehicle.local.yaml",
-                 root / "vehicle.yaml"):  # local overrides win, as in the manifest load
+    for path in (root / "vehicle.local.yaml", machine, root / "vehicle.yaml"):
         if path.is_file() and _read_yaml(path).get("data_dir"):
             data_dir = str(_read_yaml(path)["data_dir"])
             break
     if not data_dir or "{{" in data_dir:
         return []
     runs = Path(data_dir) / "runs"
-    return sorted((d.name for d in runs.iterdir() if d.is_dir()), reverse=True) \
-        if runs.is_dir() else []
+    if not runs.is_dir():
+        return []
+    ids = sorted((d.name for d in runs.iterdir() if d.is_dir()), reverse=True)
+    labels = list(dict.fromkeys(i.split("_", 1)[1] for i in ids if "_" in i))
+    return ids + [lb for lb in labels if lb not in ("auto",)]
 
 
 @_soft

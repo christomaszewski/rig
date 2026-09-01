@@ -247,7 +247,8 @@ def cmd_runs(args, manifest, catalog, descriptors) -> int:
     headers = ("RUN", "LABEL", "STATE", "STARTED", "ENDED", "SIZE") \
         + (("REPLAY-OF",) if replayed else ())
     table = [headers] + [
-        (r.run, r.label, r.state, r.started, r.ended, _size(r.disk_kb))
+        (r.run, r.label, r.state + (" (link)" if r.linked and r.state != "dangling" else ""),
+         r.started, r.ended, _size(r.disk_kb))
         + ((r.replay_of or "—",) if replayed else ())
         for r in rows
     ]
@@ -732,6 +733,11 @@ def build_parser() -> argparse.ArgumentParser:
     rec.add_argument("--config", default=None, metavar="DIGEST12",
                      help="overlay this config snapshot from the run's .rig/config/ (default: "
                           "as-opened for native captures, the LAST ups snapshot for retrofits)")
+    rec.add_argument("--copy-run", action="store_true", dest="copy_run",
+                     help="COPY the source run into the tree's registry instead of the default "
+                          "symlink (portable tree; duplicates the bags)")
+    rec.add_argument("--no-import", action="store_true", dest="no_import",
+                     help="don't put the source run in the tree's registry at all")
 
     rrm = sub.add_parser("run-rm", help="remove run(s) from the registry by id (canonical: "
                                         "run rm) — sealed freely, interrupted with --force, "
@@ -1291,7 +1297,8 @@ def main(argv=None) -> int:
             from . import reconstruct as reconstruct_mod
             return reconstruct_mod.cmd_reconstruct(
                 root if (root / "vehicle.yaml").exists() else None,
-                run_ref=args.run, into=args.into, config=args.config)
+                run_ref=args.run, into=args.into, config=args.config,
+                copy_run=args.copy_run, no_import=args.no_import)
         if args.cmd == "run-retrofit":  # reads run dirs + var/artifacts, not the manifest
             from . import reconstruct as reconstruct_mod
             return reconstruct_mod.cmd_retrofit(root, run_refs=args.runs,
