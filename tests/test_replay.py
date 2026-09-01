@@ -632,6 +632,48 @@ def test_auto_end_waits_then_downs_reversed_and_seals():
         _time.sleep = orig_sleep
 
 
+
+
+def test_live_infra_publishes_subtract_but_the_player_never_does():
+    epoch = textwrap.dedent("""\
+        schema: 1
+        first: 2026-08-27T10:00:00Z
+        last: 2026-08-27T11:00:00Z
+        rmw: rmw_zenoh_cpp
+        domain: 7
+        nodes:
+          /diag_hub/hub_node:
+            pubs:
+            - {topic: /diagnostics, type: diagnostic_msgs/msg/DiagnosticArray}
+            subs: []
+            provides: []
+            requires: []
+          /planner/planner_node:
+            pubs: []
+            subs:
+            - {topic: /diagnostics, type: diagnostic_msgs/msg/DiagnosticArray}
+            - {topic: /gnss_primary/fix, type: sensor_msgs/msg/NavSatFix}
+            provides: []
+            requires: []
+          /bag_player_node:
+            pubs:
+            - {topic: /gnss_primary/fix, type: sensor_msgs/msg/NavSatFix}
+            subs: []
+            provides: []
+            requires: []
+        """)
+    src = _source_run(epochs=(epoch,))
+    # diag_hub LIVE during replay (infra): its /diagnostics must NOT replay (double-publish);
+    # /gnss_primary/fix stays — its source-epoch publisher is the PLAYER (a chained replay),
+    # and the player is never in the subtraction set.
+    mode, value, notices = replay.select_topics(src, ["planner"],
+                                                live_names=["diag_hub", "planner"])
+    assert mode == "topics" and value == "/gnss_primary/fix"
+    # without the live set (old semantics): /diagnostics would have replayed
+    mode2, value2, _ = replay.select_topics(src, ["planner"])
+    assert "/diagnostics" in value2.split()
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

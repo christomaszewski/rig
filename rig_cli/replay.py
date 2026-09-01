@@ -87,16 +87,24 @@ def resolve_source(manifest, ref: str) -> tuple[str, Path]:
     return run_id, run_dir
 
 
-def select_topics(source_dir: Path, with_names: list[str]) -> tuple[str, str, list[str]]:
+def select_topics(source_dir: Path, with_names: list[str],
+                  live_names: list[str] | None = None) -> tuple[str, str, list[str]]:
     """(mode, value, notices): ('topics', space-joined allow-list) from the source run's graph
     epochs, or ('exclude', namespace regex) as the WARNed fallback. Graph mode requires EVERY
     named instance observed in the source epochs — a service the source run never saw has unknown
-    inputs, and guessing half a selection is worse than the honest heuristic."""
+    inputs, and guessing half a selection is worse than the honest heuristic.
+
+    Subscribes come from the WITH-SET; the publish SUBTRACTION covers every LIVE instance
+    (`live_names` — the whole up-set minus the player: infra rides along and regenerates its own
+    topics too, so the bag must not double-publish them). The player row is NEVER in the
+    subtraction: in a replay-of-a-replay, the source epochs attribute the recorded inputs to the
+    player's node — subtracting those would empty the selection and break chaining."""
     notices: list[str] = []
+    live = with_names if live_names is None else live_names
     epochs = graph_mod.load_epochs(source_dir)
     if epochs:
         u = graph_mod.union(epochs)
-        groups = graph_mod.group_nodes(u.nodes, with_names)
+        groups = graph_mod.group_nodes(u.nodes, sorted(set(with_names) | set(live)))
         unobserved = [n for n in with_names if n not in groups]
         if unobserved:
             notices.append(f"fallback: {', '.join(unobserved)} not observed in the source run's "
@@ -105,13 +113,18 @@ def select_topics(source_dir: Path, with_names: list[str]) -> tuple[str, str, li
             subs: set[str] = set()
             pubs: set[str] = set()
             for name in with_names:
-                for fqn in groups[name]:
+                for fqn in groups.get(name, ()):
                     for e in u.nodes[fqn]:
                         if graph_mod.is_plumbing(e):
                             continue
                         if e.kind == "subs":
                             subs.add(e.name)
                         elif e.kind == "pubs":
+                            pubs.add(e.name)
+            for name in set(live) - set(with_names):  # live-but-not-under-test (infra): pubs only
+                for fqn in groups.get(name, ()):
+                    for e in u.nodes[fqn]:
+                        if e.kind == "pubs" and not graph_mod.is_plumbing(e):
                             pubs.add(e.name)
             echo = sorted(subs & pubs)
             if echo:
@@ -383,7 +396,8 @@ def cmd(manifest, catalog, descriptors, root: Path, *, run_ref: str, names: list
         return 1
 
     src_id, src_dir = resolve_source(manifest, run_ref)
-    mode, value, notices = select_topics(src_dir, names)
+    live = [s.name for s in manifest.sensors if s.tier == "infra" and s.enabled] + list(names)
+    mode, value, notices = select_topics(src_dir, names, live_names=live)  # player NEVER in live
     # Services ride the SAME session: verbatim (recorded requests at the with-set's servers,
     # provides − requires) — unless a call SCRIPT is given, which subsumes and SUPPRESSES
     # verbatim (script XOR verbatim: double-call discipline; rig-replay-calls-handoff §1.2).

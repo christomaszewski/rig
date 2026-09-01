@@ -1,8 +1,19 @@
 # rig — project state & handoff (resume here)
 
 > Snapshot for picking the project up cold in a new session. Read this first, then `CHEATSHEET.md` /
-> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.2.42**,
-> branch **`main`**, 657 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.2.43**,
+> branch **`main`**, 658 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> **v0.2.43 (2026-09-01) — the self-echo subtraction covers the whole LIVE set**: the topic
+> selector's publish-subtraction widened from with-set-only to every instance that comes up in
+> the session (enabled infra + with-set) — a live infra service regenerates its own topics too,
+> so the bag must not double-publish them. The PLAYER row is NEVER in the subtraction, and
+> that's load-bearing for replay-of-a-replay: a B-side run's epochs attribute the recorded
+> inputs to the player's node — subtracting those would empty the selection and break chaining
+> (which otherwise works by construction: the logger records inputs + outputs, so every replay
+> run is itself a valid source). Also affirmed in-session, no code: the player replays at
+> ORIGINAL topic names (selection, not namespacing, is the collision mechanism) and stays IN
+> the graph snapshots (writer-dumb; its node is what makes chained selection correct and a SIL
+> session's topology honest).
 > **v0.2.42 (2026-09-01) — `rig replay --auto-end [GRACE_S]`**: unattended/batch SIL — after up,
 > rig polls the PLAYER's compose project directly (`running_projects` covers enabled rows only;
 > the player row is disabled by doctrine) until the bag finishes, breathes GRACE_S (default 10 —
