@@ -1,8 +1,14 @@
 # rig — project state & handoff (resume here)
 
 > Snapshot for picking the project up cold in a new session. Read this first, then `CHEATSHEET.md` /
-> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.2.40**,
-> branch **`main`**, 655 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.2.41**,
+> branch **`main`**, 656 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> **v0.2.41 (2026-09-01) — `ls` aliases `list` everywhere**: one rewrite in `translate_argv`
+> (before both the group translation and the real subparsers, so neither's dispatch changes)
+> maps `<noun> ls` → `<noun> list` for every noun with a listing (run/artifact/registry/pkg/
+> overlay/fleet — `_LS_NOUNS`). Alias doctrine holds: parses forever, completion menus stay
+> canonical and never advertise it; epilog carries one discoverability line. Nouns without a
+> `list` are untouched (`rig up ls` still means an instance named ls).
 > **v0.2.40 (2026-09-01) — reconstruct auto-import + run refs by LABEL**: `rig reconstruct` now
 > puts the source run into the tree's own registry — as a SYMLINK by default (a reference: the
 > archive stays canonical, multi-GB bags never silently duplicate; `--copy-run` for a portable

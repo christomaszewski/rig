@@ -121,6 +121,23 @@ def test_unrouted_service_is_a_pointed_error():
     assert rc == 1 and "sensor 'gnss': service 'ghost' not in services.yaml" in err
 
 
+
+
+def test_ls_aliases_list_under_every_listing_noun():
+    # group-translated nouns rewrite all the way to the flat verb…
+    assert translate_argv(["run", "ls"]) == ["runs"]
+    assert translate_argv(["artifact", "ls"]) == ["artifact-list"]
+    # …real subparsers get the canonical token (their dispatch compares "list")
+    assert translate_argv(["registry", "ls"]) == ["registry", "list"]
+    assert translate_argv(["pkg", "ls"]) == ["pkg", "list"]
+    assert translate_argv(["overlay", "ls", "cam0"]) == ["overlay", "list", "cam0"]
+    assert translate_argv(["fleet", "ls"]) == ["fleet", "list"]
+    # global flags before the noun survive; nouns without a list are untouched
+    assert translate_argv(["--root", "/x", "run", "ls"]) == ["--root", "/x", "runs"]
+    assert translate_argv(["config", "ls"]) == ["config", "ls"]  # legacy positional-names path
+    assert translate_argv(["up", "ls"]) == ["up", "ls"]          # an instance named ls stays one
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

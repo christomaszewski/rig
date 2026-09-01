@@ -576,6 +576,9 @@ _GROUP_VERBS: dict[str, dict[str, str]] = {
 # Not-yet-implemented grouped verbs get a pointed error instead of an "unknown sensor" mystery.
 _GROUP_PENDING: dict[tuple[str, str], str] = {}
 
+# Every noun with a `list` subcommand — group-translated OR real subparser — accepts `ls`.
+_LS_NOUNS = {"run", "artifact", "registry", "pkg", "overlay", "fleet"}
+
 
 def translate_argv(argv: list[str]) -> list[str] | None:
     """Rewrite a canonical grouped spelling (`rig run list`, `rig artifact bake`) onto the flat
@@ -591,6 +594,12 @@ def translate_argv(argv: list[str]) -> list[str] | None:
     if i >= len(argv):
         return argv
     noun = argv[i]
+    # `ls` aliases `list` under every noun that has one — rewritten HERE so it covers both the
+    # group-translated nouns and the real argparse subparsers (whose dispatch compares the
+    # canonical string) without touching either. Alias doctrine: parses forever, menus never
+    # advertise it.
+    if noun in _LS_NOUNS and i + 1 < len(argv) and argv[i + 1] == "ls":
+        argv = argv[:i + 1] + ["list"] + argv[i + 2:]
     verbs = _GROUP_VERBS.get(noun)
     if verbs is None:
         return argv
@@ -623,7 +632,8 @@ def build_parser() -> argparse.ArgumentParser:
                "  rig completion bash|zsh (TAB completion — deb/brew ship it; `rig setup --shell` wires it)\n"
                "  rig service  rigify | vendor | certify\n"
                "  rig artifact bake | unbake | list   rig image    build | pull | audit\n"
-               "  rig fleet    list | status | sync | up | down    (GCS-side fan-out; fleet.yaml)")
+               "  rig fleet    list | status | sync | up | down    (GCS-side fan-out; fleet.yaml)\n"
+               "  (`ls` aliases `list` under every noun above)")
     parser.add_argument("--version", action="version", version=f"rig {__version__}")
     parser.add_argument("--root", type=Path, default=None,
                         help="deployment root holding vehicle.yaml (default: detected from the cwd, "
