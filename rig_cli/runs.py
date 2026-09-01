@@ -495,6 +495,94 @@ def list_runs(manifest: Manifest) -> list[RunRow]:
     return rows
 
 
+def remove_runs(manifest: Manifest, run_ids: list[str], *, force: bool = False) -> int:
+    """`run rm`: delete run dirs from THIS registry, by id (never by path — containment is the
+    registry's own doctrine: a mis-typed path must not delete something outside runs/). Sealed
+    runs remove freely; interrupted/corrupt need --force (their recording may be the only copy of
+    a crashed session); the OPEN run NEVER removes — even --force (`current` would dangle under a
+    possibly-live recorder) — `rig down --end-run` first."""
+    data = _root(manifest)
+    runs = (data / "runs").resolve()
+    try:
+        open_id = (current_run(data) or (None,))[0]
+    except RigError:
+        open_id = None  # a broken `current` must not block cleanup of OTHER runs
+    rc = 0
+    freed_kb = 0
+    for rid in run_ids:
+        run_dir = data / "runs" / rid
+        if "/" in rid or not run_dir.is_dir() or run_dir.resolve().parent != runs:
+            eprint(f"rig run rm: no run '{rid}' in this registry (ids only — see `rig runs`)")
+            rc = 1
+            continue
+        if rid == open_id:
+            eprint(f"rig run rm: {rid} is the OPEN run — never removed (a recorder may be "
+                   f"writing it and `current` would dangle); `rig down --end-run` first")
+            rc = 1
+            continue
+        doc: dict = {}
+        if (run_dir / "manifest.yaml").exists():
+            try:
+                doc = load_yaml(run_dir / "manifest.yaml")
+            except RigError:
+                pass
+        if not doc.get("ended") and not force:
+            eprint(f"rig run rm: {rid} is not sealed (interrupted/corrupt) — its recording may "
+                   f"be the only copy of that session; --force to remove anyway")
+            rc = 1
+            continue
+        kb = doc.get("disk_kb")
+        if not isinstance(kb, int):
+            try:
+                kb = int(subprocess.run(["du", "-sk", str(run_dir)], capture_output=True,
+                                        text=True, timeout=120).stdout.split()[0])
+            except Exception:  # noqa: BLE001 — size is display-only
+                kb = 0
+        shutil.rmtree(run_dir)
+        freed_kb += kb
+        eprint(f"rig run rm: removed {rid}" + (f" ({kb // 1024} MB)" if kb else ""))
+    if freed_kb:
+        eprint(f"rig run rm: freed {freed_kb / 1024:.0f} MB")
+    return rc
+
+
+def import_runs(manifest: Manifest, paths: list[str], *, move: bool = False) -> int:
+    """`run import`: adopt run dir(s) (scp'd off a vehicle, downloaded from the archive) into
+    THIS registry so the id-based verbs (runs/graph/replay/reconstruct, TAB completion) cover
+    them. COPY by default — the source stays the archive's; --move for same-disk adoption. Never
+    touches `current` (an imported run is history, not the open session)."""
+    data = _root(manifest)
+    runs = data / "runs"
+    runs.mkdir(parents=True, exist_ok=True)
+    rc = 0
+    for raw in paths:
+        src = Path(raw).expanduser()
+        if not src.is_dir() or not (src / "manifest.yaml").exists():
+            eprint(f"rig run import: {src} is not a run dir (no manifest.yaml)")
+            rc = 1
+            continue
+        target = runs / src.name
+        if target.exists():
+            eprint(f"rig run import: {src.name} already in the registry — remove it first "
+                   f"(`rig run rm`) or rename the source")
+            rc = 1
+            continue
+        try:
+            doc = load_yaml(src / "manifest.yaml")
+            if not doc.get("ended"):
+                eprint(f"rig run import: warning: {src.name} is not sealed (`ended:` absent) — "
+                       f"importing an incomplete session")
+        except RigError:
+            eprint(f"rig run import: warning: {src.name} has an unparseable manifest — "
+                   f"importing as-is (it will list as corrupt)")
+        if move:
+            shutil.move(str(src), str(target))
+        else:
+            shutil.copytree(src, target, symlinks=True)
+        eprint(f"rig run import: {src.name} {'moved' if move else 'copied'} into the registry")
+    return rc
+
+
 def status_line(manifest: Manifest) -> str | None:
     """The one-liner for `rig status`'s header (None when the feature is inert). Never raises — a broken
     registry must not take `status` down with it."""

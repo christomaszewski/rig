@@ -63,8 +63,10 @@ def _show(root: Path | None) -> int:
 
 
 def provision(root: Path | None, *, vehicle_id: str | None, name: str | None,
-              set_vars: list[str], platform: str | None = None, force: bool) -> int:
-    if vehicle_id is None and name is None and not set_vars and platform is None:
+              set_vars: list[str], platform: str | None = None,
+              data_dir: str | None = None, force: bool) -> int:
+    if vehicle_id is None and name is None and not set_vars and platform is None \
+            and data_dir is None:
         return _show(root)
 
     target = _target()
@@ -92,6 +94,14 @@ def provision(root: Path | None, *, vehicle_id: str | None, name: str | None,
             raise RigError(f"provision: --platform must be a valid image-tag fragment "
                            f"([A-Za-z0-9][A-Za-z0-9._-]*), got '{platform}'")
         data["platform"] = platform
+    if data_dir is not None:  # the run registry's home — a HOST fact like platform (runs.py's
+        #                       absolute-path rule: a relative path would fork the registry per
+        #                       working directory). Registry creation itself stays LAZY: the
+        #                       first `up`/`new-run` mints <data_dir>/runs/ — nothing to init.
+        expanded = Path(data_dir).expanduser()
+        if not expanded.is_absolute():
+            raise RigError(f"provision: --data-dir must be an ABSOLUTE path, got '{data_dir}'")
+        data["data_dir"] = str(expanded)
 
     for key in ("vehicle", "vehicle_id"):  # re-identification gate — orphaned-containers warning
         if key in existing and existing.get(key) != data.get(key) and not force:
@@ -112,5 +122,6 @@ def provision(root: Path | None, *, vehicle_id: str | None, name: str | None,
     eprint(f"rig provision: {target} written — vehicle "
            f"'{data.get('vehicle', '?')}' id {data.get('vehicle_id', '?')}"
            + (f", platform {data['platform']}" if data.get("platform") else "")
+           + (f", data_dir {data['data_dir']}" if data.get("data_dir") else "")
            + (f", vars: {', '.join(sorted(data.get('vars') or {}))}" if data.get("vars") else ""))
     return 0

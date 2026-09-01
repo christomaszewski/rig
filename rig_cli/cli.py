@@ -223,6 +223,14 @@ def cmd_end_run(args, manifest, catalog, descriptors) -> int:
     return 0
 
 
+def cmd_run_rm(args, manifest, catalog, descriptors) -> int:
+    return runs_mod.remove_runs(manifest, args.runs, force=args.force)
+
+
+def cmd_run_import(args, manifest, catalog, descriptors) -> int:
+    return runs_mod.import_runs(manifest, args.paths, move=args.move)
+
+
 def cmd_runs(args, manifest, catalog, descriptors) -> int:
     rows = runs_mod.list_runs(manifest)
     if not rows:
@@ -544,6 +552,8 @@ _HANDLERS = {
     "new-run": cmd_new_run,
     "end-run": cmd_end_run,
     "runs": cmd_runs,
+    "run-rm": cmd_run_rm,
+    "run-import": cmd_run_import,
     "graph": cmd_graph,
     "replay": cmd_replay,
     "config-render": cmd_config_render,
@@ -555,7 +565,8 @@ _HANDLERS = {
 # when it lands) are NOT here — argparse owns them directly.
 _GROUP_VERBS: dict[str, dict[str, str]] = {
     "config": {"show": "config", "render": "config-render", "diff": "config-diff"},
-    "run": {"new": "new-run", "end": "end-run", "list": "runs", "retrofit": "run-retrofit"},
+    "run": {"new": "new-run", "end": "end-run", "list": "runs", "retrofit": "run-retrofit",
+            "rm": "run-rm", "import": "run-import"},
     "artifact": {"bake": "bake", "unbake": "unbake", "list": "artifact-list"},
     "image": {"build": "build", "pull": "pull", "audit": "image-audit"},
     "service": {"rigify": "rigify", "vendor": "vendor", "certify": "certify"},
@@ -601,7 +612,8 @@ def build_parser() -> argparse.ArgumentParser:
         prog="rig", description="vehicle-level stack orchestrator (infra · sensors · autonomy)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="noun groups (canonical forms; the flat spellings above stay as permanent aliases):\n"
-               "  rig config   show | render          rig run      new | end | list | retrofit\n"
+               "  rig config   show | render          rig run      new | end | list | rm | "
+               "import | retrofit\n"
                "  rig registry init | add | remove | list | sync | validate | index\n"
                "  rig pkg      search | info | list | outdated | add | remove | upgrade | lock | "
                "save | promote | repin | rebase | yank\n"
@@ -715,6 +727,20 @@ def build_parser() -> argparse.ArgumentParser:
     rec.add_argument("--config", default=None, metavar="DIGEST12",
                      help="overlay this config snapshot from the run's .rig/config/ (default: "
                           "as-opened for native captures, the LAST ups snapshot for retrofits)")
+
+    rrm = sub.add_parser("run-rm", help="remove run(s) from the registry by id (canonical: "
+                                        "run rm) — sealed freely, interrupted with --force, "
+                                        "the OPEN run never")
+    rrm.add_argument("runs", nargs="+", help="run id(s) — see `rig runs`")
+    rrm.add_argument("--force", action="store_true",
+                     help="also remove unsealed (interrupted/corrupt) runs")
+
+    rim = sub.add_parser("run-import", help="adopt run dir(s) into this registry (canonical: "
+                                            "run import) — copied by default, so id-based verbs "
+                                            "and completion cover archived runs")
+    rim.add_argument("paths", nargs="+", help="path(s) to run dirs (scp'd/downloaded)")
+    rim.add_argument("--move", action="store_true",
+                     help="move instead of copy (same-disk adoption)")
 
     rf = sub.add_parser("run-retrofit", help="stamp pre-capture runs with the deploy artifact "
                                              "their manifests name (canonical: run retrofit)")
@@ -1126,6 +1152,9 @@ def build_parser() -> argparse.ArgumentParser:
     pv.add_argument("--platform", default=None,
                     help="THIS machine's hardware/OS target (e.g. jp7) -> RIG_TARGET_PLATFORM; "
                          "matrix services pull <tag>-<platform>")
+    pv.add_argument("--data-dir", dest="data_dir", default=None, metavar="PATH",
+                    help="THIS machine's run-registry home (absolute; the registry itself is "
+                         "minted lazily by the first up/new-run — nothing else to initialize)")
     pv.add_argument("--force", action="store_true",
                     help="allow CHANGING an existing identity (renames compose projects — "
                          "bring the vehicle down first)")
@@ -1243,7 +1272,7 @@ def main(argv=None) -> int:
             return provision_mod.provision(
                 root if (root / "vehicle.yaml").exists() else None,
                 vehicle_id=args.vehicle_id, name=args.name, set_vars=args.var,
-                platform=args.platform, force=args.force)
+                platform=args.platform, data_dir=args.data_dir, force=args.force)
         root = (args.root or find_root()).resolve()
         if args.cmd == "add":  # edits the deployment files themselves — routes its own manifest load
             return cmd_add(args, root)

@@ -225,6 +225,17 @@ disk headroom ≥ 2× the expected bag+video volume.
 
 ## Archive → laptop replay (rig ≥ v0.2.36)
 
+Bench/laptop registry setup is one command (the registry itself is minted lazily on first use;
+it belongs to `data_dir`, not to the machine or the rig install):
+
+```bash
+sudo rig provision --data-dir /data/rig     # or a tree-local vehicle.local.yaml for one deployment
+```
+
+`rig run import <path…>` adopts scp'd/downloaded runs into the registry (copy by default) so
+id-based verbs and TAB completion cover them; `rig run rm <id…>` reclaims disk (sealed runs
+freely, interrupted with --force, the OPEN run never).
+
 Every run opened with `run_capture` on (the default) carries the tree that ran —
 `.rig/artifact.tar.gz` (surfaces + configs + rig; sha-stamped) and `.rig/images.yaml` (the image
 digests that were live). A downloaded run dir is all anyone needs:

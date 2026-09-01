@@ -200,7 +200,7 @@ Registries: `rig registry init <dir>` scaffolds a new one (usable immediately vi
 hash; `rig pkg add <ref> --locked` reproduces byte-identical configs on a second machine.
 
 Canonical grouped commands (old flat spellings stay as permanent aliases): `config show|render|diff` ·
-`run new|end|list|retrofit` · `registry init|add|remove|list|sync|pending|push|discard|validate|index` · `pkg
+`run new|end|list|rm|import|retrofit` · `registry init|add|remove|list|sync|pending|push|discard|validate|index` · `pkg
 search|info|list|outdated|add|remove|upgrade|lock|save|promote|repin|rebase|yank` · `overlay
 apply|remove|reorder|list` · `service rigify|vendor|certify` · `artifact bake|unbake|list` ·
 `image build|pull`.

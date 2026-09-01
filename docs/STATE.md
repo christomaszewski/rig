@@ -1,8 +1,18 @@
 # rig — project state & handoff (resume here)
 
 > Snapshot for picking the project up cold in a new session. Read this first, then `CHEATSHEET.md` /
-> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.2.37**,
-> branch **`main`**, 646 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.2.38**,
+> branch **`main`**, 652 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> **v0.2.38 (2026-09-01) — run-registry lifecycle QoL**: the registry belongs to `data_dir`
+> (per-deployment, machine-local overridable), is minted LAZILY on first up/new-run, and brew/deb
+> installs carry no state — so no `init` verb exists ON PURPOSE. What was missing was ergonomics:
+> **`rig provision --data-dir <path>`** (absolute-only — the registry-fork trap) writes the
+> machine file alongside identity/platform; **`rig run rm <id…>`** reclaims disk (ids only,
+> containment-checked; sealed freely, interrupted needs --force, the OPEN run NEVER — even
+> forced, `current` would dangle under a possibly-live recorder; prints freed MB from manifest
+> disk_kb or du); **`rig run import <path…> [--move]`** adopts archived/scp'd runs into the
+> registry (copy by default — the archive keeps its copy; never touches `current`; unsealed
+> imports WARN). Completions: run-rm completes run ids. 5 new tests (test_run_admin.py).
 > **v0.2.37 (2026-08-31) — service-call replay, rig side** (plan `rig-svc-replay-plan.md`;
 > contract FROZEN in `~/ws/infra/rig-replay-calls-handoff.md` — supersedes the player handoff's
 > §6 sketch; rig-infra v1.10.0 implements the player half in parallel, kickoff prompt
