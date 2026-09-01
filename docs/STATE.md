@@ -1,8 +1,13 @@
 # rig — project state & handoff (resume here)
 
 > Snapshot for picking the project up cold in a new session. Read this first, then `CHEATSHEET.md` /
-> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.2.43**,
-> branch **`main`**, 658 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.2.44**,
+> branch **`main`**, 659 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> **v0.2.44 (2026-09-01) — `runs` with arguments refuses**: `rig runs rm <id>` used to silently
+> LIST (the flat `runs` verb swallowed extra tokens into its uniformity-suppressed positional) —
+> one keystroke from the `run` group, doing the wrong thing quietly, straight from a field
+> stumble. Now a pointed error naming the group's verbs, with a did-you-mean when the stray
+> token IS one of them (`ls` included).
 > **v0.2.43 (2026-09-01) — the self-echo subtraction covers the whole LIVE set**: the topic
 > selector's publish-subtraction widened from with-set-only to every instance that comes up in
 > the session (enabled infra + with-set) — a live infra service regenerates its own topics too,

@@ -138,6 +138,22 @@ def test_ls_aliases_list_under_every_listing_noun():
     assert translate_argv(["up", "ls"]) == ["up", "ls"]          # an instance named ls stays one
 
 
+
+
+def test_runs_with_arguments_refuses_with_the_run_group_hint():
+    import io as _io
+    root = _deployment()
+    err = _io.StringIO()
+    with contextlib.redirect_stderr(err):
+        rc = main(["--root", str(root), "runs", "rm", "somerun"])
+    assert rc == 1
+    assert "did you mean `rig run rm`" in err.getvalue()
+    err = _io.StringIO()  # a non-verb argument still refuses, without the guess
+    with contextlib.redirect_stderr(err):
+        rc = main(["--root", str(root), "runs", "somerun"])
+    assert rc == 1 and "takes no arguments" in err.getvalue()
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

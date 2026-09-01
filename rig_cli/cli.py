@@ -232,6 +232,12 @@ def cmd_run_import(args, manifest, catalog, descriptors) -> int:
 
 
 def cmd_runs(args, manifest, catalog, descriptors) -> int:
+    if args.names:  # `rig runs rm <id>` must not silently LIST — the verbs live under `run`
+        verbs = _GROUP_VERBS["run"]
+        hint = f" — did you mean `rig run {args.names[0]}`?" if args.names[0] in verbs \
+            or args.names[0] == "ls" else ""
+        raise RigError(f"runs takes no arguments (it lists the registry); the run verbs are "
+                       f"`rig run {'|'.join(sorted(verbs))}`{hint}")
     rows = runs_mod.list_runs(manifest)
     if not rows:
         print("no runs recorded")
