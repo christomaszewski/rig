@@ -124,6 +124,31 @@ def test_provision_data_dir_absolute_only_and_shown():
 
 
 
+def test_provision_registry_host_merges_images_and_refuses_urls():
+    target = pathlib.Path(tempfile.mkdtemp()) / "vehicle.local.yaml"
+    target.write_text("images: {tag: v1.2.0}\n")  # a pre-existing subkey must survive the merge
+    os.environ["RIG_VEHICLE_LOCAL"] = str(target)
+    try:
+        with contextlib.redirect_stderr(io.StringIO()):
+            rc = provision.provision(None, vehicle_id=None, name=None, set_vars=[],
+                                     registry="localhost:5000/", force=False)
+        assert rc == 0
+        assert load_yaml(target)["images"] == {"tag": "v1.2.0", "registry": "localhost:5000"}
+        for bad in ("http://localhost:5000", "not a host"):
+            try:
+                provision.provision(None, vehicle_id=None, name=None, set_vars=[],
+                                    registry=bad, force=False)
+                assert False, f"{bad!r} must refuse"
+            except RigError as exc:
+                assert "registry" in str(exc)
+        err = io.StringIO()  # bare show mode lists it (images is a LOCAL_KEY)
+        with contextlib.redirect_stderr(err):
+            provision.provision(None, vehicle_id=None, name=None, set_vars=[], force=False)
+        assert "images:" in err.getvalue() and "localhost:5000" in err.getvalue()
+    finally:
+        del os.environ["RIG_VEHICLE_LOCAL"]
+
+
 def test_by_label_newest_and_rm_unlinks_linked_entries():
     data = pathlib.Path(tempfile.mkdtemp())
     _run(data, "20260901T000000Z_flight1")

@@ -880,10 +880,13 @@ def _prep_profile(root: Path, entry: Entry, reg, pkg: Package, lock: dict,
     return ref, payload_path, service.name, desc
 
 
-def install(root: Path, spec: str, *, as_name: str | None = None, locked: bool = False) -> int:
+def install(root: Path, spec: str, *, as_name: str | None = None, locked: bool = False,
+            enabled: bool = True, order: int | None = None) -> int:
     """One spec: `sensor:<id>` | `[registry/]key[@ver]` — where a profile's key IS the
     `service:short` tuple, so `ouster:generic`, `internal/ouster:generic@1.0.0`, and plain
-    service/suite names all resolve through the same ref path."""
+    service/suite names all resolve through the same ref path. `enabled`/`order` place the new
+    row deliberately (reconstruct --enable-replay's declared-disabled, last-ordered player row);
+    the defaults are `rig add`'s: enabled, next available order."""
     lock = load_lock(root)
     if spec.startswith("sensor:"):
         entry, reg, pkg = resolve_sensor(spec[len("sensor:"):])
@@ -927,7 +930,8 @@ def install(root: Path, spec: str, *, as_name: str | None = None, locked: bool =
             ref, payload_path, service_name, desc = _prep_profile(root, entry, reg, pkg, lock,
                                                                   locked=locked)
             _materialize_instance(root, svc=service_name, desc=desc, instance=as_name,
-                                  base_src=payload_path, profile_ref=ref, lock=lock, enabled=True)
+                                  base_src=payload_path, profile_ref=ref, lock=lock,
+                                  enabled=enabled, order=order)
         else:  # bare service: base config = its declared example at the pinned rev
             ref = qualified(entry, pkg)
             eprint(f"rig install: {ref}")
@@ -936,7 +940,8 @@ def install(root: Path, spec: str, *, as_name: str | None = None, locked: bool =
             examples = [e for e in examples if e.is_file()]
             if examples:
                 _materialize_instance(root, svc=pkg.name, desc=desc, instance=as_name,
-                                      base_src=examples[0], profile_ref=None, lock=lock, enabled=True)
+                                      base_src=examples[0], profile_ref=None, lock=lock,
+                                      enabled=enabled, order=order)
             else:
                 eprint(f"  no example config DECLARED at this pin — route + vendor done; author "
                        f"config/<tier>/<name>.yaml and its vehicle.yaml row yourself. (To automate "

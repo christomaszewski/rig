@@ -8,7 +8,11 @@ not bytes — the registry stays the byte store, and an arm64 run still needs an
 platform rebuild). ``reconstruct`` extracts it anywhere — a laptop with no deployment, no
 registry — verifies the sha, optionally overlays one of the run's own sealed config snapshots,
 LOCALIZES (data_dir → a local path via a tree-local vehicle.local.yaml, which outranks the
-machine file), and prints the `rig replay` that comes next.
+machine file), and prints the `rig replay` that comes next. ``--registry HOST`` localizes
+``images.registry`` the same way (a bench pulling from its own mirror); ``--enable-replay
+<path|ref>`` wires the SIL player into a tree that flew without it — OPT-IN, because the output
+is otherwise exactly the tree that ran (the player is harness: never in a with-set, absent from
+the config-drift report).
 
 Retrofit (runs that predate capture): the canonical spot doubles as the retrofit spot —
 ``run retrofit`` copies the DEPLOY artifact matching each run manifest's ``artifact:`` tag into
@@ -104,11 +108,135 @@ def _overlay(tree: Path, snap_dir: Path) -> list[str]:
     return written
 
 
+def _player_rows(tree: Path) -> list[str]:
+    """Instance names of the tree's ros2-bag-player rows — a RAW vehicle.yaml read (the tree may
+    not load yet, and reconstruct works with no deployment or registry around)."""
+    from .replay import PLAYER_SERVICE
+    try:
+        doc = load_yaml(tree / "vehicle.yaml")
+    except RigError:
+        return []
+    return [str(row.get("name")) for tier in ("infra", "sensors", "autonomy")
+            for row in (doc.get(tier) or [])
+            if isinstance(row, dict) and row.get("service") == PLAYER_SERVICE]
+
+
+def _enable_replay_target(token: str) -> tuple[str, Path | str]:
+    """--enable-replay's argument, validated BEFORE anything is extracted: ("path", dir) for the
+    ros2-bag-player service dir itself or a rig-infra checkout containing it; ("ref", token) for
+    a registry ref naming the player. Anything else refuses."""
+    from .descriptor import find_descriptor
+    from .refs import unqualified
+    from .replay import PLAYER_SERVICE
+    p = Path(token).expanduser()
+    if p.is_dir():
+        for cand in (p, p / PLAYER_SERVICE):
+            dp = find_descriptor(cand)
+            if dp and load_yaml(dp).get("service") == PLAYER_SERVICE:
+                return "path", cand.resolve()
+        raise RigError(f"reconstruct: --enable-replay {token}: not the {PLAYER_SERVICE} service "
+                       f"dir (nor a rig-infra checkout containing one) — its rigging.yaml must "
+                       f"declare service: {PLAYER_SERVICE}")
+    if unqualified(token).partition(":")[0] != PLAYER_SERVICE:  # `[ns/]name[@ver]` -> name
+        raise RigError(f"reconstruct: --enable-replay {token}: neither a directory nor a "
+                       f"{PLAYER_SERVICE} registry ref (e.g. public/{PLAYER_SERVICE}@1.10.0)")
+    return "ref", token
+
+
+def _wire_player_path(tree: Path, svc_dir: Path) -> None:
+    """Path-routed wiring — init.add_service's belt-and-braces minus its menu-row asymmetry (the
+    player row is ALWAYS declared-disabled at order 999): parse the edited files before writing,
+    gate on a full catalog + manifest load, restore both files on any failure."""
+    import yaml
+    from .catalog import load_catalog
+    from .descriptor import load_descriptor
+    from .init import _append_services_line, _append_tier_row, _repo_examples
+    from .manifest import load_manifest
+    from .replay import PLAYER_SERVICE
+    desc = load_descriptor(PLAYER_SERVICE, svc_dir)
+    examples = _repo_examples(svc_dir, desc.examples)
+    cfg = tree / "config" / "autonomy" / "bag_player.yaml"
+    cfg.parent.mkdir(parents=True, exist_ok=True)
+    if cfg.exists():
+        eprint("  config/autonomy/bag_player.yaml already exists — keeping it")
+    elif examples:
+        shutil.copy2(examples[0], cfg)
+    else:  # under rig the player is env-driven; the standalone knobs are optional
+        cfg.write_text(f"service: {PLAYER_SERVICE}\nname: bag_player\n")
+    svc_path, veh_path = tree / "services.yaml", tree / "vehicle.yaml"
+    svc_line = f"  {PLAYER_SERVICE}: {{ path: {svc_dir} }}"
+    row = (f"- {{ name: bag_player, service: {PLAYER_SERVICE}, "
+           f"config: config/autonomy/bag_player.yaml, enabled: false, order: 999 }}")
+    snippet = (f"    services.yaml, under `services:`:\n    {svc_line}\n"
+               f"    vehicle.yaml, under `autonomy:`:\n      {row}")
+    orig_svc = svc_path.read_text() if svc_path.exists() else "services:\n"
+    orig_veh = veh_path.read_text()
+    routes = ((load_yaml(svc_path) or {}).get("services") or {}) if svc_path.exists() else {}
+    new_svc = orig_svc if PLAYER_SERVICE in routes else _append_services_line(orig_svc, svc_line)
+    new_veh = _append_tier_row(orig_veh, "autonomy", row)
+    if new_svc is None or new_veh is None:
+        which = "services.yaml" if new_svc is None else "vehicle.yaml"
+        eprint(f"rig reconstruct: {which} isn't in the generated block form — config copied, "
+               f"files untouched; paste this yourself:\n{snippet}")
+        return
+    for text, name in ((new_svc, "services.yaml"), (new_veh, "vehicle.yaml")):
+        try:
+            yaml.safe_load(text)
+        except yaml.YAMLError as exc:  # belt: never write a file that will not parse
+            raise RigError(f"reconstruct: refusing to write {name} — the edited result would not "
+                           f"parse ({exc}); wire it manually:\n{snippet}")
+    svc_path.write_text(new_svc)
+    veh_path.write_text(new_veh)
+    try:  # braces: the real gates (route resolution, name uniqueness, config cross-checks)
+        load_catalog(tree)
+        load_manifest(tree)
+    except Exception as exc:  # noqa: BLE001 — restore, then surface whatever refused
+        svc_path.write_text(orig_svc)
+        veh_path.write_text(orig_veh)
+        raise RigError(f"reconstruct: the wired tree does not load ({exc}) — services.yaml/"
+                       f"vehicle.yaml restored; wire it manually:\n{snippet}")
+
+
+def wire_player(tree: Path, target: tuple[str, Path | str]) -> None:
+    """`--enable-replay`: the SIL player into a reconstructed tree that predates it. OPT-IN by
+    doctrine — reconstruct's output is otherwise exactly the tree that ran; the player is harness
+    (never in a with-set, absent from the config-drift report), so the experiment's isolation
+    holds. Registry form = `rig add <ref> --as bag_player` plus the two row values the installer
+    cannot know: enabled: false (a plain `up` must never start it) and order: 999 (LAST, forever —
+    an autonomy service added later must still land before it)."""
+    from .replay import PLAYER_SERVICE
+    have = _player_rows(tree)
+    if have:
+        eprint(f"rig reconstruct: tree already carries a {PLAYER_SERVICE} row "
+               f"({', '.join(have)}) — nothing to wire")
+        return
+    kind, value = target
+    if kind == "ref":
+        from . import install as install_mod
+        install_mod.install(tree, str(value), as_name="bag_player", enabled=False, order=999)
+    else:
+        _wire_player_path(tree, Path(value))
+    if _player_rows(tree):
+        eprint(f"rig reconstruct: {PLAYER_SERVICE} wired (bag_player — enabled: false, "
+               f"order: 999); harness only: never in a with-set, absent from the config-drift "
+               f"report")
+    else:
+        eprint("rig reconstruct: the player row is NOT wired yet — paste the row printed above")
+
+
 def cmd_reconstruct(root: Path | None, *, run_ref: str, into: str | None,
                     config: str | None, copy_run: bool = False,
-                    no_import: bool = False) -> int:
+                    no_import: bool = False, registry: str | None = None,
+                    enable_replay: str | None = None) -> int:
     run_dir = _resolve_run(root, run_ref)
     doc = _run_manifest(run_dir)
+    # Flag validation BEFORE extraction: a refused host or player target must not leave a
+    # half-built tree behind (the retry would hit the non-empty --into guard).
+    reg_host = None
+    if registry:
+        from .provision import registry_host
+        reg_host = registry_host(registry)
+    replay_target = _enable_replay_target(enable_replay) if enable_replay else None
     tarpath = run_dir / ".rig" / "artifact.tar.gz"
     if not tarpath.exists():
         tag = doc.get("artifact")
@@ -178,9 +306,23 @@ def cmd_reconstruct(root: Path | None, *, run_ref: str, into: str | None,
         except RigError:
             local = {}
     local["data_dir"] = str((dest / "var" / "data").resolve())
+    if reg_host:  # the bench's image mirror — per SUBKEY: the run's tag/base pins still apply,
+        #           only the host swaps (machine-wide instead: `rig provision --registry`)
+        local["images"] = {**(local.get("images") or {}), "registry": reg_host}
     (dest / "var" / "data").mkdir(parents=True, exist_ok=True)
     import yaml
     (dest / "vehicle.local.yaml").write_text(yaml.safe_dump(local, sort_keys=False))
+
+    # The SIL player: every capture since v0.2.36 carries its declared-disabled row; a tree that
+    # FLEW without it says so (`rig replay` would refuse in it) and is wired only on request.
+    if replay_target is not None:
+        wire_player(dest, replay_target)
+    elif not _player_rows(dest):
+        from .replay import PLAYER_SERVICE
+        eprint(f"rig reconstruct: this tree predates the SIL player (no {PLAYER_SERVICE} row) — "
+               f"`rig replay` will refuse in it; re-run with --enable-replay <{PLAYER_SERVICE} "
+               f"dir | rig-infra checkout | public/{PLAYER_SERVICE}@1.10.0> to wire it (harness "
+               f"only — the tree otherwise stays exactly what ran)")
 
     # Import the source run into the tree's OWN registry so every verb and TAB completion work
     # by id/label inside the experiment workspace. Default = SYMLINK (a reference — the archive
@@ -204,7 +346,8 @@ def cmd_reconstruct(root: Path | None, *, run_ref: str, into: str | None,
     images = run_dir / ".rig" / "images.yaml"
     image_note = " · image digests: .rig/images.yaml (fetch by digest, or run on a matching host)" \
         if images.exists() else ""
-    eprint(f"rig reconstruct: {run_dir.name} -> {dest}{image_note}")
+    registry_note = f" · images.registry -> {reg_host} (vehicle.local.yaml)" if reg_host else ""
+    eprint(f"rig reconstruct: {run_dir.name} -> {dest}{image_note}{registry_note}")
     print(f"cd {dest} && ./rig doctor && ./rig replay {run_arg} <names…>")
     return 0
 

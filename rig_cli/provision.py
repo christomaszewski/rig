@@ -27,6 +27,20 @@ def _target() -> Path:
     return Path(os.environ.get("RIG_VEHICLE_LOCAL") or MACHINE_LOCAL_DEFAULT)
 
 
+def registry_host(value: str) -> str:
+    """Validate an `images.registry` value: a docker registry HOST[:port][/namespace] — never a
+    URL (the scheme is docker's business; a pasted `http://` would compose into an unpullable
+    ref), no whitespace, trailing slash dropped. Shared by `provision --registry` (machine-wide)
+    and `reconstruct --registry` (tree-local)."""
+    host = value.strip().rstrip("/")
+    if "://" in host:
+        raise RigError(f"--registry takes a docker registry HOST (localhost:5000, "
+                       f"registry.lan:5000/fleet), not a URL: '{value}'")
+    if not re.match(r"^[A-Za-z0-9][A-Za-z0-9._-]*(:\d+)?(/[A-Za-z0-9._-]+)*$", host):
+        raise RigError(f"--registry: '{value}' is not a registry host[:port][/namespace]")
+    return host
+
+
 def _show(root: Path | None) -> int:
     target = _target()
     if target.is_file():
@@ -64,9 +78,9 @@ def _show(root: Path | None) -> int:
 
 def provision(root: Path | None, *, vehicle_id: str | None, name: str | None,
               set_vars: list[str], platform: str | None = None,
-              data_dir: str | None = None, force: bool) -> int:
+              data_dir: str | None = None, registry: str | None = None, force: bool) -> int:
     if vehicle_id is None and name is None and not set_vars and platform is None \
-            and data_dir is None:
+            and data_dir is None and registry is None:
         return _show(root)
 
     target = _target()
@@ -102,6 +116,10 @@ def provision(root: Path | None, *, vehicle_id: str | None, name: str | None,
         if not expanded.is_absolute():
             raise RigError(f"provision: --data-dir must be an ABSOLUTE path, got '{data_dir}'")
         data["data_dir"] = str(expanded)
+    if registry is not None:  # the image registry HOST is a per-machine fact too (a bench pulls
+        #                       from its own mirror). `images` merges per SUBKEY in the local
+        #                       file: tag/base keep coming from vehicle.yaml, only the host swaps.
+        data["images"] = {**(data.get("images") or {}), "registry": registry_host(registry)}
 
     for key in ("vehicle", "vehicle_id"):  # re-identification gate — orphaned-containers warning
         if key in existing and existing.get(key) != data.get(key) and not force:
@@ -123,5 +141,7 @@ def provision(root: Path | None, *, vehicle_id: str | None, name: str | None,
            f"'{data.get('vehicle', '?')}' id {data.get('vehicle_id', '?')}"
            + (f", platform {data['platform']}" if data.get("platform") else "")
            + (f", data_dir {data['data_dir']}" if data.get("data_dir") else "")
+           + (f", registry {data['images']['registry']}"
+              if (data.get("images") or {}).get("registry") else "")
            + (f", vars: {', '.join(sorted(data.get('vars') or {}))}" if data.get("vars") else ""))
     return 0

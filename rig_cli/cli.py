@@ -761,6 +761,16 @@ def build_parser() -> argparse.ArgumentParser:
                           "symlink (portable tree; duplicates the bags)")
     rec.add_argument("--no-import", action="store_true", dest="no_import",
                      help="don't put the source run in the tree's registry at all")
+    rec.add_argument("--registry", default=None, metavar="HOST",
+                     help="localize images.registry too (tree-local vehicle.local.yaml): the docker "
+                          "registry HOST[:port][/ns] this bench pulls from — the run's tag/base pins "
+                          "stay, only the host swaps (machine-wide instead: provision --registry)")
+    rec.add_argument("--enable-replay", dest="enable_replay", default=None, metavar="PATH|REF",
+                     help="wire the SIL player into a tree that predates it (OPT-IN: the tree is "
+                          "otherwise exactly what ran): the ros2-bag-player dir or a rig-infra "
+                          "checkout, or a registry ref (public/ros2-bag-player@1.10.0) — adds the "
+                          "route, config/autonomy/bag_player.yaml and the enabled: false, order: 999 "
+                          "row; no-op when the tree already carries the player")
 
     rrm = sub.add_parser("run-rm", help="remove run(s) from the registry by id (canonical: "
                                         "run rm) — sealed freely, interrupted with --force, "
@@ -1189,6 +1199,10 @@ def build_parser() -> argparse.ArgumentParser:
     pv.add_argument("--data-dir", dest="data_dir", default=None, metavar="PATH",
                     help="THIS machine's run-registry home (absolute; the registry itself is "
                          "minted lazily by the first up/new-run — nothing else to initialize)")
+    pv.add_argument("--registry", default=None, metavar="HOST",
+                    help="THIS machine's docker registry HOST[:port][/ns] — the images.registry "
+                         "override (a bench pulling from its own mirror); tag/base keep coming "
+                         "from each deployment's vehicle.yaml")
     pv.add_argument("--force", action="store_true",
                     help="allow CHANGING an existing identity (renames compose projects — "
                          "bring the vehicle down first)")
@@ -1306,7 +1320,8 @@ def main(argv=None) -> int:
             return provision_mod.provision(
                 root if (root / "vehicle.yaml").exists() else None,
                 vehicle_id=args.vehicle_id, name=args.name, set_vars=args.var,
-                platform=args.platform, data_dir=args.data_dir, force=args.force)
+                platform=args.platform, data_dir=args.data_dir, registry=args.registry,
+                force=args.force)
         root = (args.root or find_root()).resolve()
         if args.cmd == "add":  # edits the deployment files themselves — routes its own manifest load
             return cmd_add(args, root)
@@ -1321,7 +1336,8 @@ def main(argv=None) -> int:
             return reconstruct_mod.cmd_reconstruct(
                 root if (root / "vehicle.yaml").exists() else None,
                 run_ref=args.run, into=args.into, config=args.config,
-                copy_run=args.copy_run, no_import=args.no_import)
+                copy_run=args.copy_run, no_import=args.no_import,
+                registry=args.registry, enable_replay=args.enable_replay)
         if args.cmd == "run-retrofit":  # reads run dirs + var/artifacts, not the manifest
             from . import reconstruct as reconstruct_mod
             return reconstruct_mod.cmd_retrofit(root, run_refs=args.runs,

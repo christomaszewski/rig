@@ -441,16 +441,26 @@ def _append_services_line(text: str, line: str) -> str | None:
 def _append_tier_row(text: str, section: str, row: str) -> str | None:
     """Insert a manifest row at the END of a tier section (`infra:`/`sensors:`/`autonomy:`) in
     vehicle.yaml. A missing section is appended as a new top-level block (older deployments predate
-    `autonomy:`). None = the section exists but in a flow shape (`sensors: [...]`) rig won't edit."""
+    `autonomy:`). None = the section exists but in a flow shape (`sensors: [...]`) rig won't edit.
+    Two block shapes are understood: the generated form (items two spaces under the key) and
+    PyYAML's INDENTLESS form (`- name:` at column 0, continuation lines indented — what
+    `yaml.safe_dump` writes, i.e. every captured/baked tree's vehicle.yaml); the new row lands at
+    the section's own item column, so an append never mixes indents into an unparseable file."""
     lines = text.splitlines()
     for i, ln in enumerate(lines):
         if re.match(rf"^{section}:\s*(#.*)?$", ln):
-            j = i + 1  # walk to the end of the section: its content is indented (rows, comments, blanks)
-            while j < len(lines) and (not lines[j].strip() or lines[j].startswith(" ")):
+            k = i + 1
+            while k < len(lines) and not lines[k].strip():
+                k += 1
+            indent = "" if k < len(lines) and lines[k].startswith("- ") else "  "
+            j = i + 1  # walk to the end of the section: its content is indented (rows, comments,
+            #            blanks) — or, in the indentless shape, starts with the item dash
+            while j < len(lines) and (not lines[j].strip() or lines[j].startswith(" ")
+                                      or (not indent and lines[j].startswith("- "))):
                 j += 1
             while j > i + 1 and not lines[j - 1].strip():  # keep trailing blanks below the new row
                 j -= 1
-            return "\n".join(lines[:j] + [f"  {row}"] + lines[j:]) + "\n"
+            return "\n".join(lines[:j] + [f"{indent}{row}"] + lines[j:]) + "\n"
         if re.match(rf"^{section}:", ln):
             return None
     return "\n".join(lines + ["", f"{section}:", f"  {row}"]) + "\n"

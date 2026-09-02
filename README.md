@@ -133,6 +133,9 @@ python3 -m venv .venv && .venv/bin/pip install pyyaml
                           #   into .rig/artifact.tar.gz — extract, verify, overlay a config
                           #   snapshot, localize. Pre-capture runs: `rig run retrofit` stamps them
                           #   with the deploy artifact their manifest names. Opt-out: run_capture
+                          #   --registry HOST localizes images.registry too (a bench's mirror;
+                          #   machine-wide: `provision --registry`); --enable-replay <path|ref>
+                          #   wires the SIL player into a tree that flew without it (opt-in)
 ./rig replay <run> planner  # SIL: NEW provenance-linked run; the named instances come up LIVE and
                           #   the ros2-bag-player (rig-infra ≥ v1.8.0) plays the topics they
                           #   consumed in <run> (selected from its graph epochs — observed

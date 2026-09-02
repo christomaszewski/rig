@@ -261,7 +261,9 @@ def _player_row(manifest):
                        f"`autonomy:` with a high order and `enabled: false` (it must come up "
                        f"LAST so subscribers exist before data flows), e.g.\n"
                        f"  - {{ name: bag_player, service: {PLAYER_SERVICE}, "
-                       f"config: config/infra/bag_player.yaml, enabled: false, order: 999 }}")
+                       f"config: config/autonomy/bag_player.yaml, enabled: false, order: 999 }}\n"
+                       f"  (a reconstructed tree: `rig reconstruct <run> --enable-replay "
+                       f"<{PLAYER_SERVICE} dir | registry ref>` wires it)")
     if len(rows) > 1:
         raise RigError(f"replay: {len(rows)} {PLAYER_SERVICE} rows "
                        f"({', '.join(s.name for s in rows)}) — one player per replay session")

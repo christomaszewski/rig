@@ -230,6 +230,8 @@ it belongs to `data_dir`, not to the machine or the rig install):
 
 ```bash
 sudo rig provision --data-dir /data/rig     # or a tree-local vehicle.local.yaml for one deployment
+sudo rig provision --registry localhost:5000  # the bench's image mirror (images.registry, machine-wide;
+                                            #   each deployment's tag/base pins stay — only the host swaps)
 ```
 
 `rig run import <path…>` adopts scp'd/downloaded runs into the registry (copy by default) so
@@ -242,8 +244,17 @@ digests that were live). A downloaded run dir is all anyone needs:
 
 ```bash
 rig reconstruct <path-to-run> --into flight1-tree/   # extract + verify + overlay + localize
+#   … --registry localhost:5000                      # + images.registry for THIS tree only
+#   … --enable-replay ~/ws/rig-infra                 # a tree that flew without the player row
 cd flight1-tree && ./rig doctor                      # then: ./rig replay <path-to-run> <names…>
 ```
+
+A tree that FLEW before the player row existed reconstructs without it — reconstruct says so and
+never injects it silently (the output is the tree that ran). `--enable-replay <ros2-bag-player
+dir | rig-infra checkout | public/ros2-bag-player@1.10.0>` wires it on request: the route,
+`config/autonomy/bag_player.yaml`, and the `enabled: false, order: 999` row (the registry form
+also pins it in rig.lock). Harness only — the player is never in a with-set and absent from the
+config-drift report. Captures since v0.2.36 already carry the row (the flag is then a no-op).
 
 Image BYTES come from the registry (fetch by the recorded digests) — and an arm64 run needs an
 arm64 host, emulation, or a platform rebuild at the same pins. Runs recorded BEFORE v0.2.36:

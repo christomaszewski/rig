@@ -1,8 +1,25 @@
 # rig — project state & handoff (resume here)
 
 > Snapshot for picking the project up cold in a new session. Read this first, then `CHEATSHEET.md` /
-> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.2.44**,
-> branch **`main`**, 659 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.2.45**,
+> branch **`main`**, 665 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> **v0.2.45 (2026-09-01) — reconstruct/provision bench QoL** (the two offers queued since
+> v0.2.39): **`rig provision --registry HOST`** + **`rig reconstruct --registry HOST`** write the
+> `images.registry` override (the machine file / the tree-local vehicle.local.yaml) — a bench
+> pulling from its own mirror. Per SUBKEY: the run's tag/base pins stay, only the host swaps;
+> HOST[:port][/ns] validated, URLs refused (one `registry_host` in provision.py).
+> **`rig reconstruct --enable-replay <path|ref>`**: a tree that FLEW without the ros2-bag-player
+> row now SAYS so (detect-and-tell — never a silent injection: the output is the tree that ran)
+> and wires it on request — the player dir or a rig-infra checkout (route + example config +
+> row, add's belt-and-braces: parse before write, load-gate, restore on failure), or a registry
+> ref (`install()` grew `enabled`/`order` passthrough for the two row values the installer can't
+> know: enabled: false, order: 999 — LAST forever). No-op when the tree carries it (every capture
+> since v0.2.36). Both flags validate BEFORE extraction (a refused retry would hit the non-empty
+> --into guard). Latent bug fixed underneath: `_append_tier_row` now understands PyYAML's
+> INDENTLESS sequence shape (`- name:` at column 0 — what safe_dump writes, i.e. every captured/
+> baked vehicle.yaml), so `rig add`/`pkg add` into a reconstructed tree whose section already has
+> rows no longer produces an unparseable file. Replay's missing-row hint corrected
+> (config/autonomy/ + the reconstruct pointer). 6 new tests — total 665.
 > **v0.2.44 (2026-09-01) — `runs` with arguments refuses**: `rig runs rm <id>` used to silently
 > LIST (the flat `runs` verb swallowed extra tokens into its uniformity-suppressed positional) —
 > one keystroke from the `run` group, doing the wrong thing quietly, straight from a field
@@ -55,7 +72,7 @@
 > the child's stdout (`> calls.yaml`); rig chatter stays on stderr. Refuses instance names and
 > `--calls` (export vs play — one direction per invocation). ROS stays launcher-side per the
 > calls-handoff doctrine — rig added dispatch, not deserialization. QoL still queued from
-> discussion: `reconstruct --enable-replay`, `reconstruct`/`provision --registry`.
+> discussion: `reconstruct --enable-replay`, `reconstruct`/`provision --registry` (landed v0.2.45).
 > **v0.2.38 (2026-09-01) — run-registry lifecycle QoL**: the registry belongs to `data_dir`
 > (per-deployment, machine-local overridable), is minted LAZILY on first up/new-run, and brew/deb
 > installs carry no state — so no `init` verb exists ON PURPOSE. What was missing was ergonomics:

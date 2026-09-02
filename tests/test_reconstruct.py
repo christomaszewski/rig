@@ -33,29 +33,48 @@ def _service_repo(base: pathlib.Path, name: str) -> pathlib.Path:
     return repo
 
 
-def _deployment(*, run_capture=True):
-    """(root, manifest) — two services (one row disabled), path-routed like a real dev tree."""
+def _deployment(*, run_capture=True, player=("bag_player", "playr")):
+    """(root, manifest) — two services (one row disabled), path-routed like a real dev tree.
+    `player` = (name, service) of the disabled autonomy row (None = no autonomy row at all) —
+    the default deliberately is NOT the real player service, i.e. a tree that flew without it."""
     base = pathlib.Path(tempfile.mkdtemp())
     root = base / "deploy"
     (root / "config" / "sensors").mkdir(parents=True)
     repo_a = _service_repo(base, "sensa")
-    repo_b = _service_repo(base, "playr")
-    (root / "services.yaml").write_text(textwrap.dedent(f"""\
-        services:
-          sensa: {{ path: {repo_a} }}
-          playr: {{ path: {repo_b} }}
-        """))
+    routes = f"  sensa: {{ path: {repo_a} }}\n"
     cfg_a = root / "config" / "sensors" / "cam.yaml"
     cfg_a.write_text("service: sensa\nname: cam\nvalue: original\n")
-    cfg_b = root / "config" / "sensors" / "bag_player.yaml"
-    cfg_b.write_text("service: playr\nname: bag_player\n")
-    rows = [Sensor(name="cam", service="sensa", config=cfg_a, enabled=True, order=10),
-            Sensor(name="bag_player", service="playr", config=cfg_b, enabled=False, order=999,
-                   tier="autonomy")]
+    rows = [Sensor(name="cam", service="sensa", config=cfg_a, enabled=True, order=10)]
+    if player:
+        pname, psvc = player
+        repo_b = _service_repo(base, psvc)
+        routes += f"  {psvc}: {{ path: {repo_b} }}\n"
+        cfg_b = root / "config" / "sensors" / f"{pname}.yaml"
+        cfg_b.write_text(f"service: {psvc}\nname: {pname}\n")
+        rows.append(Sensor(name=pname, service=psvc, config=cfg_b, enabled=False, order=999,
+                           tier="autonomy"))
+    (root / "services.yaml").write_text("services:\n" + routes)
     manifest = Manifest(vehicle="veh", vehicle_id=1, sensors=rows, data_dir=str(base / "data"),
                         run_capture=run_capture,
                         ros=RosSettings(domain_id=1, rmw="rmw_zenoh_cpp", distro=None))
     return root, manifest
+
+
+def _player_repo(base: pathlib.Path) -> pathlib.Path:
+    """A stand-in ros2-bag-player checkout, laid out like rig-infra/ros2-bag-player."""
+    repo = base / "rig-infra" / "ros2-bag-player"
+    (repo / "config").mkdir(parents=True)
+    (repo / "rigging.yaml").write_text(textwrap.dedent("""\
+        service: ros2-bag-player
+        launcher: ros2-bag-player-up
+        tier: autonomy
+        examples: [config/ros2-bag-player.example.yaml]
+        launch_surface: [ros2-bag-player-up]
+        """))
+    (repo / "ros2-bag-player-up").write_text("#!/bin/sh\nexit 0\n")
+    (repo / "config" / "ros2-bag-player.example.yaml").write_text(
+        "service: ros2-bag-player\nname: bag_player\nplay: {rate: 1.0}\n")
+    return repo
 
 
 def _open(manifest, root, label="t"):
@@ -242,6 +261,150 @@ def test_reconstruct_links_source_into_tree_registry_by_default():
         assert reconstruct.cmd_reconstruct(None, run_ref=str(run_dir), into=str(dest3),
                                            config=None, no_import=True) == 0
     assert not (dest3 / "var" / "data" / "runs" / rid).exists()  # opted out
+
+
+def test_reconstruct_enable_replay_path_wires_the_player_row():
+    from rig_cli.manifest import load_manifest
+    root, m = _deployment(player=("nav", "playr"))  # an autonomy row that is NOT the player
+    rid, data = _open(m, root)
+    run_dir = data / "runs" / rid
+    player = _player_repo(pathlib.Path(tempfile.mkdtemp()))
+    dest = pathlib.Path(tempfile.mkdtemp()) / "tree"
+    err = io.StringIO()
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+        rc = reconstruct.cmd_reconstruct(None, run_ref=str(run_dir), into=str(dest), config=None,
+                                         enable_replay=str(player))
+    assert rc == 0, err.getvalue()
+    assert "wired" in err.getvalue() and "harness only" in err.getvalue()
+    assert f"ros2-bag-player: {{ path: {player.resolve()} }}" in (dest / "services.yaml").read_text()
+    assert "play:" in (dest / "config" / "autonomy" / "bag_player.yaml").read_text()  # the example
+    # the captured vehicle.yaml is safe_dump's INDENTLESS shape with an EXISTING autonomy section —
+    # the row lands in it (at the section's own column) and the tree loads
+    rows = [s for s in load_manifest(dest).sensors if s.tier == "autonomy"]
+    assert [(s.name, s.service, s.enabled, s.order) for s in rows] == \
+        [("nav", "playr", False, 999), ("bag_player", "ros2-bag-player", False, 999)]
+    # a rig-infra CHECKOUT (the dir containing ros2-bag-player/) is accepted too
+    dest2 = dest.parent / "tree2"
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        assert reconstruct.cmd_reconstruct(None, run_ref=str(run_dir), into=str(dest2), config=None,
+                                           enable_replay=str(player.parent)) == 0
+    assert any(s.service == "ros2-bag-player" for s in load_manifest(dest2).sensors)
+    # a directory that is not the player refuses BEFORE extraction
+    other = _service_repo(pathlib.Path(tempfile.mkdtemp()), "sensb")
+    try:
+        reconstruct.cmd_reconstruct(None, run_ref=str(run_dir), into=str(dest.parent / "t3"),
+                                    config=None, enable_replay=str(other))
+        assert False, "a non-player dir must refuse"
+    except RigError as exc:
+        assert "service: ros2-bag-player" in str(exc) and not (dest.parent / "t3").exists()
+
+
+def test_reconstruct_player_hint_and_noop_when_present():
+    root, m = _deployment()  # its 'bag_player' row is service playr — NOT the player
+    rid, data = _open(m, root)
+    dest = pathlib.Path(tempfile.mkdtemp()) / "tree"
+    err = io.StringIO()
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+        assert reconstruct.cmd_reconstruct(None, run_ref=str(data / "runs" / rid),
+                                           into=str(dest), config=None) == 0
+    assert "--enable-replay" in err.getvalue()  # detect-and-tell — never a silent injection
+    assert "ros2-bag-player" not in (dest / "services.yaml").read_text()
+    # a run that carried the player (every capture since v0.2.36): --enable-replay is a no-op
+    root2, m2 = _deployment(player=("bag_player", "ros2-bag-player"))
+    rid2, data2 = _open(m2, root2)
+    player = _player_repo(pathlib.Path(tempfile.mkdtemp()))
+    dest2 = pathlib.Path(tempfile.mkdtemp()) / "tree"
+    err = io.StringIO()
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+        assert reconstruct.cmd_reconstruct(None, run_ref=str(data2 / "runs" / rid2),
+                                           into=str(dest2), config=None,
+                                           enable_replay=str(player)) == 0
+    assert "already carries" in err.getvalue() and "--enable-replay" not in err.getvalue()
+    assert "path: services/ros2-bag-player" in (dest2 / "services.yaml").read_text()  # untouched
+
+
+def test_reconstruct_enable_replay_registry_ref_installs_disabled_and_last():
+    import os
+    import subprocess
+
+    import yaml
+
+    from rig_cli.cli import main
+    from rig_cli.lock import load_lock
+    from rig_cli.manifest import load_manifest
+    from rig_cli.registry_scaffold import registry_init
+    base = pathlib.Path(tempfile.mkdtemp())
+    player = _player_repo(base)  # base/rig-infra/ros2-bag-player — the collection repo is git-tracked
+    repo = player.parent
+
+    def git(*args):
+        return subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *args],
+                              cwd=repo, capture_output=True, text=True, check=True)
+    git("init", "-q")
+    git("add", ".")
+    git("commit", "-q", "-m", "player")
+    rev = git("rev-parse", "HEAD").stdout.strip()
+    reg = base / "reg"
+    with contextlib.redirect_stderr(io.StringIO()):
+        registry_init(reg, namespace="testns")
+    d = reg / "services" / "ros2-bag-player"
+    d.mkdir(parents=True)
+    (d / "manifest.yaml").write_text(yaml.safe_dump({
+        "kind": "service", "name": "ros2-bag-player", "version": "1.10.0",
+        "source": {"repo": str(repo), "rev": rev, "path": "ros2-bag-player"}}))
+    old_home = os.environ.get("RIG_HOME")
+    os.environ["RIG_HOME"] = str(base / "home")
+    try:
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            assert main(["registry", "index", str(reg)]) == 0
+            assert main(["setup", "--no-default-registry"]) == 0
+            assert main(["registry", "add", "testns", "--path", str(reg)]) == 0
+        root, m = _deployment(player=None)
+        rid, data = _open(m, root)
+        dest = base / "tree"
+        err = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            rc = reconstruct.cmd_reconstruct(None, run_ref=str(data / "runs" / rid),
+                                             into=str(dest), config=None,
+                                             enable_replay="testns/ros2-bag-player@1.10.0")
+        assert rc == 0, err.getvalue()
+        assert (dest / "services" / "ros2-bag-player" / ".vendored.yaml").is_file()  # vendored
+        row = next(s for s in load_manifest(dest).sensors if s.service == "ros2-bag-player")
+        # the installer's defaults (enabled, max+10) are overridden: declared-disabled, LAST forever
+        assert (row.name, row.tier, row.enabled, row.order) == ("bag_player", "autonomy", False, 999)
+        assert "testns/ros2-bag-player@1.10.0" in load_lock(dest)["packages"]  # pinned
+        try:  # a ref that is not the player refuses BEFORE extraction
+            reconstruct.cmd_reconstruct(None, run_ref=str(data / "runs" / rid),
+                                        into=str(base / "t2"), config=None,
+                                        enable_replay="testns/zenoh-router")
+            assert False, "a non-player ref must refuse"
+        except RigError as exc:
+            assert "registry ref" in str(exc) and not (base / "t2").exists()
+    finally:
+        if old_home is None:
+            os.environ.pop("RIG_HOME", None)
+        else:
+            os.environ["RIG_HOME"] = old_home
+
+
+def test_reconstruct_registry_localizes_images_registry():
+    from rig_cli.manifest import load_manifest
+    root, m = _deployment()
+    rid, data = _open(m, root)
+    run_dir = data / "runs" / rid
+    dest = pathlib.Path(tempfile.mkdtemp()) / "tree"
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        assert reconstruct.cmd_reconstruct(None, run_ref=str(run_dir), into=str(dest), config=None,
+                                           registry="localhost:5000/") == 0
+    local = load_yaml(dest / "vehicle.local.yaml")
+    assert local["images"] == {"registry": "localhost:5000"} and local["data_dir"]  # slash dropped
+    assert load_manifest(dest).image_registry == "localhost:5000"  # tree-local outranks vehicle.yaml
+    try:
+        reconstruct.cmd_reconstruct(None, run_ref=str(run_dir), into=str(dest.parent / "t2"),
+                                    config=None, registry="http://localhost:5000")
+        assert False, "a URL must refuse"
+    except RigError as exc:
+        assert "HOST" in str(exc) and not (dest.parent / "t2").exists()  # refused BEFORE extraction
 
 
 if __name__ == "__main__":

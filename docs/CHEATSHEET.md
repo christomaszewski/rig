@@ -425,6 +425,8 @@ rig graph <stamp>_dock-test --check                        # topology + declared
 rig reconstruct <path-to-run> --into tree/                 # the run dir back into a runnable tree
                                                            #   (its .rig/artifact.tar.gz capture;
                                                            #   old runs: `rig run retrofit` first)
+                                                           #   --registry HOST (bench mirror) ·
+                                                           #   --enable-replay <path|ref> (old trees)
 rig replay <stamp>_dock-test planner                       # SIL: play planner's recorded inputs at
                                                            #   the CURRENT planner build/config —
                                                            #   new run links back via replay-of

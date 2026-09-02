@@ -159,6 +159,27 @@ def test_add_instance_name_collision_errors():
         assert "zr" in str(exc) and "already exists" in str(exc)
 
 
+def test_append_tier_row_understands_pyyaml_indentless_sections():
+    import yaml
+
+    from rig_cli.init import _append_tier_row
+    # what yaml.safe_dump writes (every captured/baked vehicle.yaml): `- name:` at column 0
+    text = yaml.safe_dump({"vehicle": "v",
+                           "sensors": [{"name": "cam", "service": "s", "order": 10}],
+                           "autonomy": [{"name": "nav", "service": "p", "order": 20}],
+                           "data_dir": "/d"}, sort_keys=False)
+    assert "\n- name: nav" in text  # the shape under test really is indentless
+    row = "- { name: bag_player, service: ros2-bag-player, config: c.yaml, enabled: false, order: 999 }"
+    doc = yaml.safe_load(_append_tier_row(text, "autonomy", row))
+    assert [r["name"] for r in doc["autonomy"]] == ["nav", "bag_player"] and doc["data_dir"] == "/d"
+    doc2 = yaml.safe_load(_append_tier_row(text, "sensors", row))
+    assert [r["name"] for r in doc2["sensors"]] == ["cam", "bag_player"] and len(doc2["autonomy"]) == 1
+    # the generated (indented) form is untouched by the change
+    gen = "vehicle: v\nautonomy:\n  - { name: nav, service: p, order: 20 }\n\ndata_dir: /d\n"
+    out = _append_tier_row(gen, "autonomy", row)
+    assert "\n  - { name: bag_player" in out and yaml.safe_load(out)["autonomy"][1]["order"] == 999
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):
