@@ -287,6 +287,22 @@ rig down --end-run                         # seal the replay session like any ru
 rig runs                                   # the REPLAY-OF column links the pair
 ```
 
+**Windows** (rig ≥ v0.2.46 + rig-infra ≥ v1.12.0): `--from S` / `--to S` replay a SECTION of the
+recording — seconds from BAG START, the same zero as call-script `t`, so a script means the same
+thing under any window. The player seeks there AND restores the latched topics (`/tf_static`…) a
+bare seek would skip; it exits at `--to`, so `--auto-end` composes and section sweeps are a loop:
+
+```bash
+for w in 0:120 120:240 240:360; do
+  rig replay <stamp>_fieldtest planner --from ${w%:*} --to ${w#*:} --auto-end
+done
+```
+
+The window is recorded as `replay.window` in the new run's manifest. Scripted calls outside it
+are skipped by the injector (rig says how many up front; `t == from` fires at window start).
+A window cuts service STATE — a mode set at 119.5 s is gone at `--from 120`; pick quiescent
+starts, or script the state-setting calls at `t: 120`.
+
 **Service calls** (rig ≥ v0.2.37 + rig-infra ≥ v1.10.0, sources recorded with `record.services`
 and CONTENTS-level introspection adopted): by default replay also re-issues the recorded calls at
 the with-set's servers — observed `provides` minus `requires`, the topic rule's twin. To RETIME

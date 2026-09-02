@@ -674,6 +674,149 @@ def test_live_infra_publishes_subtract_but_the_player_never_does():
     assert "/diagnostics" in value2.split()
 
 
+def test_validate_window_and_export_calls_refusal():
+    assert replay.validate_window(None, None) == (None, None)
+    assert replay.validate_window("120", 300) == (120.0, 300.0)  # argparse hands strings
+    assert replay.validate_window(0, None) == (0.0, None)
+    for f, to, needle in ((-1, None, ">= 0"), ("nan", None, "finite"), (None, 0, "> 0"),
+                          (300, 120, "empty window"), (5, 5, "empty window"),
+                          ("x", None, "number")):
+        try:
+            replay.validate_window(f, to)
+            assert False, f"must refuse from={f} to={to}"
+        except RigError as exc:
+            assert needle in str(exc), str(exc)
+    from rig_cli.cli import build_parser
+    args = build_parser().parse_args(["replay", "r", "planner", "--from", "12", "--to", "30"])
+    assert (args.window_from, args.window_to) == ("12", "30")
+    # --export-calls exports the WHOLE recording (t from bag start): a window there is refused
+    src = _source_run(epochs=(EPOCH_SVC,))
+    m = _manifest([_row("planner", service="plan", tier="autonomy", order=20), PLAYER])
+    try:
+        replay.cmd(m, {}, {}, pathlib.Path("."), run_ref=str(src), names=[], label=None,
+                   wall_clock=False, force=False, dry_run=True, export_calls=True,
+                   window_from=10)
+        assert False, "export-calls + window must refuse"
+    except RigError as exc:
+        assert "WHOLE recording" in str(exc)
+
+
+def test_cmd_window_exports_env_summary_and_pops_elsewhere():
+    import contextlib
+    import io
+    import os
+    src = _source_run()
+    rows = [_row("gnss_primary", service="nov", tier="sensor", order=10),
+            _row("planner", service="plan", tier="autonomy", order=20), PLAYER]
+    m = _manifest(rows)
+    descriptors = {s.service: object() for s in rows}
+    seen = {}
+    orig = (replay.doctor_mod.collect, replay.dispatch.fleet_env, replay.dispatch.run_verb)
+    try:
+        replay.doctor_mod.collect = lambda *a, **k: []
+        replay.dispatch.fleet_env = lambda *a, **k: {}
+        def _run_verb(pairs, env, verb, dry_run=False, **k):
+            seen.update(env=env)
+            class O:  # noqa: N801
+                returncode = 0
+                sensor = pairs[0][0]
+            return [O()]
+        replay.dispatch.run_verb = _run_verb
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = replay.cmd(m, {}, descriptors, pathlib.Path("."), run_ref=str(src),
+                            names=["planner"], label=None, wall_clock=False, force=False,
+                            dry_run=True, window_from=120, window_to=300)
+        assert rc == 0
+        assert (seen["env"]["RIG_REPLAY_FROM_S"], seen["env"]["RIG_REPLAY_TO_S"]) == ("120", "300")
+        assert "window [120, 300)s" in err.getvalue()  # the summary line names it
+        rc = replay.cmd(m, {}, descriptors, pathlib.Path("."), run_ref=str(src),
+                        names=["planner"], label=None, wall_clock=False, force=False,
+                        dry_run=True, window_to=45.5)  # --to alone = truncate
+        assert rc == 0 and "RIG_REPLAY_FROM_S" not in seen["env"]
+        assert seen["env"]["RIG_REPLAY_TO_S"] == "45.5"
+        rc = replay.cmd(m, {}, descriptors, pathlib.Path("."), run_ref=str(src),
+                        names=["planner"], label=None, wall_clock=False, force=False,
+                        dry_run=True)
+        assert rc == 0 and not {"RIG_REPLAY_FROM_S", "RIG_REPLAY_TO_S"} & set(seen["env"])
+    finally:
+        replay.doctor_mod.collect, replay.dispatch.fleet_env, replay.dispatch.run_verb = orig
+    # every OTHER verb pops the window keys — a leaked shell value must never seek a live replay
+    from rig_cli import dispatch
+    os.environ["RIG_REPLAY_FROM_S"], os.environ["RIG_REPLAY_TO_S"] = "9", "99"
+    try:
+        env = dispatch.fleet_env(_manifest([]))
+        assert "RIG_REPLAY_FROM_S" not in env and "RIG_REPLAY_TO_S" not in env
+    finally:
+        del os.environ["RIG_REPLAY_FROM_S"], os.environ["RIG_REPLAY_TO_S"]
+
+
+def test_cmd_window_records_provenance():
+    src = _source_run()
+    data = pathlib.Path(tempfile.mkdtemp())
+    rows = [_row("planner", service="plan", tier="autonomy", order=20), PLAYER]
+    m = _manifest(rows, data_dir=str(data))
+    descriptors = {s.service: object() for s in rows}
+    seen = {}
+    orig = (replay.doctor_mod.collect, replay.dispatch.fleet_env, replay.dispatch.run_verb,
+            replay.runs_mod.new_run, replay.runs_mod.snapshot, replay._guard_clean_host)
+    try:
+        replay.doctor_mod.collect = lambda *a, **k: []
+        replay.dispatch.fleet_env = lambda *a, **k: {}
+        def _run_verb(pairs, env, verb, dry_run=False, **k):
+            class O:  # noqa: N801
+                returncode = 0
+                sensor = pairs[0][0]
+            return [O()]
+        replay.dispatch.run_verb = _run_verb
+        def _new_run(manifest, root, label, *, force=False, replay=None):
+            seen["replay"] = replay
+            return "rid"
+        replay.runs_mod.new_run = _new_run
+        replay.runs_mod.snapshot = lambda *a, **k: None
+        replay._guard_clean_host = lambda *a, **k: None
+        common = dict(run_ref=str(src), names=["planner"], label=None, wall_clock=False,
+                      force=False, dry_run=False)
+        rc = replay.cmd(m, {}, descriptors, pathlib.Path("."), window_from=120, window_to=300,
+                        **common)
+        assert rc == 0 and seen["replay"]["window"] == {"from": 120.0, "to": 300.0}
+        rc = replay.cmd(m, {}, descriptors, pathlib.Path("."), window_from=30, **common)
+        assert rc == 0 and seen["replay"]["window"] == {"from": 30.0}  # only the given keys
+        rc = replay.cmd(m, {}, descriptors, pathlib.Path("."), **common)
+        assert rc == 0 and "window" not in seen["replay"]
+    finally:
+        (replay.doctor_mod.collect, replay.dispatch.fleet_env, replay.dispatch.run_verb,
+         replay.runs_mod.new_run, replay.runs_mod.snapshot, replay._guard_clean_host) = orig
+
+
+def test_window_notices_wall_duration_and_calls_overlap():
+    src = _source_run()
+    (src / "manifest.yaml").write_text(f"run: {src.name}\nstarted: 2026-08-27T10:00:00+00:00\n"
+                                       "ended: 2026-08-27T10:01:00+00:00\n")  # a 60 s run
+    assert replay.source_wall_duration_s(src) == 60.0
+    assert replay.source_wall_duration_s(_source_run()) is None  # no `started:` -> unknown
+    d = pathlib.Path(tempfile.mkdtemp())
+    script = d / "calls.yaml"
+    script.write_text("schema: 1\ncalls:\n"
+                      "  - {t: 5, service: /s, type: t/srv/T}\n"
+                      "  - {t: 20, service: /s, type: t/srv/T}\n"
+                      "  - {t: 40, service: /s, type: t/srv/T}\n")
+    notes = replay.window_notices(10.0, 30.0, wall_s=60.0, calls_path=script)
+    assert len(notes) == 1 and "2 of 3" in notes[0] and "skips" in notes[0]
+    notes = replay.window_notices(45.0, None, wall_s=60.0, calls_path=script)
+    assert len(notes) == 1 and "none of the 3" in notes[0]  # the injector will fire nothing
+    notes = replay.window_notices(10.0, 300.0, wall_s=60.0, calls_path=None)
+    assert len(notes) == 1 and "--to 300s" in notes[0] and "clamps" in notes[0]
+    notes = replay.window_notices(100.0, 300.0, wall_s=60.0, calls_path=None)
+    assert len(notes) == 1 and "--from 100s" in notes[0] and "refuses" in notes[0]
+    assert replay.window_notices(10.0, 30.0, wall_s=None, calls_path=None) == []
+    # t == from FIRES (inclusive start); t == to does not (exclusive end)
+    script.write_text("schema: 1\ncalls:\n  - {t: 10, service: /s, type: t/srv/T}\n"
+                      "  - {t: 30, service: /s, type: t/srv/T}\n")
+    notes = replay.window_notices(10.0, 30.0, wall_s=None, calls_path=script)
+    assert len(notes) == 1 and "1 of 2" in notes[0]
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

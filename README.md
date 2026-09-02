@@ -142,6 +142,8 @@ python3 -m venv .venv && .venv/bin/pip install pyyaml
                           #   subscribes minus publishes; namespace fallback for pre-epoch runs).
                           #   The bag-logger records the new outputs: source bag vs replay bag is
                           #   the A/B pair. Refuses while stacks run; teardown = down --end-run
+                          #   --from S / --to S replay a SECTION (seconds from bag start — the
+                          #   call-script zero; latches restored; --auto-end composes for sweeps)
 ./rig down                # tear down in reverse (autonomy FIRST); --purge also GCs external volumes
 ./rig cleanup             # decommission: remove this deployment's images + volumes from the host
                           #   (after the final down, before deleting the tree; --dry-run to preview)

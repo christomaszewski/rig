@@ -41,6 +41,12 @@ from . import RigError, dispatch, doctor as doctor_mod, graph as graph_mod, runs
 from .common import eprint, load_yaml
 
 PLAYER_SERVICE = "ros2-bag-player"
+# Windows (`--from`/`--to`, rig-replay-window-handoff): seconds from BAG START — the ONE zero
+# shared with call scripts, results.yaml and export-calls, so a script means the same thing under
+# any window. rig validates `0 <= from < to`, exports RIG_REPLAY_FROM_S / RIG_REPLAY_TO_S, and
+# records `replay.window` (selection provenance, beside `with`); the player (rig-infra ≥ v1.12.0)
+# maps them to --start-offset + the end bound, restores the latched topics the offset would skip,
+# and filters the call script. `--auto-end` composes: the player exits at the window end.
 
 
 def resolve_source(manifest, ref: str) -> tuple[str, Path]:
@@ -200,7 +206,7 @@ def validate_calls(path: Path) -> str:
         t = entry.get("t")
         if not isinstance(t, (int, float)) or isinstance(t, bool) or t < 0:
             raise RigError(f"replay --calls: {path.name}: calls #{i}: t must be a number ≥ 0 "
-                           f"(seconds from play start on the sim clock)")
+                           f"(seconds from BAG START on the sim clock)")
         for key in ("service", "type"):
             if not isinstance(entry.get(key), str) or not entry[key]:
                 raise RigError(f"replay --calls: {path.name}: calls #{i} needs `{key}`")
@@ -208,6 +214,87 @@ def validate_calls(path: Path) -> str:
             raise RigError(f"replay --calls: {path.name}: calls #{i}: `request` must be a "
                            f"mapping (the srv type's own fields)")
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def validate_window(from_s, to_s) -> tuple[float | None, float | None]:
+    """`--from`/`--to` -> (from, to) as floats or None. Seconds from BAG START (rosbag2's
+    `starting_time` — the ONE zero shared with call scripts, results.yaml and export-calls;
+    rig-replay-window-handoff §1.1). rig guarantees `0 <= from < to`; the player re-checks
+    against the bag's real duration (rig is bag-opaque): an empty window refuses there too, an
+    end past the bag clamps with a WARN."""
+    import math
+    parsed: list[float | None] = []
+    for flag, value in (("--from", from_s), ("--to", to_s)):
+        if value is None:
+            parsed.append(None)
+            continue
+        try:
+            f = float(value)
+        except (TypeError, ValueError):
+            raise RigError(f"replay {flag}: takes seconds (a number), got {value!r}")
+        if not math.isfinite(f) or f < 0:
+            raise RigError(f"replay {flag}: must be a finite number of seconds >= 0 (from bag "
+                           f"start), got {value!r}")
+        parsed.append(f)
+    w_from, w_to = parsed
+    if w_to is not None and w_to <= 0:
+        raise RigError("replay --to: must be > 0 (seconds from bag start; the end is exclusive)")
+    if w_from is not None and w_to is not None and w_from >= w_to:
+        raise RigError(f"replay: empty window — --from {w_from:g} must be < --to {w_to:g}")
+    return w_from, w_to
+
+
+def _window_label(w_from: float | None, w_to: float | None) -> str:
+    lo = f"{w_from:g}" if w_from is not None else "0"
+    hi = f"{w_to:g}" if w_to is not None else "end"
+    return f"[{lo}, {hi})"
+
+
+def source_wall_duration_s(src_dir: Path) -> float | None:
+    """The source run's WALL duration from its manifest (`started`/`ended`, ISO) — a bag-opaque
+    sanity bound for a window (bag time ≈ wall time for a live recording). None when unknown."""
+    import datetime
+    try:
+        doc = load_yaml(src_dir / "manifest.yaml")
+    except RigError:
+        return None
+    try:
+        started = datetime.datetime.fromisoformat(str(doc.get("started")).replace("Z", "+00:00"))
+        ended = datetime.datetime.fromisoformat(str(doc.get("ended")).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    secs = (ended - started).total_seconds()
+    return secs if secs > 0 else None
+
+
+def window_notices(w_from: float | None, w_to: float | None, *, wall_s: float | None,
+                   calls_path: Path | None) -> list[str]:
+    """Notices for a window: bounds beyond the source run's wall duration (the player refuses a
+    `from` past the bag end and clamps `to` — rig only warns, bag-opaque), and the call-script
+    intersection (the injector's filter is authoritative: t < from is skipped, t >= to never
+    reached; rig's shallow parse already reads every t, so say it up front)."""
+    notes: list[str] = []
+    if wall_s is not None:
+        if w_from is not None and w_from > wall_s:
+            notes.append(f"warning: --from {w_from:g}s is beyond the source run's wall duration "
+                         f"(~{wall_s:.0f}s) — the player refuses a window that starts after "
+                         f"the bag ends")
+        elif w_to is not None and w_to > wall_s:
+            notes.append(f"warning: --to {w_to:g}s is beyond the source run's wall duration "
+                         f"(~{wall_s:.0f}s) — the player clamps the end to the bag")
+    if calls_path is not None:
+        ts = [float(c["t"]) for c in (load_yaml(calls_path).get("calls") or [])]
+        lo = w_from if w_from is not None else 0.0
+        inside = [t for t in ts if t >= lo and (w_to is None or t < w_to)]
+        if not inside:
+            notes.append(f"warning: none of the {len(ts)} scripted call(s) falls inside the "
+                         f"window {_window_label(w_from, w_to)} — the injector will fire "
+                         f"nothing (t counts from bag start, never from the window)")
+        elif len(inside) < len(ts):
+            notes.append(f"{len(ts) - len(inside)} of {len(ts)} scripted calls fall outside the "
+                         f"window {_window_label(w_from, w_to)} — the injector skips them "
+                         f"(named in results.yaml's `# window:` line)")
+    return notes
 
 
 def _alignment_report(manifest, with_names: list[str], src_dir: Path) -> tuple[list[str], list[str]]:
@@ -360,7 +447,7 @@ def auto_end(manifest, descriptors, root: Path, pairs, env, player, grace_s: int
 def cmd(manifest, catalog, descriptors, root: Path, *, run_ref: str, names: list[str],
         label: str | None, wall_clock: bool, force: bool, dry_run: bool,
         calls: str | None = None, export_calls: bool = False,
-        auto_end_grace: int | None = None) -> int:
+        auto_end_grace: int | None = None, window_from=None, window_to=None) -> int:
     if export_calls:
         # NOT a session: one launcher-verb dispatch (the export runs in a one-shot container —
         # ROS stays on the player's side of the line; rig resolves run + row + launcher, which
@@ -372,6 +459,9 @@ def cmd(manifest, catalog, descriptors, root: Path, *, run_ref: str, names: list
         if calls:
             raise RigError("replay --export-calls: exports a script; --calls plays one — "
                            "one direction per invocation")
+        if window_from is not None or window_to is not None:
+            raise RigError("replay --export-calls: exports the WHOLE recording (t from bag "
+                           "start) — --from/--to apply at replay, where the injector filters")
         src_id, src_dir = resolve_source(manifest, run_ref)
         player = _player_row(manifest)
         env = dispatch.fleet_env(manifest, descriptors)
@@ -389,6 +479,7 @@ def cmd(manifest, catalog, descriptors, root: Path, *, run_ref: str, names: list
     if player.name in names:
         raise RigError(f"replay: '{player.name}' is the player — it is added automatically; "
                        f"name the instances under test")
+    w_from, w_to = validate_window(window_from, window_to)  # cheap, before any docker preflight
     blocking = [i for i in doctor_mod.collect(manifest, catalog, descriptors)
                 if i.level == doctor_mod.ERROR]
     if blocking and not force:
@@ -413,6 +504,9 @@ def cmd(manifest, catalog, descriptors, root: Path, *, run_ref: str, names: list
         # (--calls) is unaffected — it issues calls itself, outside bag playback.
         services, svc_notices = select_services(src_dir, names)
         notices += svc_notices
+    if w_from is not None or w_to is not None:  # the window: bag-opaque sanity + script overlap
+        notices += window_notices(w_from, w_to, wall_s=source_wall_duration_s(src_dir),
+                                  calls_path=calls_path)
     for n in notices:
         eprint(f"rig replay: {n}")
     align_lines, drifted = _alignment_report(manifest, names, src_dir)
@@ -452,6 +546,10 @@ def cmd(manifest, catalog, descriptors, root: Path, *, run_ref: str, names: list
         env["RIG_REPLAY_SERVICES"] = services
     if not wall_clock:
         env["RIG_SIM_TIME"] = "1"
+    if w_from is not None:  # seconds from bag start — the player maps them to --start-offset and
+        env["RIG_REPLAY_FROM_S"] = f"{w_from:g}"  # the end bound, restores latches the offset
+    if w_to is not None:                          # would skip, and hands the injector the same zero
+        env["RIG_REPLAY_TO_S"] = f"{w_to:g}"
 
     if not dry_run:
         if manifest.data_dir:
@@ -461,6 +559,9 @@ def cmd(manifest, catalog, descriptors, root: Path, *, run_ref: str, names: list
                 replay_doc["config_drift"] = drifted  # the diff IS the experiment — name it
             if calls_sha:
                 replay_doc["calls_sha"] = calls_sha
+            if w_from is not None or w_to is not None:  # selection provenance, like `with`
+                replay_doc["window"] = {k: v for k, v in (("from", w_from), ("to", w_to))
+                                        if v is not None}
             # our clean-host guard already ran (same evidence, replay-flavored message) — don't
             # fail-closed twice on one docker call
             run_id = runs_mod.new_run(manifest, root, run_label, force=True, replay=replay_doc)
@@ -476,7 +577,9 @@ def cmd(manifest, catalog, descriptors, root: Path, *, run_ref: str, names: list
     count = f"{len(value.split())} topics" if mode == "topics" else "namespace-exclude"
     svc_note = (", scripted calls" if calls_path is not None
                 else f", {len(services.split())} services" if services else "")
-    eprint(f"rig replay: {src_id} → {', '.join(names)}  [{mode}: {count}{svc_note}"
+    window_note = (f", window {_window_label(w_from, w_to)}s"
+                   if (w_from is not None or w_to is not None) else "")
+    eprint(f"rig replay: {src_id} → {', '.join(names)}  [{mode}: {count}{svc_note}{window_note}"
            f"{', wall clock' if wall_clock else ', sim time'}]")
     outcomes = dispatch.run_verb(pairs, env, "up", dry_run=dry_run)
     failed = [o for o in outcomes if o.returncode != 0]

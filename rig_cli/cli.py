@@ -269,7 +269,8 @@ def cmd_replay(args, manifest, catalog, descriptors) -> int:
     return replay_mod.cmd(manifest, catalog, descriptors, args.rig_root, run_ref=args.run,
                           names=args.names, label=args.label, wall_clock=args.wall_clock,
                           force=args.force, dry_run=args.dry_run, calls=args.calls,
-                          export_calls=args.export_calls, auto_end_grace=args.auto_end)
+                          export_calls=args.export_calls, auto_end_grace=args.auto_end,
+                          window_from=args.window_from, window_to=args.window_to)
 
 
 def cmd_graph(args, manifest, catalog, descriptors) -> int:
@@ -718,6 +719,14 @@ def build_parser() -> argparse.ArgumentParser:
                     help="call-script YAML (schema 1): inject/retime service calls on the sim "
                          "clock — SUPPRESSES verbatim service replay (script XOR verbatim); "
                          "bootstrap one with --export-calls")
+    rp.add_argument("--from", dest="window_from", default=None, metavar="S",
+                    help="start the replay S seconds into the recording (from BAG START — the "
+                         "same zero as call-script t). The player (rig-infra ≥ v1.12.0) seeks "
+                         "there AND restores the latched topics (/tf_static…) the seek would skip")
+    rp.add_argument("--to", dest="window_to", default=None, metavar="S",
+                    help="stop the replay at S seconds from bag start (exclusive; past the bag "
+                         "end clamps). The player exits there, so --auto-end composes: "
+                         "sweeps are a shell loop over windows")
     rp.add_argument("--wall-clock", action="store_true", dest="wall_clock",
                     help="no /clock, no use_sim_time (default: RIG_SIM_TIME=1 — player publishes "
                          "/clock, adopted services pace to it)")

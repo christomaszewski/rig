@@ -430,6 +430,8 @@ rig reconstruct <path-to-run> --into tree/                 # the run dir back in
 rig replay <stamp>_dock-test planner                       # SIL: play planner's recorded inputs at
                                                            #   the CURRENT planner build/config —
                                                            #   new run links back via replay-of
+rig replay <stamp>_dock-test planner --from 120 --to 300   # a SECTION of the run (seconds from
+                                                           #   bag start; --auto-end for sweeps)
 ```
 (bare-Docker hosts: `./new-run.sh dock-test && ./up.sh` — the flagged forms need the bundled rig.)
 

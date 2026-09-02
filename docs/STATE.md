@@ -1,8 +1,28 @@
 # rig — project state & handoff (resume here)
 
 > Snapshot for picking the project up cold in a new session. Read this first, then `CHEATSHEET.md` /
-> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.2.45**,
-> branch **`main`**, 665 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.2.46**,
+> branch **`main`**, 669 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> **v0.2.46 (2026-09-02) — replay windows, rig side** (`rig-window-plan.md`; contract FROZEN
+> in `~/ws/infra/rig-replay-window-handoff.md` — it AMENDS the player handoff §1.1 env and the
+> calls handoff §1.2 time base; rig-infra v1.12.0 in flight from
+> `rig-bag-player-window-prompt.md`). **RELEASE HELD** until the rig-infra report + one
+> integration smoke (the svc-replay pattern). `rig replay <run> <names…> --from S --to S`:
+> seconds from BAG START — the ONE zero shared with call-script `t`, results.yaml and
+> export-calls. The motivating BUG (live today): the injector pinned t=0 at its first /clock
+> sample (≈ bag_start + start_offset) while export-calls writes t from bag start, so an exported
+> script replayed with any offset fired late by exactly the offset — the player fixes its side
+> under the amended contract, and rosbag2's --start-offset latch gap (/tf_static skipped) gets
+> the player's latch pre-pass. rig: `validate_window` (finite, `0 <= from < to`, before any
+> docker preflight), refused under `--export-calls` (it exports the WHOLE recording), exported
+> as RIG_REPLAY_FROM_S / RIG_REPLAY_TO_S (joined RIG_OWNED_ENV + the pop loop + the dry-run
+> envline), recorded as `replay.window: {from, to}` (only the given keys — selection provenance
+> beside `with`), named in the summary line. Bag-opaque notices (`window_notices`): a bound
+> beyond the source run's WALL duration (`started`/`ended`) WARNs — the player refuses a from
+> past the bag end and clamps to; the call-script overlap is reported up front (none inside →
+> "the injector will fire nothing"; some outside → "N of M skipped"; `t == from` fires,
+> `t == to` does not). `--auto-end` composes unchanged (the player exits at the window end).
+> 4 new tests — total 669.
 > **v0.2.45 (2026-09-01) — reconstruct/provision bench QoL** (the two offers queued since
 > v0.2.39): **`rig provision --registry HOST`** + **`rig reconstruct --registry HOST`** write the
 > `images.registry` override (the machine file / the tree-local vehicle.local.yaml) — a bench
