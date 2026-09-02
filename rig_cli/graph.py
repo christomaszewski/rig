@@ -26,6 +26,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import RigError
+from .manifest import PLAYER_SERVICE
 from .common import eprint, load_yaml
 
 # Epoch-file edge kinds (the writer's spelling) -> the rigging `interface:` kinds (the declared
@@ -262,7 +263,11 @@ def check(u: GraphUnion, manifest, descriptors) -> list[str]:
                     observed[e.kind].setdefault(e.name, set()).add(e.type)
         seen_any = any(observed[k] for k in observed)
         if iface is None:
-            if seen_any:
+            # The SIL player is harness: it publishes whatever the source run recorded (and, under
+            # a window, its latch-restore node republishes the recorded latches), so it can never
+            # declare an interface — a WARN on every windowed replay run would only teach
+            # operators to ignore WARNs. Exempt by service name (the row is rig's to know).
+            if seen_any and sensor.service != PLAYER_SERVICE:
                 undeclared_instances.append(sensor.name)
             continue
         if not seen_any:

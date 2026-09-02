@@ -2,12 +2,21 @@
 
 > Snapshot for picking the project up cold in a new session. Read this first, then `CHEATSHEET.md` /
 > `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.2.46**,
-> branch **`main`**, 669 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> branch **`main`**, 670 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
 > **v0.2.46 (2026-09-02) — replay windows, rig side** (`rig-window-plan.md`; contract FROZEN
 > in `~/ws/infra/rig-replay-window-handoff.md` — it AMENDS the player handoff §1.1 env and the
 > calls handoff §1.2 time base; rig-infra v1.12.0 in flight from
-> `rig-bag-player-window-prompt.md`). **RELEASE HELD** until the rig-infra report + one
-> integration smoke (the svc-replay pattern). `rig replay <run> <names…> --from S --to S`:
+> `rig-bag-player-window-prompt.md`). rig-infra **v1.12.0** (`4541169`) landed with its report
+> (handoff §R1–R8: end flag `--playback-duration`, RECORDED seconds independent of -r; latch
+> pre-pass ~50 ms even on a 954 MB mcap; the one-zero injector round-trips under `--from 30`
+> within ~15 ms of the recorded offsets, pre-window calls named in the `# window:` line).
+> Integration smoke here (sibling ../rig-infra fast-forwarded to v1.12.0 — the stale-clone trap
+> again): dry-run envlines carry FROM/TO on every launcher; the real renderer under rig's exact
+> exports produced the latch pre-pass + `--start-offset 30 --playback-duration 60`, clamped
+> `--to 500` to the bag end with NO duration flag, refused `--from 300`, rendered the unwindowed
+> play.sh at `--from 0`, and handed the injector the bag start + window via the launcher. NOT run
+> on this Mac (no ROS host): a real windowed `rig replay --auto-end` — first field use is the
+> remaining check. `rig replay <run> <names…> --from S --to S`:
 > seconds from BAG START — the ONE zero shared with call-script `t`, results.yaml and
 > export-calls. The motivating BUG (live today): the injector pinned t=0 at its first /clock
 > sample (≈ bag_start + start_offset) while export-calls writes t from bag start, so an exported
@@ -22,7 +31,13 @@
 > past the bag end and clamps to; the call-script overlap is reported up front (none inside →
 > "the injector will fire nothing"; some outside → "N of M skipped"; `t == from` fires,
 > `t == to` does not). `--auto-end` composes unchanged (the player exits at the window end).
-> 4 new tests — total 669.
+> R5 fold-back: lyrical's `ros2 bag play` cannot be namespaced, so `/rosbag2_player` (and the
+> injector node) stay unassigned in `rig graph` while the new latch node groups under the player
+> — which made `graph --check` nudge "no interface: declared for bag_player". The player is
+> harness (it publishes whatever the source recorded) and can never declare, so `check` now
+> exempts the player row by service (`PLAYER_SERVICE` moved to manifest.py; replay re-exports
+> it). Chaining/self-echo unaffected (none of those nodes sits under a live instance). 5 new
+> tests — total 670.
 > **v0.2.45 (2026-09-01) — reconstruct/provision bench QoL** (the two offers queued since
 > v0.2.39): **`rig provision --registry HOST`** + **`rig reconstruct --registry HOST`** write the
 > `images.registry` override (the machine file / the tree-local vehicle.local.yaml) — a bench

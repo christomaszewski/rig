@@ -28,6 +28,9 @@ MACHINE_LOCAL_DEFAULT = "/etc/rig/vehicle.local.yaml"
 # fleet. Never sensor rows — a local file silently flipping stacks makes fleet debugging miserable.
 LOCAL_KEYS = {"vehicle", "vehicle_id", "vars", "env", "data_dir", "images", "platform",
               "run_capture"}
+# rig's SIL companion service (rig-infra's ros2-bag-player): the one service rig knows by NAME —
+# replay selects its row by service, the graph check exempts it from interface declarations.
+PLAYER_SERVICE = "ros2-bag-player"
 # Env keys rig owns end-to-end (fleet_env sets them; an `env:` map may not shadow them).
 RIG_OWNED_ENV = {"VEHICLE_ID", "ROS_DOMAIN_ID", "RMW_IMPLEMENTATION", "RIG_IMAGE_REGISTRY",
                  "RIG_IMAGE_TAG", "RIG_TARGET_PLATFORM", "RIG_DATA_DIR", "COMPOSE_PROJECT_NAME",

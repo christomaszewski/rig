@@ -205,6 +205,43 @@ def test_check_clean_when_declaration_matches():
     assert graph.check(u, manifest, descriptors) == []
 
 
+def test_check_exempts_the_sil_player_from_interface_declarations():
+    import textwrap
+    epoch = textwrap.dedent("""\
+        schema: 1
+        first: 2026-09-02T10:00:00Z
+        last: 2026-09-02T10:01:00Z
+        rmw: rmw_zenoh_cpp
+        domain: 1
+        nodes:
+          /bag_player/latch_restore:
+            pubs:
+            - {topic: /tf_static, type: tf2_msgs/msg/TFMessage}
+            subs: []
+            provides: []
+            requires: []
+          /rosbag2_player:
+            pubs:
+            - {topic: /gnss_primary/fix, type: sensor_msgs/msg/NavSatFix}
+            subs: []
+            provides: []
+            requires: []
+          /planner/planner_node:
+            pubs:
+            - {topic: /planner/cmd_vel, type: geometry_msgs/msg/Twist}
+            subs: []
+            provides: []
+            requires: []
+        """)
+    u = graph.union(graph.load_epochs(_run_dir(epoch)))
+    manifest = _manifest([_sensor("planner", "planner"),
+                          _sensor("bag_player", "ros2-bag-player", tier="autonomy")])
+    warns = graph.check(u, manifest, {"planner": _Desc(None), "ros2-bag-player": _Desc(None)})
+    text = "\n".join(warns)
+    assert "no interface: declared for planner" in text   # a real instance still gets the nudge
+    assert "bag_player" not in text                        # the player is harness — never nudged
+
+
 def test_check_declared_but_instance_never_observed():
     u = graph.union(graph.load_epochs(_run_dir(EPOCH_B)))
     manifest = _manifest([_sensor("cam_front", "camera-service")])

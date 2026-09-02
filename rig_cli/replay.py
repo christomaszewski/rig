@@ -39,8 +39,7 @@ from pathlib import Path
 
 from . import RigError, dispatch, doctor as doctor_mod, graph as graph_mod, runs as runs_mod
 from .common import eprint, load_yaml
-
-PLAYER_SERVICE = "ros2-bag-player"
+from .manifest import PLAYER_SERVICE  # noqa: F401 — re-exported: replay.PLAYER_SERVICE is the spelling callers use
 # Windows (`--from`/`--to`, rig-replay-window-handoff): seconds from BAG START — the ONE zero
 # shared with call scripts, results.yaml and export-calls, so a script means the same thing under
 # any window. rig validates `0 <= from < to`, exports RIG_REPLAY_FROM_S / RIG_REPLAY_TO_S, and
