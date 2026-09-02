@@ -31,8 +31,10 @@
 > past the bag end and clamps to; the call-script overlap is reported up front (none inside →
 > "the injector will fire nothing"; some outside → "N of M skipped"; `t == from` fires,
 > `t == to` does not). `--auto-end` composes unchanged (the player exits at the window end).
-> R5 fold-back: lyrical's `ros2 bag play` cannot be namespaced, so `/rosbag2_player` (and the
-> injector node) stay unassigned in `rig graph` while the new latch node groups under the player
+> R5 fold-back: lyrical's `ros2 bag play` cannot be namespaced, so `/rosbag2_player` stays
+> unassigned in `rig graph` (rig-infra v1.12.1 then moved the injector node under the player as
+> `/<name>/call_injector`, beside the latch node — symmetry, no contract change) while the new
+> latch node groups under the player
 > — which made `graph --check` nudge "no interface: declared for bag_player". The player is
 > harness (it publishes whatever the source recorded) and can never declare, so `check` now
 > exempts the player row by service (`PLAYER_SERVICE` moved to manifest.py; replay re-exports
