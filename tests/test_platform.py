@@ -13,7 +13,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 from rig_cli import RigError  # noqa: E402
 from rig_cli.build import _build_env, _service_tag  # noqa: E402
 from rig_cli.descriptor import Descriptor, load_descriptor  # noqa: E402
-from rig_cli.dispatch import fleet_env, service_env  # noqa: E402
+from rig_cli.dispatch import fleet_env, instance_env, service_env  # noqa: E402
 from rig_cli.doctor import ERROR, OK, WARN, collect  # noqa: E402
 from rig_cli.manifest import Manifest, RosSettings, Sensor, load_manifest  # noqa: E402
 
@@ -194,6 +194,21 @@ def test_service_env_composes_tag_and_mirrors_override():
 
     sensitive = _desc(platforms=[], override="DASH_PLATFORM")  # override without a matrix
     assert service_env(base, sensitive)["DASH_PLATFORM"] == "jp7"
+
+
+def test_instance_env_adds_the_compose_project_on_top_of_the_service_view():
+    """Every launcher invocation goes through this — `up`/`down` and status's probes alike — so the
+    project rig starts a stack under is the project it later asks about. service_env() alone leaves
+    COMPOSE_PROJECT_NAME unset and the launcher picks its own."""
+    from rig_cli.manifest import Sensor
+    sensor = Sensor(name="cam", service="cam", config=pathlib.Path("/dev/null"), enabled=True, order=10)
+    desc = _desc(platforms=["jp7"], override="CAM_PLATFORM")
+    out = instance_env({"RIG_TARGET_PLATFORM": "jp7", "VEHICLE_ID": "7"}, sensor, desc)
+    assert out["COMPOSE_PROJECT_NAME"] == "cam-vehicle-7"
+    assert out["CAM_PLATFORM"] == "jp7"             # the service view still applies underneath
+
+    bare = instance_env({"RIG_TARGET_PLATFORM": "jp7"}, sensor, desc)
+    assert bare["COMPOSE_PROJECT_NAME"] == "cam"    # no vehicle id -> the bare instance name
 
 
 def test_service_env_legacy_passthrough_without_platform():

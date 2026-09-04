@@ -1,8 +1,22 @@
 # rig — project state & handoff (resume here)
 
 > Snapshot for picking the project up cold in a new session. Read this first, then `CHEATSHEET.md` /
-> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.2.49**,
-> branch **`main`**, 682 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.2.50**,
+> branch **`main`**, 684 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> **v0.2.50 (2026-09-04) — `rig status` probed the wrong compose project** (field report: a bench
+> deployment with every container up and serving reported `down`, `0/0`, on all three rows). `up`
+> and `down` build their launcher env as `service_env(...)` PLUS the `COMPOSE_PROJECT_NAME` rig
+> owns; `status.gather` used `service_env` alone, for both the `ps` probe and the `state` probe. So
+> the launcher fell back to its OWN default project — `cam_playback`, `dashboard`,
+> `zenoh-router_zenoh-router` — and `docker compose ps` faithfully reported those empty projects
+> while `playback-vehicle-1` & co ran alongside. Any deployment with a vehicle id was affected,
+> which is every provisioned one; a bare-name deployment happened to agree and hid it. Fixed by
+> giving the pairing ONE home: `dispatch.instance_env(env, sensor, desc)` is now the only way to
+> build a launcher env, and `run()` and both status probes call it — a future caller can't
+> reassemble the halves wrongly. `bake` and `cleanup` also call `service_env` alone and are
+> deliberately left: bake records `project_name(...)` in the artifact manifest and passes it as
+> `-p` on every generated verb, and cleanup reads only image refs out of the render. 2 new tests —
+> total 684.
 > **v0.2.49 (2026-09-04) — services.yaml routes: rig edits BOTH shapes** (field report: `rig swap`
 > in a reconstructed tree refused with "the route is not in the generated single-line form"). The
 > capture wrote services.yaml with `yaml.safe_dump` — valid YAML that parses identically, but the

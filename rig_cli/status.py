@@ -12,7 +12,7 @@ import subprocess
 from dataclasses import dataclass
 
 from .descriptor import Descriptor, STATE_VOCAB
-from .dispatch import launcher_cmd, service_env
+from .dispatch import instance_env, launcher_cmd
 from .manifest import Sensor
 
 
@@ -86,8 +86,9 @@ def gather(pairs: list[tuple[Sensor, Descriptor]], env: dict[str, str]) -> list[
     rows: list[Row] = []
     for sensor, desc in pairs:
         cmd = launcher_cmd(sensor, desc, "status", ["--format", "json"])
-        try:  # platform routing: same per-service env view as up/config
-            proc = subprocess.run(cmd, env=service_env(env, desc), cwd=str(desc.repo),
+        try:  # the SAME per-instance env up/down ran with — platform routing AND the compose
+            #     project, or we'd ask the launcher about a stack rig never started
+            proc = subprocess.run(cmd, env=instance_env(env, sensor, desc), cwd=str(desc.repo),
                                   capture_output=True, text=True)
             containers = _parse_ps(proc.stdout)
         except Exception:
@@ -97,7 +98,7 @@ def gather(pairs: list[tuple[Sensor, Descriptor]], env: dict[str, str]) -> list[
         if desc.supports_states:  # declared trio only — the declaration is the support claim
             try:
                 proc_op = subprocess.run(launcher_cmd(sensor, desc, "state"),
-                                         env=service_env(env, desc), cwd=str(desc.repo),
+                                         env=instance_env(env, sensor, desc), cwd=str(desc.repo),
                                          capture_output=True, text=True)
                 op = _op_state(proc_op.stdout) if proc_op.returncode == 0 else "unknown"
             except Exception:

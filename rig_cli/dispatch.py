@@ -100,6 +100,21 @@ def service_env(env: dict[str, str], desc: Descriptor) -> dict[str, str]:
     return out
 
 
+def instance_env(env: dict[str, str], sensor: Sensor, desc: Descriptor) -> dict[str, str]:
+    """The env for ONE launcher invocation on ONE instance: the per-service view (platform routing)
+    PLUS the compose project rig owns.
+
+    Every launcher call belongs here, not just `up`/`down`. A caller that used service_env() alone
+    left COMPOSE_PROJECT_NAME unset, so the launcher fell back to its OWN default project name
+    (`cam_<name>`, the bare instance name, ...) and rig then inspected a different — empty — stack
+    than the one it had started: `rig status` reported every running instance as `down` with 0/0
+    containers on any deployment with a vehicle id. Keeping the pairing in one function is what
+    makes that unrepresentable.
+    """
+    return {**service_env(env, desc),
+            "COMPOSE_PROJECT_NAME": project_name(sensor.name, env.get("VEHICLE_ID"))}
+
+
 def launcher_cmd(sensor: Sensor, desc: Descriptor, verb: str, extra: list[str] | None = None) -> list[str]:
     launcher = desc.launcher_path
     if not launcher.exists():
@@ -127,7 +142,7 @@ def run(
     # rig owns the compose project name (containers = <project>-<compose-service>-N). A launcher honors
     # COMPOSE_PROJECT_NAME unless it overrides with `-p` (see the launcher contract). The platform
     # routing (override_env mirror + composed per-platform tag) is per-service too.
-    env = {**service_env(env, desc), "COMPOSE_PROJECT_NAME": project_name(sensor.name, env.get("VEHICLE_ID"))}
+    env = instance_env(env, sensor, desc)
     pretty = " ".join(shlex.quote(part) for part in cmd)
     if dry_run:
         envline = (f"COMPOSE_PROJECT_NAME={env['COMPOSE_PROJECT_NAME']} "

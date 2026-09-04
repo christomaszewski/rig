@@ -158,6 +158,15 @@ echo "camsvc: cannot reach docker" >&2
 exit 1
 """
 
+# A launcher that answers ONLY for the project rig started the stack under — which is what a real
+# `docker compose ps` does, since it lists that project and no other.
+_PROJECT_SCOPED_LAUNCHER = """\
+#!/bin/sh
+[ "$2" = ps ] || exit 0
+[ "$COMPOSE_PROJECT_NAME" = "cam-vehicle-7" ] || { echo "no such project: ${COMPOSE_PROJECT_NAME:-<unset>}" >&2; exit 0; }
+printf '{"Name":"cam-vehicle-7-core-1","State":"running","Health":"healthy"}\\n'
+"""
+
 
 def test_gather_rolls_up_healthy_and_failed_launchers():
     pairs = [(_sensor("cam", "camsvc"), _desc("camsvc", _OK_LAUNCHER)),
@@ -170,6 +179,18 @@ def test_gather_rolls_up_healthy_and_failed_launchers():
     bad = rows[1]  # launcher exits 1 with nothing on stdout -> no containers -> "down", never a crash
     assert (bad.state, bad.health, bad.running, bad.total) == ("down", "-", 0, 0)
     assert bad.containers == []
+
+
+def test_gather_probes_the_project_rig_started():
+    """Regression: gather() built its launcher env from service_env() alone, leaving
+    COMPOSE_PROJECT_NAME unset. The launcher fell back to its own default project, `docker compose
+    ps` listed that empty stack, and `rig status` showed every RUNNING instance as down / 0-0 on any
+    deployment with a vehicle id. The probe must run with the same project `up` used."""
+    pairs = [(_sensor("cam", "camsvc"), _desc("camsvc", _PROJECT_SCOPED_LAUNCHER))]
+    rows = gather(pairs, {"PATH": os.environ["PATH"], "VEHICLE_ID": "7"})
+    row = rows[0]
+    assert (row.state, row.health, row.running, row.total) == ("running", "healthy", 1, 1)
+    assert row.containers[0]["Name"] == "cam-vehicle-7-core-1"
 
 
 if __name__ == "__main__":
