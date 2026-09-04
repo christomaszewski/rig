@@ -94,7 +94,9 @@ def test_capture_rides_open_and_stamps_manifest():
         names = tf.getnames()
     # disabled row's surface AND config are inside; rig is bundled; metadata marks the kind
     assert any(n.endswith("services/playr/playr-up") for n in names)
-    assert any(n.endswith("config/sensors/bag_player.yaml") for n in names)
+    assert any(n.endswith("config/autonomy/bag_player.yaml") for n in names)   # TIER dir, not a flat one
+    assert not any(n.endswith("config/sensors/bag_player.yaml") for n in names)
+    assert any(n.endswith("config/sensors/cam.yaml") for n in names)            # the sensor row's own tier
     assert any("/rig_cli/" in n for n in names)
     with tarfile.open(tar) as tf:
         import yaml as _y
@@ -149,6 +151,23 @@ def test_reconstruct_native_capture_verifies_and_localizes():
         assert False, "sha mismatch must refuse"
     except RigError as exc:
         assert "sha256 mismatch" in str(exc)
+
+
+def test_reconstruct_lays_configs_out_by_tier():
+    """A reconstructed tree IS a deployment tree: `rig add` after it must not meet a second
+    convention. Through v0.2.47 every row was flattened into config/sensors/."""
+    from rig_cli.manifest import load_manifest
+    root, m = _deployment(player=("nav", "playr"))
+    rid, data = _open(m, root)
+    dest = pathlib.Path(tempfile.mkdtemp()) / "tree"
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        assert reconstruct.cmd_reconstruct(None, run_ref=str(data / "runs" / rid),
+                                           into=str(dest), config=None) == 0
+    assert (dest / "config" / "sensors" / "cam.yaml").is_file()
+    assert (dest / "config" / "autonomy" / "nav.yaml").is_file()
+    assert not (dest / "config" / "sensors" / "nav.yaml").exists()
+    rows = {s.name: str(s.config) for s in load_manifest(dest).sensors}   # rows point where files are
+    assert rows["nav"].endswith("config/autonomy/nav.yaml") and pathlib.Path(rows["nav"]).is_file()
 
 
 def test_reconstruct_missing_capture_names_the_retrofit_path():

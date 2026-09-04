@@ -432,6 +432,8 @@ rig replay <stamp>_dock-test planner                       # SIL: play planner's
                                                            #   new run links back via replay-of
 rig replay <stamp>_dock-test planner --from 120 --to 300   # a SECTION of the run (seconds from
                                                            #   bag start; --auto-end for sweeps)
+rig swap planner ../planner                                # in a reconstructed tree: same rows +
+rig swap planner public/planner@2.1.0                      #   configs, DIFFERENT code (drift named)
 ```
 (bare-Docker hosts: `./new-run.sh dock-test && ./up.sh` — the flagged forms need the bundled rig.)
 

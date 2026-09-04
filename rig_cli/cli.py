@@ -399,7 +399,7 @@ def route_add(root: Path, token: str, *, as_name: str | None = None, tier: str |
         if ns_known:
             return install_mod.install(root, token, as_name=as_name)
     try:
-        return init_mod.add_service(root, token, tier=tier)
+        return init_mod.add_service(root, token, tier=tier, as_name=as_name)
     except RigError as exc:
         if "unknown service" not in str(exc) or "/" in token:
             raise
@@ -885,9 +885,26 @@ def build_parser() -> argparse.ArgumentParser:
     ad.add_argument("--tier", choices=["infra", "sensor", "autonomy"], default=None,
                     help="override the service's declared tier for THIS deployment (local forms only)")
     ad.add_argument("--as", dest="as_name", default=None, metavar="NAME",
-                    help="instance name for registry installs (ROS-safe; default from the package)")
+                    help="instance name (ROS-safe; default: from the package/example config). "
+                         "Honored by every add form — registry, sensor:, profile AND local "
+                         "path/workspace name; it names the working config too")
     ad.add_argument("--locked", action="store_true",
                     help="registry installs only: reproduce rig.lock exactly (same pins/hashes)")
+
+    sw = sub.add_parser("swap", help="re-point an INSTALLED service at different code — a local "
+                                     "checkout or a registry ref — keeping the rows, the working "
+                                     "configs and the overlays (the reconstructed-tree SIL swap)")
+    sw.add_argument("service", metavar="SERVICE",
+                    help="the service to re-source (services.yaml key); every instance of it moves")
+    sw.add_argument("source", metavar="PATH|REF",
+                    help="a service-dir path or workspace name (routed live — edit and re-`up`), "
+                         "or a registry ref (public/ouster@0.2.0 — vendored + pinned in rig.lock)")
+    sw.add_argument("--reset-config", action="store_true", dest="reset_config",
+                    help="also re-materialize each instance's working config from the new "
+                         "version's example — DISCARDS your edits (default: configs are kept, "
+                         "which is the point; key drift vs the new example is reported either way)")
+    sw.add_argument("--locked", action="store_true",
+                    help="registry refs only: reproduce rig.lock exactly (same pin, same hashes)")
 
     ven = sub.add_parser("vendor", help="copy a service's launch surface into services/<service>/")
     ven.add_argument("service", help="service name (key in services.yaml / its rigging.yaml)")
@@ -1334,6 +1351,9 @@ def main(argv=None) -> int:
         root = (args.root or find_root()).resolve()
         if args.cmd == "add":  # edits the deployment files themselves — routes its own manifest load
             return cmd_add(args, root)
+        if args.cmd == "swap":  # ditto: rewrites the route/vendor/pin, never the rows or configs
+            return install_mod.swap(root, args.service, args.source,
+                                    reset_config=args.reset_config, locked=args.locked)
         if args.cmd == "fetch":  # runs BEFORE the manifest is loadable — reads vehicle.yaml raw
             return cmd_fetch(args, root)
         if args.cmd == "vendor":  # operates on a source repo, not the manifest

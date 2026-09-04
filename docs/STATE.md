@@ -1,8 +1,35 @@
 # rig — project state & handoff (resume here)
 
 > Snapshot for picking the project up cold in a new session. Read this first, then `CHEATSHEET.md` /
-> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.2.47**,
-> branch **`main`**, 672 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.2.48**,
+> branch **`main`**, 679 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> **v0.2.48 (2026-09-04) — `rig swap`, `--as` on the local add forms, tier-laid-out captures**
+> (three field reports from the reconstructed-tree SIL loop): **`rig swap <service> <path|ref>`**
+> re-points an INSTALLED service at different code, reusing `rig add`'s dual grammar — a path or
+> workspace name routes LIVE (edit, rebuild, re-up; the vendored twin is dropped and any registry
+> pin with it), a registry ref vendors + re-pins (`allow_repin`, the upgrade path). Exactly three
+> things move: the services.yaml route, the vendored surface, the rig.lock pin. vehicle.yaml rows,
+> working configs, `config/.pins/` and overlay bindings are NOT touched — keeping the run's config
+> IS the experiment — and config-KEY drift vs the new version's example is reported per instance,
+> never gated (the replay config-drift doctrine). `--reset-config` opts the config half out
+> (profile-backed instances skipped: `pkg upgrade` owns those). Services are SHARED, so the
+> affected instance names are printed. Refusals: an uninstalled service (that's `rig add`), a
+> profile key (instance config, not code), and a source declaring a DIFFERENT service, path or ref
+> alike. Belt-and-braces throughout: `_snapshot`/`_rollback` + a `load_manifest` gate, and
+> `_route_set` refuses a hand-authored route with a paste-ready line. Bug the tests caught:
+> `_route_service` RESPECTS an existing route (a foreign one is not install's to move), so the
+> registry form vendored + pinned while still running from the checkout — swap now re-points
+> explicitly. **`rig add --as`** parsed on every form but reached only the registry installer:
+> `route_add` called `add_service(root, token, tier=tier)`, which had no such parameter, so
+> `rig add ../svc --as foo` silently took the example's name instead. Now honored on the path and
+> workspace-name forms too (it names the working config as well; the example's own `name:` is
+> neutralized the way `pkg add` does), ROS-safety CHECKED rather than coerced, and a collision
+> refused on every form — an explicit name is a claim, a derived menu stub stays a suggestion.
+> **Captures lay configs out by TIER** (`_stage_tree`, so deploy bakes, run-open captures and
+> every reconstructed tree): through v0.2.47 all rows were flattened into `config/sensors/`, so a
+> reconstructed tree met a second convention the moment anyone ran `rig add`. Old artifacts stay
+> valid — their rows point where their files are, and reconstruct reads the row, never the
+> convention (the retrofit test covers exactly that mixed case). 7 new tests — total 679.
 > **v0.2.47 (2026-09-02) — replay says WHY service replay isn't armed**: a reconstructed flight
 > run replayed with no service calls and nothing said why (field report; the proposed fix was a
 > `services: all` config default). Two independent facts now surface as notices before `up`:

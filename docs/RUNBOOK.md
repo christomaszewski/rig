@@ -256,6 +256,21 @@ dir | rig-infra checkout | public/ros2-bag-player@1.10.0>` wires it on request: 
 also pins it in rig.lock). Harness only — the player is never in a with-set and absent from the
 config-drift report. Captures since v0.2.36 already carry the row (the flag is then a no-op).
 
+**Swapping the code under a reconstructed tree** (rig ≥ v0.2.48) is the SIL loop itself: the tree
+is what ran, and the experiment is the same config and the same data against a newer service.
+
+```bash
+rig swap planner ../planner              # a local checkout: routed live — edit, rebuild, re-replay
+rig swap planner public/planner@2.1.0    # a registry version: vendored + pinned in rig.lock
+```
+
+Rows, working configs, config pins and overlay bindings are untouched — keeping the run's config
+is the point. Every instance of that service moves, and they are named in the output. rig reports
+config-key drift against the new version's example config without gating on it; `--reset-config`
+re-materializes the configs from the new example instead, discarding your edits. The undo is
+`rig reconstruct` again. Configs in a reconstructed tree sit in their tier's directory
+(`config/infra|sensors|autonomy`), the same layout `rig add` writes, so the two never collide.
+
 Image BYTES come from the registry (fetch by the recorded digests) — and an arm64 run needs an
 arm64 host, emulation, or a platform rebuild at the same pins. Runs recorded BEFORE v0.2.36:
 `rig run retrofit <run…>` (in the deployment, with var/artifacts/ populated) stamps them with the

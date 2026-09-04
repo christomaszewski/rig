@@ -457,6 +457,15 @@ def _remove_specs(root_arg, positionals, words):
 
 
 @_soft
+def _routed_services(root_arg, positionals, words):
+    """Services THIS deployment routes — `rig swap`'s subject (a service, never an instance)."""
+    root = _deployment(root_arg)
+    if not root:
+        return []
+    return sorted((_read_yaml(root / "services.yaml").get("services") or {}))
+
+
+@_soft
 def _save_specs(root_arg, positionals, words):
     return (_instances.__wrapped__(root_arg, positionals, words)
             + _services.__wrapped__(root_arg, positionals, words))
@@ -546,6 +555,8 @@ _POSITIONAL_SOURCES: dict = {
     (("reconstruct",), "run"): _run_ids,
     (("run-retrofit",), "runs"): _run_ids,
     (("run-rm",), "runs"): _run_ids,
+    (("swap",), "service"): _routed_services,
+    (("swap",), "source"): _add_specs,
     (("pkg", "add"), "spec"): _add_specs,
     (("pkg", "remove"), "specs"): _remove_specs,
     (("pkg", "save"), "spec"): _save_specs,

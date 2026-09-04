@@ -506,13 +506,20 @@ def _stage_tree(staging: Path, manifest, catalog, *, registry: str | None = None
     later `rig replay`) needs their surfaces and configs too."""
     _stage_rig(staging)
 
-    cfg_dir = staging / "config" / "sensors"
-    cfg_dir.mkdir(parents=True)
+    # Configs land in their TIER's dir (config/infra|sensors|autonomy), the layout `rig init`,
+    # `rig add` and `pkg add` all write — a staged tree is a deployment tree, and an operator who
+    # reconstructs one then adds a service must not end up with two conventions in one config/.
+    # (Through v0.2.47 every row was flattened into config/sensors/; those artifacts stay valid —
+    # their rows point where their files are, and reconstruct reads the row, never the convention.)
+    _TIER_SUB = {"infra": "infra", "sensor": "sensors", "autonomy": "autonomy"}
+    (staging / "config").mkdir(parents=True, exist_ok=True)
     tier_rows: dict[str, list] = {"infra": [], "sensor": [], "autonomy": []}
     for s in manifest.sensors:
-        shutil.copy2(s.config, cfg_dir / f"{s.name}.yaml")
+        sub = _TIER_SUB[s.tier]
+        (staging / "config" / sub).mkdir(parents=True, exist_ok=True)
+        shutil.copy2(s.config, staging / "config" / sub / f"{s.name}.yaml")
         tier_rows[s.tier].append({"name": s.name, "service": s.service,
-                                  "config": f"config/sensors/{s.name}.yaml",
+                                  "config": f"config/{sub}/{s.name}.yaml",
                                   "enabled": s.enabled, "order": s.order})
     veh: dict = {"vehicle": manifest.vehicle}
     if manifest.vehicle_id is not None:

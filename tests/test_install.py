@@ -451,6 +451,85 @@ def test_pkg_list_shows_installed_users_and_upgrades():
         assert "2.0.0 available" in out and "pkg upgrade" in out
 
 
+def test_swap_path_form_repoints_route_drops_the_pin_and_keeps_config():
+    """The reconstructed-tree SIL swap: same rows, same config, DIFFERENT code."""
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        root, _ = _world()
+        rc, _, err = _run("--root", str(root), "add", "testns/camish")
+        assert rc == 0, err
+        cfg = root / "config" / "sensors" / "camish.yaml"
+        cfg.write_text(cfg.read_text() + "my_local_edit: 42\n")
+        rows_before = (root / "vehicle.yaml").read_text()
+        checkout, _rev = _code_repo()                      # another checkout of the same service
+        rc, _, err = _run("--root", str(root), "swap", "camish", str(checkout / "camish"))
+        assert rc == 0, err
+        routes = (root / "services.yaml").read_text()
+        assert str(checkout / "camish") in routes or "../" in routes   # routed at the checkout
+        assert "path: services/camish" not in routes
+        assert not (root / "services" / "camish").exists()             # no stale vendored twin
+        assert "my_local_edit: 42" in cfg.read_text()                  # config KEPT — the point
+        assert (root / "vehicle.yaml").read_text() == rows_before      # rows untouched
+        assert not [r for r in (load_lock(root).get("packages") or {}) if "camish" in r]
+        assert "camish" in err and "local checkout" in err
+        load_manifest(root)                                            # the tree still loads
+
+
+def test_swap_back_to_a_registry_ref_vendors_pins_and_reports_drift():
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        root, _ = _world()
+        assert _run("--root", str(root), "add", "testns/camish")[0] == 0
+        cfg = root / "config" / "sensors" / "camish.yaml"
+        cfg.write_text(cfg.read_text() + "my_local_edit: 42\n")
+        checkout, _rev = _code_repo()
+        assert _run("--root", str(root), "swap", "camish", str(checkout / "camish"))[0] == 0
+        rc, _, err = _run("--root", str(root), "swap", "camish", "testns/camish@1.2.0")
+        assert rc == 0, err
+        assert "path: services/camish" in (root / "services.yaml").read_text()
+        assert (root / "services" / "camish" / ".vendored.yaml").is_file()   # vendored again
+        assert "testns/camish@1.2.0" in load_lock(root)["packages"]          # and re-pinned
+        assert "my_local_edit: 42" in cfg.read_text()                        # still kept
+        assert "camish: config key drift" in err and "my_local_edit" in err  # named, never gated
+        load_manifest(root)
+
+
+def test_swap_reset_config_rematerializes_and_repins_the_base():
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        root, _ = _world()
+        assert _run("--root", str(root), "add", "testns/camish")[0] == 0
+        cfg = root / "config" / "sensors" / "camish.yaml"
+        cfg.write_text(cfg.read_text() + "my_local_edit: 42\n")
+        checkout, _rev = _code_repo()
+        rc, _, err = _run("--root", str(root), "swap", "camish", str(checkout / "camish"),
+                          "--reset-config")
+        assert rc == 0, err
+        assert "my_local_edit" not in cfg.read_text() and "RESET" in err   # edits discarded, loudly
+        assert load_lock(root)["instances"]["camish"]["base_sha256"] == sha256_file(cfg)
+        assert sha256_file(root / "config" / ".pins" / "camish.yaml") == sha256_file(cfg)
+
+
+def test_swap_refusals_and_rollback():
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        root, _ = _world()
+        assert _run("--root", str(root), "add", "testns/camish")[0] == 0
+        checkout, _rev = _code_repo()
+        before = ((root / "services.yaml").read_text(), (root / "vehicle.yaml").read_text(),
+                  (root / "rig.lock").read_text())
+        for spec, needle in (
+                ("ghost", "no 'ghost' row"),                        # not installed -> `rig add`
+                ("camish:acme-cam", "profile key"),                 # a profile is instance config
+        ):
+            rc, _, err = _run("--root", str(root), "swap", *( ["ghost", str(checkout / "camish")]
+                                                              if spec == "ghost" else
+                                                              ["camish", "camish:acme-cam"]))
+            assert rc != 0 and needle in err, (spec, err)
+        rc, _, err = _run("--root", str(root), "swap", "camish", "testns/routerish")
+        assert rc != 0 and "not 'camish'" in err                    # a swap is same-service only
+        rc, _, err = _run("--root", str(root), "swap", "camish", str(checkout / "routerish"))
+        assert rc != 0 and "declares service 'routerish'" in err    # ditto for a path
+        assert ((root / "services.yaml").read_text(), (root / "vehicle.yaml").read_text(),
+                (root / "rig.lock").read_text()) == before          # nothing moved
+
+
 def test_locked_reproduces_and_detects_drift():
     with _env(RIG_HOME=tempfile.mkdtemp()):
         root, reg = _world()

@@ -145,6 +145,11 @@ python3 -m venv .venv && .venv/bin/pip install pyyaml
                           #   --from S / --to S replay a SECTION (seconds from bag start — the
                           #   call-script zero; latches restored; --auto-end composes for sweeps)
 ./rig down                # tear down in reverse (autonomy FIRST); --purge also GCs external volumes
+./rig swap <svc> <path|ref>  # re-point an INSTALLED service at different code — a local checkout
+                          #   (routed live: edit, rebuild, re-up) or a registry ref (vendored +
+                          #   pinned). Rows, working configs and overlays are KEPT; config-key
+                          #   drift vs the new example is reported. The reconstructed-tree SIL
+                          #   swap: same config, same data, different code
 ./rig cleanup             # decommission: remove this deployment's images + volumes from the host
                           #   (after the final down, before deleting the tree; --dry-run to preview)
 ./rig up cam_front ins_main   # operate on a subset by name

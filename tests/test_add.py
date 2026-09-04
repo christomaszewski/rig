@@ -119,6 +119,45 @@ def test_add_tier_override_demotes_infra_to_menu():
         assert "--tier" in str(exc)
 
 
+def test_add_as_names_the_instance_on_local_forms():
+    """`--as` used to parse and be silently dropped for path/workspace-name tokens (it reached
+    only the registry installer) — one keystroke from the wrong instance name, quietly."""
+    from rig_cli.manifest import load_manifest
+
+    ws = _ws()
+    veh = ws / "veh"
+    add_service(veh, "zenoh-router", as_name="router_a")        # infra: ENABLED row, named by --as
+    body = (veh / "vehicle.yaml").read_text()
+    assert "- { name: router_a, service: zenoh-router, config: config/infra/router_a.yaml" in body
+    assert (veh / "config" / "infra" / "router_a.yaml").is_file()   # the config is named for it too
+    from rig_cli.common import load_yaml
+    assert load_yaml(veh / "config" / "infra" / "router_a.yaml").get("name") is None  # neutralized
+    assert [s.name for s in load_manifest(veh).sensors] == ["router_a"]
+
+    add_service(veh, str(ws / "foo_driver"), as_name="cam_left")  # sensor: MENU row, named by --as
+    body = (veh / "vehicle.yaml").read_text()
+    assert "# - { name: cam_left, service: foo, config: config/sensors/cam_left.yaml" in body
+    assert (veh / "config" / "sensors" / "cam_left.yaml").is_file()
+
+    for bad in ("Cam-Left", "9front", "cam left"):
+        try:
+            add_service(veh, str(ws / "nav"), as_name=bad)
+            assert False, f"must refuse ROS-unsafe --as {bad!r}"
+        except RigError as exc:
+            assert "ROS-safe" in str(exc)
+
+
+def test_add_as_refuses_a_name_already_in_the_vehicle():
+    ws = _ws()
+    veh = ws / "veh"
+    add_service(veh, "zenoh-router", as_name="dup")
+    try:
+        add_service(veh, str(ws / "nav"), as_name="dup")
+        assert False, "a duplicate instance name must refuse"
+    except RigError as exc:
+        assert "already exists" in str(exc)
+
+
 def test_add_duplicate_service_errors():
     ws = _ws()
     veh = ws / "veh"

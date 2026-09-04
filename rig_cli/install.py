@@ -24,7 +24,9 @@ content hash is the guarantee, so a moved registry HEAD with identical payload s
 from __future__ import annotations
 
 import hashlib
+import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -834,6 +836,194 @@ def remove(root: Path, specs: list[str], *, purge_config: bool = False) -> int:
     load_manifest(root)  # the gate: the deployment must still load
     eprint("rig pkg remove: done — rig.lock updated, commit it")
     return 0
+
+
+def _route_set(root: Path, svc: str, target: str) -> bool:
+    """Re-point an EXISTING generated services.yaml route at `target`. False (with a paste-ready
+    line) when the route is absent or hand-authored — the belt-and-braces rule every file edit
+    here follows: never rewrite a shape rig didn't write."""
+    svc_path = root / "services.yaml"
+    line = f"  {svc}: {{ path: {target} }}"
+    if not svc_path.is_file():
+        eprint(f"swap: no services.yaml — add the route yourself:\n{line}")
+        return False
+    lines = svc_path.read_text().splitlines()
+    hits = [i for i, ln in enumerate(lines) if re.match(r"^\s{2}" + re.escape(svc) + r":\s*\{", ln)]
+    if len(hits) != 1:
+        eprint(f"swap: services.yaml route for '{svc}' isn't in the generated single-line form — "
+               f"re-point it yourself:\n{line}")
+        return False
+    lines[hits[0]] = line
+    svc_path.write_text("\n".join(lines) + "\n")
+    return True
+
+
+def _example_config(desc, base: Path) -> Path | None:
+    """The service's first DECLARED example config, resolved under `base` (a checkout or the
+    vendored copy). None when the repo declares none — the drift report then simply says nothing."""
+    for rel in desc.examples:
+        candidate = base / rel
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _config_key_drift(example: Path | None, instances) -> list[str]:
+    """Top-level key drift between the NEW version's example config and each KEPT working config.
+    Report-only, never a gate: rig is schema-opaque about a service's config, and keeping the
+    config across a swap is the whole point — but a renamed or retired key is exactly what makes a
+    SIL run fail confusingly, so name it (the replay config-drift doctrine)."""
+    lines: list[str] = []
+    if example is None:
+        return lines
+    try:
+        want = set((load_yaml(example) or {}).keys())
+    except RigError:
+        return lines
+    for sensor in instances:
+        try:
+            have = set((load_yaml(sensor.config) or {}).keys())
+        except RigError:
+            continue
+        missing = sorted(want - have - {"name"})   # `name` is stamped by the row, never the config's
+        extra = sorted(have - want - {"name", "service"})
+        if missing or extra:
+            parts = []
+            if missing:
+                parts.append(f"absent from your config: {', '.join(missing)}")
+            if extra:
+                parts.append(f"not in the new example: {', '.join(extra)}")
+            lines.append(f"  {sensor.name}: config key drift — {'; '.join(parts)}")
+        else:
+            lines.append(f"  {sensor.name}: config keys match the new example")
+    return lines
+
+
+def swap(root: Path, service: str, token: str, *, reset_config: bool = False,
+         locked: bool = False) -> int:
+    """`rig swap <service> <path|ref>` — re-point an INSTALLED service at a different source,
+    keeping the deployment's own wiring. The reconstructed-tree SIL workflow: a run dir rebuilds
+    the tree that ran, and the experiment is the same config and the same data against DIFFERENT
+    CODE, so exactly three things move — the services.yaml route, the vendored surface, and the
+    rig.lock service pin. vehicle.yaml rows (name/order/enabled/config path), the working configs,
+    their pins and overlay bindings are NOT touched (`--reset-config` opts one half out).
+
+    Services are SHARED: a swap moves the code under every instance of that service, and the
+    affected names are printed. Undo is `rig reconstruct` again — it is non-destructive and cheap."""
+    manifest = load_manifest(root)
+    instances = [s for s in manifest.sensors if s.service == service]
+    if not instances:
+        known = sorted({s.service for s in manifest.sensors})
+        raise RigError(f"swap: no '{service}' row in vehicle.yaml — swap replaces the source of an "
+                       f"INSTALLED service; `rig add` adds a new one. This deployment runs: "
+                       f"{', '.join(known) or 'nothing'}")
+    if ":" in token and "/" not in token and not Path(token).expanduser().exists():
+        raise RigError(f"swap: '{token}' is a profile key — a profile is an INSTANCE's config "
+                       f"source, not a service's code; swap takes a service dir path or a service "
+                       f"registry ref (`rig pkg upgrade <instance>` re-pins a profile)")
+
+    kind, target = _swap_source(root, token, locked=locked)
+    lock = load_lock(root)
+    snap = _snapshot(root)
+    try:
+        if kind == "path":
+            from .descriptor import find_descriptor
+            dpath = find_descriptor(target)
+            declared = str(load_yaml(dpath).get("service") or "") if dpath else ""
+            if not dpath:
+                raise RigError(f"swap: {target} has no rigging.yaml — not a service checkout")
+            if declared and declared != service:
+                raise RigError(f"swap: {target} declares service '{declared}', not '{service}' — a "
+                               f"swap replaces a service with another version of ITSELF "
+                               f"(`rig add` installs a different service)")
+            desc = load_descriptor(service, target)
+            base = target
+            rel = os.path.relpath(target, root)
+            if not _route_set(root, service, rel):
+                _rollback(root, snap)
+                return 1
+            vendored = root / "services" / service
+            if (vendored / ".vendored.yaml").exists():  # the route left it behind — never a stale twin
+                shutil.rmtree(vendored, ignore_errors=True)
+                eprint(f"  dropped the vendored copy at services/{service} (the route is the "
+                       f"checkout now — edit it in place and re-`up`)")
+            for ref in [r for r, info in (lock.get("packages") or {}).items()
+                        if (info or {}).get("kind") == "service" and unqualified(r) == service]:
+                lock["packages"].pop(ref, None)  # path-routed: no registry pin to reproduce
+                eprint(f"  dropped the registry pin {ref} — this service is path-routed now")
+            eprint(f"rig swap: {service} -> {rel} (local checkout)")
+        else:
+            entry, reg, pkg = target
+            if pkg.kind != "service":
+                raise RigError(f"swap: '{pkg.name}' is a {pkg.kind}, not a service — swap replaces "
+                               f"a service's code")
+            if pkg.name != service:
+                raise RigError(f"swap: {qualified(entry, pkg)} is service '{pkg.name}', not "
+                               f"'{service}' — a swap replaces a service with another version of "
+                               f"ITSELF (rig add installs a different service)")
+            pkg = _at_locked_commit(entry, pkg, lock, locked)
+            desc = _install_service(root, entry, pkg, lock, locked=locked, allow_repin=True)
+            # _route_service RESPECTS an existing route (a foreign one is not install's to move) —
+            # but re-pointing IS the swap, so say it explicitly: a path-routed service coming back
+            # to the registry must leave the checkout behind, not keep running from it.
+            if not _route_set(root, service, f"services/{service}"):
+                _rollback(root, snap)
+                return 1
+            base = root / "services" / service
+            eprint(f"rig swap: {service} -> {qualified(entry, pkg)} (vendored + pinned)")
+
+        if reset_config:
+            for sensor in instances:
+                if sensor.profile:
+                    eprint(f"  {sensor.name}: profile-backed — config left alone "
+                           f"(`rig pkg upgrade {sensor.name}` re-bases a profile instance)")
+                    continue
+                example = _example_config(desc, base)
+                if example is None:
+                    eprint(f"  {sensor.name}: the new version declares no example config — kept")
+                    continue
+                from .init import _copy_as_profile
+                survived = _copy_as_profile(example, sensor.config)
+                if survived and survived != sensor.name:
+                    raise RigError(f"swap --reset-config: {example.name} pins name '{survived}' in "
+                                   f"a form rig can't neutralize — reset {sensor.name}'s config by hand")
+                pin = root / "config" / ".pins" / f"{sensor.name}.yaml"
+                pin.parent.mkdir(parents=True, exist_ok=True)
+                pin.write_bytes(Path(sensor.config).read_bytes())
+                record_instance(lock, sensor.name, profile=None,
+                                base_sha256=sha256_file(Path(sensor.config)))
+                eprint(f"  {sensor.name}: config RESET from the new example (your edits are gone)")
+        else:
+            for line in _config_key_drift(_example_config(desc, base), instances):
+                eprint(line)
+
+        save_lock(root, lock)
+        load_manifest(root)  # the real gate: routes resolve, names hold, configs cross-check
+    except BaseException:
+        _rollback(root, snap)
+        eprint("rig swap: failed — rolled back (services.yaml/vehicle.yaml/rig.lock/configs restored)")
+        raise
+    eprint(f"  instances now running this code: {', '.join(s.name for s in instances)}"
+           + ("" if reset_config else " — configs kept as they were"))
+    return 0
+
+
+def _swap_source(root: Path, token: str, *, locked: bool):
+    """`rig add`'s dual grammar, reused: ('path', dir) | ('ref', (entry, registry, package)).
+    An existing directory reads as a path; registry grammar as a ref; --locked forces the ref
+    reading. A bare name falls back to the one-level workspace scan, then to the registries."""
+    from .init import _resolve_service_dir
+    if not locked and Path(token).expanduser().is_dir():
+        return "path", Path(token).expanduser().resolve()
+    if "/" in token or locked:
+        return "ref", resolve_ref(token, history=True)
+    try:
+        return "path", _resolve_service_dir(token, root.parent, label="swap")
+    except RigError as exc:
+        try:
+            return "ref", resolve_ref(token, history=True)
+        except RigError as reg_exc:
+            raise RigError(f"{exc}\n  (registry fallback: {reg_exc})")
 
 
 def _at_locked_commit(entry: Entry, pkg: Package, lock: dict, locked: bool) -> Package:

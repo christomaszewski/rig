@@ -466,7 +466,8 @@ def _append_tier_row(text: str, section: str, row: str) -> str | None:
     return "\n".join(lines + ["", f"{section}:", f"  {row}"]) + "\n"
 
 
-def add_service(root: Path, token: str, tier: str | None = None) -> int:
+def add_service(root: Path, token: str, tier: str | None = None,
+                as_name: str | None = None) -> int:
     """`rig add <name|path>` — the post-init sibling of --infra/--discover, for a deployment that
     already exists (init refuses those). Resolves the token exactly like --infra (path form, or a
     bare name via the one-level workspace scan), copies the example config, routes services.yaml, and
@@ -500,6 +501,14 @@ def add_service(root: Path, token: str, tier: str | None = None) -> int:
                f"declare `tier: {tier}` in its rigging.yaml so every deployment benefits")
     tier = tier or declared
     sub = {"infra": "infra", "sensor": "sensors", "autonomy": "autonomy"}[tier]
+    if as_name is not None:  # rig-DERIVED names are made safe; an operator's explicit one is CHECKED
+        if not re.match(r"^[a-z][a-z0-9_]*$", as_name):
+            raise RigError(f"add --as: instance name '{as_name}' must be ROS-safe "
+                           f"([a-z][a-z0-9_]*) — it keys the namespace, compose project and volumes")
+        if any(s.name == as_name for s in load_manifest(root).sensors):
+            raise RigError(f"add --as: instance name '{as_name}' already exists in vehicle.yaml — "
+                           f"names key the ROS namespace, the compose project and the volumes, so "
+                           f"they must be unique across the vehicle")
 
     routes = ((load_yaml(svc_path) or {}).get("services") or {}) if svc_path.exists() else {}
     if svc in routes:
@@ -513,13 +522,20 @@ def add_service(root: Path, token: str, tier: str | None = None) -> int:
 
     enabled_row = menu_row = None
     if tier == "infra" and examples:
-        instance = str(load_yaml(examples[0]).get("name") or svc)
+        instance = as_name or str(load_yaml(examples[0]).get("name") or svc)
         if any(s.name == instance for s in manifest.sensors):
-            raise RigError(f"add: instance name '{instance}' (from {examples[0].name}) already exists "
+            raise RigError(f"add: instance name '{instance}' "
+                           f"{'(--as)' if as_name else f'(from {examples[0].name})'} already exists "
                            f"in vehicle.yaml — wire this one manually with a unique name")
         dest = root / "config" / "infra" / f"{instance}.yaml"
         if dest.exists():
             eprint(f"  add: config/infra/{instance}.yaml already exists — keeping it")
+        elif as_name:  # the example's own `name:` would fight the row's — neutralize it (pkg add's rule)
+            survived = _copy_as_profile(examples[0], dest)
+            if survived and survived != instance:
+                dest.unlink()
+                raise RigError(f"add: {examples[0].name} pins name '{survived}' in a form rig can't "
+                               f"neutralize — use --as {survived}, or author the config by hand")
         else:
             shutil.copy2(examples[0], dest)
         orders = [s.order for s in manifest.sensors if s.tier == "infra"]
@@ -530,17 +546,21 @@ def add_service(root: Path, token: str, tier: str | None = None) -> int:
         order = max(orders, default=0) + (5 if tier == "infra" else 10)
         if examples:
             src = examples[0]
-            stem = src.name[: -len(".example.yaml")] if src.name.endswith(".example.yaml") else src.stem
+            stem = as_name or (src.name[: -len(".example.yaml")]
+                               if src.name.endswith(".example.yaml") else src.stem)
             dest = root / "config" / sub / f"{stem}.yaml"
             if dest.exists():
                 eprint(f"  add: config/{sub}/{stem}.yaml already exists — keeping it")
                 kept = (load_yaml(dest) or {}).get("name")  # stub must match, or uncommenting cross-errors
             else:
                 kept = _copy_as_profile(src, dest)
-            stub = str(kept) if kept else _safe_name(stem)
+            if as_name and kept and str(kept) != as_name:
+                raise RigError(f"add: {src.name} pins name '{kept}' in a form rig can't neutralize "
+                               f"— use --as {kept}, or author config/{sub}/{stem}.yaml by hand")
+            stub = as_name or (str(kept) if kept else _safe_name(stem))
             menu_row = f"# {_entry(stub, svc, f'config/{sub}/{stem}.yaml', order)}"
         else:
-            n = _safe_name(svc)
+            n = as_name or _safe_name(svc)
             menu_row = f"# {_entry(n, svc, f'config/{sub}/{n}.yaml', order)}   # TODO: author this config"
 
     svc_line = f"  {svc}: {{ path: {rel} }}"
