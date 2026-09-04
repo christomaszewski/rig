@@ -178,9 +178,72 @@ def select_services(source_dir: Path, with_names: list[str]) -> tuple[str | None
                        f"inside the with-set; the live client re-issues those calls")
     allow = sorted(provides - requires)
     if not allow:
+        notices.append("service replay: not armed — " + (
+            "every observed server of the with-set is also called from inside it (self-echo: "
+            "the live client re-issues those calls)" if provides else
+            "the with-set has no observed service servers beyond parameter plumbing"))
         return None, notices
     notices.append(f"service replay: {len(allow)} recorded call target(s) — {', '.join(allow)}")
     return " ".join(allow), notices
+
+
+def source_service_events(src_dir: Path) -> tuple[int, int] | None:
+    """(service-event topics with messages, total events) summed over every recording under
+    `<run>/bags/*/*/metadata.yaml` — rosbag2's plain-YAML index, the same file the player reads
+    host-side (bag CONTENTS stay opaque to rig; this is the table of contents). None when no
+    metadata is readable (no bags, a foreign layout) — say nothing rather than guess."""
+    found, topics, events = False, 0, 0
+    for meta in sorted((src_dir / "bags").glob("*/*/metadata.yaml")):
+        try:
+            doc = load_yaml(meta)
+        except RigError:
+            continue
+        info = doc.get("rosbag2_bagfile_information") if isinstance(doc, dict) else None
+        if not isinstance(info, dict):
+            continue
+        found = True
+        for row in info.get("topics_with_message_count") or []:
+            if not isinstance(row, dict):
+                continue
+            name = str(((row.get("topic_metadata") or {}).get("name")) or "")
+            try:
+                count = int(row.get("message_count") or 0)
+            except (TypeError, ValueError):
+                count = 0
+            if name.endswith("/_service_event") and count > 0:
+                topics += 1
+                events += count
+    return (topics, events) if found else None
+
+
+def service_replay_notices(src_dir: Path, *, mode: str, services: str | None,
+                           calls_path: Path | None) -> list[str]:
+    """Say WHY verbatim service replay is or isn't in play — a silent nothing is the failure
+    class this exists to remove (a reconstructed flight replayed with no calls, and no line said
+    why). Two independent facts: whether the SOURCE RUN recorded any service events at all
+    (record-time-or-never: `record.services` on at record time AND the servers running
+    CONTENTS-level introspection), and whether rig's selector armed anything (epochs-only;
+    `select_services` names its own reasons in topics mode). Script mode needs neither — the
+    injector calls live servers itself — so it says nothing."""
+    if calls_path is not None:
+        return []
+    notes: list[str] = []
+    scan = source_service_events(src_dir)
+    if scan is not None and scan[0] == 0:
+        notes.append("warning: the source run recorded NO service events — no recorded call can "
+                     "replay, whatever the selection (record-time-or-never: `record.services` on "
+                     "at record time AND the servers running CONTENTS-level introspection); "
+                     "--calls can still inject scripted calls at the live servers")
+        return notes  # a not-armed reason underneath would be noise
+    if scan is not None:
+        notes.append(f"source run holds {scan[1]} recorded service event(s) across {scan[0]} "
+                     f"service(s)")
+    if services is None and mode != "topics":
+        notes.append("service replay: not armed — namespace fallback (no epochs, or an instance "
+                     "the source run never observed): verbatim calls replay only from OBSERVED "
+                     "graph epochs, and the fallback's exclude regex would drop them on lyrical "
+                     "anyway")
+    return notes
 
 
 def validate_calls(path: Path) -> str:
@@ -503,6 +566,7 @@ def cmd(manifest, catalog, descriptors, root: Path, *, run_ref: str, names: list
         # (--calls) is unaffected — it issues calls itself, outside bag playback.
         services, svc_notices = select_services(src_dir, names)
         notices += svc_notices
+    notices += service_replay_notices(src_dir, mode=mode, services=services, calls_path=calls_path)
     if w_from is not None or w_to is not None:  # the window: bag-opaque sanity + script overlap
         notices += window_notices(w_from, w_to, wall_s=source_wall_duration_s(src_dir),
                                   calls_path=calls_path)

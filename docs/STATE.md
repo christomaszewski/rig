@@ -1,8 +1,26 @@
 # rig — project state & handoff (resume here)
 
 > Snapshot for picking the project up cold in a new session. Read this first, then `CHEATSHEET.md` /
-> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.2.46**,
-> branch **`main`**, 670 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.2.47**,
+> branch **`main`**, 672 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> **v0.2.47 (2026-09-02) — replay says WHY service replay isn't armed**: a reconstructed flight
+> run replayed with no service calls and nothing said why (field report; the proposed fix was a
+> `services: all` config default). Two independent facts now surface as notices before `up`:
+> (1) whether the SOURCE RUN recorded any service events at all — rig reads the bags'
+> `metadata.yaml` (rosbag2's plain-YAML index, the same file the player reads host-side; bag
+> CONTENTS stay opaque) and counts `_service_event` topics with messages: none → WARN
+> "record-time-or-never: `record.services` on at record time AND the servers running
+> CONTENTS-level introspection" (the deployment's record flip rides the next bake; no service
+> has adopted introspection yet — so every flight to date holds no calls, whatever the
+> selection); some → the count. (2) why the selector armed nothing — `select_services` names
+> "no observed servers beyond parameter plumbing" vs "every server self-echoed", and the
+> namespace fallback (no epochs / unobserved instance; lyrical's exclude regex would drop
+> services anyway) is named at the cmd level. Script mode says nothing (the injector calls live
+> servers itself); a run with no readable metadata makes no claim. Design deliberately NOT
+> changed: no `services: all` default (double-calls a with-set that calls itself; fires recorded
+> calls at live infra servers such as the logger's snapshot trigger; the fallback regex drops the
+> with-set's own services on lyrical) and no services heuristic for pre-epoch runs (those runs
+> predate service recording too). 2 new tests — total 672.
 > **v0.2.46 (2026-09-02) — replay windows, rig side** (`rig-window-plan.md`; contract FROZEN
 > in `~/ws/infra/rig-replay-window-handoff.md` — it AMENDS the player handoff §1.1 env and the
 > calls handoff §1.2 time base; rig-infra v1.12.0 in flight from

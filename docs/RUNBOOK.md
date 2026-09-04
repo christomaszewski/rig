@@ -305,7 +305,10 @@ starts, or script the state-setting calls at `t: 120`.
 
 **Service calls** (rig ≥ v0.2.37 + rig-infra ≥ v1.10.0, sources recorded with `record.services`
 and CONTENTS-level introspection adopted): by default replay also re-issues the recorded calls at
-the with-set's servers — observed `provides` minus `requires`, the topic rule's twin. To RETIME
+the with-set's servers — observed `provides` minus `requires`, the topic rule's twin. rig says
+up front whether the source run recorded ANY service events (from the bags' metadata) and why
+verbatim replay is or isn't armed — a run recorded before `record.services` was on and the
+servers ran introspection holds no calls to replay, record-time-or-never. To RETIME
 or INJECT calls instead, pass a call script (script XOR verbatim — never both):
 
 ```bash
