@@ -1,8 +1,21 @@
 # rig — project state & handoff (resume here)
 
 > Snapshot for picking the project up cold in a new session. Read this first, then `CHEATSHEET.md` /
-> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.2.48**,
-> branch **`main`**, 679 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.2.49**,
+> branch **`main`**, 682 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> **v0.2.49 (2026-09-04) — services.yaml routes: rig edits BOTH shapes** (field report: `rig swap`
+> in a reconstructed tree refused with "the route is not in the generated single-line form"). The
+> capture wrote services.yaml with `yaml.safe_dump` — valid YAML that parses identically, but the
+> BLOCK shape (`svc:` + an indented `path:`), while every line-oriented editor matched only rig's
+> generated FLOW line. The v0.2.45 `_append_tier_row` situation, one file over. Both halves fixed:
+> (1) `init._route_span` finds a route in EITHER shape, scoped to the `services:` block (a
+> same-named key elsewhere, or a commented menu route, never matches) — `_route_set` rewrites just
+> the `path:` line of a block entry, leaving its other keys and its neighbours alone, and
+> `_drop_route` deletes the key line plus its indented body, which fixes `rig pkg remove` in a
+> reconstructed tree too (same latent bug, never reported); (2) `bake._routes_text` writes the
+> GENERATED form from `_stage_tree`, so new captures/bakes are shaped like rig-authored trees
+> (safe_dump fallback kept for any path that isn't a bare token). Trees reconstructed BEFORE this
+> need no re-reconstruction — the editors read them as they are. 3 new tests — total 682.
 > **v0.2.48 (2026-09-04) — `rig swap`, `--as` on the local add forms, tier-laid-out captures**
 > (three field reports from the reconstructed-tree SIL loop): **`rig swap <service> <path|ref>`**
 > re-points an INSTALLED service at different code, reusing `rig add`'s dual grammar — a path or

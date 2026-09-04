@@ -438,6 +438,39 @@ def _append_services_line(text: str, line: str) -> str | None:
     return None
 
 
+def _route_span(lines: list[str], svc: str) -> tuple[int, int, str] | None:
+    """(start, end-exclusive, style) of one service's route inside services.yaml's `services:`
+    block, or None when it is absent. Two shapes, the `_append_tier_row` situation again: rig's
+    generated FLOW line (`  svc: { path: X }`, one line) and PyYAML's BLOCK form (`  svc:` plus
+    indented children) — what `yaml.safe_dump` writes, i.e. what every captured/baked tree carried
+    through v0.2.48. Scoped to the `services:` block so a same-named key elsewhere can't match."""
+    head = next((i for i, ln in enumerate(lines) if re.match(r"^services:", ln)), None)
+    if head is None:
+        return None
+    i = head + 1
+    while i < len(lines):
+        ln = lines[i]
+        if not ln.strip():                       # blanks belong to the block; keep scanning
+            i += 1
+            continue
+        indent = len(ln) - len(ln.lstrip())
+        if indent == 0:                          # dedented to a new top-level key: block is over
+            return None
+        m = re.match(r"^(\s+)(#\s*)?" + re.escape(svc) + r":\s*(.*)$", ln)
+        if m and not m.group(2):                 # a commented menu route is not a live route
+            if m.group(3).startswith("{"):
+                return i, i + 1, "flow"
+            j = i + 1                            # block: the key line plus its deeper-indented body
+            while j < len(lines) and (not lines[j].strip()
+                                      or len(lines[j]) - len(lines[j].lstrip()) > indent):
+                j += 1
+            while j > i + 1 and not lines[j - 1].strip():
+                j -= 1
+            return i, j, "block"
+        i += 1
+    return None
+
+
 def _append_tier_row(text: str, section: str, row: str) -> str | None:
     """Insert a manifest row at the END of a tier section (`infra:`/`sensors:`/`autonomy:`) in
     vehicle.yaml. A missing section is appended as a new top-level block (older deployments predate

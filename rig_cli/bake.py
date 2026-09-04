@@ -17,6 +17,7 @@ from __future__ import annotations
 import datetime
 import hashlib
 import json
+import re
 import shlex
 import shutil
 import subprocess
@@ -497,6 +498,19 @@ def _stage_rig(staging: Path) -> None:
     (staging / "rig").chmod(0o755)
 
 
+def _routes_text(catalog_out: dict) -> str:
+    """services.yaml in rig's GENERATED single-line form. A staged tree IS a deployment tree, and
+    the line-oriented editors (`add`, `swap`, `pkg remove`) write and read that shape; safe_dump's
+    block form parses identically but made every reconstructed tree a second convention. Falls
+    back to safe_dump for any path that isn't a bare token, where flow style would need quoting."""
+    simple = re.compile(r"^[A-Za-z0-9._/-]+$")
+    if all(simple.match(str((spec or {}).get("path", ""))) and set(spec or {}) == {"path"}
+           for spec in catalog_out.values()):
+        return "\n".join(["services:"] + [f"  {svc}: {{ path: {spec['path']} }}"
+                                          for svc, spec in catalog_out.items()]) + "\n"
+    return yaml.safe_dump({"services": catalog_out}, sort_keys=False)
+
+
 def _stage_tree(staging: Path, manifest, catalog, *, registry: str | None = None) -> None:
     """Steps 1–3 shared by the deploy bake and the run-open capture: bundled rig + resolved
     per-sensor configs + a COMPLETE resolved vehicle.yaml (overrides/profiles already baked in;
@@ -544,7 +558,7 @@ def _stage_tree(staging: Path, manifest, catalog, *, registry: str | None = None
     for service in sorted({s.service for s in manifest.sensors}):
         vendor(service, catalog[service].path, staging)
         catalog_out[service] = {"path": f"services/{service}"}
-    (staging / "services.yaml").write_text(yaml.safe_dump({"services": catalog_out}, sort_keys=False))
+    (staging / "services.yaml").write_text(_routes_text(catalog_out))
 
 
 def bake(root: Path, manifest, catalog, descriptors, env, tag: str, *, registry: str | None = None,

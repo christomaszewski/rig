@@ -170,6 +170,51 @@ def test_reconstruct_lays_configs_out_by_tier():
     assert rows["nav"].endswith("config/autonomy/nav.yaml") and pathlib.Path(rows["nav"]).is_file()
 
 
+def test_reconstructed_tree_is_editable_by_the_line_verbs():
+    """A staged tree IS a deployment tree: `rig swap` (and `pkg remove`) edit services.yaml by
+    line, so the capture must write rig's generated form — safe_dump's block form parsed fine but
+    made every reconstructed tree refuse the edit ('not in the generated single-line form')."""
+    from rig_cli import install
+    from rig_cli.manifest import load_manifest
+    root, m = _deployment()
+    rid, data = _open(m, root)
+    dest = pathlib.Path(tempfile.mkdtemp()) / "tree"
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        assert reconstruct.cmd_reconstruct(None, run_ref=str(data / "runs" / rid),
+                                           into=str(dest), config=None) == 0
+    routes = (dest / "services.yaml").read_text()
+    assert "  sensa: { path: services/sensa }" in routes          # the generated single-line form
+    assert load_yaml(dest / "services.yaml")["services"]["sensa"] == {"path": "services/sensa"}
+    fresh = _service_repo(pathlib.Path(tempfile.mkdtemp()), "sensa")   # newer code, same service
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        assert install.swap(dest, "sensa", str(fresh)) == 0
+    assert str(fresh) in (dest / "services.yaml").read_text() or "../" in (dest / "services.yaml").read_text()
+    assert load_manifest(dest)                                     # and the tree still loads
+    assert "not in the generated" not in err.getvalue()
+
+
+def test_route_set_rewrites_a_block_form_route_in_place():
+    """Trees reconstructed BEFORE the capture wrote the generated form are already out there —
+    the editors read the dumped block shape too, rewriting only the `path:` line."""
+    import yaml
+
+    from rig_cli import install
+    tree = pathlib.Path(tempfile.mkdtemp())
+    (tree / "services.yaml").write_text(yaml.safe_dump(
+        {"services": {"sensa": {"path": "services/sensa"}, "playr": {"path": "services/playr"}}},
+        sort_keys=False))
+    with contextlib.redirect_stderr(io.StringIO()):
+        assert install._route_set(tree, "sensa", "../checkout") is True
+    doc = load_yaml(tree / "services.yaml")
+    assert doc["services"]["sensa"] == {"path": "../checkout"}     # re-pointed
+    assert doc["services"]["playr"] == {"path": "services/playr"}  # neighbour untouched
+    with contextlib.redirect_stderr(io.StringIO()):
+        install._drop_route(tree, "playr")                          # `pkg remove`'s half
+    doc = load_yaml(tree / "services.yaml")
+    assert "playr" not in doc["services"] and "sensa" in doc["services"]
+
+
 def test_reconstruct_missing_capture_names_the_retrofit_path():
     run_dir = pathlib.Path(tempfile.mkdtemp()) / "r"
     run_dir.mkdir()

@@ -35,7 +35,7 @@ import yaml
 from . import RigError
 from .common import eprint, load_yaml
 from .descriptor import load_descriptor
-from .init import _append_services_line, _append_tier_row, _safe_name
+from .init import _append_services_line, _append_tier_row, _route_span, _safe_name
 from .lock import load_lock, record_instance, record_package, record_registry, save_lock, sha256_file
 from .manifest import load_manifest
 from .pkg import _each_index, _entries_or_hint, _sensor_hits
@@ -692,12 +692,11 @@ def _drop_route(root: Path, svc: str) -> None:
     if not svc_path.is_file():
         return
     lines = svc_path.read_text().splitlines()
-    hits = [i for i, line in enumerate(lines) if re.match(r"^\s{2}" + re.escape(svc) + r":\s*\{", line)]
-    if len(hits) != 1:
-        eprint(f"remove: services.yaml route for '{svc}' not in the generated form — "
-               f"remove it yourself")
+    span = _route_span(lines, svc)
+    if span is None:
+        eprint(f"remove: no '{svc}' route found in services.yaml — remove it yourself")
         return
-    del lines[hits[0]]
+    del lines[span[0]:span[1]]
     svc_path.write_text("\n".join(lines) + "\n")
 
 
@@ -848,12 +847,23 @@ def _route_set(root: Path, svc: str, target: str) -> bool:
         eprint(f"swap: no services.yaml — add the route yourself:\n{line}")
         return False
     lines = svc_path.read_text().splitlines()
-    hits = [i for i, ln in enumerate(lines) if re.match(r"^\s{2}" + re.escape(svc) + r":\s*\{", ln)]
-    if len(hits) != 1:
-        eprint(f"swap: services.yaml route for '{svc}' isn't in the generated single-line form — "
-               f"re-point it yourself:\n{line}")
+    span = _route_span(lines, svc)
+    if span is None:
+        eprint(f"swap: no '{svc}' route in services.yaml to re-point — add it yourself:\n{line}")
         return False
-    lines[hits[0]] = line
+    start, end, style = span
+    if style == "flow":
+        lines[start:end] = [line]
+    else:
+        # BLOCK form (every captured/reconstructed tree): rewrite the `path:` value in place and
+        # leave the entry's other keys alone — a minimal edit beats normalizing someone's file.
+        keys = [i for i in range(start + 1, end) if re.match(r"^\s+path:\s*", lines[i])]
+        if len(keys) != 1:
+            eprint(f"swap: the '{svc}' route in services.yaml has no single `path:` line — "
+                   f"re-point it yourself:\n{line}")
+            return False
+        indent = len(lines[keys[0]]) - len(lines[keys[0]].lstrip())
+        lines[keys[0]] = f"{' ' * indent}path: {target}"
     svc_path.write_text("\n".join(lines) + "\n")
     return True
 

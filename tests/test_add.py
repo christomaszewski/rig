@@ -198,6 +198,25 @@ def test_add_instance_name_collision_errors():
         assert "zr" in str(exc) and "already exists" in str(exc)
 
 
+def test_route_span_reads_both_the_generated_and_the_dumped_shapes():
+    import yaml
+
+    from rig_cli.init import _route_span
+    flow = ("# header\nservices:\n  camish: { path: ../camish }\n"
+            "  # novatel: { path: ../novatel }\n").splitlines()
+    assert _route_span(flow, "camish") == (2, 3, "flow")
+    assert _route_span(flow, "novatel") is None          # a COMMENTED menu route is not a route
+    assert _route_span(flow, "ghost") is None
+    block = yaml.safe_dump({"services": {"camish": {"path": "services/camish"},
+                                         "novatel": {"path": "services/novatel"}}},
+                           sort_keys=False).splitlines()
+    assert _route_span(block, "camish") == (1, 3, "block")   # key line + its indented body
+    assert _route_span(block, "novatel") == (3, 5, "block")
+    # a key of the same name OUTSIDE the services block never matches
+    other = "camish: { path: /wrong }\nservices:\n  novatel: { path: ../n }\n".splitlines()
+    assert _route_span(other, "camish") is None
+
+
 def test_append_tier_row_understands_pyyaml_indentless_sections():
     import yaml
 
