@@ -17,6 +17,7 @@ from __future__ import annotations
 import datetime
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 import yaml
@@ -64,30 +65,47 @@ def vendor(service: str, source: Path, root: Path) -> Path:
     target = root / "services" / service
     if target.exists() and not (target / ".vendored.yaml").exists():
         raise RigError(f"vendor {service}: {target} exists and isn't a vendored dir; remove it first")
-    if target.exists():
-        shutil.rmtree(target)  # refresh a prior vendor in full
-    target.mkdir(parents=True)
+    if target.exists() and source == target.resolve():
+        # After a registry install the catalog routes the service at its OWN vendored copy, so a
+        # bare `rig vendor <service>` (--from defaults to the route) would read from the dir it is
+        # about to replace. Nothing to refresh from — say so instead of eating the copy.
+        raise RigError(f"vendor {service}: {target} IS the source — services.yaml routes "
+                       f"'{service}' at its own vendored copy; pass --from <checkout> to refresh "
+                       f"it from real source")
 
-    for rel in files:
-        src = source / rel
-        if not src.exists():
-            raise RigError(f"vendor {service}: launch_surface entry missing in source: {src}")
-        dst = target / rel
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        if src.is_dir():
-            shutil.copytree(src, dst, dirs_exist_ok=True)  # a surface may list a dir (e.g. a static bundle)
-        else:
-            shutil.copy2(src, dst)
+    # Build the new copy BESIDE the target and swap it in at the end. Every surface file is
+    # checked and copied before the old copy is touched, so a source missing one declared file
+    # can't leave services/<service> deleted with the error still to come — and the swap is a
+    # same-directory rename, so there is no window with a half-written vendored dir either.
+    target.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=f".{service}.vendoring-", dir=target.parent))
+    try:
+        for rel in files:
+            src = source / rel
+            if not src.exists():
+                raise RigError(f"vendor {service}: launch_surface entry missing in source: {src}")
+            dst = staging / rel
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            if src.is_dir():
+                shutil.copytree(src, dst, dirs_exist_ok=True)  # a surface may list a dir (e.g. a static bundle)
+            else:
+                shutil.copy2(src, dst)
 
-    stamp = {
-        "service": service,
-        "source": str(source),
-        "ref": _git_ref(source),
-        "files": files,
-        "when": datetime.datetime.now().isoformat(timespec="seconds"),
-    }
-    with open(target / ".vendored.yaml", "w") as handle:
-        yaml.safe_dump(stamp, handle, sort_keys=False)
+        stamp = {
+            "service": service,
+            "source": str(source),
+            "ref": _git_ref(source),
+            "files": files,
+            "when": datetime.datetime.now().isoformat(timespec="seconds"),
+        }
+        with open(staging / ".vendored.yaml", "w") as handle:
+            yaml.safe_dump(stamp, handle, sort_keys=False)
+
+        if target.exists():
+            shutil.rmtree(target)  # refresh a prior vendor in full — only now that the new copy is whole
+        staging.rename(target)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)  # a no-op after the rename; the cleanup on any failure
 
     eprint(f"vendored {service}: {len(files)} files -> services/{service}  (ref {stamp['ref'] or 'n/a'})")
     return target

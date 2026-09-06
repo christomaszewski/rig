@@ -1,4 +1,4 @@
-"""Shared helpers: YAML loading and stderr printing."""
+"""Shared helpers: YAML loading, stderr printing, path hygiene."""
 from __future__ import annotations
 
 import sys
@@ -56,3 +56,28 @@ def print_table(rows: list[tuple]) -> None:
     widths = [max(len(r[i]) for r in rows) for i in range(len(rows[0]))]
     for r in rows:
         print("  ".join(cell.ljust(widths[i]) for i, cell in enumerate(r)).rstrip())
+
+
+def safe_component(value: str, *, what: str) -> str:
+    """ONE path segment and nothing else — for a name rig joins onto a directory it then creates,
+    replaces or DELETES (an artifact tag names var/bake/<tag>, which bake rmtree's first).
+    pathlib makes the hazard silent: ``base / "/etc"`` IS ``/etc``, and ``base / "../../config"``
+    walks out of var/bake into the deployment. Rejects the empty string, ``.``/``..``, any
+    separator, and surrounding whitespace. Returns the value so a caller can bind it inline."""
+    bad = (not value or value in (".", "..") or "/" in value or "\\" in value or "\0" in value
+           or value != value.strip())
+    if bad:
+        raise RigError(f"{what}: {value!r} must be a single path component — no separators, not "
+                       f"'.' or '..', not empty (it names a directory rig creates and removes)")
+    return value
+
+
+def contained(path: Path, root: Path) -> bool:
+    """True iff ``path`` resolves to somewhere STRICTLY inside ``root`` — symlinks resolved on
+    both sides, so a link out of the tree fails too. The check behind every "write this under
+    the tree" step whose relative path came from data rather than from rig."""
+    try:
+        target, base = path.resolve(), root.resolve()
+    except OSError:
+        return False
+    return target != base and target.is_relative_to(base)

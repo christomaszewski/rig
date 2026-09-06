@@ -246,6 +246,45 @@ def test_provision_show_checks_deployment():
         rc, _, err = _run("--root", str(root), "provision")
         assert rc == 0 and "all vars satisfied" in err and "vehicle_id=4" in err
 
+# --- v0.2.51: fleet-ness is decided by VALUES, not text (finding 8) ------------------------------
+
+def test_fleet_detection_ignores_comments_and_unreferenced_configs():
+    """rig init's own scaffold documents the fleet vocabulary in COMMENTS ({{gcs_ip}},
+    {{fleet_ids}}, {{map fleet_peer_ids peer_endpoint}}); the text scan read a literal
+    `rig init --vehicle-id 7` tree as a fleet and refused --bundle-images / --registry on it.
+    A stray config nobody's row references doesn't vote either."""
+    root = pathlib.Path(tempfile.mkdtemp())
+    (root / "config" / "sensors").mkdir(parents=True)
+    (root / "vehicle.yaml").write_text(
+        "vehicle: t\nvehicle_id: 7\n"
+        "# vars:\n#   gcs_ip: 10.0.0.10   # {{fleet_ids}}, {{gcs_ip}}, {{fleet_mode}}\n"
+        '#   connect: "{{map fleet_peer_ids peer_endpoint}}"\n'
+        "sensors:\n  - {name: cam, service: camsvc, config: config/sensors/cam.yaml}  # {{vehicle}}\n")
+    (root / "config" / "sensors" / "cam.yaml").write_text("service: camsvc\nname: cam\n# {{rtsp_port}}\n")
+    (root / "config" / "sensors" / "unused.yaml").write_text("service: camsvc\nurl: '{{gcs_ip}}'\n")
+    assert fleet_refs(root) == set()
+    assert not is_fleet(root)
+    # ...and a REAL reference in a referenced file still counts, map form included
+    (root / "config" / "sensors" / "cam.yaml").write_text(
+        "service: camsvc\nname: cam\npeers: '{{map fleet_peer_ids peer_endpoint}}'\n")
+    assert {"fleet_peer_ids", "peer_endpoint"} <= fleet_refs(root)
+
+
+def test_fleet_detection_counts_pins_overlays_and_unparseable_files():
+    """The layers rig composes under a working config vote too, and a file YAML can't parse (a
+    marker STARTING an unquoted value is the classic) falls back to the text scan rather than
+    silently reading as literal."""
+    root = pathlib.Path(tempfile.mkdtemp())
+    (root / "config" / "sensors").mkdir(parents=True)
+    (root / "config" / ".overlays").mkdir()
+    (root / "vehicle.yaml").write_text(
+        "vehicle: t\nvehicle_id: 7\nsensors:\n  - {name: cam, service: camsvc, config: config/sensors/cam.yaml}\n")
+    (root / "config" / "sensors" / "cam.yaml").write_text("service: camsvc\nname: cam\n")
+    assert not is_fleet(root)
+    (root / "config" / ".overlays" / "proj.yaml").write_text("gcs: {ip: '{{gcs_ip}}'}\n")
+    assert fleet_refs(root) == {"gcs_ip"}
+    (root / "config" / "sensors" / "cam.yaml").write_text("service: camsvc\nname: cam\nid: {{vehicle_id}}\n")
+    assert "vehicle_id" in fleet_refs(root)    # unquoted marker -> load error -> text fallback
 
 if __name__ == "__main__":
     failures = 0

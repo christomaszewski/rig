@@ -68,6 +68,9 @@ class RosSettings:
 # The hard ordering partition: every infra stack before every sensor before every autonomy stack,
 # regardless of per-entry `order` (which only sorts within a tier). `down` reverses the whole list.
 TIER_RANK = {"infra": 0, "sensor": 1, "autonomy": 2}
+# Where a tier's instance configs live under config/ — the layout `rig init`, `rig add`, `pkg add`,
+# bake's staging and reconstruct all write. One map, so no path is ever spelled from a guess.
+TIER_SUB = {"infra": "infra", "sensor": "sensors", "autonomy": "autonomy"}
 
 
 @dataclass

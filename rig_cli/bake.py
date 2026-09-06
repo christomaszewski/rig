@@ -27,8 +27,8 @@ from pathlib import Path
 import yaml
 
 from . import RigError, __version__
-from .common import eprint, load_yaml
-from .manifest import project_name, stack_summary
+from .common import eprint, load_yaml, safe_component
+from .manifest import TIER_SUB, project_name, stack_summary
 from .vendor import vendor
 
 
@@ -418,34 +418,48 @@ def _write_bootstrap(staging: Path) -> None:
     boot.chmod(0o755)
 
 
-def _compose_only(manifest, descriptors, env, staging: Path, images: dict, *, pin: bool = True) -> list[dict]:
-    """Per sensor: run the VENDORED launcher's `config` verb, capture the resolved compose, transform it for
-    portable/offline use, and write compose/<name>/. Best-effort — a sensor whose launcher can't run is
-    skipped (the rig-runnable tree still ships). ``pin=False`` (bundle mode) keeps tag refs: ``docker load``
-    can't restore registry digests, so a bundled artifact's integrity is its own sha256, not @sha256 pins —
-    digests are still collected (local-only) as audit metadata."""
+def _compose_only(manifest, descriptors, env, staging: Path, images: dict, *,
+                  pin: bool = True) -> tuple[list[dict], list[str]]:
+    """Per ENABLED instance, in launch order: run the VENDORED launcher's `config` verb, capture the
+    resolved compose, transform it for portable/offline use, and write compose/<name>/. Returns
+    (entries, skipped): a stack whose launcher can't run is skipped and NAMED — the caller decides
+    what a partial capture means (bake withholds the scripts: the rig-runnable tree still ships).
+    ``pin=False`` (bundle mode) keeps tag refs: ``docker load`` can't restore registry digests, so a
+    bundled artifact's integrity is its own sha256, not @sha256 pins — digests are still collected
+    (local-only) as audit metadata."""
     entries: list[dict] = []
+    skipped: list[str] = []
     # Images declared `mirror:` in a rigging.yaml are kept as their registry TAG, not digest-pinned: a
     # mirrored multi-arch tag's digest is fragile (index vs per-arch manifest, re-push churn). Built images
     # (single-arch, stable digest) are still pinned.
     mirrored = {_repo_of(m) for d in descriptors.values() for m in d.mirror}
-    for sensor in manifest.sensors:
+    # The SAME selection `rig up` dispatches: enabled rows only, tiered, `order`-sorted within a
+    # tier — up.sh/down.sh are built from this list in this order. Iterating manifest.sensors
+    # (every row, YAML order) started disabled stacks and ignored `order`.
+    for sensor in manifest.select([], enabled_only=True):
         desc = descriptors[sensor.service]
         repo = staging / "services" / sensor.service
         launcher = repo / desc.launcher
-        config = staging / "config" / "sensors" / f"{sensor.name}.yaml"
+        # _stage_tree lays configs out by TIER (config/infra|sensors|autonomy) — read the row's
+        # own tier, or every infra and autonomy stack fails its render and drops out of up.sh.
+        config = staging / "config" / TIER_SUB[sensor.tier] / f"{sensor.name}.yaml"
         cmd = [str(launcher), str(config), *desc.verb_args("config")]
         try:
-            from .dispatch import service_env  # platform routing: composed tag + override_env, same as up
-            proc = subprocess.run(cmd, env=service_env(env, desc), cwd=str(repo),
+            # The per-INSTANCE env `up` runs with — platform routing AND the compose project. A
+            # launcher may interpolate COMPOSE_PROJECT_NAME into values (a volume name, a container
+            # env var); those freeze into the YAML here, where `-p` at run time can't reach them.
+            from .dispatch import instance_env
+            proc = subprocess.run(cmd, env=instance_env(env, sensor, desc), cwd=str(repo),
                                   capture_output=True, text=True)
             if proc.returncode != 0 or not proc.stdout.strip():
                 eprint(f"  compose-only: skip {sensor.name} (launcher config failed: "
                        f"{(proc.stderr or '').strip()[:140]})")
+                skipped.append(sensor.name)
                 continue
             compose = yaml.safe_load(proc.stdout)
         except Exception as exc:  # noqa: BLE001
             eprint(f"  compose-only: skip {sensor.name} ({exc})")
+            skipped.append(sensor.name)
             continue
 
         _strip_build(compose)
@@ -469,7 +483,7 @@ def _compose_only(manifest, descriptors, env, staging: Path, images: dict, *, pi
             "compose": f"compose/{sensor.name}/docker-compose.yaml",
             "external_volumes": ext,
         })
-    return entries
+    return entries, skipped
 
 
 _RIG_SHIM = '''#!/usr/bin/env python3
@@ -525,11 +539,10 @@ def _stage_tree(staging: Path, manifest, catalog, *, registry: str | None = None
     # reconstructs one then adds a service must not end up with two conventions in one config/.
     # (Through v0.2.47 every row was flattened into config/sensors/; those artifacts stay valid —
     # their rows point where their files are, and reconstruct reads the row, never the convention.)
-    _TIER_SUB = {"infra": "infra", "sensor": "sensors", "autonomy": "autonomy"}
     (staging / "config").mkdir(parents=True, exist_ok=True)
     tier_rows: dict[str, list] = {"infra": [], "sensor": [], "autonomy": []}
     for s in manifest.sensors:
-        sub = _TIER_SUB[s.tier]
+        sub = TIER_SUB[s.tier]
         (staging / "config" / sub).mkdir(parents=True, exist_ok=True)
         shutil.copy2(s.config, staging / "config" / sub / f"{s.name}.yaml")
         tier_rows[s.tier].append({"name": s.name, "service": s.service,
@@ -547,6 +560,14 @@ def _stage_tree(staging: Path, manifest, catalog, *, registry: str | None = None
         veh["platform"] = manifest.platform  # export the same RIG_TARGET_PLATFORM / composed tags
     if manifest.data_dir:
         veh["data_dir"] = manifest.data_dir
+    # The rest of what a `rig up` on the unbaked tree needs to behave like the source did: the
+    # operator's `env:` map (already interpolated, like every other value staged here) and the
+    # capture opt-out — both were dropped, so a re-run in the field exported nothing and captured
+    # into every run on a disk-tight vehicle that had said not to.
+    if manifest.extra_env:
+        veh["env"] = dict(manifest.extra_env)
+    if not manifest.run_capture:
+        veh["run_capture"] = False
     if tier_rows["infra"]:
         veh["infra"] = tier_rows["infra"]
     veh["sensors"] = tier_rows["sensor"]
@@ -563,6 +584,7 @@ def _stage_tree(staging: Path, manifest, catalog, *, registry: str | None = None
 
 def bake(root: Path, manifest, catalog, descriptors, env, tag: str, *, registry: str | None = None,
          bundle_images: bool = False) -> Path:
+    safe_component(tag, what="bake --tag")  # names var/bake/<tag>, which is rmtree'd below
     if registry:
         env = {**env, "RIG_IMAGE_REGISTRY": registry}  # override vehicle.yaml images.registry for this bake
     staging = root / "var" / "bake" / tag
@@ -576,9 +598,22 @@ def bake(root: Path, manifest, catalog, descriptors, env, tag: str, *, registry:
     # 4. compose-only resolved form (best-effort) + scripts + bootstrap. Bundle mode also `docker save`s
     #    the image set into the artifact: zero registry at deploy time, integrity = the artifact's sha256.
     images: dict[str, str | None] = {}
-    entries = _compose_only(manifest, descriptors, env, staging, images, pin=not bundle_images)
+    entries, skipped = _compose_only(manifest, descriptors, env, staging, images, pin=not bundle_images)
+    if skipped:
+        # The compose-only form is ALL or nothing. run.sh prefers up.sh whenever it exists and
+        # never falls back to rig for the stacks it lacks — a partial up.sh silently started a
+        # subset of the vehicle. Withhold the scripts instead: run.sh then drives the bundled rig,
+        # which starts everything (python3 + pyyaml on the vehicle, the documented fallback).
+        eprint(f"  compose-only: {len(skipped)} of {len(entries) + len(skipped)} enabled stacks did "
+               f"not render ({', '.join(skipped)}) — no up.sh/down.sh emitted; run.sh will drive "
+               f"the bundled rig instead")
+        entries = []
     bundle = None
     if bundle_images:
+        if skipped:
+            raise RigError(f"bake --bundle-images: the compose-only rendering must succeed for every "
+                           f"enabled stack, and {', '.join(skipped)} did not (see the skip messages "
+                           f"above)")
         if not images:
             raise RigError("bake --bundle-images: no images captured — the compose-only rendering must "
                            "succeed for every stack you want bundled (see the skip messages above)")
@@ -628,6 +663,7 @@ def bake(root: Path, manifest, catalog, descriptors, env, tag: str, *, registry:
         "pinning": "tag+bundle" if bundle else "digest",
         "sensors": [s.name for s in manifest.sensors],
         "compose_only": [e["sensor"] for e in entries],
+        "compose_only_skipped": skipped,
         "sources": sources,
         "images": {ref: dig for ref, dig in images.items()},
     }
@@ -759,18 +795,42 @@ def is_fleet(root: Path) -> bool:
 
 
 def fleet_refs(root: Path) -> set[str]:
-    from .interpolate import MAP, MARKER
+    """Every {{var}} the deployment would resolve at `rig up`: the manifest's VALUES, each row's
+    config file, and the layers rig composes under a working config (config/.pins, .overlays).
+    Parsed values, never raw text — `rig init`'s own scaffold documents the fleet vocabulary in
+    COMMENTS, and a text scan read a literal, freshly initialized deployment as a fleet (which
+    then refused --bundle-images and --registry). An unreferenced config left in the tree does
+    not vote either. A file rig can't parse falls back to the text scan for that file alone: a
+    marker that starts an unquoted value is a load error at `up` too, and must still read as
+    fleet here rather than vanish."""
+    from .interpolate import MAP, MARKER, referenced_vars
 
-    def _scan(text: str) -> set[str]:
-        # MARKER does not match `{{map a b}}` — a map-ONLY deployment must still read as fleet,
-        # so both of the form's var names are harvested too.
+    def _scan_text(text: str) -> set[str]:
         return set(MARKER.findall(text)) | {g for m in MAP.finditer(text) for g in m.groups()}
 
-    refs: set[str] = _scan((root / "vehicle.yaml").read_text())
-    cfg = root / "config"
-    if cfg.is_dir():
-        for path in sorted(cfg.rglob("*.yaml")):
-            refs |= _scan(path.read_text())
+    def _refs_of(path: Path) -> set[str]:
+        try:
+            return referenced_vars(load_yaml(path))
+        except RigError:
+            return _scan_text(path.read_text())
+
+    veh = root / "vehicle.yaml"
+    refs: set[str] = _refs_of(veh)
+    try:
+        doc = load_yaml(veh)
+    except RigError:
+        doc = {}
+    for tier in ("infra", "sensors", "autonomy"):
+        for row in doc.get(tier) or []:
+            if isinstance(row, dict) and row.get("config"):
+                cfg = root / str(row["config"])
+                if cfg.is_file():
+                    refs |= _refs_of(cfg)
+    for layer in (".pins", ".overlays"):
+        d = root / "config" / layer
+        if d.is_dir():
+            for path in sorted(d.rglob("*.yaml")):
+                refs |= _refs_of(path)
     return refs
 
 
@@ -793,6 +853,7 @@ def bake_fleet(root: Path, tag: str, *, registry: str | None = None,
         raise RigError("bake: --registry cannot override a fleet artifact (values resolve "
                        "per-vehicle) — set images.registry in vehicle.yaml, or per vehicle in "
                        "vehicle.local.yaml")
+    safe_component(tag, what="bake --tag")  # names var/bake/<tag>, which is rmtree'd below
     refs = sorted(fleet_refs(root))
     raw = load_yaml(root / "vehicle.yaml")
 

@@ -233,6 +233,7 @@ def _deployment_fixture(launcher_body: str):
 _COMPOSE_LAUNCHER = """\
 #!/bin/sh
 [ "$2" = config ] || exit 0
+[ -f "$1" ] || { echo "no such config: $1" >&2; exit 7; }
 printf 'services:\\n  core:\\n    image: reg.test/foo:t1\\n'
 """
 
@@ -556,6 +557,216 @@ def test_mirror_declared_refs_stay_tags_while_built_refs_pin():
     assert meta["images"]["reg.test/foo:t1"] == "reg.test/foo@sha256:deadbeef"
     assert meta["images"]["thirdparty/zenoh:1.0"] is None   # recorded unpinned in the audit map
 
+# --- v0.2.51: path hygiene + bake correctness (review 2026-09-04, findings 1/5/6/8/11/12/13) ------
+
+def _bake_quiet(root, m, cat, descs, env, tag, **kw):
+    """bake() with digest resolution stubbed and stderr swallowed."""
+    import contextlib
+    import io
+    from unittest.mock import patch
+
+    import rig_cli.bake as bake_mod
+    with patch.object(bake_mod, "_resolve_digest", return_value=None), \
+            contextlib.redirect_stderr(io.StringIO()):
+        return bake_mod.bake(root, m, cat, descs, env, tag, **kw)
+
+
+def test_bake_tag_must_be_a_single_path_component():
+    """`--tag` names var/bake/<tag>, which bake rmtree's before staging. pathlib joins an absolute
+    tag to ITSELF and a `../` tag walks out of var/bake — so `--tag ../../config` deleted the
+    deployment's config/ and `--tag /etc/rig` would have deleted that. Refused before any write."""
+    from unittest.mock import patch
+
+    from rig_cli import RigError
+    import rig_cli.bake as bake_mod
+    root, m, cat, descs = _deployment_fixture(_COMPOSE_LAUNCHER)
+    (root / "var" / "bake").mkdir(parents=True)
+    for bad in ("../../config", "/etc/rig", "a/b", "", ".", "..", " v1"):
+        with patch.object(bake_mod.shutil, "rmtree") as rm:
+            try:
+                bake_mod.bake(root, m, cat, descs, {}, bad)
+            except RigError as exc:
+                assert "single path component" in str(exc), bad
+            else:
+                raise AssertionError(f"tag {bad!r} accepted")
+            assert not rm.called, f"tag {bad!r} reached rmtree"
+    assert (root / "config" / "sensors" / "a.yaml").is_file()   # nothing was deleted
+
+
+def test_compose_only_reads_each_row_from_its_tier_dir_and_follows_dispatch_order():
+    """_stage_tree lays configs out by tier; _compose_only read config/sensors/ for every row, so
+    every infra and autonomy stack failed its render and vanished from up.sh — a 2-infra +
+    1-sensor deployment shipped an artifact that started the sensor alone. And the rows were
+    iterated in YAML order with no enabled filter: a disabled stack was started, and `order`
+    within a tier was ignored (down.sh inherited the reverse of the wrong order)."""
+    from rig_cli.bake import unbake
+    from rig_cli.catalog import load_catalog
+    from rig_cli.common import load_yaml
+    from rig_cli.descriptor import load_descriptor
+    from rig_cli.manifest import load_manifest
+
+    svc = pathlib.Path(tempfile.mkdtemp())
+    (svc / "rigging.yaml").write_text("service: demo\nlauncher: demo-up\nlaunch_surface: [demo-up]\n")
+    (svc / "demo-up").write_text(_COMPOSE_LAUNCHER)   # checks `-f "$1"`: a wrong path FAILS
+    (svc / "demo-up").chmod(0o755)
+    root = pathlib.Path(tempfile.mkdtemp())
+    for sub in ("infra", "sensors", "autonomy"):
+        (root / "config" / sub).mkdir(parents=True)
+    (root / "vehicle.yaml").write_text(
+        "vehicle: t\nvehicle_id: 7\n"
+        "infra: [{name: router, service: demo, config: config/infra/router.yaml, order: 0}]\n"
+        "sensors:\n"
+        "  - {name: late, service: demo, config: config/sensors/late.yaml, order: 90}\n"
+        "  - {name: parked, service: demo, config: config/sensors/parked.yaml, enabled: false, order: 1}\n"
+        "  - {name: early, service: demo, config: config/sensors/early.yaml, order: 10}\n"
+        "autonomy: [{name: planner, service: demo, config: config/autonomy/planner.yaml, order: 10}]\n")
+    (root / "services.yaml").write_text(f"services: {{demo: {{path: {svc}}}}}\n")
+    for sub, n in (("infra", "router"), ("sensors", "late"), ("sensors", "parked"),
+                   ("sensors", "early"), ("autonomy", "planner")):
+        (root / "config" / sub / f"{n}.yaml").write_text(f"service: demo\nname: {n}\n")
+    m, cat = load_manifest(root), load_catalog(root)
+    artifact = _bake_quiet(root, m, cat, {"demo": load_descriptor("demo", svc)},
+                           {"PATH": os.environ["PATH"]}, "t")
+    tree = unbake(artifact, pathlib.Path(tempfile.mkdtemp()))
+    meta = load_yaml(tree / "metadata.yaml")
+    assert meta["compose_only"] == ["router", "early", "late", "planner"]   # == `rig up`'s order
+    assert meta["compose_only_skipped"] == []
+    up = (tree / "up.sh").read_text()
+    assert '"parked-vehicle-7"' not in up                                # disabled: staged, never started
+    assert (tree / "config" / "sensors" / "parked.yaml").is_file()      # ...but still in the tree
+    assert (up.index('"router-vehicle-7"') < up.index('"early-vehicle-7"')
+            < up.index('"late-vehicle-7"') < up.index('"planner-vehicle-7"'))
+    down = (tree / "down.sh").read_text()
+    assert (down.index('"planner-vehicle-7"') < down.index('"late-vehicle-7"')
+            < down.index('"early-vehicle-7"') < down.index('"router-vehicle-7"'))
+
+
+def test_compose_only_is_all_or_nothing():
+    """run.sh prefers up.sh whenever it exists and never falls back to rig for the stacks it
+    lacks, so a PARTIAL compose-only form silently started a subset of the vehicle. One enabled
+    stack that can't render now withholds the scripts (run.sh drives the bundled rig, which
+    starts everything), names the stack in metadata, and makes --bundle-images refuse."""
+    from rig_cli import RigError
+    from rig_cli.bake import unbake
+    from rig_cli.catalog import load_catalog
+    from rig_cli.common import load_yaml
+    from rig_cli.descriptor import load_descriptor
+    from rig_cli.manifest import load_manifest
+
+    svc = pathlib.Path(tempfile.mkdtemp())
+    (svc / "rigging.yaml").write_text("service: demo\nlauncher: demo-up\nlaunch_surface: [demo-up]\n")
+    (svc / "demo-up").write_text(  # renders for `a`, refuses for `b` (a launcher with no docker, say)
+        '#!/bin/sh\n[ "$2" = config ] || exit 0\ncase "$1" in *b.yaml) echo nope >&2; exit 3;; esac\n'
+        "printf 'services:\\n  core:\\n    image: reg.test/foo:t1\\n'\n")
+    (svc / "demo-up").chmod(0o755)
+    root = pathlib.Path(tempfile.mkdtemp())
+    (root / "config" / "sensors").mkdir(parents=True)
+    (root / "vehicle.yaml").write_text(
+        "vehicle: t\nsensors:\n  - {name: a, service: demo, config: config/sensors/a.yaml}\n"
+        "  - {name: b, service: demo, config: config/sensors/b.yaml}\n")
+    (root / "services.yaml").write_text(f"services: {{demo: {{path: {svc}}}}}\n")
+    for n in "ab":
+        (root / "config" / "sensors" / f"{n}.yaml").write_text(f"service: demo\nname: {n}\n")
+    m, cat = load_manifest(root), load_catalog(root)
+    descs = {"demo": load_descriptor("demo", svc)}
+    artifact = _bake_quiet(root, m, cat, descs, {"PATH": os.environ["PATH"]}, "t")
+    tree = unbake(artifact, pathlib.Path(tempfile.mkdtemp()))
+    meta = load_yaml(tree / "metadata.yaml")
+    assert meta["compose_only"] == [] and meta["compose_only_skipped"] == ["b"]
+    assert not (tree / "up.sh").exists() and not (tree / "down.sh").exists()   # no partial startup
+    assert (tree / "rig").exists() and (tree / "run.sh").exists()              # the rig fallback ships
+    try:
+        _bake_quiet(root, m, cat, descs, {"PATH": os.environ["PATH"]}, "t2", bundle_images=True)
+    except RigError as exc:
+        assert "b did not" in str(exc)
+    else:
+        raise AssertionError("--bundle-images accepted a partial capture")
+
+
+def test_compose_capture_renders_with_the_instance_env():
+    """Capture rendered with service_env() alone — no COMPOSE_PROJECT_NAME — so a launcher that
+    interpolates the project into a VALUE (a container env var, a volume name) froze the wrong
+    one into the YAML, where the `-p` on every generated verb can't reach it."""
+    from rig_cli.bake import unbake
+    from rig_cli.common import load_yaml
+    from rig_cli.manifest import load_manifest
+
+    launcher = ('#!/bin/sh\n[ "$2" = config ] || exit 0\n'   # double-quoted: the SHELL expands it,
+                'printf "services:\\n  core:\\n    image: i\\n    environment:\\n"'  # as compose would
+                '"      PROJECT: ${COMPOSE_PROJECT_NAME:-standalone}\\n"\n')
+    root, m, cat, descs = _deployment_fixture(launcher)
+    (root / "vehicle.yaml").write_text(
+        "vehicle: t\nvehicle_id: 7\nsensors: [{name: a, service: demo, config: config/sensors/a.yaml}]\n")
+    m = load_manifest(root)
+    artifact = _bake_quiet(root, m, cat, descs, {"PATH": os.environ["PATH"], "VEHICLE_ID": "7"}, "t")
+    tree = unbake(artifact, pathlib.Path(tempfile.mkdtemp()))
+    compose = load_yaml(tree / "compose" / "a" / "docker-compose.yaml")
+    assert compose["services"]["core"]["environment"]["PROJECT"] == "a-vehicle-7"
+
+
+def test_staged_tree_round_trips_env_and_run_capture():
+    """_stage_tree rebuilt vehicle.yaml without `env:` or `run_capture:` — a re-run on the unbaked
+    tree exported nothing to the launchers and captured into every run on a vehicle that had
+    opted out."""
+    from rig_cli.bake import unbake
+    from rig_cli.manifest import load_manifest
+
+    root, m, cat, descs = _deployment_fixture(_COMPOSE_LAUNCHER)
+    (root / "vehicle.yaml").write_text(
+        "vehicle: t\nrun_capture: false\nenv: {API_ENDPOINT: 'http://internal'}\n"
+        "sensors: [{name: a, service: demo, config: config/sensors/a.yaml}]\n")
+    m = load_manifest(root)
+    assert m.extra_env == {"API_ENDPOINT": "http://internal"} and m.run_capture is False
+    artifact = _bake_quiet(root, m, cat, descs, {"PATH": os.environ["PATH"]}, "t")
+    out = load_manifest(unbake(artifact, pathlib.Path(tempfile.mkdtemp())))
+    assert out.extra_env == {"API_ENDPOINT": "http://internal"}
+    assert out.run_capture is False
+
+
+def test_cli_round_trip_init_add_bake_starts_exactly_the_enabled_rows():
+    """The whole authoring path through the real CLI: a literal `rig init --vehicle-id`, a
+    path-routed `rig add`, then `rig artifact bake` — and the artifact's up.sh must start exactly
+    what `rig up` would. A generated tree carries the fleet vocabulary in its COMMENTS, which
+    used to make this a fleet bake with no up.sh at all."""
+    import contextlib
+    import io
+    import subprocess
+
+    from rig_cli.bake import unbake
+    from rig_cli.common import load_yaml
+
+    svc = pathlib.Path(tempfile.mkdtemp()) / "demo"
+    (svc / "config").mkdir(parents=True)
+    (svc / "rigging.yaml").write_text("service: demo\nlauncher: demo-up\nlaunch_surface: [demo-up]\n"
+                                      "examples: [config/demo.example.yaml]\n")
+    (svc / "config" / "demo.example.yaml").write_text("service: demo\n")
+    (svc / "demo-up").write_text(_COMPOSE_LAUNCHER)
+    (svc / "demo-up").chmod(0o755)
+    root = pathlib.Path(tempfile.mkdtemp()) / "veh"
+    rig = str(pathlib.Path(__file__).resolve().parent.parent / "rig")
+    env = {**os.environ, "RIG_HOME": tempfile.mkdtemp()}
+
+    def run(*args):
+        p = subprocess.run([sys.executable, rig, *args], capture_output=True, text=True, env=env)
+        assert p.returncode == 0, p.stderr
+        return p
+
+    run("init", str(root), "--vehicle-id", "7", "--no-git")
+    run("--root", str(root), "add", str(svc), "--as", "cam")
+    # A path add writes a COMMENTED menu row and no config — the operator uncomments the row when
+    # the vehicle really runs the stack, and `rig fetch` materializes its config from the example.
+    veh = root / "vehicle.yaml"
+    veh.write_text(veh.read_text().replace("  # - { name: cam,", "  - { name: cam,", 1))
+    run("--root", str(root), "fetch")
+    assert (root / "config" / "sensors" / "cam.yaml").is_file()
+    from rig_cli.bake import is_fleet
+    assert not is_fleet(root)                       # comments in the scaffold are not references
+    with contextlib.redirect_stderr(io.StringIO()):
+        run("--root", str(root), "artifact", "bake", "--tag", "v1")
+    tree = unbake(root / "var" / "artifacts" / "v1.tar.gz", pathlib.Path(tempfile.mkdtemp()))
+    meta = load_yaml(tree / "metadata.yaml")
+    assert meta["compose_only"] == ["cam"] and meta["compose_only_skipped"] == []
+    assert 'docker compose -p "cam-vehicle-7"' in (tree / "up.sh").read_text()
 
 if __name__ == "__main__":
     failures = 0

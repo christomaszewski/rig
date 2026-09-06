@@ -470,6 +470,103 @@ def test_reconstruct_registry_localizes_images_registry():
     except RigError as exc:
         assert "HOST" in str(exc) and not (dest.parent / "t2").exists()  # refused BEFORE extraction
 
+# --- v0.2.51: reconstruction never writes outside its own tree (findings 3, 14) ---------------
+
+def test_overlay_redirects_rows_that_point_outside_the_tree():
+    """A source deployment's rows may point ANYWHERE — an absolute path, a ../shared config —
+    and the snapshot carries those rows verbatim. `tree / <absolute>` IS the absolute path, so
+    the overlay wrote the run's historical config over the operator's CURRENT one in the
+    original deployment. Those land in the tree's own tier layout now, and the row follows."""
+    from rig_cli.manifest import load_manifest
+    base = pathlib.Path(tempfile.mkdtemp())
+    shared = base / "shared"
+    shared.mkdir()
+    for n in ("cam", "nav"):
+        (shared / f"{n}.yaml").write_text(f"service: x\nname: {n}\nvalue: CURRENT\n")
+    snap = base / "snap"
+    (snap / "rendered").mkdir(parents=True)
+    (snap / "vehicle.yaml").write_text(
+        "vehicle: veh\nvehicle_id: 1\n"
+        f"sensors:\n- {{name: cam, service: x, config: {shared / 'cam.yaml'}, enabled: true, order: 10}}\n"
+        "autonomy:\n- {name: nav, service: x, config: ../shared/nav.yaml, enabled: false, order: 999}\n")
+    for n in ("cam", "nav"):
+        (snap / "rendered" / f"{n}.yaml").write_text(f"service: x\nname: {n}\nvalue: HISTORICAL\n")
+    tree = base / "tree"
+    tree.mkdir()
+    written = reconstruct._overlay(tree, snap)
+    assert set(written) == {"vehicle.yaml", "config/sensors/cam.yaml", "config/autonomy/nav.yaml"}
+    for n in ("cam", "nav"):
+        assert "CURRENT" in (shared / f"{n}.yaml").read_text()       # the source is untouched
+    assert "HISTORICAL" in (tree / "config" / "sensors" / "cam.yaml").read_text()
+    assert "HISTORICAL" in (tree / "config" / "autonomy" / "nav.yaml").read_text()
+    rows = {r["name"]: r["config"] for tier in ("sensors", "autonomy")
+            for r in load_yaml(tree / "vehicle.yaml")[tier]}
+    assert rows == {"cam": "config/sensors/cam.yaml", "nav": "config/autonomy/nav.yaml"}
+
+
+def test_overlay_keeps_a_contained_row_path_verbatim():
+    """The redirect is for escapes only: a row that already points inside the tree keeps its own
+    path — reconstruct reads the row, never a convention (pre-v0.2.48 artifacts flattened every
+    tier into config/sensors/ and must keep working)."""
+    base = pathlib.Path(tempfile.mkdtemp())
+    snap = base / "snap"
+    (snap / "rendered").mkdir(parents=True)
+    (snap / "vehicle.yaml").write_text(
+        "vehicle: veh\nautonomy:\n- {name: nav, service: x, config: config/sensors/nav.yaml, "
+        "enabled: false, order: 999}\n")
+    (snap / "rendered" / "nav.yaml").write_text("service: x\nname: nav\n")
+    tree = base / "tree"
+    tree.mkdir()
+    assert reconstruct._overlay(tree, snap) == ["vehicle.yaml", "config/sensors/nav.yaml"]
+    assert (tree / "config" / "sensors" / "nav.yaml").is_file()
+    assert "config: config/sensors/nav.yaml" in (tree / "vehicle.yaml").read_text()   # row untouched
+
+
+def test_reconstruct_into_an_existing_empty_dir_makes_it_the_root():
+    """--into accepted an empty directory and then shutil.move'd the tree INTO it:
+    dest/<tag>/vehicle.yaml beside a dest/vehicle.local.yaml, and instructions naming dest."""
+    root, m = _deployment()
+    rid, data = _open(m, root)
+    dest = pathlib.Path(tempfile.mkdtemp()) / "tree"
+    dest.mkdir()                                                   # exists, empty
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        assert reconstruct.cmd_reconstruct(None, run_ref=str(data / "runs" / rid),
+                                           into=str(dest), config=None, no_import=True) == 0
+    assert (dest / "vehicle.yaml").is_file() and (dest / "rig").is_file()
+    assert not [p for p in dest.iterdir() if p.is_dir() and (p / "vehicle.yaml").exists()]  # no nesting
+
+
+def test_reconstruct_refuses_a_file_as_into():
+    root, m = _deployment()
+    rid, data = _open(m, root)
+    dest = pathlib.Path(tempfile.mkdtemp()) / "not-a-dir"
+    dest.write_text("x")
+    try:
+        with contextlib.redirect_stderr(io.StringIO()):
+            reconstruct.cmd_reconstruct(None, run_ref=str(data / "runs" / rid), into=str(dest),
+                                        config=None, no_import=True)
+    except RigError as exc:
+        assert "empty directory" in str(exc)
+    else:
+        raise AssertionError("expected RigError")
+
+
+def test_repoint_rows_round_trips_a_hand_shaped_manifest():
+    """The redirect line-edits the generated single-line row form; a hand-shaped (block-form)
+    vehicle.yaml has no such line, so it round-trips through YAML instead — comments go, the
+    row lands on the contained path, and nothing else about the document changes."""
+    veh = pathlib.Path(tempfile.mkdtemp()) / "vehicle.yaml"
+    veh.write_text(
+        "vehicle: veh\nvehicle_id: 3\n"
+        "sensors:\n  - name: cam\n    service: x\n    config: /abs/cam.yaml\n    enabled: true\n"
+        "    order: 10\n  - {name: gnss, service: y, config: config/sensors/gnss.yaml, order: 20}\n")
+    reconstruct._repoint_rows(veh, {"cam": "config/sensors/cam.yaml"})
+    doc = load_yaml(veh)
+    assert doc["vehicle_id"] == 3
+    rows = {r["name"]: r for r in doc["sensors"]}
+    assert rows["cam"]["config"] == "config/sensors/cam.yaml" and rows["cam"]["order"] == 10
+    assert rows["gnss"]["config"] == "config/sensors/gnss.yaml"           # untouched neighbour
+
 
 if __name__ == "__main__":
     failures = 0

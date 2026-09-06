@@ -25,13 +25,16 @@ snapshot's own content-addressing is re-verified (the dir name IS the digest of 
 from __future__ import annotations
 
 import datetime
+import re
 import shutil
+
+import yaml
 import tarfile
 import tempfile
 from pathlib import Path
 
 from . import RigError
-from .common import eprint, load_yaml
+from .common import contained, eprint, load_yaml
 
 
 def _run_manifest(run_dir: Path) -> dict:
@@ -90,22 +93,57 @@ def _overlay(tree: Path, snap_dir: Path) -> list[str]:
     if snap_veh.exists():
         shutil.copy2(snap_veh, tree / "vehicle.yaml")
         written.append("vehicle.yaml")
-    rows = {}
+    rows: dict[str, tuple[str, str]] = {}   # name -> (row's config path, tier subdir)
     try:
         doc = load_yaml(tree / "vehicle.yaml")
         for tier in ("infra", "sensors", "autonomy"):
             for row in doc.get(tier) or []:
                 if isinstance(row, dict) and row.get("name") and row.get("config"):
-                    rows[str(row["name"])] = str(row["config"])
+                    rows[str(row["name"])] = (str(row["config"]), tier)
     except RigError:
         pass
+    redirected: dict[str, str] = {}
     for rendered in sorted((snap_dir / "rendered").glob("*.yaml")):
-        rel = rows.get(rendered.stem, f"config/sensors/{rendered.stem}.yaml")
+        rel, sub = rows.get(rendered.stem, (f"config/sensors/{rendered.stem}.yaml", "sensors"))
         dest = tree / rel
+        if not contained(dest, tree):
+            # The snapshot's rows are the SOURCE deployment's rows, and a source row may point
+            # anywhere — an absolute path, a ../shared config. Joined onto the reconstructed tree
+            # that lands OUTSIDE it (an absolute path wins the join outright): onto the original
+            # deployment, overwriting the operator's CURRENT config with a historical one. Land
+            # it in the tree's own tier layout instead and re-point the row at it.
+            rel = f"config/{sub}/{rendered.stem}.yaml"
+            dest = tree / rel
+            redirected[rendered.stem] = rel
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(rendered, dest)
         written.append(rel)
+    if redirected:
+        _repoint_rows(tree / "vehicle.yaml", redirected)
     return written
+
+
+def _repoint_rows(veh: Path, configs: dict[str, str]) -> None:
+    """Rewrite `config:` on the named rows. Line-edit the generated single-line form (the shape
+    every rig-authored tree has, comments intact); a hand-shaped file is round-tripped through
+    YAML instead — a reconstruction, not the operator's own copy, so losing its comments beats
+    leaving a row that points out of the tree."""
+    lines = veh.read_text().splitlines()
+    pending = dict(configs)
+    for i, line in enumerate(lines):
+        for name, rel in list(pending.items()):
+            if f"name: {name}," in line and "config: " in line:
+                lines[i] = re.sub(r"config: [^,}]+", f"config: {rel}", line)
+                del pending[name]
+    if not pending:
+        veh.write_text("\n".join(lines) + "\n")
+        return
+    doc = load_yaml(veh)
+    for tier in ("infra", "sensors", "autonomy"):
+        for row in doc.get(tier) or []:
+            if isinstance(row, dict) and str(row.get("name")) in pending:
+                row["config"] = pending[str(row["name"])]
+    veh.write_text(yaml.safe_dump(doc, sort_keys=False))
 
 
 def _player_rows(tree: Path) -> list[str]:
@@ -259,8 +297,8 @@ def cmd_reconstruct(root: Path | None, *, run_ref: str, into: str | None,
                "extracting unverified")
 
     dest = Path(into).expanduser() if into else Path.cwd() / f"{run_dir.name}-tree"
-    if dest.exists() and any(dest.iterdir()):
-        raise RigError(f"reconstruct: {dest} exists and is not empty — pick --into")
+    if dest.exists() and (not dest.is_dir() or any(dest.iterdir())):
+        raise RigError(f"reconstruct: {dest} exists and is not an empty directory — pick --into")
     work = Path(tempfile.mkdtemp(prefix="rig-reconstruct-"))
     try:
         with tarfile.open(tarpath) as tf:
@@ -270,6 +308,11 @@ def cmd_reconstruct(root: Path | None, *, run_ref: str, into: str | None,
             raise RigError(f"reconstruct: {tarpath} does not contain a single tree "
                            f"({len(tops)} top-level dirs) — not a rig artifact?")
         dest.parent.mkdir(parents=True, exist_ok=True)
+        if dest.exists():
+            # Validated empty above. shutil.move onto an EXISTING directory nests the source
+            # inside it (dest/<tag>/vehicle.yaml), while the localization below and the printed
+            # instructions both address dest itself — remove the shell so the tree IS dest.
+            dest.rmdir()
         shutil.move(str(tops[0]), str(dest))
     finally:
         shutil.rmtree(work, ignore_errors=True)

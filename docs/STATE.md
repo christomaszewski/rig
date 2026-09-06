@@ -1,8 +1,57 @@
 # rig — project state & handoff (resume here)
 
 > Snapshot for picking the project up cold in a new session. Read this first, then `CHEATSHEET.md` /
-> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.2.50**,
-> branch **`main`**, 684 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.2.51**,
+> branch **`main`**, 699 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> **v0.2.51 (2026-09-06) — path hygiene + bake correctness** (the first of the review-2026-09-04
+> releases: findings 1, 2, 3, 5, 6, 8, 11, 12, 13, 14 — all reproduced against v0.2.50 first, and
+> each reviewer probe now trips its bug-assertion). Two groups, one release, because both are
+> "the artifact or the tree is silently not what you think".
+> **Path hygiene — data loss on documented commands.** `common.safe_component` / `contained` are
+> the two new primitives. (1) `bake --tag` names `var/bake/<tag>`, which bake rmtree's first, and
+> pathlib joins an absolute tag to ITSELF: `--tag ../../config` deleted the deployment's config/,
+> `--tag /etc/rig` would have deleted that — refused before any write, both `bake` and
+> `bake_fleet`. (2) `rig vendor <svc>` with no `--from` reads the services.yaml route, which
+> after a registry install IS `services/<svc>`; `vendor()` rmtree'd the target and then read the
+> surface from it. Now: a source that resolves to the target is refused up front, and every
+> refresh builds the copy BESIDE the target and swaps it in last — a source missing one declared
+> file can no longer leave the working copy deleted with the error still to come. (3)
+> `reconstruct._overlay` joined each snapshot row's `config:` onto the tree; a source row may be
+> absolute or `../shared/…`, both of which land OUTSIDE the tree — on the original deployment,
+> overwriting the operator's current config with a historical one. Escapes now land in the
+> tree's tier layout and `_repoint_rows` follows (line edit in the generated form, YAML round-
+> trip otherwise); a contained row keeps its own path — reconstruct still reads the row, never a
+> convention. (14) `--into <existing empty dir>` was moved INTO, nesting the tree one level under
+> everything that addressed it; the validated-empty shell is removed first, and a file is refused.
+> **Bake correctness — every multi-tier artifact was wrong.** (5) `_stage_tree` lays configs out by
+> tier (since v0.2.48) but `_compose_only` read `config/sensors/` for every row, so EVERY infra and
+> autonomy stack failed its render and dropped out of up.sh — a 2-infra + 1-sensor vehicle
+> shipped an artifact that started the sensor alone; (6) rows were iterated with no enabled
+> filter, so a disabled stack was started; (11) in YAML order, so `order` within a tier was
+> ignored and down.sh inherited the reverse of the wrong order. One change: `_compose_only`
+> iterates `manifest.select([], enabled_only=True)` — the selection `rig up` dispatches — and
+> reads `config/<TIER_SUB>/<name>.yaml` (`TIER_SUB` now lives beside `TIER_RANK` in manifest.py;
+> bake and reconstruct share it). And the compose-only form is ALL or nothing: run.sh prefers
+> up.sh whenever it exists and never falls back to rig for the stacks it lacks, so a partial
+> up.sh silently started a subset — one enabled stack that can't render now withholds the
+> scripts (run.sh drives the bundled rig, which starts everything), names it in
+> `metadata.compose_only_skipped`, and makes `--bundle-images` refuse. (12) capture rendered with
+> `service_env` alone; a launcher that interpolates COMPOSE_PROJECT_NAME into a VALUE froze the
+> wrong one where `-p` can't reach — `instance_env` now, which also retracts v0.2.50's note that
+> bake was fine (it was fine for the top-level `name:` only). (13) `env:` and `run_capture:` are
+> staged; both were dropped, so a field re-run exported nothing and captured into every run on a
+> vehicle that had opted out. (8) `fleet_refs` read raw text: rig init's own scaffold documents
+> the fleet vocabulary in COMMENTS, so a literal `rig init --vehicle-id 7` tree was a fleet and
+> refused `--bundle-images`/`--registry`. It reads parsed VALUES now (`interpolate.referenced_vars`,
+> whose docstring already named fleet detection as a consumer): vehicle.yaml, each row's config,
+> config/.pins and .overlays — an unreferenced file doesn't vote, and a file YAML can't parse
+> falls back to the text scan for that file alone. NOTE a marker-identity deployment (the
+> `rig init` default without --vehicle-id) is STILL fleet-shaped, by the settled doctrine: its
+> identity can't resolve from the committed tree. 15 new tests — the tier-order fixture's
+> launcher now checks `-f "$1"` (it passed by never reading its config), and the CLI round trip
+> the review named as the top coverage gap (literal init → add → fetch → bake → up.sh) is in.
+> Total 699. Remaining from the review — C (4, 17, 18), D (7, 15, 16), E (9, 10), F (test
+> isolation) — are unchanged and their probes still reproduce.
 > **v0.2.50 (2026-09-04) — `rig status` probed the wrong compose project** (field report: a bench
 > deployment with every container up and serving reported `down`, `0/0`, on all three rows). `up`
 > and `down` build their launcher env as `service_env(...)` PLUS the `COMPOSE_PROJECT_NAME` rig

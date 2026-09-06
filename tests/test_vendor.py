@@ -101,6 +101,47 @@ def test_requires_launch_surface_and_errors_on_missing_file():
     else:
         raise AssertionError("expected RigError for missing surface file")
 
+# --- v0.2.51: the vendored copy is never deleted before the new one is whole (finding 2) -------
+
+def test_vendor_refuses_its_own_vendored_copy_as_source():
+    """After a registry install services.yaml routes the service at services/<service> — the
+    vendored copy itself — and `rig vendor <service>` defaults --from to that route. vendor()
+    deleted the target first and then read the surface from it: the launcher was gone and the
+    error came after. Refuse up front, with nothing touched."""
+    root = pathlib.Path(tempfile.mkdtemp())
+    target = vendor("demo", _make_source(), root)
+    before = sorted(p.name for p in target.rglob("*"))
+    try:
+        vendor("demo", target, root)
+    except RigError as exc:
+        assert "IS the source" in str(exc) and "--from" in str(exc)
+    else:
+        raise AssertionError("expected RigError")
+    assert (target / "demo-up").exists()
+    assert sorted(p.name for p in target.rglob("*")) == before   # byte-for-byte the same tree
+
+
+def test_revendor_from_an_incomplete_source_keeps_the_old_copy():
+    """The same ordering bug from the other side: a source missing ONE declared surface file
+    raised the "entry missing" error only after the old copy was rmtree'd. The copy is now built
+    beside the target and swapped in last, so a bad refresh leaves the working vendored dir as
+    it was."""
+    root = pathlib.Path(tempfile.mkdtemp())
+    good = _make_source()
+    target = vendor("demo", good, root)
+    stamp_before = (target / ".vendored.yaml").read_text()
+    broken = _make_source()
+    (broken / "docker" / "compose" / "compose.deploy.yaml").unlink()   # declared, absent
+    try:
+        vendor("demo", broken, root)
+    except RigError as exc:
+        assert "missing" in str(exc)
+    else:
+        raise AssertionError("expected RigError")
+    assert (target / "demo-up").exists()
+    assert (target / "docker" / "compose" / "compose.deploy.yaml").exists()
+    assert (target / ".vendored.yaml").read_text() == stamp_before       # the old stamp, not a new one
+    assert not [p for p in target.parent.iterdir() if p.name.startswith(".demo.vendoring-")]  # no litter
 
 if __name__ == "__main__":
     failures = 0
