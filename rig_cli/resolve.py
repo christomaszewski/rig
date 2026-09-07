@@ -22,16 +22,25 @@ from .manifest import Manifest, Sensor
 
 def deep_merge(base: dict, patch: dict) -> dict:
     """Recursively merge ``patch`` onto ``base``. Mappings merge; scalars and lists replace; a ``None``
-    value deletes the key. Returns a new dict; inputs are untouched."""
+    value deletes the key -- in a mapping the patch INTRODUCES too (a key set to null simply does
+    not exist there), so a null-valued variable in a patch never lands as a literal null. Returns a
+    new dict; inputs are untouched."""
     out = dict(base)
     for key, value in patch.items():
         if value is None:
             out.pop(key, None)
         elif isinstance(value, dict) and isinstance(out.get(key), dict):
             out[key] = deep_merge(out[key], value)
+        elif isinstance(value, dict):
+            out[key] = _without_nulls(value)
         else:  # scalar or list -> replace (keyed list-merge is a v2 enhancement)
             out[key] = value
     return out
+
+
+def _without_nulls(value: dict) -> dict:
+    return {k: (_without_nulls(v) if isinstance(v, dict) else v)
+            for k, v in value.items() if v is not None}
 
 
 def structural_diff(base: dict, current: dict) -> dict:
@@ -63,7 +72,8 @@ def overlay_payload_path(root: Path, ref: str) -> Path:
     return root / "config" / ".overlays" / (ref.replace("/", "--").replace("@", "--") + ".yaml")
 
 
-def _layered_dict(sensor: Sensor, root: Path, variables: dict | None = None) -> dict:
+def _layered_dict(sensor: Sensor, root: Path, variables: dict | None = None,
+                  extra_overrides: dict | None = None) -> dict:
     """The four-layer merge, honoring LOCAL BEATS OVERLAYS: pinned base ⊕ overlays (bound order) ⊕
     the working file's local delta ⊕ row overrides — then ONE `{{var}}` interpolation pass
     (vehicle-local vars; unknown var = hard error). Without a pinned base (hand-authored
@@ -92,6 +102,12 @@ def _layered_dict(sensor: Sensor, root: Path, variables: dict | None = None) -> 
         cfg = dict(working)
     if sensor.overrides:
         cfg = deep_merge(cfg, sensor.overrides)
+    if extra_overrides:  # a VERB-time layer (rig replay's source patch): on top of everything.
+        # Interpolated BEFORE the merge so a variable that resolves to None deletes its key
+        # (deep_merge's null-deletes contract): the launcher's own default then applies.
+        patch = substitute(extra_overrides, variables, where=f"{sensor.name}: replay patch") \
+            if variables is not None else extra_overrides
+        cfg = deep_merge(cfg, patch)
     if variables is not None:
         cfg = substitute(cfg, variables, where=f"{sensor.name}: config")
     cfg.setdefault("service", sensor.service)
@@ -115,17 +131,23 @@ def resolved_dict(sensor: Sensor, root: Path | None = None) -> dict:
     return cfg
 
 
-def materialize(sensor: Sensor, root: Path, variables: dict | None = None) -> Path:
+def materialize(sensor: Sensor, root: Path, variables: dict | None = None,
+                extra_overrides: dict | None = None, out_subdir: str | None = None) -> Path:
     """Return the config path to hand the launcher. If the base is already a complete *named* config
     with no overrides, no overlays, and no `{{var}}` markers, return it unchanged; otherwise render
     the four-layer merge (+ interpolation) to ``var/rendered/<name>.yaml``. Deterministic: same
-    inputs -> identical render (up and down agree)."""
-    if (not sensor.overrides and not sensor.overlays
+    inputs -> identical render (up and down agree). `extra_overrides` is a VERB-time fifth layer
+    (`rig replay` flipping an instance to replay its own recordings): always rendered, and the
+    next plain `up` re-renders without it -- nothing to undo. Idempotent over an already-rendered
+    row (a materialized manifest): re-merging the same layers changes nothing. `out_subdir` keeps
+    such a render OUT of var/rendered/<name>.yaml, which every verb re-materializes at load -- a
+    `rig status` during the session must not flip the file a restarting container would read."""
+    if (not sensor.overrides and not sensor.overlays and not extra_overrides
             and "{{" not in Path(sensor.config).read_text()
             and "name" in load_yaml(sensor.config)):
         return sensor.config
-    cfg = _layered_dict(sensor, root, variables)
-    out_dir = root / "var" / "rendered"
+    cfg = _layered_dict(sensor, root, variables, extra_overrides)
+    out_dir = root / "var" / "rendered" / out_subdir if out_subdir else root / "var" / "rendered"
     out_dir.mkdir(parents=True, exist_ok=True)
     out = out_dir / f"{sensor.name}.yaml"
     with open(out, "w") as handle:

@@ -79,6 +79,17 @@ def test_nameless_profile_without_overrides_still_renders_the_name():
     assert rendered["camera"]["frame_rate"] == 20.0  # profile body carried through unchanged
 
 
+
+def test_deep_merge_null_in_a_new_subtree_never_lands_as_a_literal_null():
+    from rig_cli.resolve import deep_merge
+    base = {"camera": {"type": "usb"}, "replay": {"run": "old"}}
+    out = deep_merge(base, {"replay": {"run": None, "path": "/r"},
+                            "playback": {"initial_state": "paused", "epoch": None, "nested": {"a": None, "b": 1}}})
+    assert out["replay"] == {"path": "/r"}                        # existing mapping: the key is deleted
+    assert out["playback"] == {"initial_state": "paused", "nested": {"b": 1}}   # new mapping: never a null
+    assert base == {"camera": {"type": "usb"}, "replay": {"run": "old"}}        # inputs untouched
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

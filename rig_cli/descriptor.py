@@ -76,6 +76,22 @@ class MsgsSource:
     packages: tuple[str, ...]  # colcon --packages-up-to selection
 
 
+@dataclass(frozen=True)
+class ReplaySource:
+    """`replay.source` — how `rig replay` turns an instance into a replay of ITS OWN recordings
+    (ROADMAP §2, the per-sensor source axis): `data` is the run-relative directory the instance
+    writes and reads back (`{name}` = the instance name; rig checks it exists in the source run,
+    nothing more), `overrides` the config patch that flips the instance to replay — deep-merged over
+    its rendered config for the session, `{{replay_*}}` variables substituted (replay_source,
+    replay_retime, replay_epoch_unix_ns, replay_start_at_unix_s, replay_from_s, replay_to_s,
+    replay_session, name). rig never interprets the keys: the launcher owns the mechanics."""
+    data: str
+    overrides: dict
+
+    def data_path(self, name: str) -> str:
+        return self.data.replace("{name}", name)
+
+
 @dataclass
 class Descriptor:
     service: str
@@ -113,6 +129,9 @@ class Descriptor:
     #                                              token; the player's --clock derives from the same
     #                                              var). Undeclared services WARN under `rig replay`
     #                                              sim time: they run wall clock against bag stamps
+    replay_source: ReplaySource | None = None  # `replay: {source: {data, overrides}}` — this
+    #                                              service can replay its own recordings from a run
+    #                                              (see ReplaySource); None = a live-only service
     replay_service_introspection: bool = False  # `replay: {service_introspection: true}` — the
     #                                              launcher enables CONTENTS-level service
     #                                              introspection (servers+clients), so calls RECORD
@@ -279,14 +298,36 @@ def load_descriptor(service: str, repo: Path) -> Descriptor:
     #                               (e.g. a per-sensor replay SOURCE declaration).
     replay_sim_time = False
     replay_service_introspection = False
+    replay_source: ReplaySource | None = None
     if replay_raw is not None:
         if not isinstance(replay_raw, dict):
             raise RigError(f"{path}: `replay` must be a mapping with "
-                           f"sim_time/service_introspection")
-        unknown = set(replay_raw) - {"sim_time", "service_introspection"}
+                           f"sim_time/service_introspection/source")
+        unknown = set(replay_raw) - {"sim_time", "service_introspection", "source"}
         if unknown:  # a typo'd key would silently drop the promise doctor relies on
             raise RigError(f"{path}: replay: unknown key(s) {', '.join(sorted(unknown))} — it "
-                           f"carries only sim_time, service_introspection")
+                           f"carries only sim_time, service_introspection, source")
+        src_raw = replay_raw.get("source")
+        if src_raw is not None:
+            if not isinstance(src_raw, dict):
+                raise RigError(f"{path}: replay.source must be a mapping with `data` (a run-relative "
+                               f"directory, e.g. recordings/{{name}}) and `overrides` (the config patch)")
+            extra = set(src_raw) - {"data", "overrides"}
+            if extra:
+                raise RigError(f"{path}: replay.source: unknown key(s) {', '.join(sorted(extra))} — "
+                               f"it carries only data, overrides")
+            data_rel = src_raw.get("data")
+            if not isinstance(data_rel, str) or not data_rel.strip():
+                raise RigError(f"{path}: replay.source.data must be a run-relative directory the "
+                               f"instance records into, e.g. recordings/{{name}}")
+            data_rel = data_rel.strip().strip("/")
+            if ".." in Path(data_rel).parts:
+                raise RigError(f"{path}: replay.source.data must stay inside the run ({data_rel!r})")
+            ov = src_raw.get("overrides")
+            if not isinstance(ov, dict) or not ov:
+                raise RigError(f"{path}: replay.source.overrides must be a non-empty mapping — the "
+                               f"config patch that flips the instance to replay its recordings")
+            replay_source = ReplaySource(data=data_rel, overrides=ov)
         for key in ("sim_time", "service_introspection"):
             if key in replay_raw and not isinstance(replay_raw[key], bool):
                 raise RigError(f"{path}: replay.{key} must be true or false (a declaration is a "
@@ -375,6 +416,7 @@ def load_descriptor(service: str, repo: Path) -> Descriptor:
         msgs_apt=msgs_apt,
         msgs_source=msgs_source,
         replay_sim_time=replay_sim_time,
+        replay_source=replay_source,
         replay_service_introspection=replay_service_introspection,
         interface=interface,
         platform_auto_detect=(str(platform_raw["auto_detect"]) if platform_raw.get("auto_detect")

@@ -278,18 +278,26 @@ def run(manifest: Manifest, catalog: dict[str, ServiceEntry], descriptors: dict[
 
 def replay_issues(manifest: Manifest, descriptors: dict[str, Descriptor],
                   with_names: list[str], *, sim_time: bool,
-                  services: bool = False) -> list[Issue]:
+                  services: bool = False, sources: list[str] = ()) -> list[Issue]:
     """Replay-specific preflight (called by `rig replay`, dry-run included — never by plain
     `doctor`, which has no with-set). WARN-only: replay is a bench workflow and the operator may
     know better — but an undeclared launcher under sim time is the silent failure class this
     check exists for (the service runs WALL clock while the player stamps BAG time; TF and every
     stamp comparison quietly rejects the replayed data)."""
+    issues: list[Issue] = []
+    if sources:
+        issues.append(Issue(OK, f"{len(sources)} instance(s) replayed from their own recordings: "
+                                f"{', '.join(sources)}"))
     if not sim_time:
-        return [Issue(INFO, "wall clock: replayed stamps are historical — services comparing "
-                            "them to now() will reject old data (this is the --wall-clock "
-                            "trade-off, fine for topic-flow smoke tests)")]
-    issues = []
-    rows = [s for s in manifest.sensors if s.name in set(with_names)]
+        issues.append(Issue(INFO, "wall clock: replayed stamps are historical — services comparing "
+                                  "them to now() will reject old data (this is the --wall-clock "
+                                  "trade-off, fine for topic-flow smoke tests)"
+                                  + (" — the sources retime their recordings onto now" if sources
+                                     else "")))
+        return issues
+    # a source's stamps ARE the recorded timeline (retime: original under sim time) -- coherent
+    # with the bag's /clock by construction, whatever its rigging declares about use_sim_time
+    rows = [s for s in manifest.sensors if s.name in set(with_names) - set(sources)]
     undeclared = [s for s in rows
                   if not getattr(descriptors[s.service], "replay_sim_time", False)]
     for s in undeclared:

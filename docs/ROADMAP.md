@@ -86,9 +86,18 @@ No launcher changes; no semantic interpretation of config bodies by rig; no simu
 > `~/ws/infra/rig-replay-player-handoff.md`) plays a sealed run's recorded inputs at the named
 > instances via rig-infra's `ros2-bag-player` (≥ v1.8.0), in a new provenance-linked run
 > (`replay: {of, source, with}`) with one rig-owned clock token (`RIG_SIM_TIME` → the player's
-> `--clock` + adopted launchers' `use_sim_time`). The per-sensor source axis and the footprint
-> token below remain open — `RIG_REPLAY_SOURCE` is deliberately fleet-general so a per-sensor
-> replay source (e.g. camera-service replaying its own mkv+csv recordings) consumes the same hook.
+> `--clock` + adopted launchers' `use_sim_time`). **The per-sensor SOURCE axis landed in v0.2.52**
+> (plan `rig-sensor-replay-plan.md`): a service declares `replay.source` in its rigging (the
+> run-relative `data` dir it records into + the config `overrides` that flip it to replay) and
+> `rig replay` FINDS every instance whose recordings the source run holds, renders its config for
+> the session (a verb-time override layer, `var/rendered/replay/<name>.yaml`) and feeds it from
+> them; no names = REPRODUCE the run (infra + sources + the player for what the bag holds), names
+> stay "under test". One timeline for every producer: the bag's zero (`replay_epoch_unix_ns`), one
+> release instant (`replay_start_at_unix_s` = now + `--start-delay`), the window, the clock
+> decision (`replay_retime`). camera-service is the first source (its `playback:` block). Open:
+> the player's adoption of `RIG_REPLAY_START_AT_UNIX_S` (start paused, resume at the instant —
+> until then a mixed bag + camera replay starts within container-start skew), and the footprint
+> token.
 
 Not modeled as enforced vehicle-wide modes. Two independent axes:
 - **Data source** — per *sensor*: live | replay | sim (a config / override concern, §1).

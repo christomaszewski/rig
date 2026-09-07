@@ -270,7 +270,8 @@ def cmd_replay(args, manifest, catalog, descriptors) -> int:
                           names=args.names, label=args.label, wall_clock=args.wall_clock,
                           force=args.force, dry_run=args.dry_run, calls=args.calls,
                           export_calls=args.export_calls, auto_end_grace=args.auto_end,
-                          window_from=args.window_from, window_to=args.window_to)
+                          window_from=args.window_from, window_to=args.window_to,
+                          live=args.live, session=args.session, start_delay=args.start_delay)
 
 
 def cmd_graph(args, manifest, catalog, descriptors) -> int:
@@ -703,12 +704,26 @@ def build_parser() -> argparse.ArgumentParser:
     rn = sub.add_parser("runs", help="list the run registry (OPEN / sealed / interrupted)")
     rn.add_argument("names", nargs="*", default=[], help=argparse.SUPPRESS)
 
-    rp = sub.add_parser("replay", help="SIL: play a sealed run's recorded topics back through "
-                                       "the named instances (needs the ros2-bag-player row, "
-                                       "rig-infra ≥ v1.8.0; selection from the run's graph epochs)")
+    rp = sub.add_parser("replay", help="play a sealed run back: instances whose rigging declares "
+                                       "replay.source come up fed from their OWN recordings in "
+                                       "the run (found, never named); the ros2-bag-player row "
+                                       "plays what the bag holds (rig-infra ≥ v1.8.0; selection "
+                                       "from the run's graph epochs). No names = reproduce the run")
     rp.add_argument("run", help="SOURCE run id or run-dir path")
     rp.add_argument("names", nargs="*",
-                    help="instance(s) under test — brought up live, their recorded inputs played")
+                    help="instance(s) under test — brought up live, their recorded inputs played "
+                         "(a recording-capable instance named here is still fed from its "
+                         "recordings: the new-code-against-this-run's-data case). Omit to "
+                         "REPRODUCE the run: infra + every source + the player, nothing under test")
+    rp.add_argument("--live", action="append", default=[], metavar="NAME",
+                    help="force an instance LIVE although the run holds its recordings (HIL: "
+                         "replay the rest, run the real device); repeatable")
+    rp.add_argument("--session", default=None, metavar="PREFIX",
+                    help="pin ONE recorded session (its <prefix>) for every source instead of "
+                         "playing all of them in order")
+    rp.add_argument("--start-delay", dest="start_delay", type=float, default=20.0, metavar="S",
+                    help="the release gate: sources come up paused and resume together S seconds "
+                         "after the up starts (default 20; 0 = no gate, each plays as it comes up)")
     rp.add_argument("--label", default=None,
                     help="label for the NEW replay run (default: replay-<source-run>)")
     rp.add_argument("--export-calls", action="store_true", dest="export_calls",

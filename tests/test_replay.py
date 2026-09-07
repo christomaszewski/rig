@@ -225,14 +225,22 @@ def test_cmd_dry_run_env_and_ordering():
                         dry_run=True)
         assert rc == 0 and "RIG_SIM_TIME" not in calls["env"]
 
-        for bad_names, needle in (([], "name the instance"), (["bag_player"], "player")):
-            try:
-                replay.cmd(m, {}, descriptors, pathlib.Path("."), run_ref=str(src),
-                           names=bad_names, label=None, wall_clock=False, force=False,
-                           dry_run=True)
-                assert False, f"must refuse names={bad_names}"
-            except RigError as exc:
-                assert needle in str(exc)
+        try:
+            replay.cmd(m, {}, descriptors, pathlib.Path("."), run_ref=str(src),
+                       names=["bag_player"], label=None, wall_clock=False, force=False,
+                       dry_run=True)
+            assert False, "must refuse naming the player"
+        except RigError as exc:
+            assert "player" in str(exc)
+
+        # NO names = REPRODUCE the run: infra + the player (no sources declared here), nothing
+        # under test; no bag index in this fixture -> the namespace exclude over the live infra
+        rc = replay.cmd(m, {}, descriptors, pathlib.Path("."), run_ref=str(src),
+                        names=[], label=None, wall_clock=False, force=False, dry_run=True)
+        assert rc == 0
+        assert [s.name for s, _ in calls["pairs"]] == ["zenoh-router", "bag_player"]
+        assert calls["env"]["RIG_REPLAY_EXCLUDE"] == "^/(?:zenoh\\-router)(?:/.*)?$"
+        assert "RIG_REPLAY_TOPICS" not in calls["env"] and calls["env"]["RIG_SIM_TIME"] == "1"
     finally:
         replay.doctor_mod.collect, replay.dispatch.fleet_env, replay.dispatch.run_verb = orig
 
@@ -817,14 +825,17 @@ def test_window_notices_wall_duration_and_calls_overlap():
     assert len(notes) == 1 and "1 of 2" in notes[0]
 
 
-def _bag_metadata(run, *, session="bag_logger_20260827T100000Z", topics=()):
-    """A rosbag2 metadata.yaml (the plain-YAML index rig reads) with (topic, message_count) rows."""
+def _bag_metadata(run, *, session="bag_logger_20260827T100000Z", topics=(), starting_ns=None):
+    """A rosbag2 metadata.yaml (the plain-YAML index rig reads) with (topic, message_count) rows
+    and, when given, the bag's starting_time (the zero rig hands every source)."""
     d = run / "bags" / "bag_logger" / session
     d.mkdir(parents=True, exist_ok=True)
     rows = "\n".join(f"    - topic_metadata: {{name: {n}, type: x/msg/Y, serialization_format: cdr}}"
                       f"\n      message_count: {c}" for n, c in topics)
-    (d / "metadata.yaml").write_text("rosbag2_bagfile_information:\n  version: 9\n"
-                                     "  topics_with_message_count:\n" + rows + "\n")
+    start = (f"  starting_time:\n    nanoseconds_since_epoch: {starting_ns}\n"
+             if starting_ns is not None else "")
+    (d / "metadata.yaml").write_text("rosbag2_bagfile_information:\n  version: 9\n" + start
+                                     + "  topics_with_message_count:\n" + rows + "\n")
 
 
 def test_source_service_events_scan():
@@ -904,6 +915,245 @@ def test_service_replay_notices_say_why():
         assert "recorded NO service events" in err.getvalue()
     finally:
         replay.doctor_mod.collect, replay.dispatch.fleet_env, replay.dispatch.run_verb = orig
+
+
+# ---- per-sensor sources: instances replaying their OWN recordings -------------------------------
+
+class _Desc:
+    """A descriptor stub with (or without) a replay.source declaration."""
+    replay_sim_time = False
+    replay_service_introspection = False
+
+    def __init__(self, source=None):
+        self.replay_source = source
+
+
+def _source_desc(overrides=None):
+    from rig_cli.descriptor import ReplaySource
+    return _Desc(ReplaySource(data="recordings/{name}", overrides=overrides or {
+        "camera": {"type": "replay"},
+        "replay": {"path": "{{replay_source}}/recordings/{{name}}", "retime": "{{replay_retime}}",
+                   "run": "{{replay_session}}"},
+        "playback": {"initial_state": "paused", "start_at_unix_s": "{{replay_start_at_unix_s}}",
+                     "epoch_unix_ns": "{{replay_epoch_unix_ns}}", "from_s": "{{replay_from_s}}",
+                     "to_s": "{{replay_to_s}}"}}))
+
+
+def _record(run, name, files=("cam-1.json", "cam-1.csv", "cam-1-00000.mkv")):
+    d = run / "recordings" / name
+    d.mkdir(parents=True, exist_ok=True)
+    for f in files:
+        (d / f).write_bytes(b"x")
+
+
+def test_descriptor_replay_source_block_and_strictness():
+    import tempfile as tf
+    repo = pathlib.Path(tf.mkdtemp())
+    from rig_cli.descriptor import load_descriptor
+
+    def _load(block):
+        (repo / "rigging.yaml").write_text("service: svc\nlauncher: svc-up\n" + block)
+        return load_descriptor("svc", repo)
+
+    d = _load("replay:\n  source:\n    data: recordings/{name}\n    overrides: {camera: {type: replay}}\n")
+    assert d.replay_source is not None and d.replay_source.data_path("cam_a") == "recordings/cam_a"
+    assert d.replay_source.overrides == {"camera": {"type": "replay"}}
+    assert _load("replay: { sim_time: true }\n").replay_source is None
+    for bad in ("replay: { source: recordings }\n",                                   # not a mapping
+                "replay: { source: { data: recordings/{name} } }\n",                  # no overrides
+                "replay: { source: { data: '', overrides: {a: 1} } }\n",             # empty data
+                "replay: { source: { data: ../x, overrides: {a: 1} } }\n",           # escapes the run
+                "replay: { source: { data: r, overrides: {a: 1}, extra: 1 } }\n"):   # unknown key
+        try:
+            _load(bad)
+            assert False, f"must refuse: {bad!r}"
+        except RigError:
+            pass
+
+
+def test_discover_sources_finds_recordings_never_names():
+    src = _source_run(bags=False)
+    (src / "manifest.yaml").write_text("run: x\nended: 2026-08-27T11:01:00Z\nstacks: [cam_a, cam_b]\n")
+    _record(src, "cam_a")
+    rows = [_row("cam_a", service="cam"), _row("cam_b", service="cam"), _row("gnss", service="nov")]
+    descriptors = {"cam": _source_desc(), "nov": _Desc()}
+    sources, notes = replay.discover_sources(_manifest(rows), descriptors, src)
+    assert [sp.row.name for sp in sources] == ["cam_a"]
+    assert sources[0].rel == "recordings/cam_a" and sources[0].path == src / "recordings" / "cam_a"
+    assert any("cam_b" in n and "no recordings" in n for n in notes)      # ran, recorded nothing
+    sources, notes = replay.discover_sources(_manifest(rows), descriptors, src, live={"cam_a"})
+    assert sources == [] and any("cam_a" in n and "--live" in n for n in notes)
+
+
+def test_timeline_variables_bag_zero_release_gate_and_nulls():
+    src = _source_run()
+    _bag_metadata(src, topics=(("/gnss_primary/fix", 10),), starting_ns=1756288800000000000)
+    v = replay.timeline_variables(src, has_bags=True, sim_time=True, start_delay_s=20,
+                                  w_from=None, w_to=30.0, session=None, now=lambda: 1000.0)
+    assert v["replay_retime"] == "original" and v["replay_start_at_unix_s"] == 1020.0
+    assert v["replay_epoch_unix_ns"] == 1756288800000000000          # the bag's starting_time
+    assert v["replay_from_s"] is None and v["replay_to_s"] == 30.0 and v["replay_session"] is None
+    v = replay.timeline_variables(src, has_bags=False, sim_time=False, start_delay_s=0,
+                                  w_from=None, w_to=None, session="cam-1")
+    assert v["replay_retime"] == "wall" and v["replay_start_at_unix_s"] is None
+    assert v["replay_epoch_unix_ns"] is None and v["replay_session"] == "cam-1"   # no bag: no shared zero
+    (src / "manifest.yaml").write_text("run: x\nstarted: 2026-08-27T10:00:00Z\nended: 2026-08-27T11:00:00Z\n")
+    v = replay.timeline_variables(src, has_bags=False, sim_time=False, start_delay_s=0,
+                                  w_from=None, w_to=None, session=None)
+    assert v["replay_epoch_unix_ns"] is None            # even with a run start: nothing to align with
+    _bag_metadata(src, topics=(("/x", 1),))            # a bag with no readable starting_time
+    v = replay.timeline_variables(src, has_bags=True, sim_time=True, start_delay_s=0,
+                                  w_from=None, w_to=None, session=None)
+    assert v["replay_epoch_unix_ns"] == replay.manifest_started_ns({"started": "2026-08-27T10:00:00Z"})
+
+
+def test_render_sources_layers_the_patch_and_drops_null_keys():
+    import tempfile as tf
+    from rig_cli.common import load_yaml
+    root = pathlib.Path(tf.mkdtemp())
+    cfg = root / "cam_a.yaml"
+    cfg.write_text("service: cam\nname: cam_a\ncamera: {type: usb}\nreplay: {run: old}\n")
+    row = Sensor(name="cam_a", service="cam", config=cfg, enabled=True, order=10)
+    src = _source_run(bags=False)
+    _record(src, "cam_a")
+    spec = replay.SourceSpec(row=row, rel="recordings/cam_a", path=src / "recordings" / "cam_a")
+    variables = replay.timeline_variables(src, has_bags=False, sim_time=False, start_delay_s=5,
+                                          w_from=None, w_to=None, session=None, now=lambda: 100.0)
+    out = replay.render_sources(_manifest([row]), {"cam": _source_desc()}, root, [spec], variables)
+    rendered = load_yaml(out["cam_a"])
+    assert out["cam_a"] == root / "var" / "rendered" / "replay" / "cam_a.yaml"
+    assert rendered["camera"] == {"type": "replay"} and rendered["name"] == "cam_a"
+    assert rendered["replay"] == {"path": f"{src}/recordings/cam_a", "retime": "wall"}   # run: null DELETED
+    assert rendered["playback"] == {"initial_state": "paused", "start_at_unix_s": 105.0}  # nulls dropped
+
+
+def test_cmd_reproduce_with_sources_and_no_bags_is_wall_clock_without_a_player():
+    src = _source_run(bags=False)
+    (src / "manifest.yaml").write_text("run: x\nended: 2026-08-27T11:01:00Z\n"
+                                       "started: 2026-08-27T10:00:00Z\nstacks: [cam_a]\n")
+    _record(src, "cam_a")
+    rows = [_row("zenoh-router", service="zr", tier="infra", order=0),
+            _row("cam_a", service="cam", order=10), _row("cam_b", service="cam", order=11),
+            _row("planner", service="plan", tier="autonomy", order=20), PLAYER]
+    m = _manifest(rows)
+    descriptors = {"zr": _Desc(), "cam": _source_desc(), "plan": _Desc(),
+                   replay.PLAYER_SERVICE: _Desc()}
+    calls = {}
+    orig = (replay.doctor_mod.collect, replay.dispatch.fleet_env, replay.dispatch.run_verb)
+    try:
+        replay.doctor_mod.collect = lambda *a, **k: []
+        replay.dispatch.fleet_env = lambda *a, **k: {}
+        def _run_verb(pairs, env, verb, dry_run=False, **k):
+            calls.update(pairs=pairs, env=env, verb=verb)
+            class O:  # noqa: N801
+                returncode = 0
+                sensor = pairs[0][0]
+            return [O()]
+        replay.dispatch.run_verb = _run_verb
+        rc = replay.cmd(m, {}, descriptors, pathlib.Path("."), run_ref=str(src), names=[],
+                        label=None, wall_clock=False, force=False, dry_run=True)
+        assert rc == 0
+        # infra + the ONE source with recordings; no player (no bags), cam_b not replayed
+        assert [s.name for s, _ in calls["pairs"]] == ["zenoh-router", "cam_a"]
+        assert "RIG_SIM_TIME" not in calls["env"] and "RIG_REPLAY_TOPICS" not in calls["env"]
+        assert calls["env"]["RIG_REPLAY_SOURCE"] == str(src)
+        # a named source is still a source; a named live instance rides live; --live forces live
+        rc = replay.cmd(m, {}, descriptors, pathlib.Path("."), run_ref=str(src),
+                        names=["cam_a", "planner"], label=None, wall_clock=False, force=False,
+                        dry_run=True)
+        assert rc == 0 and [s.name for s, _ in calls["pairs"]] == ["zenoh-router", "cam_a", "planner"]
+        try:
+            replay.cmd(m, {}, descriptors, pathlib.Path("."), run_ref=str(src), names=[],
+                       label=None, wall_clock=False, force=False, dry_run=True, live=["cam_a"])
+            assert False, "no bags and the only source forced live: nothing to play"
+        except RigError as exc:
+            assert "nothing to play" in str(exc)
+        try:
+            replay.cmd(m, {}, descriptors, pathlib.Path("."), run_ref=str(src), names=[],
+                       label=None, wall_clock=False, force=False, dry_run=True, auto_end_grace=5)
+            assert False, "--auto-end needs the player"
+        except RigError as exc:
+            assert "auto-end" in str(exc)
+    finally:
+        replay.doctor_mod.collect, replay.dispatch.fleet_env, replay.dispatch.run_verb = orig
+
+
+def test_cmd_sources_beside_the_bag_subtract_their_topics_and_record_provenance():
+    src = _source_run()
+    _bag_metadata(src, topics=(("/gnss_primary/fix", 10), ("/cam_a/image", 5)),
+                  starting_ns=1756288800000000000)
+    _record(src, "cam_a")
+    epoch = EPOCH + textwrap.indent(textwrap.dedent("""\
+        /cam_a/ros2_bridge:
+          pubs:
+          - {topic: /cam_a/image, type: sensor_msgs/msg/Image}
+          subs: []
+          provides: []
+          requires: []
+        """), "  ")
+    (src / "graph" / "bag_logger" / "epoch_20260827T100000Z.yaml").write_text(epoch)
+    rows = [_row("zenoh-router", service="zr", tier="infra", order=0),
+            _row("cam_a", service="cam", order=10),
+            _row("planner", service="plan", tier="autonomy", order=20), PLAYER]
+    descriptors = {"zr": _Desc(), "cam": _source_desc(), "plan": _Desc(),
+                   replay.PLAYER_SERVICE: _Desc()}
+    calls, opened = {}, {}
+    orig = (replay.doctor_mod.collect, replay.dispatch.fleet_env, replay.dispatch.run_verb,
+            replay.runs_mod.new_run, replay.runs_mod.snapshot, replay._guard_clean_host,
+            replay.render_sources)
+    try:
+        replay.doctor_mod.collect = lambda *a, **k: []
+        replay.dispatch.fleet_env = lambda *a, **k: {}
+        def _run_verb(pairs, env, verb, dry_run=False, **k):
+            calls.update(pairs=pairs, env=env)
+            class O:  # noqa: N801
+                returncode = 0
+                sensor = pairs[0][0]
+            return [O()]
+        replay.dispatch.run_verb = _run_verb
+        replay.runs_mod.new_run = lambda m, root, label, force=False, replay=None: (
+            opened.update(label=label, replay=replay) or "20260901T000000Z_x")
+        replay.runs_mod.snapshot = lambda *a, **k: None
+        replay._guard_clean_host = lambda *a, **k: None
+        replay.render_sources = lambda m, d, root, sources, variables: (
+            calls.update(variables=variables) or {sp.row.name: pathlib.Path("/dev/null") for sp in sources})
+        m = _manifest(rows, data_dir="/tmp/x")
+        rc = replay.cmd(m, {}, descriptors, pathlib.Path("."), run_ref=str(src), names=[],
+                        label=None, wall_clock=False, force=False, dry_run=False, start_delay=15)
+        assert rc == 0
+        assert [s.name for s, _ in calls["pairs"]] == ["zenoh-router", "cam_a", "bag_player"]
+        assert calls["env"]["RIG_REPLAY_TOPICS"] == "/gnss_primary/fix"     # /cam_a/image comes from cam_a
+        assert calls["env"]["RIG_SIM_TIME"] == "1"
+        assert calls["variables"]["replay_retime"] == "original"
+        assert calls["variables"]["replay_epoch_unix_ns"] == 1756288800000000000
+        doc = opened["replay"]
+        assert doc["with"] == [] and doc["sources"] == {"cam_a": {"data": "recordings/cam_a"}}
+        assert doc["clock"] == "sim" and doc["epoch_unix_ns"] == 1756288800000000000
+        assert abs(doc["start_at_unix_s"] - (calls["variables"]["replay_start_at_unix_s"])) < 1e-6
+        # under test + a session pin
+        rc = replay.cmd(m, {}, descriptors, pathlib.Path("."), run_ref=str(src), names=["planner"],
+                        label=None, wall_clock=False, force=False, dry_run=False, session="cam-1")
+        assert rc == 0 and opened["replay"]["with"] == ["planner"]
+        assert opened["replay"]["sources"] == {"cam_a": {"data": "recordings/cam_a", "session": "cam-1"}}
+    finally:
+        (replay.doctor_mod.collect, replay.dispatch.fleet_env, replay.dispatch.run_verb,
+         replay.runs_mod.new_run, replay.runs_mod.snapshot, replay._guard_clean_host,
+         replay.render_sources) = orig
+
+
+def test_alignment_and_doctor_treat_sources_as_rendered_not_drift():
+    src = _source_run(bags=False)
+    lines, drifted = replay._alignment_report(_manifest([_row("cam_a", service="cam")]), [], src,
+                                              sources=["cam_a"])
+    assert drifted == [] and any("cam_a" in ln and "rendered" in ln for ln in lines)
+    from rig_cli import doctor
+    issues = doctor.replay_issues(_manifest([_row("cam_a", service="cam"), _row("p", service="plan")]),
+                                  {"cam": _Desc(), "plan": _Desc()}, ["cam_a", "p"], sim_time=True,
+                                  sources=["cam_a"])
+    assert any(i.level == doctor.OK and "cam_a" in i.message for i in issues)
+    assert not any(i.level == doctor.WARN and "cam_a" in i.message for i in issues)   # never WARNed
+    assert any(i.level == doctor.WARN and "p [" in i.message for i in issues)
+
 
 
 if __name__ == "__main__":

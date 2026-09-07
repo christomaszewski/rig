@@ -291,9 +291,27 @@ service under test whose rigging lacks `replay: {sim_time: true}` (the adoption 
 launcher change per service, see `~/ws/infra/service-sim-time-adoption-prompt.md`; the bag-logger
 adopted in rig-infra v1.9.0, so replay-run bags record on bag time and the A/B pair aligns).
 
+**Per-sensor sources (rig ≥ v0.2.52).** An instance whose service declares `replay.source` in
+its rigging (camera-service: `recordings/{name}`, its mkv + csv sessions) is a SOURCE whenever the
+source run holds its recordings: it comes up fed from them, its config rendered for the session
+with the descriptor's patch on top (`var/rendered/replay/<name>.yaml`; the next plain `up`
+renders the live config again — nothing to undo). Sources are found, never named. With no names
+`rig replay <run>` REPRODUCES the run: infra (the dashboard shows what the operator saw), every
+source, and the player for what the bag holds — nothing under test; with names the names are
+under test as before and the sources ride along (a named source is still a source: the
+new-camera-service-against-this-run's-video case). Every source shares one timeline — the bag's
+zero (no bag: each starts on its own first recorded frame), one release instant (`--start-delay`, default 20 s: sources come up paused on their first
+frame and resume together), `--from/--to`, and the clock decision (recorded stamps under sim
+time, retimed onto now under wall clock; no bags ⇒ no player ⇒ wall clock). `--live NAME` forces
+an instance live although its recordings exist (HIL); `--session PREFIX` pins one recorded
+session for every source. The manifest records `replay.sources`, `clock`, `epoch_unix_ns`,
+`start_at_unix_s`. A run with instance recordings and no bags replays without a player row.
+
 ```bash
 rig down                                   # replay starts from a quiet host (recorders pin their
                                            #   run dir at start — survivors would write elsewhere)
+rig replay <stamp>_fieldtest               # REPRODUCE: infra + every recording-capable instance fed
+                                           #   from its own recordings + the player for the bag
 rig replay <stamp>_fieldtest planner       # new run opens, labeled replay-<source> (--label to name)
 rig down --end-run                         # seal the replay session like any run
 # unattended/batch: --auto-end waits for the bag to finish, breathes (default 10 s) so consumers

@@ -427,6 +427,11 @@ rig reconstruct <path-to-run> --into tree/                 # the run dir back in
                                                            #   old runs: `rig run retrofit` first)
                                                            #   --registry HOST (bench mirror) ·
                                                            #   --enable-replay <path|ref> (old trees)
+rig replay <stamp>_dock-test                               # REPRODUCE the run: recording-capable
+                                                           #   instances (camera-service) fed from
+                                                           #   their own recordings, the bag for the
+                                                           #   rest; --start-delay S / --live NAME /
+                                                           #   --session PREFIX
 rig replay <stamp>_dock-test planner                       # SIL: play planner's recorded inputs at
                                                            #   the CURRENT planner build/config —
                                                            #   new run links back via replay-of

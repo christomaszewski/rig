@@ -1,8 +1,37 @@
 # rig — project state & handoff (resume here)
 
 > Snapshot for picking the project up cold in a new session. Read this first, then `CHEATSHEET.md` /
-> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.2.51**,
+> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.2.52**,
 > branch **`main`**, 699 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> **v0.2.52 (2026-09-07) — per-sensor replay sources (ROADMAP §2's open axis; plan
+> `rig-sensor-replay-plan.md`).** A service's rigging may declare `replay.source: {data, overrides}`
+> (`descriptor.ReplaySource`; strict keys, `data` run-relative with `{name}`): `rig replay` FINDS
+> every instance whose recordings the source run holds (`discover_sources` — data presence is the
+> evidence, the run manifest's `stacks` only informs the notices) and feeds it from them, rendering
+> its config with the patch on top through `resolve.materialize(..., extra_overrides,
+> out_subdir="replay")` — a verb-time fifth layer, interpolated BEFORE the merge so a variable
+> rig has no value for deletes its key (`deep_merge` now drops nulls in a mapping the patch
+> introduces, too), and written to `var/rendered/replay/<name>.yaml` because every verb
+> re-materializes `var/rendered/<name>.yaml` at load (a mid-session `rig status` clobbered the
+> replay render on the bench; the container would have restarted into the LIVE config). Two
+> modes: no names = REPRODUCE (infra + sources + the player for what the bag holds — the reproduce
+> selector is the bag index minus the live instances' observed publishes; the old "name the
+> instance" refusal is gone), names = under test as before with sources riding along; `--live`
+> forces an instance live, `--session` pins a recorded session, `--start-delay` (default 20 s) is
+> the release gate. The player row is optional now (`_player_row(required=False)`): a run of
+> instance recordings with no bags replays without it, wall clock (no /clock without a player),
+> `--calls`/`--auto-end` refused. `timeline_variables` gives every source one zero (the bag's
+> `starting_time`; the run's `started` only for a bag with no readable index; NO zero without a
+> bag — each source starts on its own first frame, a run that sat open for days must not replay
+> its idle days), one release instant, the window, the clock decision
+> (`replay_retime`: original/wall); `RIG_REPLAY_START_AT_UNIX_S` is exported for the player's
+> adoption (rig-owned, popped elsewhere). Provenance: `replay.sources`, `clock`, `epoch_unix_ns`,
+> `start_at_unix_s`, `live`; the alignment report marks sources `[≈]` (rendered for replay, not
+> drift); `doctor.replay_issues` never WARNs a source about sim time (its stamps ARE the recorded
+> timeline). Bench-proven on the viewer deployment against camera-service `playback-sources`
+> (its `playback:` block: paused boot with the first frame let out, the held frame re-published
+> to the plugin transport, the release gate, the epoch anchor, sessions in order, hold at the
+> end). 9 new tests in test_replay + 1 in test_overrides.
 > **v0.2.51 (2026-09-06) — path hygiene + bake correctness** (the first of the review-2026-09-04
 > releases: findings 1, 2, 3, 5, 6, 8, 11, 12, 13, 14 — all reproduced against v0.2.50 first, and
 > each reviewer probe now trips its bug-assertion). Two groups, one release, because both are
