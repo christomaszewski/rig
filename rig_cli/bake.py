@@ -111,6 +111,20 @@ def _repo_of(ref: str) -> str:
     return ref[:colon] if colon > slash else ref
 
 
+# The registry round-trip is bounded: an unreachable or non-resolving registry host (a bench off
+# the vehicle network, a fake `reg.test` ref, a resolver that hangs instead of NXDOMAIN-ing) must
+# leave the ref as a tag with one warning, never hang a bake. RIG_DIGEST_TIMEOUT_S overrides.
+DIGEST_TIMEOUT_S = 20.0
+
+
+def _digest_timeout() -> float:
+    import os
+    try:
+        return float(os.environ.get("RIG_DIGEST_TIMEOUT_S") or DIGEST_TIMEOUT_S)
+    except ValueError:
+        return DIGEST_TIMEOUT_S
+
+
 def _resolve_digest(ref: str, *, local_only: bool = False) -> str | None:
     """A pinned ``repo@sha256:…`` for an image ref. Tries the local image's RepoDigests first, then the
     registry via ``docker buildx imagetools`` (so a tag pushed to your local/offline registry pins to its
@@ -120,7 +134,7 @@ def _resolve_digest(ref: str, *, local_only: bool = False) -> str | None:
     repo = _repo_of(ref)
     try:  # 1. local image's repo digest
         proc = subprocess.run(["docker", "inspect", "--format", "{{json .RepoDigests}}", ref],
-                              capture_output=True, text=True)
+                              capture_output=True, text=True, timeout=_digest_timeout())
         if proc.returncode == 0:
             for rd in json.loads(proc.stdout or "[]"):
                 if rd.startswith(repo + "@sha256:"):
@@ -131,10 +145,14 @@ def _resolve_digest(ref: str, *, local_only: bool = False) -> str | None:
         return None
     try:  # 2. registry manifest digest (multi-arch index digest -> the vehicle pulls the right arch)
         proc = subprocess.run(["docker", "buildx", "imagetools", "inspect", ref,
-                               "--format", "{{.Manifest.Digest}}"], capture_output=True, text=True)
+                               "--format", "{{.Manifest.Digest}}"], capture_output=True, text=True,
+                              timeout=_digest_timeout())
         dig = proc.stdout.strip()
         if proc.returncode == 0 and dig.startswith("sha256:"):
             return f"{repo}@{dig}"
+    except subprocess.TimeoutExpired:
+        eprint(f"rig: warning: digest lookup for {ref} timed out after {_digest_timeout():g}s "
+               f"(registry unreachable?) — the ref stays a tag (RIG_DIGEST_TIMEOUT_S to adjust)")
     except Exception:  # noqa: BLE001
         pass
     return None

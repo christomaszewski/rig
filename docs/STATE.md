@@ -3,6 +3,12 @@
 > Snapshot for picking the project up cold in a new session. Read this first, then `CHEATSHEET.md` /
 > `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.2.52**,
 > branch **`main`**, 699 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> **main after v0.2.52 (unreleased) — bake's registry digest lookup is bounded.** `_resolve_digest`
+> ran `docker buildx imagetools inspect <ref>` with no timeout; on a host whose resolver hangs on
+> an unknown registry (a bench off the vehicle network — the bake suite's fake `reg.test` ref hung
+> test_bake for minutes here, while CI's NXDOMAIN failed fast) the whole bake hung. Both docker
+> calls now carry `DIGEST_TIMEOUT_S` (20 s, `RIG_DIGEST_TIMEOUT_S` overrides); a timeout leaves the
+> ref a tag with one warning. +1 test.
 > **v0.2.52 (2026-09-07) — per-sensor replay sources (ROADMAP §2's open axis; plan
 > `rig-sensor-replay-plan.md`).** A service's rigging may declare `replay.source: {data, overrides}`
 > (`descriptor.ReplaySource`; strict keys, `data` run-relative with `{name}`): `rig replay` FINDS

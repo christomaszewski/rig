@@ -768,6 +768,33 @@ def test_cli_round_trip_init_add_bake_starts_exactly_the_enabled_rows():
     assert meta["compose_only"] == ["cam"] and meta["compose_only_skipped"] == []
     assert 'docker compose -p "cam-vehicle-7"' in (tree / "up.sh").read_text()
 
+
+def test_resolve_digest_registry_lookup_is_bounded():
+    # A registry host that hangs (a bench off the vehicle network, a resolver that never NXDOMAINs)
+    # must leave the ref a tag with one warning -- never hang the bake. Both docker calls carry
+    # the timeout; a TimeoutExpired from the registry step is the warned path.
+    import contextlib
+    import io
+    import subprocess as sp
+    from unittest.mock import patch
+    from rig_cli import bake as bake_mod
+
+    seen = []
+
+    def fake_run(cmd, **kw):
+        seen.append((cmd[:4], kw.get("timeout")))
+        if "imagetools" in cmd:
+            raise sp.TimeoutExpired(cmd, kw.get("timeout") or 0)
+        return sp.CompletedProcess(cmd, 1, "", "")
+
+    err = io.StringIO()
+    with patch.object(bake_mod.subprocess, "run", fake_run), contextlib.redirect_stderr(err), \
+            patch.dict(os.environ, {"RIG_DIGEST_TIMEOUT_S": "3.5"}):
+        assert bake_mod._resolve_digest("reg.test/foo:t1") is None
+    assert all(t == 3.5 for _, t in seen) and len(seen) == 2          # both calls bounded, env honoured
+    assert "timed out after 3.5s" in err.getvalue() and "reg.test/foo:t1" in err.getvalue()
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):
