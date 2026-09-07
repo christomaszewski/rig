@@ -266,6 +266,22 @@ def test_catalog_missing_path_and_relative_resolution():
     assert load_catalog(ok)["cam"].path == (ok / ".." / "cam-repo").resolve()  # relative to the root
 
 
+
+def test_manifest_env_cannot_smuggle_the_operational_state():
+    # Finding 18 (review 2026-09-04): RIG_TARGET_STATE is set/popped per verb by dispatch; a
+    # manifest `env:` reintroducing it would put every verb into standby behind rig's back.
+    root = _root_with({
+        "vehicle.yaml": "vehicle: v\nvehicle_id: 3\nenv: {RIG_TARGET_STATE: standby}\n"
+                        "sensors: [{name: a, service: novatel, config: x.yaml}]\n",
+        "x.yaml": "service: novatel\n",
+    })
+    try:
+        load_manifest(root)
+        assert False, "RIG_TARGET_STATE must be rig-owned"
+    except RigError as exc:
+        assert "RIG_TARGET_STATE" in str(exc) and "rig-owned" in str(exc)
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

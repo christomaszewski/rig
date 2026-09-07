@@ -139,6 +139,15 @@ def discover_sources(manifest, descriptors, src_dir: Path, *, live: set[str] = f
     for row in manifest.sensors:
         rs = getattr(descriptors.get(row.service), "replay_source", None)
         if rs is None:
+            # A reconstructed tree carries the service AS IT RAN: a capture from before the
+            # service could replay its recordings has no `replay.source` in its vendored rigging
+            # (and an image that could not honour it). The recordings are there; the code is not.
+            rec = src_dir / "recordings" / row.name
+            if rec.is_dir() and any(rec.iterdir()):
+                notes.append(f"{row.name}: the source run holds its recordings (recordings/{row.name}) "
+                             f"but {row.service}'s rigging declares no replay.source — this tree's "
+                             f"{row.service} predates replay; `rig swap {row.name} <a current "
+                             f"{row.service} checkout>` and replay again")
             continue
         rel = rs.data_path(row.name)
         path = src_dir / rel
@@ -938,12 +947,21 @@ def cmd(manifest, catalog, descriptors, root: Path, *, run_ref: str, names: list
             else "")
     eprint(f"rig replay: {src_id} → {what or 'reproduce'}  [{count}{svc_note}{window_note}"
            f"{', wall clock' if not sim_time else ', sim time'}{gate}]")
+    up_started = time.time()
     outcomes = dispatch.run_verb(pairs, env, "up", dry_run=dry_run)
     failed = [o for o in outcomes if o.returncode != 0]
     if failed:
         eprint(f"rig: {len(failed)}/{len(outcomes)} failed: "
                f"{', '.join(o.sensor.name for o in failed)}")
         return 1
+    gate = variables.get("replay_start_at_unix_s")
+    if sources and gate is not None and not dry_run and time.time() > gate:
+        # the sources resumed themselves at the gate while later stacks were still coming up
+        import math
+        late = time.time() - gate
+        eprint(f"rig replay: warning: the up outlasted the release gate by {late:.0f}s — the sources "
+               f"started playing before the last stack was up; pass --start-delay "
+               f"{math.ceil(time.time() - up_started + 5)} next time")
     if auto_end_grace is not None and not dry_run:
         # NOTE: incompatible with the player config's `loop: true` (the player never exits —
         # rig can't see that knob, schema-opaque; the wait just runs until Ctrl+C).

@@ -568,6 +568,119 @@ def test_repoint_rows_round_trips_a_hand_shaped_manifest():
     assert rows["gnss"]["config"] == "config/sensors/gnss.yaml"           # untouched neighbour
 
 
+
+def test_linked_run_with_instance_recordings_warns_copy_run():
+    # A per-sensor replay source reads its recordings INSIDE a container that binds only the
+    # tree's data root: a run linked from an archive is invisible there. Say so at reconstruct
+    # time; a copied run needs no warning.
+    import contextlib
+    import io
+    root, m = _deployment()
+    rid, data = _open(m, root)
+    run_dir = data / "runs" / rid
+    rec = run_dir / "recordings" / "cam"
+    rec.mkdir(parents=True)
+    (rec / "cam-1.json").write_text("{}")
+    for copy_run in (False, True):
+        dest = pathlib.Path(tempfile.mkdtemp()) / "tree"
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = reconstruct.cmd_reconstruct(None, run_ref=str(run_dir), into=str(dest), config=None,
+                                             copy_run=copy_run)
+        assert rc == 0
+        warned = "--copy-run" in err.getvalue() and "recordings/cam" in err.getvalue()
+        assert warned is (not copy_run), err.getvalue()
+    assert reconstruct._instance_recordings(run_dir) == ["cam"]
+    (run_dir / "recordings" / "empty").mkdir()
+    assert reconstruct._instance_recordings(run_dir) == ["cam"]          # an empty dir is nothing
+
+
+
+def _flat_session(d: pathlib.Path, prefix: str, header: dict, parts: int = 1) -> None:
+    import json as _json
+    (d / f"{prefix}.json").write_text(_json.dumps({"pixel_format": "GRAY8", "width": 8, "height": 8, **header}))
+    (d / f"{prefix}.csv").write_text("frame_id,pts_ns,timestamp_ns,source,chunk_ns,camera_ns,system_ns\n")
+    for i in range(parts):
+        (d / f"{prefix}-{i:05d}.mkv").write_bytes(b"x" * 10)
+
+
+def test_retrofit_recordings_adopts_the_sessions_inside_the_window():
+    # Recordings made BEFORE camera-service knew the run registry sit outside every run (a flat
+    # /data/recordings). `--recordings NAME=DIR` moves the sessions that began inside the run's
+    # window under <run>/recordings/NAME/, stamps provenance, and lists the instance in stacks.
+    import yaml as _y
+    run_dir = pathlib.Path(tempfile.mkdtemp()) / "20260829T100000Z_flight"
+    run_dir.mkdir()
+    (run_dir / "manifest.yaml").write_text(_y.safe_dump(
+        {"run": run_dir.name, "started": "2026-08-29T10:00:00+00:00", "ended": "2026-08-29T11:00:00+00:00",
+         "stacks": ["gnss"]}))
+    flat = pathlib.Path(tempfile.mkdtemp()) / "recordings"
+    flat.mkdir()
+    t = lambda iso: int(__import__("datetime").datetime.fromisoformat(iso).timestamp() * 1e9)  # noqa: E731
+    _flat_session(flat, "cam-20260829-101500", {"first_timestamp_ns": t("2026-08-29T10:15:00+00:00")}, parts=2)
+    _flat_session(flat, "cam-20260829-104000", {"base_timestamp_ns": t("2026-08-29T10:40:00+00:00")})   # older header
+    _flat_session(flat, "cam-20260828-090000", {"created_unix_s": t("2026-08-28T09:00:00+00:00") / 1e9})  # the day before
+    (flat / "notes.json").write_text("{}")                                                                 # not a sidecar
+    rc = reconstruct.cmd_retrofit(pathlib.Path("."), run_refs=[str(run_dir)], artifact=None, from_dir=None,
+                                  recordings=[f"cam={flat}"])
+    assert rc == 0
+    dest = run_dir / "recordings" / "cam"
+    assert sorted(p.name for p in dest.iterdir()) == [
+        "cam-20260829-101500-00000.mkv", "cam-20260829-101500-00001.mkv", "cam-20260829-101500.csv",
+        "cam-20260829-101500.json", "cam-20260829-104000-00000.mkv", "cam-20260829-104000.csv",
+        "cam-20260829-104000.json"]
+    assert sorted(p.name for p in flat.iterdir()) == [                                                     # moved, not copied
+        "cam-20260828-090000-00000.mkv", "cam-20260828-090000.csv", "cam-20260828-090000.json", "notes.json"]
+    doc = load_yaml(run_dir / "manifest.yaml")
+    block = doc["retrofit"]["recordings"]["cam"]
+    assert block["sessions"] == ["cam-20260829-101500", "cam-20260829-104000"] and block["moved"] is True
+    assert block["skipped_outside_window"] == ["cam-20260828-090000"] and block["from"] == str(flat.resolve())
+    assert doc["stacks"] == ["gnss", "cam"]
+    # the day-before session comes in with --all-sessions, copied this time (the originals stay)
+    rc = reconstruct.cmd_retrofit(pathlib.Path("."), run_refs=[str(run_dir)], artifact=None, from_dir=None,
+                                  recordings=[f"cam={flat}"], all_sessions=True, copy=True)
+    assert rc == 0 and (dest / "cam-20260828-090000.json").exists() and (flat / "cam-20260828-090000.json").exists()
+    doc = load_yaml(run_dir / "manifest.yaml")
+    assert doc["retrofit"]["recordings"]["cam"]["sessions"] == ["cam-20260828-090000"]   # the latest adoption
+    # a session is adopted once: the same copy again is refused, nothing overwritten
+    import contextlib
+    import io
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        rc = reconstruct.cmd_retrofit(pathlib.Path("."), run_refs=[str(run_dir)], artifact=None, from_dir=None,
+                                      recordings=[f"cam={flat}"], all_sessions=True, copy=True)
+    assert rc == 1 and "adopted once" in err.getvalue()
+    assert reconstruct._instance_recordings(run_dir) == ["cam"]
+
+
+def test_retrofit_recordings_refusals_are_legible():
+    import contextlib
+    import io
+    import yaml as _y
+    run_dir = pathlib.Path(tempfile.mkdtemp()) / "20260829T100000Z_x"
+    run_dir.mkdir()
+    (run_dir / "manifest.yaml").write_text(_y.safe_dump({"run": run_dir.name}))          # no window
+    flat = pathlib.Path(tempfile.mkdtemp())
+    _flat_session(flat, "cam-1", {"created_unix_s": 1.0})
+    for specs, extra, needle in (([f"cam={flat}"], {}, "no started/ended window"),
+                                 (["cam"], {"all_sessions": True}, "NAME=DIR"),
+                                 (["../x=" + str(flat)], {"all_sessions": True}, "instance name"),
+                                 ([f"cam={flat}/missing"], {"all_sessions": True}, "no directory"),
+                                 ([f"cam={pathlib.Path(tempfile.mkdtemp())}"], {"all_sessions": True}, "no camera-service sessions")):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = reconstruct.cmd_retrofit(pathlib.Path("."), run_refs=[str(run_dir)], artifact=None,
+                                          from_dir=None, recordings=specs, **extra)
+        assert rc == 1 and needle in err.getvalue(), (specs, err.getvalue())
+    (run_dir / "manifest.yaml").write_text(_y.safe_dump(
+        {"run": run_dir.name, "started": "2026-08-29T10:00:00+00:00", "ended": "2026-08-29T11:00:00+00:00"}))
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        rc = reconstruct.cmd_retrofit(pathlib.Path("."), run_refs=[str(run_dir)], artifact=None,
+                                      from_dir=None, recordings=[f"cam={flat}"])
+    assert rc == 1 and "none of the 1 session(s)" in err.getvalue() and "--all-sessions" in err.getvalue()
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

@@ -190,6 +190,12 @@ def test_new_verb_completes_with_zero_completion_changes():
         cli.build_parser = real
 
 
+
+def test_replay_live_completes_instance_names():
+    from rig_cli import completions
+    assert completions._OPTION_SOURCES[(("replay",), "--live")] is completions._instances
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

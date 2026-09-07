@@ -119,14 +119,23 @@ def cmd_up(args, manifest, catalog, descriptors) -> int:
 
 def cmd_down(args, manifest, catalog, descriptors) -> int:
     env = dispatch.fleet_env(manifest, descriptors)
-    pairs = _pairs(manifest, descriptors, args.names, reverse=True)  # reverse: consumers before producers
+    # A bare down covers what the open run's session LAUNCHED, not just the enabled rows: a replay
+    # starts the disabled player and source rows by explicit name (review 2026-09-04, finding 4).
+    names, stale = runs_mod.down_selection(manifest, args.names)
+    extra = [n for n in names if not any(s.name == n and s.enabled for s in manifest.sensors)]
+    if extra:
+        eprint(f"rig down: also {', '.join(extra)} — launched by the open run's session")
+    for n in stale:
+        eprint(f"rig down: warning: the open run launched '{n}', which this vehicle.yaml no longer "
+               f"declares — its containers (if any) are not torn down here")
+    pairs = _pairs(manifest, descriptors, names, reverse=True)  # reverse: consumers before producers
     if not pairs:
         eprint("rig: no enabled stacks to tear down")
         return 0
     eprint(f"rig down: {manifest.vehicle} — {stack_summary([p[0] for p in pairs])}")
     if args.end_run and not args.dry_run and manifest.data_dir:
         # BEFORE the verb: `compose down` removes the containers — their docker logs go with them
-        runs_mod.capture_docker_logs(manifest)
+        runs_mod.capture_docker_logs(manifest, also=set(extra))
     rc = _summarize(dispatch.run_verb(pairs, env, "down", dry_run=args.dry_run))
     if args.purge:
         eprint("rig: purging external volumes (final teardown)")
@@ -818,6 +827,15 @@ def build_parser() -> argparse.ArgumentParser:
                          "required for dev-tree runs with no tag)")
     rf.add_argument("--from", dest="from_dir", default=None, metavar="DIR",
                     help="artifacts dir to resolve tags against (default: var/artifacts)")
+    rf.add_argument("--recordings", action="append", default=None, metavar="NAME=DIR",
+                    help="instead: adopt camera-service recordings made BEFORE the service recorded "
+                         "into the run registry (a flat /data/recordings, an instance dir outside "
+                         "any run) into <run>/recordings/NAME/, where `rig replay` finds them. "
+                         "Sessions that began inside the run's started..ended window; repeatable")
+    rf.add_argument("--all-sessions", action="store_true", dest="all_sessions",
+                    help="with --recordings: adopt every session in DIR regardless of the window")
+    rf.add_argument("--copy", action="store_true",
+                    help="with --recordings: copy the files (default: move — the parts are large)")
 
     st = add("status", "fleet status table")
     st.add_argument("-v", "--verbose", action="store_true", help="expand per-container detail")
@@ -1385,7 +1403,9 @@ def main(argv=None) -> int:
         if args.cmd == "run-retrofit":  # reads run dirs + var/artifacts, not the manifest
             from . import reconstruct as reconstruct_mod
             return reconstruct_mod.cmd_retrofit(root, run_refs=args.runs,
-                                                artifact=args.artifact, from_dir=args.from_dir)
+                                                artifact=args.artifact, from_dir=args.from_dir,
+                                                recordings=args.recordings,
+                                                all_sessions=args.all_sessions, copy=args.copy)
         if args.cmd == "artifact-list":  # reads var/artifacts, not the manifest
             return cmd_artifact_list(args, root)
         if args.cmd == "config-diff":  # needs the RAW rows (working files), not the rendered output

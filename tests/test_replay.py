@@ -983,6 +983,11 @@ def test_discover_sources_finds_recordings_never_names():
     assert any("cam_b" in n and "no recordings" in n for n in notes)      # ran, recorded nothing
     sources, notes = replay.discover_sources(_manifest(rows), descriptors, src, live={"cam_a"})
     assert sources == [] and any("cam_a" in n and "--live" in n for n in notes)
+    # a reconstructed tree whose vendored camera rigging predates replay.source: recordings
+    # present, no declaration -> not a source, and the way out is named (swap the service in)
+    sources, notes = replay.discover_sources(_manifest(rows), {"cam": _Desc(), "nov": _Desc()}, src)
+    assert sources == [] and any("cam_a" in n and "replay.source" in n and "rig swap cam_a" in n for n in notes)
+    assert not any("cam_b" in n for n in notes)                           # nothing recorded: nothing to say
 
 
 def test_timeline_variables_bag_zero_release_gate_and_nulls():
@@ -1154,6 +1159,64 @@ def test_alignment_and_doctor_treat_sources_as_rendered_not_drift():
     assert not any(i.level == doctor.WARN and "cam_a" in i.message for i in issues)   # never WARNed
     assert any(i.level == doctor.WARN and "p [" in i.message for i in issues)
 
+
+
+
+def test_an_up_that_outlasts_the_release_gate_is_warned_with_the_delay_to_use():
+    import contextlib
+    import io
+    from unittest.mock import patch
+    src = _source_run(bags=False)
+    (src / "manifest.yaml").write_text("run: x\nended: 2026-08-27T11:01:00Z\nstacks: [cam_a]\n")
+    _record(src, "cam_a")
+    rows = [_row("zenoh-router", service="zr", tier="infra", order=0), _row("cam_a", service="cam", order=10)]
+    descriptors = {"zr": _Desc(), "cam": _source_desc()}
+    orig = (replay.doctor_mod.collect, replay.dispatch.fleet_env, replay.dispatch.run_verb,
+            replay.runs_mod.new_run, replay.runs_mod.snapshot, replay._guard_clean_host,
+            replay.render_sources)
+    real_time = replay.time.time
+    clock = {"skew": 0.0}
+
+    class _Time:
+        @staticmethod
+        def time():
+            return real_time() + clock["skew"]
+
+    try:
+        replay.doctor_mod.collect = lambda *a, **k: []
+        replay.dispatch.fleet_env = lambda *a, **k: {}
+        def _run_verb(pairs, env, verb, dry_run=False, **k):
+            clock["skew"] = 90.0                       # the up took 90 s wall time
+            class O:  # noqa: N801
+                returncode = 0
+                sensor = pairs[0][0]
+            return [O()]
+        replay.dispatch.run_verb = _run_verb
+        replay.runs_mod.new_run = lambda *a, **k: "20260901T000000Z_x"
+        replay.runs_mod.snapshot = lambda *a, **k: None
+        replay._guard_clean_host = lambda *a, **k: None
+        replay.render_sources = lambda m, d, root, sources, variables: {sp.row.name: pathlib.Path("/dev/null") for sp in sources}
+        err = io.StringIO()
+        with patch.object(replay, "time", _Time), contextlib.redirect_stderr(err):
+            rc = replay.cmd(_manifest(rows, data_dir="/tmp/x"), {}, descriptors, pathlib.Path("."),
+                            run_ref=str(src), names=[], label=None, wall_clock=False, force=False,
+                            dry_run=False, start_delay=20)
+        assert rc == 0
+        assert "outlasted the release gate by 70s" in err.getvalue()
+        import re
+        assert re.search(r"--start-delay 9[5-7]\b", err.getvalue()), err.getvalue()   # ~90 s up + 5 s slack, ceiled
+        clock["skew"] = 0.0
+        err = io.StringIO()
+        replay.dispatch.run_verb = lambda pairs, env, verb, dry_run=False, **k: [type("O", (), {"returncode": 0, "sensor": pairs[0][0]})()]
+        with patch.object(replay, "time", _Time), contextlib.redirect_stderr(err):
+            replay.cmd(_manifest(rows, data_dir="/tmp/x"), {}, descriptors, pathlib.Path("."),
+                       run_ref=str(src), names=[], label=None, wall_clock=False, force=False,
+                       dry_run=False, start_delay=20)
+        assert "outlasted" not in err.getvalue()                         # a quick up: no warning
+    finally:
+        (replay.doctor_mod.collect, replay.dispatch.fleet_env, replay.dispatch.run_verb,
+         replay.runs_mod.new_run, replay.runs_mod.snapshot, replay._guard_clean_host,
+         replay.render_sources) = orig
 
 
 if __name__ == "__main__":

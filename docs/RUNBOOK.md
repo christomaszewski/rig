@@ -278,6 +278,18 @@ deploy artifact their manifest names; reconstruct then overlays each run's own s
 snapshot, so between-run config edits reconstruct correctly per run. `--config <digest12>` picks
 any mid-run state (`ups:` in the run manifest lists them).
 
+Camera recordings and old runs (rig ≥ v0.2.53): a run whose recordings already sit under
+`<run>/recordings/<instance>/` — every run since camera-service recorded into the registry —
+needs nothing: `rig replay` finds them, and older sidecar headers (no session stamp) order by file
+time. Recordings made BEFORE that, in a flat `/data/recordings` or an instance directory outside
+any run, are adopted with `rig run retrofit <run> --recordings <instance>=<dir>`: the sessions
+that began inside the run's `started..ended` window are MOVED under the run (`--copy` to copy,
+`--all-sessions` to ignore the window), the manifest records `retrofit.recordings` and lists the
+instance in `stacks`. Two independent retrofits, one verb. A RECONSTRUCTED tree from an old run
+carries camera-service as it ran — a vendored rigging without `replay.source` and an image that
+cannot replay — so `rig replay` there reports the recordings it found and names the way out:
+`rig swap <instance> <a current camera-service checkout>`, then replay (the drift is recorded).
+
 ## SIL replay — test a service change against a recorded run (rig ≥ v0.2.33)
 
 Needs the `ros2-bag-player` row in vehicle.yaml (`autonomy:`, `enabled: false`, high `order` —
@@ -313,7 +325,10 @@ rig down                                   # replay starts from a quiet host (re
 rig replay <stamp>_fieldtest               # REPRODUCE: infra + every recording-capable instance fed
                                            #   from its own recordings + the player for the bag
 rig replay <stamp>_fieldtest planner       # new run opens, labeled replay-<source> (--label to name)
-rig down --end-run                         # seal the replay session like any run
+rig down --end-run                         # seal the replay session like any run — a bare down
+                                           #   covers what the session launched (the disabled
+                                           #   player / source rows too), and the seal guard sees
+                                           #   every declared row (rig ≥ v0.2.53)
 # unattended/batch: --auto-end waits for the bag to finish, breathes (default 10 s) so consumers
 # drain, then runs the down --end-run itself — never tears down on uncertainty; sweeps become
 #   for c in a b c; do …edit config…; rig replay fieldtest planner --auto-end; done

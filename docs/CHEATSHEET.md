@@ -424,7 +424,9 @@ scp -r $VEHICLE:<data_dir>/runs/<stamp>_dock-test .        # the whole session, 
 rig graph <stamp>_dock-test --check                        # topology + declared-vs-observed WARNs
 rig reconstruct <path-to-run> --into tree/                 # the run dir back into a runnable tree
                                                            #   (its .rig/artifact.tar.gz capture;
-                                                           #   old runs: `rig run retrofit` first)
+                                                           #   old runs: `rig run retrofit` first;
+                                                           #   pre-registry camera recordings:
+                                                           #   `run retrofit <run> --recordings cam=DIR`)
                                                            #   --registry HOST (bench mirror) ·
                                                            #   --enable-replay <path|ref> (old trees)
 rig replay <stamp>_dock-test                               # REPRODUCE the run: recording-capable

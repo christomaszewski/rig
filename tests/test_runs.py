@@ -550,6 +550,57 @@ def test_capture_docker_logs_then_seal_keeps_the_entry():
     assert doc["docker_logs"]["containers"] == 1 and doc["ended"]
 
 
+
+def test_guard_counts_a_disabled_row_started_by_name():
+    # Finding 4 (review 2026-09-04): `rig replay` starts the disabled player (and any disabled
+    # source row) by explicit name; a guard that looked only at enabled rows sealed the run under
+    # a running player. Every declared row is evidence now.
+    data = pathlib.Path(tempfile.mkdtemp())
+    m = _manifest(data)
+    m = Manifest(vehicle=m.vehicle, ros=m.ros, vehicle_id=m.vehicle_id, data_dir=m.data_dir,
+                 sensors=m.sensors + [Sensor(name="bag_player", service="p", config=pathlib.Path("/x"),
+                                             enabled=False, order=999, tier="autonomy")])
+    _mark_idle()
+    runs.ensure(m, data)
+    os.environ["SHIM_COMPOSE_LS"] = json.dumps(
+        [{"Name": project_name("bag_player", m.vehicle_id), "Status": "running(1)"}])
+    assert runs.running_projects(m) == [project_name("bag_player", m.vehicle_id)]
+    try:
+        runs.new_run(m, data, "next")
+        assert False, "must refuse to rotate under a running disabled row"
+    except RigError as exc:
+        assert "bag_player" in str(exc)
+    _mark_idle()
+
+
+def test_down_selection_covers_what_the_open_session_launched():
+    # A bare `down` after a replay must include the player / source rows the session started
+    # (explicit names in `select` reach disabled rows); names given win untouched; a launched row
+    # the manifest no longer declares is reported, not guessed at.
+    data = pathlib.Path(tempfile.mkdtemp())
+    m = _manifest(data)
+    m = Manifest(vehicle=m.vehicle, ros=m.ros, vehicle_id=m.vehicle_id, data_dir=m.data_dir,
+                 sensors=m.sensors + [Sensor(name="bag_player", service="p", config=pathlib.Path("/x"),
+                                             enabled=False, order=999, tier="autonomy")])
+    _mark_idle()
+    assert runs.launched_names(m) == []                                   # no open run
+    assert runs.down_selection(m, []) == (["cam"], [])
+    runs.ensure(m, data)
+    assert runs.launched_names(m) == []                                   # open, no snapshot yet
+    root = pathlib.Path(tempfile.mkdtemp())
+    (root / "vehicle.yaml").write_text("vehicle: t\n")
+    (root / "cam.yaml").write_text("service: c\nname: cam\n")        # the snapshot reads each row's config
+    m = Manifest(vehicle=m.vehicle, ros=m.ros, vehicle_id=m.vehicle_id, data_dir=m.data_dir,
+                 sensors=[Sensor(name="cam", service="c", config=root / "cam.yaml", enabled=True, order=10),
+                          Sensor(name="bag_player", service="p", config=root / "cam.yaml", enabled=False,
+                                 order=999, tier="autonomy")])
+    assert runs.snapshot(m, root, stacks=["cam", "bag_player", "gone"]) is not None
+    assert runs.launched_names(m) == ["cam", "bag_player", "gone"]
+    assert runs.down_selection(m, []) == (["cam", "bag_player"], ["gone"])
+    assert runs.down_selection(m, ["cam"]) == (["cam"], [])              # explicit names win
+    assert runs.launched_names(_manifest(None)) == []                     # no data_dir: inert
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

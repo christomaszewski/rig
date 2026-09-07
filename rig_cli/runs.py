@@ -82,9 +82,12 @@ def _iso_now() -> str:
 
 def running_projects(manifest: Manifest) -> list[str]:
     """This manifest's compose projects that are currently up — the rotation/seal guard's evidence.
-    Raises RigError when docker CAN'T ANSWER (the guard must fail closed, not open); a missing docker
-    binary alone reads as [] (nothing of ours can run without it)."""
-    expected = {project_name(s.name, manifest.vehicle_id) for s in manifest.sensors if s.enabled}
+    EVERY declared row counts, enabled or not: `rig replay` starts the disabled player and any
+    disabled source row by explicit name, and a guard that looked only at enabled rows sealed
+    the run under a running player (review 2026-09-04, finding 4). Raises RigError when docker
+    CAN'T ANSWER (the guard must fail closed, not open); a missing docker binary alone reads as
+    [] (nothing of ours can run without it)."""
+    expected = {project_name(s.name, manifest.vehicle_id) for s in manifest.sensors}
     try:
         proc = subprocess.run(["docker", "compose", "ls", "-a", "--format", "json"],
                               capture_output=True, text=True, timeout=15)
@@ -111,6 +114,38 @@ def running_projects(manifest: Manifest) -> list[str]:
                 and "running" in str(row.get("Status", "")).lower():
             live.append(row["Name"])
     return sorted(live)
+
+
+def launched_names(manifest: Manifest) -> list[str]:
+    """The instance names the OPEN run's latest `up` launched (its manifest's last `ups:` entry) —
+    a replay session's player and source rows are disabled rows started by explicit name, and a
+    bare `rig down` must tear them down too. [] with no data_dir, no open run, no snapshot, or a
+    corrupt manifest (fail-soft: the enabled rows still come down)."""
+    if not manifest.data_dir:
+        return []
+    try:
+        cur = current_run(_root(manifest))
+    except RigError:
+        return []
+    if cur is None:
+        return []
+    ups = cur[2].get("ups")
+    if not isinstance(ups, list) or not ups or not isinstance(ups[-1], dict):
+        return []
+    return [str(n) for n in (ups[-1].get("stacks") or []) if isinstance(n, str)]
+
+
+def down_selection(manifest: Manifest, names: list[str]) -> tuple[list[str], list[str]]:
+    """(names to tear down, names the session launched that this manifest no longer declares).
+    Explicit names win untouched; a bare `down` is every enabled row PLUS whatever the open run's
+    session launched (explicit names in `select` include disabled rows)."""
+    if names:
+        return list(names), []
+    known = {s.name for s in manifest.sensors}
+    enabled = [s.name for s in manifest.sensors if s.enabled]
+    launched = launched_names(manifest)
+    chosen = list(dict.fromkeys(enabled + [n for n in launched if n in known]))
+    return chosen, [n for n in launched if n not in known]
 
 
 def _guard(manifest: Manifest, force: bool, action: str) -> None:
@@ -259,7 +294,7 @@ def snapshot(manifest: Manifest, root: Path, *, stacks: list[str]) -> str | None
         return None
 
 
-def capture_docker_logs(manifest: Manifest) -> int:
+def capture_docker_logs(manifest: Manifest, also: set[str] = frozenset()) -> int:
     """Save `docker logs` from every container of this manifest's compose projects into the OPEN run.
     cmd_down calls this BEFORE dispatching the down verb when --end-run was asked: `compose down`
     REMOVES the containers, and their stdout/stderr goes with them — seal time is too late.
@@ -280,7 +315,7 @@ def capture_docker_logs(manifest: Manifest) -> int:
             return 0
         run_id, run_dir, doc = cur
         for sensor in manifest.sensors:
-            if not sensor.enabled:
+            if not sensor.enabled and sensor.name not in also:  # `also`: the session's launched rows
                 continue
             project = project_name(sensor.name, manifest.vehicle_id)
             try:

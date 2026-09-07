@@ -40,7 +40,10 @@ RIG_OWNED_ENV = {"VEHICLE_ID", "ROS_DOMAIN_ID", "RMW_IMPLEMENTATION", "RIG_IMAGE
                  # leaked selector or sim-time token would silently corrupt a live session)
                  "RIG_REPLAY_SOURCE", "RIG_REPLAY_TOPICS", "RIG_REPLAY_EXCLUDE", "RIG_SIM_TIME",
                  "RIG_REPLAY_SERVICES", "RIG_REPLAY_CALLS",
-                 "RIG_REPLAY_FROM_S", "RIG_REPLAY_TO_S", "RIG_REPLAY_START_AT_UNIX_S"}  # the window (seconds from bag start)
+                 "RIG_REPLAY_FROM_S", "RIG_REPLAY_TO_S", "RIG_REPLAY_START_AT_UNIX_S",  # the window (seconds from bag start)
+                 # the operational-state post (dispatch sets/pops it per verb; a manifest `env:`
+                 # must not smuggle a standby past every verb -- review 2026-09-04, finding 18)
+                 "RIG_TARGET_STATE"}
 
 
 @dataclass(frozen=True)

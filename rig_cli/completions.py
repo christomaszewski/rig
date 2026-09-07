@@ -589,6 +589,7 @@ _OPTION_SOURCES: dict = {
     (("pkg", "search"), "--registry"): _registry_names,
     (("pkg", "outdated"), "--registry"): _registry_names,
     (("graph",), "--contract"): _instances,
+    (("replay",), "--live"): _instances,
 }
 
 

@@ -1,8 +1,23 @@
 # rig — project state & handoff (resume here)
 
 > Snapshot for picking the project up cold in a new session. Read this first, then `CHEATSHEET.md` /
-> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.2.52**,
+> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.2.53**,
 > branch **`main`**, 699 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> **v0.2.53 (2026-09-07) — the replay session's teardown, and old runs for replay.** Review
+> finding 4: `runs.running_projects` now counts EVERY declared row (a replay starts the disabled
+> player and source rows by explicit name; the seal/rotation guard sealed the run under a running
+> player), and a bare `rig down` tears down what the open run's session LAUNCHED (`launched_names`
+> from the manifest's last `ups:` entry, `down_selection`; a launched row the manifest no longer
+> declares is reported, not guessed) with docker logs captured for those rows too. Finding 18:
+> `RIG_TARGET_STATE` is rig-owned (a manifest `env:` can no longer smuggle a standby past every
+> verb). `rig reconstruct` warns when a LINKED run holds instance recordings (invisible inside the
+> containers — `--copy-run`). `rig replay` warns when the up outlasts the release gate, naming the
+> `--start-delay` to use; `--live` completes instance names. `rig run retrofit <run> --recordings
+> NAME=DIR` adopts camera-service recordings made before the service recorded into the registry
+> (a flat /data/recordings): sessions that began inside the run's window are moved (`--copy`,
+> `--all-sessions`) under `<run>/recordings/NAME/`, provenance in `retrofit.recordings`, the
+> instance added to `stacks`; runs whose recordings already sit under the run need nothing.
+> +8 tests (runs 2, manifest 1, reconstruct 3, replay 1, completions 1).
 > **main after v0.2.52 (unreleased) — bake's registry digest lookup is bounded.** `_resolve_digest`
 > ran `docker buildx imagetools inspect <ref>` with no timeout; on a host whose resolver hangs on
 > an unknown registry (a bench off the vehicle network — the bake suite's fake `reg.test` ref hung

@@ -146,6 +146,15 @@ def _repoint_rows(veh: Path, configs: dict[str, str]) -> None:
     veh.write_text(yaml.safe_dump(doc, sort_keys=False))
 
 
+def _instance_recordings(run_dir: Path) -> list[str]:
+    """Instance names with recordings under <run>/recordings/<name>/ (camera-service's layout —
+    the per-sensor replay sources `rig replay` finds)."""
+    base = run_dir / "recordings"
+    if not base.is_dir():
+        return []
+    return sorted(d.name for d in base.iterdir() if d.is_dir() and any(d.iterdir()))
+
+
 def _player_rows(tree: Path) -> list[str]:
     """Instance names of the tree's ros2-bag-player rows — a RAW vehicle.yaml read (the tree may
     not load yet, and reconstruct works with no deployment or registry around)."""
@@ -384,6 +393,14 @@ def cmd_reconstruct(root: Path | None, *, run_ref: str, into: str | None,
             entry.symlink_to(run_dir.resolve())
             eprint(f"rig reconstruct: source run LINKED into the tree's registry "
                    f"({run_dir.name} -> archive; `--copy-run` for a portable copy)")
+            if (recs := _instance_recordings(run_dir)):
+                # rig finds the recordings through the link; the containers see only the tree's
+                # data root, so a replayed camera would fail to open its files
+                eprint(f"rig reconstruct: warning: the run holds instance recordings "
+                       f"(recordings/{', recordings/'.join(recs)}) — a LINKED run is invisible inside "
+                       f"the containers (only the tree's data root is bound), so `rig replay` here "
+                       f"would fail to open them; re-run with --copy-run, or move the run under "
+                       f"{dest / 'var' / 'data' / 'runs'}")
         run_arg = run_dir.name
 
     images = run_dir / ".rig" / "images.yaml"
@@ -395,12 +412,159 @@ def cmd_reconstruct(root: Path | None, *, run_ref: str, into: str | None,
     return 0
 
 
+def _sidecar_sessions(src: Path) -> list[tuple[str, dict, list[Path]]]:
+    """camera-service recording sessions in a directory: (<prefix>, header, files) for every
+    `<prefix>.json` sidecar header that has its `.csv` beside it and at least one
+    `<prefix>-NNNNN.mkv` part. Anything else in the directory is left alone."""
+    import json
+    import re
+    out = []
+    for jp in sorted(src.glob("*.json")):
+        prefix = jp.name[:-5]
+        csv = src / f"{prefix}.csv"
+        if not csv.is_file():
+            continue
+        try:
+            header = json.loads(jp.read_text())
+        except (OSError, ValueError):
+            continue
+        if not isinstance(header, dict) or not all(header.get(k) for k in ("pixel_format", "width", "height")):
+            continue
+        part = re.compile(re.escape(prefix) + r"-\d{5}\.mkv$")
+        parts = sorted(p for p in src.glob(f"{prefix}-*.mkv") if part.match(p.name))
+        if not parts:
+            continue
+        out.append((prefix, header, [jp, csv, *parts]))
+    return out
+
+
+def _session_time_ns(header: dict) -> int | None:
+    """When a recorded session began, from its header: the session's first stamp (sessions,
+    camera-service ≥ the lifecycle arc), else the process base (older headers), else the file's
+    creation time. None when the header carries none of them."""
+    for key, scale in (("first_timestamp_ns", 1), ("base_timestamp_ns", 1), ("created_unix_s", 1e9)):
+        v = header.get(key)
+        if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0:
+            return int(v * scale)
+    return None
+
+
+def _run_window_ns(doc: dict) -> tuple[int | None, int | None]:
+    import datetime
+
+    def _ns(value):
+        try:
+            t = datetime.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return None
+        if t.tzinfo is None:
+            t = t.replace(tzinfo=datetime.timezone.utc)
+        return int(t.timestamp() * 1e9)
+
+    return _ns(doc.get("started")), _ns(doc.get("ended"))
+
+
+def retrofit_recordings(run_dir: Path, specs: list[str], *, all_sessions: bool = False,
+                        copy: bool = False) -> dict:
+    """Adopt camera-service recordings made BEFORE the service recorded into the run registry
+    (a flat `/data/recordings`, or `<data_dir>/recordings/<instance>` outside any run) into
+    `<run>/recordings/<name>/`, where `rig replay` finds per-sensor sources. `NAME=DIR` per
+    instance (the recordings do not know the instance name — the operator does). Sessions are
+    selected by TIME: a session that began inside the run's [started, ended] window belongs to
+    it (`all_sessions` adopts every session in DIR — a run with no window, a foreign layout).
+    MOVED by default (the parts are large; same filesystem = a rename), copied with `copy`.
+    Refuses to overwrite a session already under the run. Returns the provenance block that
+    the run manifest records under `retrofit.recordings`."""
+    import datetime
+    import shutil
+    doc = _run_manifest(run_dir)
+    lo, hi = _run_window_ns(doc)
+    if not all_sessions and (lo is None or hi is None):
+        raise RigError(f"{run_dir.name}: the run manifest has no started/ended window to select "
+                       f"sessions by — pass --all-sessions to adopt every session in the directory")
+    record: dict = {}
+    for spec in specs:
+        if "=" not in spec:
+            raise RigError(f"--recordings takes NAME=DIR (the instance name the recordings belong "
+                           f"to, and the directory holding them), got {spec!r}")
+        name, _, src_s = spec.partition("=")
+        name = name.strip()
+        src = Path(src_s.strip()).expanduser()
+        from .common import safe_component
+        safe_component(name, what="--recordings instance name")
+        if not src.is_dir():
+            raise RigError(f"--recordings {name}: no directory at {src}")
+        sessions = _sidecar_sessions(src)
+        if not sessions:
+            raise RigError(f"--recordings {name}: {src} holds no camera-service sessions "
+                           f"(<prefix>.json + .csv + <prefix>-NNNNN.mkv)")
+        chosen, skipped = [], []
+        for prefix, header, files in sessions:
+            t = _session_time_ns(header)
+            if all_sessions or (t is not None and lo <= t < hi):
+                chosen.append((prefix, files))
+            else:
+                skipped.append((prefix, t))
+        if not chosen:
+            when = ", ".join(f"{p} ({'no time in header' if t is None else datetime.datetime.fromtimestamp(t / 1e9, datetime.timezone.utc).isoformat(timespec='seconds')})"
+                             for p, t in skipped)
+            raise RigError(f"--recordings {name}: none of the {len(sessions)} session(s) in {src} "
+                           f"began inside the run's window {doc.get('started')} .. {doc.get('ended')}: "
+                           f"{when} — --all-sessions adopts them regardless")
+        dest = run_dir / "recordings" / name
+        for prefix, _files in chosen:
+            if (dest / f"{prefix}.json").exists():
+                raise RigError(f"--recordings {name}: {dest / prefix}.json already exists under the run "
+                               f"— a session is adopted once")
+        dest.mkdir(parents=True, exist_ok=True)
+        for prefix, files in chosen:
+            for f in files:
+                if copy:
+                    shutil.copy2(f, dest / f.name)
+                else:
+                    shutil.move(str(f), str(dest / f.name))
+        record[name] = {"from": str(src.resolve()), "sessions": [p for p, _ in chosen],
+                        "copied" if copy else "moved": True,
+                        "skipped_outside_window": [p for p, _ in skipped]}
+        eprint(f"rig retrofit: {run_dir.name}: {name} <- {len(chosen)} session(s) from {src} "
+               f"({'copied' if copy else 'moved'}"
+               f"{f', {len(skipped)} outside the window left behind' if skipped else ''})")
+    import yaml
+    retro = doc.get("retrofit") if isinstance(doc.get("retrofit"), dict) else {}
+    recs = retro.get("recordings") if isinstance(retro.get("recordings"), dict) else {}
+    for name, block in record.items():
+        block["at"] = datetime.date.today().isoformat()
+        recs[name] = block
+    retro["recordings"] = recs
+    doc["retrofit"] = retro
+    stacks = [str(s) for s in (doc.get("stacks") or [])]
+    for name in record:
+        if name not in stacks:   # the instance ran (it recorded); the old manifest never listed it
+            stacks.append(name)
+    doc["stacks"] = stacks
+    (run_dir / "manifest.yaml").write_text(yaml.safe_dump(doc, sort_keys=False))
+    return record
+
+
 def cmd_retrofit(root: Path, *, run_refs: list[str], artifact: str | None,
-                 from_dir: str | None) -> int:
+                 from_dir: str | None, recordings: list[str] | None = None,
+                 all_sessions: bool = False, copy: bool = False) -> int:
     """Stamp old runs with the deploy artifact their manifests name. Tag→tarball resolution
     against --from (default: <root>/var/artifacts); --artifact overrides for ALL named runs
-    (single-tag campaigns). Refuses tag mismatches; never guesses."""
+    (single-tag campaigns). Refuses tag mismatches; never guesses. With `--recordings NAME=DIR`
+    the verb instead adopts camera-service recordings made before the service knew the run
+    registry into the run (retrofit_recordings) — the two retrofits are independent."""
     import yaml
+    if recordings:
+        rc = 0
+        for ref in run_refs:
+            try:
+                retrofit_recordings(_resolve_run(root, ref), recordings, all_sessions=all_sessions,
+                                    copy=copy)
+            except RigError as exc:
+                eprint(f"rig retrofit: {exc}")
+                rc = 1
+        return rc
     src_dir = Path(from_dir).expanduser() if from_dir else root / "var" / "artifacts"
     rc = 0
     for ref in run_refs:
