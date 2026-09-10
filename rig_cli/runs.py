@@ -69,7 +69,8 @@ def _remember(data: Path) -> None:
 
 def _root(manifest: Manifest) -> Path:
     if not manifest.data_dir:
-        raise RigError("runs need `data_dir` in vehicle.yaml (the host dir the registry lives under)")
+        raise RigError("no run registry: `rig setup --data-dir <dir>` (this user), `sudo rig "
+                       "provision --data-dir <dir>` (this machine), or `data_dir:` in vehicle.yaml")
     data = Path(manifest.data_dir)
     if not data.is_absolute():
         raise RigError(f"data_dir must be an ABSOLUTE host path, not '{manifest.data_dir}' — a relative "

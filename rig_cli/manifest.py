@@ -90,11 +90,12 @@ class Manifest:
     platform: str | None = None      # THIS host's hardware/OS target (e.g. jp7) -> RIG_TARGET_PLATFORM;
     #                                  matrix services pull <tag>-<platform> (see dispatch.service_env)
     data_dir: str | None = None      # host dir for recordings/logs/outputs; -> RIG_DATA_DIR
-    host_data_dir: str | None = None  # the MACHINE file's data_dir when the effective data_dir is
-    #                                   ANOTHER one (a TREE-local vehicle.local.yaml — a reconstruct
-    #                                   workspace, a bench experiment; the machine beats vehicle.yaml):
-    #                                   the host's run registry, read-THROUGH for run lookup,
-    #                                   `rig runs` and TAB (runs.registries) — never a write target
+    host_data_dir: str | None = None  # the box's shared registry (the USER's ~/.rig/config.yaml
+    #                                   data_dir, else the MACHINE file's) when the effective
+    #                                   data_dir is ANOTHER one (a TREE-local vehicle.local.yaml —
+    #                                   a reconstruct workspace, a bench experiment): read-THROUGH
+    #                                   for run lookup, `rig runs` and TAB (runs.registries) —
+    #                                   never a write target
     run_capture: bool = True         # lean-bake the tree into each opened run (.rig/artifact.tar.gz)
     #                                  so every run dir is self-contained for `rig reconstruct`;
     #                                  disk-tight vehicles opt out here or in vehicle.local.yaml
@@ -242,12 +243,33 @@ def machine_data_dir() -> str | None:
     return raw or None
 
 
+def host_registry_dir() -> str | None:
+    """The registry every deployment on this box shares, outside any tree: THIS USER's
+    (~/.rig/config.yaml, `rig setup --data-dir`) when set, else the MACHINE's (/etc/rig,
+    `sudo rig provision --data-dir`). The read-through registry of a tree that names its own."""
+    from .userconfig import user_data_dir
+    return user_data_dir() or machine_data_dir()
+
+
+def _user_source() -> dict:
+    """The user tier of the local precedence: data_dir only (identity stays machine-level)."""
+    from .userconfig import load_user_config
+    doc = load_user_config()  # a typo'd key refuses here — the file must never silently do nothing
+    return {"data_dir": doc["data_dir"]} if doc.get("data_dir") else {}
+
+
 def _local_sources(root: Path) -> list[dict]:
     """Vehicle-local files, highest precedence first: the deployment-local vehicle.local.yaml
-    (bench/dev trees — artifacts never ship one), then the MACHINE identity file."""
+    (bench/dev trees — artifacts never ship one), the USER's ~/.rig/config.yaml (data_dir only),
+    then the MACHINE identity file."""
     sources: list[dict] = []
     machine = machine_file()
-    for path in (root / "vehicle.local.yaml", machine):
+    for path in (root / "vehicle.local.yaml", None, machine):
+        if path is None:
+            user = _user_source()
+            if user:
+                sources.append(user)
+            continue
         if not path.is_file():
             continue
         data = load_yaml(path)
@@ -408,12 +430,12 @@ def load_manifest(root: Path) -> Manifest:
     data_dir = (str(eff_data_dir or "").strip()) or None
     if data_dir is not None:
         ctx["data_dir"] = data_dir
-    # The HOST registry: when the effective data_dir is not the machine's (a TREE-local
-    # vehicle.local.yaml — a reconstruct workspace, a bench experiment; the machine file beats
-    # vehicle.yaml, so that is the one way to differ), the machine registry stays visible
-    # READ-THROUGH (lookup/list/TAB), so a run imported into the provisioned home is found from
-    # every deployment on the box — never the reverse. Same dir = no layering.
-    host_data_dir = machine_data_dir()
+    # The HOST registry: when the effective data_dir is not the box's shared one (the user's,
+    # else the machine's — only a TREE-local vehicle.local.yaml beats those: a reconstruct
+    # workspace, a bench experiment), the shared registry stays visible READ-THROUGH
+    # (lookup/list/TAB), so a run imported into it is found from every deployment on the box —
+    # never the reverse. Same dir = no layering.
+    host_data_dir = host_registry_dir()
     if host_data_dir and MARKER.search(host_data_dir):
         try:
             host_data_dir = str(substitute_scalar(host_data_dir, ctx, where="host data_dir"))

@@ -509,18 +509,23 @@ def _registry_dirs(root_arg) -> list[Path]:
     root = _deployment(root_arg)
     if not root:
         return []
+    from .registries import rig_home
     machine = Path(os.environ.get("RIG_VEHICLE_LOCAL") or "/etc/rig/vehicle.local.yaml")
+    user = rig_home() / "config.yaml"
     out: list[Path] = []
-    for path in (root / "vehicle.local.yaml", machine, root / "vehicle.yaml"):
+    for path in (root / "vehicle.local.yaml", user, machine, root / "vehicle.yaml"):
         if path.is_file() and _read_yaml(path).get("data_dir"):
             data_dir = str(_read_yaml(path)["data_dir"])
             if "{{" not in data_dir:
-                out.append(Path(data_dir))
+                out.append(Path(data_dir).expanduser())
             break
-    if machine.is_file():
-        host = str(_read_yaml(machine).get("data_dir") or "")
-        if host and "{{" not in host and (not out or Path(host).resolve() != out[0].resolve()):
-            out.append(Path(host))
+    host = ""
+    for path in (user, machine):  # the box's shared registry: the user's, else the machine's
+        if path.is_file() and _read_yaml(path).get("data_dir"):
+            host = str(_read_yaml(path)["data_dir"])
+            break
+    if host and "{{" not in host and (not out or Path(host).expanduser().resolve() != out[0].resolve()):
+        out.append(Path(host).expanduser())
     return out
 
 
@@ -618,6 +623,7 @@ _POSITIONAL_SOURCES: dict = {
     (("reconstruct",), "run"): _run_ids,
     (("run-retrofit",), "runs"): _run_ids,
     (("run-rm",), "runs"): _local_run_ids,
+    (("run-archive",), "runs"): _local_run_ids,
     (("run-export",), "run"): _run_ids,
     (("run-tag",), "run"): _run_ids,
     (("run-tag",), "tags"): _run_tags,

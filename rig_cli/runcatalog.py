@@ -2,7 +2,8 @@
 by tag, label, vehicle and date. Tags live in each run's OWN manifest (`rig run tag`), so they
 travel with the run and every copy reads them raw.
 
-Roots (``~/.rig/catalog.yaml``): the machine registry (always, when the box is provisioned),
+Roots (``~/.rig/catalog.yaml``): the box's shared registry (the user's, and the machine's —
+always, when set),
 every registry rig has opened or imported a run into, every ``fleet sync --into`` tree and
 reconstruct workspace — remembered as rig touches them — plus ``rig catalog add <dir>``. The
 catalog is deliberately NOT what ``rig runs`` or TAB show: those stay the deployment's registry
@@ -66,10 +67,10 @@ def remember(path: Path | str, *, kind: str = "registry") -> None:
     if not p.is_absolute():
         return
     key = str(p.resolve())
-    from .manifest import machine_data_dir
-    machine = machine_data_dir()
-    if machine and str(Path(machine).expanduser().resolve()) == key:
-        return  # the machine registry is always a root — never written down
+    from .manifest import host_registry_dir
+    shared = host_registry_dir()
+    if shared and str(Path(shared).expanduser().resolve()) == key:
+        return  # the box's shared registry is always a root — never written down
     rows = _read_roots()
     if any(str(Path(r["path"]).expanduser().resolve()) == key for r in rows):
         return
@@ -80,7 +81,8 @@ def remember(path: Path | str, *, kind: str = "registry") -> None:
 def roots() -> list[tuple[Path, str]]:
     """(path, kind) in scan order: the machine registry first, then the remembered roots, no
     duplicates (by resolved path)."""
-    from .manifest import machine_data_dir
+    from .manifest import host_registry_dir, machine_data_dir
+    from .userconfig import user_data_dir
     out: list[tuple[Path, str]] = []
     seen: set[str] = set()
 
@@ -91,8 +93,11 @@ def roots() -> list[tuple[Path, str]]:
         seen.add(key)
         out.append((path.expanduser(), kind))
 
-    machine = machine_data_dir()
-    if machine and Path(machine).is_absolute():
+    shared = host_registry_dir()
+    if shared and Path(shared).expanduser().is_absolute():
+        _add(Path(shared), "user" if user_data_dir() else "machine")
+    machine = machine_data_dir()  # both, when the user's registry shadows the machine's
+    if machine and Path(machine).expanduser().is_absolute():
         _add(Path(machine), "machine")
     for row in _read_roots():
         _add(Path(row["path"]), row["kind"])

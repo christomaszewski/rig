@@ -10,6 +10,9 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 from rig_cli import RigError  # noqa: E402
 from rig_cli.init import add_service, init  # noqa: E402
 from rig_cli.manifest import load_manifest  # noqa: E402
+import os
+# Hermetic user state: a developer's real ~/.rig/config.yaml (data_dir) must not reach these.
+os.environ.setdefault("RIG_HOME", str(pathlib.Path(tempfile.mkdtemp()) / "home"))
 
 
 def _ws() -> pathlib.Path:

@@ -9,6 +9,8 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 from rig_cli import RigError
 from rig_cli.manifest import load_manifest
+# Hermetic user state: a developer's real ~/.rig/config.yaml (data_dir) must not reach these.
+os.environ.setdefault("RIG_HOME", str(pathlib.Path(tempfile.mkdtemp()) / "home"))
 
 # Hermetic on ANY host, provisioned included — set at import, since tests load manifests directly:
 # no /etc/rig identity file, no shell identity, no stray RIG_VAR_* feeding the vars tier.

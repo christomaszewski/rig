@@ -16,6 +16,8 @@ from rig_cli.descriptor import Descriptor, load_descriptor  # noqa: E402
 from rig_cli.dispatch import fleet_env, instance_env, service_env  # noqa: E402
 from rig_cli.doctor import ERROR, OK, WARN, collect  # noqa: E402
 from rig_cli.manifest import Manifest, RosSettings, Sensor, load_manifest  # noqa: E402
+# Hermetic user state: a developer's real ~/.rig/config.yaml (data_dir) must not reach these.
+os.environ.setdefault("RIG_HOME", str(pathlib.Path(tempfile.mkdtemp()) / "home"))
 
 
 @contextlib.contextmanager

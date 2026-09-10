@@ -253,6 +253,12 @@ def cmd_run_export(args, manifest, catalog, descriptors) -> int:
                           profile=profile, force=args.force, dry_run=args.dry_run)
 
 
+def cmd_run_archive(args, manifest, catalog, descriptors) -> int:
+    from . import datadir
+    return datadir.archive_runs(manifest, args.runs, args.to, link=not args.no_link,
+                                force=args.force)
+
+
 def cmd_run_tag(args, manifest, catalog, descriptors) -> int:
     return runs_mod.tag_runs(manifest, args.run, args.tags, remove=False)
 
@@ -615,6 +621,7 @@ _HANDLERS = {
     "run-import": cmd_run_import,
     "run-export": cmd_run_export,
     "run-tag": cmd_run_tag,
+    "run-archive": cmd_run_archive,
     "run-untag": cmd_run_untag,
     "graph": cmd_graph,
     "replay": cmd_replay,
@@ -629,7 +636,7 @@ _GROUP_VERBS: dict[str, dict[str, str]] = {
     "config": {"show": "config", "render": "config-render", "diff": "config-diff"},
     "run": {"new": "new-run", "end": "end-run", "list": "runs", "retrofit": "run-retrofit",
             "rm": "run-rm", "import": "run-import", "export": "run-export",
-            "tag": "run-tag", "untag": "run-untag"},
+            "tag": "run-tag", "untag": "run-untag", "archive": "run-archive"},
     "catalog": {"search": "catalog-search", "list": "catalog-search", "add": "catalog-add",
                 "remove": "catalog-remove", "rm": "catalog-remove", "roots": "catalog-roots"},
     "artifact": {"bake": "bake", "unbake": "unbake", "list": "artifact-list"},
@@ -689,7 +696,7 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="noun groups (canonical forms; the flat spellings above stay as permanent aliases):\n"
                "  rig config   show | render          rig run      new | end | list | rm | "
-               "import | export | tag | untag | retrofit\n"
+               "import | export | tag | untag | archive | retrofit\n"
                "  rig catalog  [query] [--tag --label --vehicle --since] | add | remove | roots"
                "   (every run rig knows about)\n"
                "  rig registry init | add | remove | list | sync | validate | index\n"
@@ -884,6 +891,18 @@ def build_parser() -> argparse.ArgumentParser:
                      help="redo an export that already exists (removed first)")
     rex.add_argument("--dry-run", action="store_true", dest="dry_run",
                      help="print what would be kept/omitted and which exporters would run")
+
+    rar = sub.add_parser("run-archive", help="move sealed runs' BYTES off this registry to "
+                                             "<to>/<vehicle>/<id> (a drive, a NAS) and keep a "
+                                             "LINKED entry (canonical: run archive) — runs/replay/"
+                                             "TAB still resolve them, `run rm` unlinks, an "
+                                             "unmounted drive lists as dangling; the root joins "
+                                             "`rig catalog`")
+    rar.add_argument("runs", nargs="+", help="run id(s) in THIS registry — see `rig runs`")
+    rar.add_argument("--to", required=True, metavar="DIR", help="archive root (absolute, mounted)")
+    rar.add_argument("--no-link", action="store_true", dest="no_link",
+                     help="drop the registry entry instead of linking (the catalog still finds it)")
+    rar.add_argument("--force", action="store_true", help="also move unsealed (interrupted) runs")
 
     rtg = sub.add_parser("run-tag", help="tag a run (canonical: run tag) — tags live in the run's "
                                          "own manifest and travel with it; `key:value` "
@@ -1376,6 +1395,12 @@ def build_parser() -> argparse.ArgumentParser:
                     help="THIS machine's docker registry HOST[:port][/ns] — the images.registry "
                          "override (a bench pulling from its own mirror); tag/base keep coming "
                          "from each deployment's vehicle.yaml")
+    pv.add_argument("--migrate", action="store_true",
+                    help="with --data-dir: MOVE the machine's existing registry there first "
+                         "(hardlinks kept, verified, a symlink left at the old path); refuses "
+                         "with an OPEN run")
+    pv.add_argument("--keep-old", action="store_true", dest="keep_old",
+                    help="with --migrate: copy, leave the old tree in place (no symlink)")
     pv.add_argument("--force", action="store_true",
                     help="allow CHANGING an existing identity (renames compose projects — "
                          "bring the vehicle down first)")
@@ -1396,6 +1421,22 @@ def build_parser() -> argparse.ArgumentParser:
     st.add_argument("--purge", action="store_true",
                     help="remove ~/.rig and the shell block (run BEFORE uninstalling the package)")
     st.add_argument("--yes", action="store_true", help="confirm --purge non-interactively")
+    st.add_argument("--show", action="store_true",
+                    help="one screen of where everything is: rig, ~/.rig, the machine identity, "
+                         "this deployment's effective data_dir and which file set it, the host "
+                         "registry it reads through, the catalog roots")
+    st.add_argument("--data-dir", dest="data_dir", default=None, metavar="PATH",
+                    help="THIS USER's run registry (~/.rig/config.yaml; absolute; beats the "
+                         "machine's, yields to a tree-local vehicle.local.yaml). A first "
+                         "interactive `rig setup` asks when none is set anywhere")
+    st.add_argument("--migrate", action="store_true",
+                    help="with --data-dir: MOVE the current registry (this user's, else the "
+                         "machine's) there first — hardlinks kept, verified, a symlink left at "
+                         "the old path; refuses with an OPEN run")
+    st.add_argument("--keep-old", action="store_true", dest="keep_old",
+                    help="with --migrate: copy, leave the old tree in place (no symlink)")
+    st.add_argument("--skip-data-dir", action="store_true", dest="skip_data_dir",
+                    help="don't ask about a run registry (scripts; vehicles use provision)")
     return parser
 
 
@@ -1490,14 +1531,19 @@ def main(argv=None) -> int:
             print(completions.script(args.shell), end="")
             return 0
         if args.cmd == "setup":  # host/user environment — the one command whose object is the HOST
+            root = (args.root or find_root()).resolve()
             return registries_mod.setup(shell=args.shell, no_default_registry=args.no_default_registry,
-                                        purge=args.purge, yes=args.yes)
+                                        purge=args.purge, yes=args.yes, data_dir=args.data_dir,
+                                        migrate=args.migrate, keep_old=args.keep_old,
+                                        skip_data_dir=args.skip_data_dir, show=args.show,
+                                        root=root if (root / "vehicle.yaml").exists() else None)
         if args.cmd == "provision":  # machine identity — works with or without a deployment nearby
             root = (args.root or find_root()).resolve()
             return provision_mod.provision(
                 root if (root / "vehicle.yaml").exists() else None,
                 vehicle_id=args.vehicle_id, name=args.name, set_vars=args.var,
                 platform=args.platform, data_dir=args.data_dir, registry=args.registry,
+                migrate=args.migrate, keep_old=args.keep_old,
                 force=args.force)
         root = (args.root or find_root()).resolve()
         if args.cmd == "add":  # edits the deployment files themselves — routes its own manifest load

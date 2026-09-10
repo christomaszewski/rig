@@ -255,7 +255,9 @@ Bench/laptop registry setup is one command (the registry itself is minted lazily
 it belongs to `data_dir`, not to the machine or the rig install):
 
 ```bash
-sudo rig provision --data-dir /data/rig     # or a tree-local vehicle.local.yaml for one deployment
+rig setup --data-dir ~/rig-data             # THIS USER's registry, no sudo (a first `rig setup` asks);
+sudo rig provision --data-dir /data/rig     #   or the machine's; or a tree-local vehicle.local.yaml
+rig setup --show                            # where everything is, one screen
 sudo rig provision --registry localhost:5000  # the bench's image mirror (images.registry, machine-wide;
                                             #   each deployment's tag/base pins stay — only the host swaps)
 ```
@@ -264,9 +266,9 @@ sudo rig provision --registry localhost:5000  # the bench's image mirror (images
 id-based verbs and TAB completion cover them; `rig run rm <id…>` reclaims disk (sealed runs
 freely, interrupted with --force, the OPEN run never).
 
-**Where imports go, and who sees them** (rig ≥ v0.2.55). The registry is the machine's
-(`sudo rig provision --data-dir /data/rig`), so a run imported from any deployment on the laptop
-is found from every deployment on it. A tree with its OWN `data_dir` in `vehicle.local.yaml` —
+**Where imports go, and who sees them** (rig ≥ v0.2.55). The registry is the box's — this
+user's (`rig setup --data-dir`) or the machine's (`sudo rig provision --data-dir`) — so a run
+imported from any deployment on the laptop is found from every deployment on it. A tree with its OWN `data_dir` in `vehicle.local.yaml` —
 a reconstruct workspace, a bench experiment — keeps its runs (and its replay sessions) to itself
 and still sees the machine registry read-through: `rig runs` prints its own table and then the
 host's, `rig replay <id|label>` and TAB resolve both, `run rm` and `import` only ever touch its
@@ -280,6 +282,27 @@ rig catalog --tag site:mojave --since 2026-08         # …with every copy; `sit
 rig catalog survey --vehicle skiff-07 --paths         # free text; --paths feeds any run verb
 rig catalog roots / add <dir> / remove <dir>          # rig remembers what it touches; add a disk
 ```
+
+**When the collection outgrows the disk** (rig ≥ v0.2.56). Recording must stay on a LOCAL disk:
+the registry relies on symlinks (`current`), hardlinks (exports) and atomic renames, none of
+which SMB/NFS honor, and bags write at disk speed. Two moves, for two situations:
+
+```bash
+rig setup --data-dir /Volumes/ssd/rig-data --migrate   # a bigger LOCAL disk: the whole registry
+                                                       #   moves (hardlinks kept, verified), a
+                                                       #   symlink stays at the old path so
+                                                       #   workspace links keep resolving
+rig run archive <id…> --to /Volumes/nas/runs           # a drive or NAS for OLD runs: the bytes
+                                                       #   move to <to>/<vehicle>/<id>, a LINKED
+                                                       #   entry stays — runs/replay/TAB still
+                                                       #   resolve it, `run rm` unlinks only, an
+                                                       #   unmounted drive lists as `dangling`;
+                                                       #   the root joins `rig catalog`
+```
+
+macOS note: stacks bind-mount the registry, and Docker Desktop shares only `/Users` by default —
+add an external volume under Settings → Resources → File sharing before recording or replaying
+there.
 
 Every run opened with `run_capture` on (the default) carries the tree that ran —
 `.rig/artifact.tar.gz` (surfaces + configs + rig; sha-stamped) and `.rig/images.yaml` (the image

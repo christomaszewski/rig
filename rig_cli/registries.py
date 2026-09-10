@@ -320,8 +320,32 @@ def _strip_block(text: str) -> str:
     return pre.rstrip("\n") + ("\n" + post.lstrip("\n") if post.strip() else "\n")
 
 
-def setup(*, shell: bool, no_default_registry: bool, purge: bool, yes: bool) -> int:
+DEFAULT_DATA_DIR_HINT = "~/rig-data"
+
+
+def ask_data_dir(ask=input) -> str | None:
+    """The first-run question: where should this user's runs live? Enter keeps the suggestion,
+    `none` (or `-`) skips (a vehicle gets its registry from `sudo rig provision`)."""
+    eprint("  run registry (data_dir): where runs record and imports land — a LOCAL disk (never\n"
+           "  network storage; archive there later with `rig run archive`). Enter = the suggestion,\n"
+           "  `none` = skip (vehicles: `sudo rig provision --data-dir`)")
+    answer = ask(f"  data_dir [{DEFAULT_DATA_DIR_HINT}]: ").strip()
+    if answer.lower() in ("none", "-", "skip"):
+        return None
+    return answer or DEFAULT_DATA_DIR_HINT
+
+
+def setup(*, shell: bool, no_default_registry: bool, purge: bool, yes: bool,
+          data_dir: str | None = None, migrate: bool = False, keep_old: bool = False,
+          skip_data_dir: bool = False, show: bool = False, root: Path | None = None,
+          ask=input) -> int:
+    from .userconfig import absolute_data_dir, save_user_config, user_data_dir
+    if show:
+        from .datadir import show as show_env
+        return show_env(root)
     home = rig_home()
+    if migrate and data_dir is None:
+        raise RigError("setup --migrate needs --data-dir NEW (the registry moves there)")
     if purge:
         targets = [p for p in _rc_targets() if p.is_file() and _BLOCK_BEGIN in p.read_text()]
         eprint(f"rig setup --purge would remove: {home}"
@@ -353,6 +377,40 @@ def setup(*, shell: bool, no_default_registry: bool, purge: bool, yes: bool) -> 
     else:
         names = ", ".join(e.name for e in load_entries()) or "(empty)"
         eprint(f"  registries.yaml: exists ({names}) — left untouched")
+
+    # This user's run registry (~/.rig/config.yaml data_dir): --data-dir sets it outright
+    # (--migrate moves an existing registry there); on a first run at a terminal with none set
+    # anywhere (user or machine) the question is asked — never on a vehicle image or in CI.
+    from .manifest import machine_data_dir
+    current = user_data_dir()
+    if data_dir is not None:
+        new = absolute_data_dir(data_dir, what="setup --data-dir")
+        if migrate:
+            old = current or machine_data_dir()
+            if not old:
+                raise RigError("setup --migrate: no registry to move (no data_dir set for this user "
+                               "or machine) — plain --data-dir sets one")
+            if Path(old).expanduser().resolve() != Path(new).resolve():
+                from .datadir import migrate_registry
+                migrate_registry(Path(old), Path(new), keep_old=keep_old)
+        save_user_config(data_dir=new)
+        eprint(f"  config.yaml: data_dir {new}"
+               + ("" if Path(new).is_dir() else "  (minted by the first up/new-run/import)"))
+    elif current:
+        eprint(f"  config.yaml: data_dir {current} — left untouched (`--data-dir` changes it)")
+    elif machine_data_dir():
+        eprint(f"  data_dir: the machine's ({machine_data_dir()}) — `--data-dir` gives this user "
+               f"its own")
+    elif skip_data_dir or (ask is input and not sys.stdin.isatty()):
+        eprint("  data_dir: none set — `rig setup --data-dir <dir>` before the first `rig up`")
+    else:
+        answer = ask_data_dir(ask)
+        if answer is None:
+            eprint("  data_dir: skipped")
+        else:
+            new = absolute_data_dir(answer, what="setup")
+            save_user_config(data_dir=new)
+            eprint(f"  config.yaml: data_dir {new}  (minted by the first up/new-run/import)")
 
     if shell:
         rc = _shell_rc()

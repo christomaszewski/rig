@@ -78,14 +78,28 @@ def _show(root: Path | None) -> int:
 
 def provision(root: Path | None, *, vehicle_id: str | None, name: str | None,
               set_vars: list[str], platform: str | None = None,
-              data_dir: str | None = None, registry: str | None = None, force: bool) -> int:
+              data_dir: str | None = None, registry: str | None = None, force: bool,
+              migrate: bool = False, keep_old: bool = False) -> int:
     if vehicle_id is None and name is None and not set_vars and platform is None \
-            and data_dir is None and registry is None:
+            and data_dir is None and registry is None and not migrate:
         return _show(root)
 
     target = _target()
     existing = load_yaml(target) if target.is_file() else {}
     data = dict(existing)
+    if migrate:  # move the machine registry along with the setting (datadir.migrate_registry)
+        if data_dir is None:
+            raise RigError("provision --migrate needs --data-dir NEW (the registry moves there)")
+        old = str(existing.get("data_dir") or "").strip()
+        if not old:
+            raise RigError("provision --migrate: this machine has no data_dir to move — plain "
+                           "--data-dir sets one")
+        new = Path(data_dir).expanduser()
+        if not new.is_absolute():
+            raise RigError(f"provision: --data-dir must be an ABSOLUTE path, got '{data_dir}'")
+        if Path(old).resolve() != new.resolve():
+            from .datadir import migrate_registry
+            migrate_registry(Path(old), new, keep_old=keep_old)
     if vehicle_id is not None:
         if not str(vehicle_id).isdigit():
             raise RigError(f"provision: --id must be numeric (it becomes the ROS domain and the "

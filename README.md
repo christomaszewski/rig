@@ -126,11 +126,17 @@ python3 -m venv .venv && .venv/bin/pip install pyyaml
                           #   scaffolds that block from observation, -o writes the union YAML
 ./rig run rm <id> / run import <path>  # registry lifecycle: reclaim disk (sealed freely,
                           #   interrupted --force, the OPEN run never) / adopt archived runs so
-                          #   id-based verbs + TAB cover them. The registry home is a machine
-                          #   fact: `sudo rig provision --data-dir /data/rig` (minted lazily).
+                          #   id-based verbs + TAB cover them. The registry home: `rig setup
+                          #   --data-dir` (this user, no sudo — a first interactive `rig setup`
+                          #   asks) or `sudo rig provision --data-dir` (this machine); minted
+                          #   lazily. `rig setup --show` = where everything is, one screen;
+                          #   `--data-dir NEW --migrate` moves a registry (symlink left behind).
                           #   A tree with its OWN data_dir (vehicle.local.yaml — a reconstruct
                           #   workspace) sees the host registry READ-THROUGH too (runs/TAB/
                           #   refs); writes stay in its own, and no tree sees another's
+./rig run archive <id…> --to /Volumes/nas/runs  # move a sealed run's BYTES off the registry
+                          #   (<to>/<vehicle>/<id>) and keep a LINKED entry: runs/replay/TAB still
+                          #   resolve it, `run rm` unlinks, an unmounted drive lists as dangling
 ./rig run tag <run> site:mojave event:demo-day  # tags live in the run's own manifest and travel
                           #   with it (run untag removes); `rig catalog --tag site:` finds them
 ./rig catalog [query] [--tag T --label L --vehicle V --since DATE]  # EVERY run rig knows about:

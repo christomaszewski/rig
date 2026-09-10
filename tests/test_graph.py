@@ -16,6 +16,9 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 from rig_cli import RigError, graph  # noqa: E402
 from rig_cli.descriptor import InterfaceEdge  # noqa: E402
 from rig_cli.manifest import Manifest, RosSettings, Sensor  # noqa: E402
+import os
+# Hermetic user state: a developer's real ~/.rig/config.yaml (data_dir) must not reach these.
+os.environ.setdefault("RIG_HOME", str(pathlib.Path(tempfile.mkdtemp()) / "home"))
 
 EPOCH_A = textwrap.dedent("""\
     schema: 1

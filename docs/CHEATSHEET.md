@@ -78,6 +78,13 @@ No workspace checkouts needed — services/profiles install from registries, pin
 ```bash
 rig setup                          # once per machine: ~/.rig + the default `public` registry
 rig setup --shell                  # + TAB completion in your rc (deb/brew installs ship it already)
+rig setup --data-dir ~/rig-data    # THIS USER's run registry (no sudo; a first interactive `rig setup`
+                                   #   asks) — a LOCAL disk: recording needs symlinks/hardlinks/speed
+rig setup --show                   # where everything is: ~/.rig, machine identity, this deployment's
+                                   #   effective data_dir + which file set it, host registry, catalog
+rig setup --data-dir /Volumes/ssd/rig-data --migrate   # outgrew the disk: move the registry (hardlinks
+                                   #   kept, verified, a symlink left at the old path); `provision
+                                   #   --data-dir NEW --migrate` for a machine-level registry
 rig registry sync                  # clone/ff-pull the caches; everything below is OFFLINE after this
 rig init my-vehicle --vehicle-id 7 && cd my-vehicle    # born a git repo (--no-git opts out);
                                    #   without --vehicle-id the tree carries per-host identity
@@ -423,8 +430,9 @@ parked: device modes are applied, not persisted (a power-cycled sensor boots bac
 
 **Run directories** (needs `data_dir`; ROADMAP §3c): one session = one folder under
 `data_dir/runs/<stamp>_<label>/`, with a provenance manifest (`ended:` present = sealed = safe to sync).
-`data_dir` is a MACHINE fact (`sudo rig provision --data-dir`): every deployment on the box shares
-that registry. A tree that names its own in `vehicle.local.yaml` (a reconstruct workspace, a bench
+`data_dir` is a host fact — `rig setup --data-dir` (this user) or `sudo rig provision --data-dir`
+(this machine; the user's beats it): every deployment on the box shares that registry. A tree that
+names its own in `vehicle.local.yaml` (a reconstruct workspace, a bench
 experiment) writes there and sees the host registry READ-THROUGH — `rig runs` lists both, run
 refs and TAB resolve both, `run rm`/`import` touch only its own — and no tree ever sees another
 tree's registry (rig ≥ v0.2.55).
@@ -442,6 +450,8 @@ derives the union view at read time, `--check` WARNs on drift vs the riggings' `
 ```bash
 ssh $VEHICLE 'cd ~/ws/v1 && ./run.sh up --run dock-test'   # open a labeled session + up (idempotent)
 ssh $VEHICLE 'cd ~/ws/v1 && ./run.sh runs'                 # registry: OPEN / sealed / interrupted
+rig run archive <id…> --to /Volumes/nas/runs               # bytes to a drive/NAS, a LINKED entry
+                                                           #   stays (replay/TAB resolve it; rm unlinks)
 rig run tag <run> site:mojave event:demo-day               # tags ride in the run's manifest (untag
                                                            #   removes); `rig runs` shows a TAGS column
 rig catalog --tag site: --since 2026-08                     # FIND a run anywhere rig has seen one
