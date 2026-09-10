@@ -90,6 +90,11 @@ class Manifest:
     platform: str | None = None      # THIS host's hardware/OS target (e.g. jp7) -> RIG_TARGET_PLATFORM;
     #                                  matrix services pull <tag>-<platform> (see dispatch.service_env)
     data_dir: str | None = None      # host dir for recordings/logs/outputs; -> RIG_DATA_DIR
+    host_data_dir: str | None = None  # the MACHINE file's data_dir when the effective data_dir is
+    #                                   ANOTHER one (a TREE-local vehicle.local.yaml — a reconstruct
+    #                                   workspace, a bench experiment; the machine beats vehicle.yaml):
+    #                                   the host's run registry, read-THROUGH for run lookup,
+    #                                   `rig runs` and TAB (runs.registries) — never a write target
     run_capture: bool = True         # lean-bake the tree into each opened run (.rig/artifact.tar.gz)
     #                                  so every run dir is self-contained for `rig reconstruct`;
     #                                  disk-tight vehicles opt out here or in vehicle.local.yaml
@@ -219,11 +224,29 @@ def stack_summary(sensors: list[Sensor]) -> str:
     return " + ".join(parts) or "0 stacks"
 
 
+def machine_file() -> Path:
+    """THIS machine's identity file (RIG_VEHICLE_LOCAL overrides the /etc/rig default)."""
+    return Path(os.environ.get("RIG_VEHICLE_LOCAL") or MACHINE_LOCAL_DEFAULT)
+
+
+def machine_data_dir() -> str | None:
+    """The machine file's raw `data_dir` (the host registry's home), None when absent/unreadable."""
+    path = machine_file()
+    if not path.is_file():
+        return None
+    try:
+        raw = (load_yaml(path) or {}).get("data_dir")
+    except RigError:
+        return None
+    raw = str(raw or "").strip()
+    return raw or None
+
+
 def _local_sources(root: Path) -> list[dict]:
     """Vehicle-local files, highest precedence first: the deployment-local vehicle.local.yaml
     (bench/dev trees — artifacts never ship one), then the MACHINE identity file."""
     sources: list[dict] = []
-    machine = Path(os.environ.get("RIG_VEHICLE_LOCAL") or MACHINE_LOCAL_DEFAULT)
+    machine = machine_file()
     for path in (root / "vehicle.local.yaml", machine):
         if not path.is_file():
             continue
@@ -385,6 +408,19 @@ def load_manifest(root: Path) -> Manifest:
     data_dir = (str(eff_data_dir or "").strip()) or None
     if data_dir is not None:
         ctx["data_dir"] = data_dir
+    # The HOST registry: when the effective data_dir is not the machine's (a TREE-local
+    # vehicle.local.yaml — a reconstruct workspace, a bench experiment; the machine file beats
+    # vehicle.yaml, so that is the one way to differ), the machine registry stays visible
+    # READ-THROUGH (lookup/list/TAB), so a run imported into the provisioned home is found from
+    # every deployment on the box — never the reverse. Same dir = no layering.
+    host_data_dir = machine_data_dir()
+    if host_data_dir and MARKER.search(host_data_dir):
+        try:
+            host_data_dir = str(substitute_scalar(host_data_dir, ctx, where="host data_dir"))
+        except RigError:
+            host_data_dir = None
+    if host_data_dir and data_dir and Path(host_data_dir) == Path(data_dir):
+        host_data_dir = None
 
     # The HOST's hardware/OS target (jp7): a per-host fact, so the vehicle-local tier can carry it
     # per machine. Resolved value joins the var context — configs may CONSUME {{platform}}, they
@@ -431,6 +467,6 @@ def load_manifest(root: Path) -> Manifest:
                     data_dir=data_dir,
                     run_capture=bool(_effective("run_capture", sources,
                                                 data.get("run_capture")) is not False),
-                    vars=ctx, extra_env=extra_env,
+                    vars=ctx, extra_env=extra_env, host_data_dir=host_data_dir,
                     export_profiles=_parse_export_profiles(data.get("export_profiles")),
                     missing_identity=tuple(unresolved))

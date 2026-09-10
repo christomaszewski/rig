@@ -264,6 +264,23 @@ sudo rig provision --registry localhost:5000  # the bench's image mirror (images
 id-based verbs and TAB completion cover them; `rig run rm <id…>` reclaims disk (sealed runs
 freely, interrupted with --force, the OPEN run never).
 
+**Where imports go, and who sees them** (rig ≥ v0.2.55). The registry is the machine's
+(`sudo rig provision --data-dir /data/rig`), so a run imported from any deployment on the laptop
+is found from every deployment on it. A tree with its OWN `data_dir` in `vehicle.local.yaml` —
+a reconstruct workspace, a bench experiment — keeps its runs (and its replay sessions) to itself
+and still sees the machine registry read-through: `rig runs` prints its own table and then the
+host's, `rig replay <id|label>` and TAB resolve both, `run rm` and `import` only ever touch its
+own. The reverse never holds: a deployment on the machine registry does not see any workspace's
+runs. To FIND a run wherever it sits — machine registry, workspaces, `fleet sync` trees, an
+archive disk — `rig catalog`:
+
+```bash
+rig run tag <run|label> site:mojave event:demo-day   # tags live in the run's manifest: they travel
+rig catalog --tag site:mojave --since 2026-08         # …with every copy; `site:` = any site tag
+rig catalog survey --vehicle skiff-07 --paths         # free text; --paths feeds any run verb
+rig catalog roots / add <dir> / remove <dir>          # rig remembers what it touches; add a disk
+```
+
 Every run opened with `run_capture` on (the default) carries the tree that ran —
 `.rig/artifact.tar.gz` (surfaces + configs + rig; sha-stamped) and `.rig/images.yaml` (the image
 digests that were live). A downloaded run dir is all anyone needs:

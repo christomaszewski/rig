@@ -68,30 +68,11 @@ def resolve_source(manifest, ref: str, *, require_bags: bool = True) -> tuple[st
     it); WARNs on an unsealed source (`ended:` absent — bags may be incomplete); refuses a run
     with no bags/ (nothing to play) unless the caller can also play instance recordings
     (`require_bags=False`: cmd decides once it knows the sources)."""
-    as_path = Path(ref).expanduser()
-    if "/" in ref or as_path.is_dir():
-        if not as_path.is_dir():
-            raise RigError(f"replay: no run dir at {as_path}")
-        run_id, run_dir = as_path.name, as_path
-    else:
-        data = runs_mod._root(manifest)  # same registry root/validation as every run verb
-        run_dir = data / "runs" / ref
-        if not run_dir.is_dir():  # not an id — a LABEL resolves to its newest run
-            labeled = runs_mod.by_label(manifest, ref)
-            if labeled is None:
-                raise RigError(f"replay: no run '{ref}' under {data / 'runs'} — not an id, a "
-                               f"label, or a path (see `rig runs`)")
-            eprint(f"rig replay: '{ref}' -> {labeled} (newest run with that label)")
-            run_dir = data / "runs" / labeled
-        run_id = run_dir.name
-    if manifest.data_dir:
-        try:
-            cur = runs_mod.current_run(runs_mod._root(manifest))
-        except RigError:
-            cur = None  # a broken `current` must not hide the source check — rotation will report it
-        if cur is not None and cur[1].resolve() == run_dir.resolve():
-            raise RigError(f"replay: {run_id} is the OPEN run — a recorder may still be writing "
-                           f"it; `rig down --end-run` first")
+    run_id, run_dir = runs_mod.resolve_ref(manifest, ref, verb="replay")  # id | label | path;
+    #                                                   the host registry read-through
+    if runs_mod.is_open(manifest, run_dir):
+        raise RigError(f"replay: {run_id} is the OPEN run — a recorder may still be writing "
+                       f"it; `rig down --end-run` first")
     doc: dict = {}
     mpath = run_dir / "manifest.yaml"
     if mpath.exists():

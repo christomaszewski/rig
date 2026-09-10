@@ -23,6 +23,9 @@ from rig_cli.descriptor import (DEFAULT_VERBS, STATE_VERBS, Descriptor,  # noqa:
                                 load_descriptor)
 from rig_cli.manifest import Manifest, RosSettings, Sensor  # noqa: E402
 from rig_cli.status import Row, as_json, gather, render  # noqa: E402
+# Hermetic user state: rig remembers registries it touches in $RIG_HOME/catalog.yaml (rig catalog)
+# — never the developer's real ~/.rig.
+os.environ.setdefault("RIG_HOME", str(pathlib.Path(tempfile.mkdtemp()) / "home"))
 
 
 def _run(*argv) -> tuple[int, str, str]:

@@ -15,6 +15,10 @@ from rig_cli.registry import (  # noqa: E402
     constraint_satisfied, generate_index, load_registry, render_index, validate_registry, write_index,
 )
 from rig_cli.registry_scaffold import registry_init  # noqa: E402
+import os
+# Hermetic user state: rig remembers registries it touches in $RIG_HOME/catalog.yaml (rig catalog)
+# — never the developer's real ~/.rig.
+os.environ.setdefault("RIG_HOME", str(pathlib.Path(tempfile.mkdtemp()) / "home"))
 
 FULL_SHA = "a" * 40
 DIGEST = "sha256:" + "b" * 64

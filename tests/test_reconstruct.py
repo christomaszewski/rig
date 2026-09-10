@@ -20,6 +20,11 @@ from rig_cli import RigError, reconstruct, runs  # noqa: E402
 from rig_cli.common import load_yaml  # noqa: E402
 from rig_cli.manifest import Manifest, RosSettings, Sensor  # noqa: E402
 
+# Hermetic user state: rig remembers registries it touches in $RIG_HOME/catalog.yaml (rig catalog)
+# — never the developer's real ~/.rig (one test below scopes its own home on top of this).
+import os  # noqa: E402
+os.environ.setdefault("RIG_HOME", str(pathlib.Path(tempfile.mkdtemp()) / "home"))
+
 
 def _service_repo(base: pathlib.Path, name: str) -> pathlib.Path:
     repo = base / f"{name}-repo"

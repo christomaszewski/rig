@@ -10,6 +10,9 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 from rig_cli.cli import main, translate_argv  # noqa: E402
 from rig_cli.init import init  # noqa: E402
+# Hermetic user state: rig remembers registries it touches in $RIG_HOME/catalog.yaml (rig catalog)
+# — never the developer's real ~/.rig.
+os.environ.setdefault("RIG_HOME", str(pathlib.Path(tempfile.mkdtemp()) / "home"))
 
 # hermetic: no /etc/rig identity leak — the CLI loads the manifest on every deployment verb
 os.environ["RIG_VEHICLE_LOCAL"] = str(pathlib.Path(tempfile.mkdtemp()) / "absent.yaml")

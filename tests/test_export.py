@@ -21,6 +21,9 @@ from rig_cli import RigError, dispatch, export  # noqa: E402
 from rig_cli.cli import main  # noqa: E402
 from rig_cli.descriptor import load_descriptor  # noqa: E402
 from rig_cli.manifest import load_manifest  # noqa: E402
+# Hermetic user state: rig remembers registries it touches in $RIG_HOME/catalog.yaml (rig catalog)
+# — never the developer's real ~/.rig.
+os.environ.setdefault("RIG_HOME", str(pathlib.Path(tempfile.mkdtemp()) / "home"))
 
 os.environ["RIG_VEHICLE_LOCAL"] = str(pathlib.Path(tempfile.mkdtemp()) / "absent.yaml")
 for _stray in [k for k in os.environ

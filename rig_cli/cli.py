@@ -253,17 +253,15 @@ def cmd_run_export(args, manifest, catalog, descriptors) -> int:
                           profile=profile, force=args.force, dry_run=args.dry_run)
 
 
-def cmd_runs(args, manifest, catalog, descriptors) -> int:
-    if args.names:  # `rig runs rm <id>` must not silently LIST — the verbs live under `run`
-        verbs = _GROUP_VERBS["run"]
-        hint = f" — did you mean `rig run {args.names[0]}`?" if args.names[0] in verbs \
-            or args.names[0] == "ls" else ""
-        raise RigError(f"runs takes no arguments (it lists the registry); the run verbs are "
-                       f"`rig run {'|'.join(sorted(verbs))}`{hint}")
-    rows = runs_mod.list_runs(manifest)
-    if not rows:
-        print("no runs recorded")
-        return 0
+def cmd_run_tag(args, manifest, catalog, descriptors) -> int:
+    return runs_mod.tag_runs(manifest, args.run, args.tags, remove=False)
+
+
+def cmd_run_untag(args, manifest, catalog, descriptors) -> int:
+    return runs_mod.tag_runs(manifest, args.run, args.tags, remove=True)
+
+
+def _print_runs(rows: list) -> None:
     def _size(kb):
         if kb is None:
             return "—"
@@ -272,17 +270,46 @@ def cmd_runs(args, manifest, catalog, descriptors) -> int:
         return f"{kb / 1024:.0f}M" if kb < 1024 * 1024 else f"{kb / (1024 * 1024):.1f}G"
 
     replayed = any(r.replay_of for r in rows)  # the column appears only when a replay run exists
-    headers = ("RUN", "LABEL", "STATE", "STARTED", "ENDED", "SIZE") \
-        + (("REPLAY-OF",) if replayed else ())
+    tagged = any(r.tags for r in rows)         # …and TAGS only when a run carries any
+    headers = ("RUN", "LABEL") + (("TAGS",) if tagged else ()) \
+        + ("STATE", "STARTED", "ENDED", "SIZE") + (("REPLAY-OF",) if replayed else ())
     table = [headers] + [
-        (r.run, r.label, r.state + (" (link)" if r.linked and r.state != "dangling" else ""),
-         r.started, r.ended, _size(r.disk_kb))
+        (r.run, r.label) + ((", ".join(r.tags) or "—",) if tagged else ())
+        + (r.state + (" (link)" if r.linked and r.state != "dangling" else ""),
+           r.started, r.ended, _size(r.disk_kb))
         + ((r.replay_of or "—",) if replayed else ())
         for r in rows
     ]
     widths = [max(len(row[i]) for row in table) for i in range(len(headers))]
     for row in table:
-        print("  ".join(cell.ljust(widths[i]) for i, cell in enumerate(row)))
+        print("  ".join(cell.ljust(widths[i]) for i, cell in enumerate(row)).rstrip())
+
+
+def cmd_runs(args, manifest, catalog, descriptors) -> int:
+    if args.names:  # `rig runs rm <id>` must not silently LIST — the verbs live under `run`
+        verbs = _GROUP_VERBS["run"]
+        hint = f" — did you mean `rig run {args.names[0]}`?" if args.names[0] in verbs \
+            or args.names[0] == "ls" else ""
+        raise RigError(f"runs takes no arguments (it lists the registry); the run verbs are "
+                       f"`rig run {'|'.join(sorted(verbs))}`{hint}")
+    rows = runs_mod.list_runs(manifest) if manifest.data_dir else []
+    host = runs_mod.host_root(manifest)
+    host_rows = runs_mod.list_runs(manifest, host=True)
+    if not rows and not host_rows:
+        print("no runs recorded" + (f" (host registry {host / 'runs'}: empty)" if host else ""))
+        return 0
+    if rows:
+        _print_runs(rows)
+    elif manifest.data_dir:
+        print(f"no runs in this deployment's registry ({Path(manifest.data_dir) / 'runs'})")
+    if host is not None:
+        # the HOST registry, seen read-through: every run verb and TAB resolve these ids too;
+        # `run rm`/`import` never touch it from here
+        print(f"\nhost registry {host / 'runs'} (read-through):")
+        if host_rows:
+            _print_runs(host_rows)
+        else:
+            print("  empty")
     return 0
 
 
@@ -587,6 +614,8 @@ _HANDLERS = {
     "run-rm": cmd_run_rm,
     "run-import": cmd_run_import,
     "run-export": cmd_run_export,
+    "run-tag": cmd_run_tag,
+    "run-untag": cmd_run_untag,
     "graph": cmd_graph,
     "replay": cmd_replay,
     "config-render": cmd_config_render,
@@ -599,7 +628,10 @@ _HANDLERS = {
 _GROUP_VERBS: dict[str, dict[str, str]] = {
     "config": {"show": "config", "render": "config-render", "diff": "config-diff"},
     "run": {"new": "new-run", "end": "end-run", "list": "runs", "retrofit": "run-retrofit",
-            "rm": "run-rm", "import": "run-import", "export": "run-export"},
+            "rm": "run-rm", "import": "run-import", "export": "run-export",
+            "tag": "run-tag", "untag": "run-untag"},
+    "catalog": {"search": "catalog-search", "list": "catalog-search", "add": "catalog-add",
+                "remove": "catalog-remove", "rm": "catalog-remove", "roots": "catalog-roots"},
     "artifact": {"bake": "bake", "unbake": "unbake", "list": "artifact-list"},
     "image": {"build": "build", "pull": "pull", "audit": "image-audit"},
     "service": {"rigify": "rigify", "vendor": "vendor", "certify": "certify"},
@@ -608,7 +640,7 @@ _GROUP_VERBS: dict[str, dict[str, str]] = {
 _GROUP_PENDING: dict[tuple[str, str], str] = {}
 
 # Every noun with a `list` subcommand — group-translated OR real subparser — accepts `ls`.
-_LS_NOUNS = {"run", "artifact", "registry", "pkg", "overlay", "fleet"}
+_LS_NOUNS = {"run", "artifact", "registry", "pkg", "overlay", "fleet", "catalog"}
 
 
 def translate_argv(argv: list[str]) -> list[str] | None:
@@ -635,6 +667,8 @@ def translate_argv(argv: list[str]) -> list[str] | None:
     if verbs is None:
         return argv
     rest = argv[i + 1:]
+    if noun == "catalog" and (not rest or rest[0] not in verbs):
+        return argv[:i] + ["catalog-search"] + rest  # `rig catalog site:mojave --since 2026-08`
     if noun != "config" and (not rest or rest[0] in ("-h", "--help")):
         print(f"usage: rig {noun} <verb> …\nverbs: {', '.join(sorted(verbs))}")
         return None
@@ -655,7 +689,9 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="noun groups (canonical forms; the flat spellings above stay as permanent aliases):\n"
                "  rig config   show | render          rig run      new | end | list | rm | "
-               "import | retrofit\n"
+               "import | export | tag | untag | retrofit\n"
+               "  rig catalog  [query] [--tag --label --vehicle --since] | add | remove | roots"
+               "   (every run rig knows about)\n"
                "  rig registry init | add | remove | list | sync | validate | index\n"
                "  rig pkg      search | info | list | outdated | add | remove | upgrade | lock | "
                "save | promote | repin | rebase | yank\n"
@@ -848,6 +884,44 @@ def build_parser() -> argparse.ArgumentParser:
                      help="redo an export that already exists (removed first)")
     rex.add_argument("--dry-run", action="store_true", dest="dry_run",
                      help="print what would be kept/omitted and which exporters would run")
+
+    rtg = sub.add_parser("run-tag", help="tag a run (canonical: run tag) — tags live in the run's "
+                                         "own manifest and travel with it; `key:value` "
+                                         "(site:mojave, event:demo-day) is the catalog's convention")
+    rtg.add_argument("run", help="run id, label (newest), or run-dir path — this registry or the host's")
+    rtg.add_argument("tags", nargs="+", help="tag(s) to add")
+    rut = sub.add_parser("run-untag", help="remove tag(s) from a run (canonical: run untag)")
+    rut.add_argument("run", help="run id, label (newest), or run-dir path")
+    rut.add_argument("tags", nargs="+", help="tag(s) to remove")
+
+    cs = sub.add_parser("catalog-search", help="every run rig knows about (registries, harvest "
+                                               "trees), searchable (canonical: `rig catalog "
+                                               "[query] [filters]`) — NOT what `rig runs`/TAB "
+                                               "show: those stay this deployment's registry + "
+                                               "the host's")
+    cs.add_argument("query", nargs="*", help="free text — all words must match the id, label, "
+                                             "vehicle, tags or path")
+    cs.add_argument("--tag", action="append", default=[], metavar="TAG",
+                    help="require a tag (repeatable, all must hold); a bare key with colon "
+                         "(`site:`) matches any tag with that key")
+    cs.add_argument("--label", default=None, help="run label (plus its `-N` collision suffixes)")
+    cs.add_argument("--vehicle", default=None, help="vehicle name or id")
+    cs.add_argument("--since", default=None, metavar="DATE",
+                    help="started at/after (YYYY, YYYY-MM, YYYY-MM-DD, YYYY-MM-DDTHH:MM)")
+    cs.add_argument("--until", default=None, metavar="DATE", help="started at/before")
+    cs.add_argument("--state", default=None, choices=["sealed", "open", "unsealed", "corrupt"])
+    cs.add_argument("--json", action="store_true", dest="as_json", help="machine output")
+    cs.add_argument("--paths", action="store_true",
+                    help="print run-dir paths only (feeds any run verb: `rig replay $(...)`)")
+    ca = sub.add_parser("catalog-add", help="remember a directory as a catalog root (canonical: "
+                                            "catalog add): a registry (<dir>/runs), a harvest "
+                                            "tree, or a run dir")
+    ca.add_argument("dir")
+    ca.add_argument("--kind", default="registry", choices=["registry", "harvest", "archive"],
+                    help="label shown by `catalog roots` (default registry)")
+    cr = sub.add_parser("catalog-remove", help="forget a catalog root (canonical: catalog remove)")
+    cr.add_argument("dir")
+    sub.add_parser("catalog-roots", help="list the catalog's roots (canonical: catalog roots)")
 
     rf = sub.add_parser("run-retrofit", help="stamp pre-capture runs with the deploy artifact "
                                              "their manifests name (canonical: run retrofit)")
@@ -1437,6 +1511,18 @@ def main(argv=None) -> int:
             return cmd_vendor(args, root)
         if args.cmd == "unbake":  # operates on an artifact, not the manifest
             return cmd_unbake(args, root)
+        if args.cmd.startswith("catalog-"):  # user-level state (~/.rig) — no deployment needed
+            from . import runcatalog
+            if args.cmd == "catalog-search":
+                return runcatalog.cmd_search(query=args.query, tags=args.tag, label=args.label,
+                                             vehicle=args.vehicle, since=args.since,
+                                             until=args.until, state=args.state,
+                                             as_json=args.as_json, paths=args.paths)
+            if args.cmd == "catalog-add":
+                return runcatalog.cmd_add(args.dir, kind=args.kind)
+            if args.cmd == "catalog-remove":
+                return runcatalog.cmd_remove(args.dir)
+            return runcatalog.cmd_roots()
         if args.cmd == "reconstruct":  # a run dir + nothing else — no deployment, no registry
             from . import reconstruct as reconstruct_mod
             return reconstruct_mod.cmd_reconstruct(

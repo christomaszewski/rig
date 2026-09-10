@@ -37,32 +37,13 @@ EXPORTS_DIR = "exports"
 # ---- the run ------------------------------------------------------------------------------------
 
 def resolve_run(manifest, ref: str) -> tuple[str, Path]:
-    """(run-id, run-dir): an id under the registry, a label (newest run), or a path to a run dir.
-    Refuses the OPEN run (a recorder may still be writing it); WARNs on an unsealed one."""
-    as_path = Path(ref).expanduser()
-    if "/" in ref or as_path.is_dir():
-        if not as_path.is_dir():
-            raise RigError(f"export: no run dir at {as_path}")
-        run_id, run_dir = as_path.name, as_path.resolve()
-    else:
-        data = runs_mod._root(manifest)
-        run_dir = data / "runs" / ref
-        if not run_dir.is_dir():
-            labeled = runs_mod.by_label(manifest, ref)
-            if labeled is None:
-                raise RigError(f"export: no run '{ref}' under {data / 'runs'} — not an id, a "
-                               f"label, or a path (see `rig runs`)")
-            eprint(f"rig run export: '{ref}' -> {labeled} (newest run with that label)")
-            run_dir = data / "runs" / labeled
-        run_id = run_dir.name
-    if manifest.data_dir:
-        try:
-            cur = runs_mod.current_run(runs_mod._root(manifest))
-        except RigError:
-            cur = None
-        if cur is not None and cur[1].resolve() == run_dir.resolve():
-            raise RigError(f"export: {run_id} is the OPEN run — a recorder may still be writing "
-                           f"it; `rig down --end-run` first")
+    """(run-id, run-dir): an id under the registry (the host's too), a label (newest run), or a
+    path to a run dir. Refuses the OPEN run (a recorder may still be writing it); WARNs on an
+    unsealed one."""
+    run_id, run_dir = runs_mod.resolve_ref(manifest, ref, verb="run export")
+    if runs_mod.is_open(manifest, run_dir):
+        raise RigError(f"export: {run_id} is the OPEN run — a recorder may still be writing "
+                       f"it; `rig down --end-run` first")
     if not (run_dir / "manifest.yaml").exists():
         raise RigError(f"export: {run_dir} is not a run dir (no manifest.yaml)")
     try:

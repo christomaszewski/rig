@@ -9,6 +9,11 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 from rig_cli.cli import main  # noqa: E402
 from rig_cli.completions import candidates  # noqa: E402
+import os
+import tempfile
+# Hermetic user state: rig remembers registries it touches in $RIG_HOME/catalog.yaml (rig catalog)
+# — never the developer's real ~/.rig.
+os.environ.setdefault("RIG_HOME", str(pathlib.Path(tempfile.mkdtemp()) / "home"))
 
 
 def _c(*words):
@@ -67,7 +72,8 @@ def test_global_flags():
 
 def test_group_menus():
     assert _c("image", "") == ["audit", "build", "pull"]
-    assert _c("run", "") == ["end", "export", "import", "list", "new", "retrofit", "rm"]
+    assert _c("run", "") == ["end", "export", "import", "list", "new", "retrofit", "rm", "tag",
+                             "untag"]
     assert _c("artifact", "") == ["bake", "list", "unbake"]
     assert _c("service", "") == ["certify", "rigify", "vendor"]
 

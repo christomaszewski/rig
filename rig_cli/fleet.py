@@ -560,6 +560,11 @@ def cmd_sync(fleet: Fleet, names: list[str], *, label: str | None, into: str, jo
     dest_root = Path(into).expanduser()
     problems = 0
     pulled = updated = skipped = exported = 0
+    try:  # the harvest tree joins `rig catalog`'s roots (best-effort — never a gate)
+        from . import runcatalog
+        runcatalog.remember(dest_root, kind="harvest")
+    except Exception:  # noqa: BLE001
+        pass
     for v in vehicles:  # sequential: the transfer is bandwidth-bound, not latency-bound
         data_dir = _row_data_dir(fleet, v)
         if data_dir is None:

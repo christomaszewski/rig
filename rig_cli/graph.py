@@ -302,29 +302,17 @@ def resolve_run(manifest, ref: str | None) -> tuple[str, Path]:
     run id under the registry, or a path to a run dir anywhere (a run scp'd from a vehicle)."""
     from . import runs as runs_mod
     if ref:
-        as_path = Path(ref).expanduser()
-        if "/" in ref or as_path.is_dir():
-            if not as_path.is_dir():
-                raise RigError(f"graph: no run dir at {as_path}")
-            return as_path.name, as_path
-        data = runs_mod._root(manifest)
-        run_dir = data / "runs" / ref
-        if not run_dir.is_dir():  # not an id — a LABEL resolves to its newest run
-            labeled = runs_mod.by_label(manifest, ref)
-            if labeled is None:
-                raise RigError(f"graph: no run '{ref}' under {data / 'runs'} — not an id, a "
-                               f"label, or a path (see `rig runs`)")
-            run_dir = data / "runs" / labeled
-        return run_dir.name, run_dir
+        return runs_mod.resolve_ref(manifest, ref, verb="graph")  # id | label | path; host too
     data = runs_mod._root(manifest)
     cur = runs_mod.current_run(data)
     if cur is not None:
         return cur[0], cur[1]
-    runs = sorted(d for d in (data / "runs").iterdir() if d.is_dir()) \
-        if (data / "runs").is_dir() else []
-    if not runs:
-        raise RigError("graph: no runs recorded (the epochs live in run dirs — see `rig runs`)")
-    return runs[-1].name, runs[-1]
+    for reg in runs_mod.registries(manifest):  # newest of the deployment's, else the host's
+        runs = sorted(d for d in (reg / "runs").iterdir() if d.is_dir()) \
+            if (reg / "runs").is_dir() else []
+        if runs:
+            return runs[-1].name, runs[-1]
+    raise RigError("graph: no runs recorded (the epochs live in run dirs — see `rig runs`)")
 
 
 def cmd(manifest, descriptors, *, run_ref: str | None, do_check: bool,

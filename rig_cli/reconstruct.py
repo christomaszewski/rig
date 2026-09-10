@@ -54,14 +54,9 @@ def _resolve_run(root: Path | None, ref: str) -> Path:
     if root is not None and (root / "vehicle.yaml").exists():
         try:
             from .manifest import load_manifest
-            from .runs import by_label
+            from .runs import resolve_ref
             manifest = load_manifest(root)
-            if manifest.data_dir:
-                if (Path(manifest.data_dir) / "runs" / ref).is_dir():
-                    return Path(manifest.data_dir) / "runs" / ref
-                labeled = by_label(manifest, ref)  # a LABEL resolves to its newest run
-                if labeled is not None:
-                    return Path(manifest.data_dir) / "runs" / labeled
+            return resolve_ref(manifest, ref, verb="reconstruct")[1]  # id | label; host too
         except RigError:
             pass
     raise RigError(f"reconstruct: no run dir at '{ref}' (pass a path to the run directory — "
@@ -385,6 +380,8 @@ def cmd_reconstruct(root: Path | None, *, run_ref: str, into: str | None,
     if not no_import:
         reg = dest / "var" / "data" / "runs"
         reg.mkdir(parents=True, exist_ok=True)
+        from .runs import _remember
+        _remember(dest / "var" / "data")  # the workspace registry joins `rig catalog`'s roots
         entry = reg / run_dir.name
         if copy_run:
             shutil.copytree(run_dir, entry, symlinks=True)

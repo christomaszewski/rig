@@ -17,6 +17,9 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 from rig_cli import RigError, provision, runs  # noqa: E402
 from rig_cli.common import load_yaml  # noqa: E402
 from rig_cli.manifest import Manifest, RosSettings  # noqa: E402
+# Hermetic user state: rig remembers registries it touches in $RIG_HOME/catalog.yaml (rig catalog)
+# — never the developer's real ~/.rig.
+os.environ.setdefault("RIG_HOME", str(pathlib.Path(tempfile.mkdtemp()) / "home"))
 
 
 def _manifest(data_dir):

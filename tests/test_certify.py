@@ -13,6 +13,9 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 from rig_cli.certify import NAME_A, certify_target, diff_emits  # noqa: E402
 from rig_cli.descriptor import load_descriptor  # noqa: E402
+# Hermetic user state: rig remembers registries it touches in $RIG_HOME/catalog.yaml (rig catalog)
+# — never the developer's real ~/.rig.
+os.environ.setdefault("RIG_HOME", str(pathlib.Path(tempfile.mkdtemp()) / "home"))
 
 RIGGING = """\
 service: fak

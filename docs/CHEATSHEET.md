@@ -423,6 +423,11 @@ parked: device modes are applied, not persisted (a power-cycled sensor boots bac
 
 **Run directories** (needs `data_dir`; ROADMAP §3c): one session = one folder under
 `data_dir/runs/<stamp>_<label>/`, with a provenance manifest (`ended:` present = sealed = safe to sync).
+`data_dir` is a MACHINE fact (`sudo rig provision --data-dir`): every deployment on the box shares
+that registry. A tree that names its own in `vehicle.local.yaml` (a reconstruct workspace, a bench
+experiment) writes there and sees the host registry READ-THROUGH — `rig runs` lists both, run
+refs and TAB resolve both, `run rm`/`import` touch only its own — and no tree ever sees another
+tree's registry (rig ≥ v0.2.55).
 `up` auto-opens an `_auto` run if none is open — it NEVER rotates; rotation/sealing are explicit and
 refuse while stacks run. Each `up` also snapshots the effective config into the run
 (`.rig/config/<digest>/`, deduplicated) — the manifest's `config:`/`ups:` say exactly which config each
@@ -437,6 +442,11 @@ derives the union view at read time, `--check` WARNs on drift vs the riggings' `
 ```bash
 ssh $VEHICLE 'cd ~/ws/v1 && ./run.sh up --run dock-test'   # open a labeled session + up (idempotent)
 ssh $VEHICLE 'cd ~/ws/v1 && ./run.sh runs'                 # registry: OPEN / sealed / interrupted
+rig run tag <run> site:mojave event:demo-day               # tags ride in the run's manifest (untag
+                                                           #   removes); `rig runs` shows a TAGS column
+rig catalog --tag site: --since 2026-08                     # FIND a run anywhere rig has seen one
+                                                           #   (machine registry, imports, fleet-sync
+                                                           #   trees, workspaces); --paths feeds verbs
 ssh $VEHICLE 'cd ~/ws/v1 && ./run.sh down --end-run'       # stop everything, then seal the session
 scp -r $VEHICLE:<data_dir>/runs/<stamp>_dock-test .        # the whole session, data + manifest
 rig graph <stamp>_dock-test --check                        # topology + declared-vs-observed WARNs

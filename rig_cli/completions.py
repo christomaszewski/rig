@@ -500,32 +500,85 @@ def _export_profiles(root_arg, positionals, words):
     return sorted(str(k) for k in profiles) if isinstance(profiles, dict) else []
 
 
-@_soft
-def _run_ids(root_arg, positionals, words):
-    """Run-registry ids (newest first — the run you want is almost always recent) plus the
-    distinct LABELS (ids are `<stamp>_<label>` — no human types the stamp; the verbs resolve a
-    label to its newest run). Raw-read doctrine: data_dir verbatim from the same precedence the
-    manifest uses — TREE-local vehicle.local.yaml first, then the machine file (honoring
-    RIG_VEHICLE_LOCAL), then vehicle.yaml; an unresolvable {{var}} value bails to the file
-    fallback rather than guessing."""
+def _registry_dirs(root_arg) -> list[Path]:
+    """The registries run refs resolve in, in order: the deployment's (data_dir from the same
+    precedence the manifest uses — TREE-local vehicle.local.yaml, then the machine file honoring
+    RIG_VEHICLE_LOCAL, then vehicle.yaml), then the HOST's (the machine file's data_dir) when it
+    is another dir. Raw-read doctrine: an unresolvable {{var}} value bails to the file fallback."""
     import os
     root = _deployment(root_arg)
     if not root:
         return []
     machine = Path(os.environ.get("RIG_VEHICLE_LOCAL") or "/etc/rig/vehicle.local.yaml")
-    data_dir = None
+    out: list[Path] = []
     for path in (root / "vehicle.local.yaml", machine, root / "vehicle.yaml"):
         if path.is_file() and _read_yaml(path).get("data_dir"):
             data_dir = str(_read_yaml(path)["data_dir"])
+            if "{{" not in data_dir:
+                out.append(Path(data_dir))
             break
-    if not data_dir or "{{" in data_dir:
-        return []
-    runs = Path(data_dir) / "runs"
-    if not runs.is_dir():
-        return []
-    ids = sorted((d.name for d in runs.iterdir() if d.is_dir()), reverse=True)
+    if machine.is_file():
+        host = str(_read_yaml(machine).get("data_dir") or "")
+        if host and "{{" not in host and (not out or Path(host).resolve() != out[0].resolve()):
+            out.append(Path(host))
+    return out
+
+
+def _ids_of(dirs: list[Path]) -> list[str]:
+    """Run ids (newest first per registry, the deployment's registry first) plus the distinct
+    LABELS (ids are `<stamp>_<label>` — no human types the stamp; the verbs resolve a label to
+    its newest run)."""
+    ids: list[str] = []
+    for data in dirs:
+        runs = data / "runs"
+        if runs.is_dir():
+            ids += sorted((d.name for d in runs.iterdir() if d.is_dir()), reverse=True)
+    ids = list(dict.fromkeys(ids))
     labels = list(dict.fromkeys(i.split("_", 1)[1] for i in ids if "_" in i))
     return ids + [lb for lb in labels if lb not in ("auto",)]
+
+
+@_soft
+def _run_ids(root_arg, positionals, words):
+    """Every run a run verb resolves: this deployment's registry AND the host's (read-through)."""
+    return _ids_of(_registry_dirs(root_arg))
+
+
+@_soft
+def _local_run_ids(root_arg, positionals, words):
+    """`run rm` acts on THIS registry only — the host's runs are not offered."""
+    return _ids_of(_registry_dirs(root_arg)[:1])
+
+
+@_soft
+def _run_tags(root_arg, positionals, words):
+    """Tags already in use across both registries (`rig run tag` suggests existing spellings;
+    `run untag` offers the named run's own tags first)."""
+    dirs = _registry_dirs(root_arg)
+    own: list[str] = []
+    if positionals:
+        for data in dirs:
+            mpath = data / "runs" / positionals[0] / "manifest.yaml"
+            if mpath.is_file():
+                own = [str(t) for t in (_read_yaml(mpath).get("tags") or [])]
+                break
+    seen: dict[str, None] = dict.fromkeys(own)
+    for data in dirs:
+        for mpath in sorted((data / "runs").glob("*/manifest.yaml")) if (data / "runs").is_dir() else []:
+            for t in _read_yaml(mpath).get("tags") or []:
+                seen.setdefault(str(t))
+    return list(seen)
+
+
+@_soft
+def _catalog_tags(root_arg, positionals, words):
+    from .runcatalog import scan
+    seen: dict[str, None] = {}
+    for e in scan()[0]:
+        for t in e.tags:
+            seen.setdefault(t)
+            seen.setdefault(t.split(":", 1)[0] + ":") if ":" in t else None
+    return list(seen)
 
 
 @_soft
@@ -564,8 +617,12 @@ _POSITIONAL_SOURCES: dict = {
     (("replay",), "names"): _instances,
     (("reconstruct",), "run"): _run_ids,
     (("run-retrofit",), "runs"): _run_ids,
-    (("run-rm",), "runs"): _run_ids,
+    (("run-rm",), "runs"): _local_run_ids,
     (("run-export",), "run"): _run_ids,
+    (("run-tag",), "run"): _run_ids,
+    (("run-tag",), "tags"): _run_tags,
+    (("run-untag",), "run"): _run_ids,
+    (("run-untag",), "tags"): _run_tags,
     (("swap",), "service"): _routed_services,
     (("swap",), "source"): _add_specs,
     (("pkg", "add"), "spec"): _add_specs,
@@ -602,6 +659,7 @@ _OPTION_SOURCES: dict = {
     (("graph",), "--contract"): _instances,
     (("replay",), "--live"): _instances,
     (("run-export",), "--profile"): _export_profiles,
+    (("catalog-search",), "--tag"): _catalog_tags,
     (("fleet", "sync"), "--profile"): _export_profiles,
 }
 

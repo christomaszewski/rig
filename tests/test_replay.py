@@ -15,6 +15,10 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 from rig_cli import RigError, replay, runs  # noqa: E402
 from rig_cli.manifest import Manifest, RosSettings, Sensor  # noqa: E402
+import os
+# Hermetic user state: rig remembers registries it touches in $RIG_HOME/catalog.yaml (rig catalog)
+# — never the developer's real ~/.rig.
+os.environ.setdefault("RIG_HOME", str(pathlib.Path(tempfile.mkdtemp()) / "home"))
 
 EPOCH = textwrap.dedent("""\
     schema: 1

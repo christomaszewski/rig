@@ -16,6 +16,9 @@ from rig_cli.dispatch import fleet_env  # noqa: E402
 from rig_cli.interpolate import referenced_vars, resolve_map, substitute, substitute_scalar  # noqa: E402
 from rig_cli.manifest import load_manifest  # noqa: E402
 from rig_cli.resolve import materialize_manifest  # noqa: E402
+# Hermetic user state: rig remembers registries it touches in $RIG_HOME/catalog.yaml (rig catalog)
+# — never the developer's real ~/.rig.
+os.environ.setdefault("RIG_HOME", str(pathlib.Path(tempfile.mkdtemp()) / "home"))
 
 
 @contextlib.contextmanager

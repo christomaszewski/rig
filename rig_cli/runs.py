@@ -58,6 +58,15 @@ from .manifest import Manifest, project_name
 _LABEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 
 
+def _remember(data: Path) -> None:
+    """Best-effort: a registry rig writes into joins `rig catalog`'s roots. Never raises."""
+    try:
+        from . import runcatalog
+        runcatalog.remember(data)
+    except Exception:  # noqa: BLE001 — the catalog is a convenience, never a gate
+        pass
+
+
 def _root(manifest: Manifest) -> Path:
     if not manifest.data_dir:
         raise RigError("runs need `data_dir` in vehicle.yaml (the host dir the registry lives under)")
@@ -66,6 +75,81 @@ def _root(manifest: Manifest) -> Path:
         raise RigError(f"data_dir must be an ABSOLUTE host path, not '{manifest.data_dir}' — a relative "
                        f"path would fork the registry per working directory")
     return data
+
+
+def host_root(manifest: Manifest) -> Path | None:
+    """The HOST registry (the machine file's data_dir) when the deployment's own registry is
+    another one: read-THROUGH for lookups, `rig runs` and TAB — never a write target (new runs,
+    imports and removals stay in the deployment's own registry)."""
+    raw = getattr(manifest, "host_data_dir", None)
+    if not raw:
+        return None
+    host = Path(raw)
+    if not host.is_absolute():
+        return None
+    if manifest.data_dir and Path(manifest.data_dir).resolve() == host.resolve():
+        return None
+    return host
+
+
+def registries(manifest: Manifest) -> list[Path]:
+    """Where run refs resolve, in order: the deployment's own registry, then the host's."""
+    out: list[Path] = []
+    if manifest.data_dir:
+        out.append(_root(manifest))
+    host = host_root(manifest)
+    if host is not None:
+        out.append(host)
+    return out
+
+
+def _label_in(data: Path, ref: str) -> str | None:
+    runs = data / "runs"
+    if not runs.is_dir():
+        return None
+    matches = sorted(d.name for d in runs.iterdir() if d.is_dir() and d.name.endswith(f"_{ref}"))
+    return matches[-1] if matches else None
+
+
+def resolve_ref(manifest: Manifest, ref: str, *, verb: str) -> tuple[str, Path]:
+    """The ONE run-ref grammar of every run verb: a PATH to a run dir anywhere (a slash in it,
+    or an existing dir), else an ID under the deployment's registry then the HOST registry, else
+    a LABEL -> its newest run (deployment's registry first, then the host's). Errors name every
+    registry looked at."""
+    as_path = Path(ref).expanduser()
+    if "/" in ref or as_path.is_dir():
+        if not as_path.is_dir():
+            raise RigError(f"{verb}: no run dir at {as_path}")
+        return as_path.name, as_path
+    regs = registries(manifest)
+    if not regs:
+        raise RigError(f"{verb}: no run registry — `data_dir` in vehicle.yaml (or `sudo rig "
+                       f"provision --data-dir`) names one")
+    for data in regs:
+        if (data / "runs" / ref).is_dir():
+            return ref, data / "runs" / ref
+    for data in regs:
+        labeled = _label_in(data, ref)
+        if labeled is not None:
+            where = " in the host registry" if data != regs[0] or not manifest.data_dir else ""
+            eprint(f"rig {verb}: '{ref}' -> {labeled} (newest run with that label{where})")
+            return labeled, data / "runs" / labeled
+    looked = " or ".join(str(d / "runs") for d in regs)
+    raise RigError(f"{verb}: no run '{ref}' under {looked} — not an id, a label, or a path "
+                   f"(see `rig runs`)")
+
+
+def is_open(manifest: Manifest, run_dir: Path) -> bool:
+    """Whether run_dir is the OPEN run of ANY registry this deployment sees (a recorder — this
+    deployment's or another's on the same host — may still be writing it)."""
+    for data in registries(manifest):
+        try:
+            cur = current_run(data)
+        except RigError:
+            continue  # a broken `current` must not hide the check — rotation reports it
+        if cur is not None and cur[1].resolve() == run_dir.resolve():
+            return True
+    return False
 
 
 def _current(data: Path) -> Path:
@@ -363,6 +447,7 @@ def _open_run(manifest: Manifest, root: Path, data: Path, label: str | None,
         run_dir = runs / f"{run_id}-{n}"
         n += 1
     run_dir.mkdir()
+    _remember(data)
     doc = {
         "run": run_dir.name,
         "vehicle": manifest.vehicle,
@@ -502,10 +587,29 @@ class RunRow:
     replay_of: str | None = None  # SIL replay sessions name their source run
     linked: bool = False          # a symlinked registry entry (reconstruct's import) — a
     #                               reference to the archive, not a local copy
+    tags: tuple[str, ...] = ()    # `rig run tag` — kept in the run's own manifest, travel with it
 
 
-def list_runs(manifest: Manifest) -> list[RunRow]:
-    data = _root(manifest)
+def run_tags(doc: dict) -> tuple[str, ...]:
+    raw = doc.get("tags")
+    if not isinstance(raw, list):
+        return ()
+    return tuple(sorted({str(t).strip() for t in raw if str(t).strip()}))
+
+
+def list_runs(manifest: Manifest, *, host: bool = False) -> list[RunRow]:
+    """The deployment's registry (default) or the HOST registry seen through it (host=True: []
+    when there is none — the caller decides whether to show the section)."""
+    if host:
+        data = host_root(manifest)
+        if data is None:
+            return []
+    else:
+        data = _root(manifest)
+    return registry_rows(data)
+
+
+def registry_rows(data: Path) -> list[RunRow]:
     try:
         open_id = (current_run(data) or (None,))[0]
     except RigError:  # a broken `current` must not hide the registry listing
@@ -532,21 +636,57 @@ def list_runs(manifest: Manifest) -> list[RunRow]:
                            started=str(doc.get("started") or "?"), ended=ended or "—",
                            disk_kb=doc.get("disk_kb"), linked=d.is_symlink(),
                            replay_of=str(replay["of"]) if isinstance(replay, dict)
-                           and replay.get("of") else None))
+                           and replay.get("of") else None, tags=run_tags(doc)))
     return rows
 
 
 def by_label(manifest: Manifest, ref: str) -> str | None:
     """The NEWEST run id whose label matches `ref` (ids are `<stamp>_<label>`, so this is a pure
     dirname check — no manifest reads at resolution time). Lets every run-ref verb accept the
-    label a human remembers (`rig replay flight1 …`); an exact id always wins upstream."""
-    data = _root(manifest)
-    runs = data / "runs"
-    if not runs.is_dir():
-        return None
-    matches = sorted(d.name for d in runs.iterdir() if d.is_dir()
-                     and d.name.endswith(f"_{ref}"))
-    return matches[-1] if matches else None
+    label a human remembers (`rig replay flight1 …`); an exact id always wins upstream. The
+    deployment's registry first, then the host's (resolve_ref is the full grammar)."""
+    for data in registries(manifest):
+        labeled = _label_in(data, ref)
+        if labeled is not None:
+            return labeled
+    return None
+
+
+_TAG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/@+-]*$")
+
+
+def tag_runs(manifest: Manifest, ref: str, tags: list[str], *, remove: bool = False) -> int:
+    """`run tag` / `run untag`: tags live in the run's OWN manifest (`tags:` — a sorted list), so
+    they travel with the run wherever it is copied, synced or exported, and every catalog reads
+    them raw. Free-form; `key:value` (site:mojave, event:demo-day) is the convention the catalog
+    filters by prefix. Works on a run in either registry (it is the run's metadata, not the
+    registry's) and on the OPEN run (the seal rewrites the manifest with them kept)."""
+    bad = [t for t in tags if not _TAG_RE.match(t)]
+    if bad:
+        raise RigError(f"run tag: {', '.join(bad)} — tags are [A-Za-z0-9][A-Za-z0-9_.:/@+-]* "
+                       f"(e.g. site:mojave, event:demo-day, 2026-09)")
+    run_id, run_dir = resolve_ref(manifest, ref, verb="run tag")
+    mpath = run_dir / "manifest.yaml"
+    if not mpath.exists():
+        raise RigError(f"run tag: {run_dir} has no manifest.yaml — not a run dir")
+    doc = load_yaml(mpath)
+    have = set(run_tags(doc))
+    want = (have - set(tags)) if remove else (have | set(tags))
+    if remove:
+        absent = sorted(set(tags) - have)
+        if absent:
+            eprint(f"rig run untag: {run_id}: not tagged {', '.join(absent)}")
+    if want == have:
+        eprint(f"rig run tag: {run_id}: unchanged [{', '.join(sorted(have))}]")
+        return 0
+    if want:
+        doc["tags"] = sorted(want)
+    else:
+        doc.pop("tags", None)
+    mpath.write_text(yaml.safe_dump(doc, sort_keys=False))
+    eprint(f"rig run {'untag' if remove else 'tag'}: {run_id}: tags now "
+           f"[{', '.join(sorted(want)) or '—'}]")
+    return 0
 
 
 def remove_runs(manifest: Manifest, run_ids: list[str], *, force: bool = False) -> int:
@@ -572,7 +712,12 @@ def remove_runs(manifest: Manifest, run_ids: list[str], *, force: bool = False) 
             eprint(f"rig run rm: unlinked {rid} (the archived run itself is untouched)")
             continue
         if "/" in rid or not run_dir.is_dir() or run_dir.resolve().parent != runs:
-            eprint(f"rig run rm: no run '{rid}' in this registry (ids only — see `rig runs`)")
+            host = host_root(manifest)
+            if host is not None and "/" not in rid and (host / "runs" / rid).is_dir():
+                eprint(f"rig run rm: {rid} lives in the HOST registry ({host / 'runs'}) — seen "
+                       f"read-through from here, removed only from a deployment that uses it")
+            else:
+                eprint(f"rig run rm: no run '{rid}' in this registry (ids only — see `rig runs`)")
             rc = 1
             continue
         if rid == open_id:
@@ -614,6 +759,8 @@ def import_runs(manifest: Manifest, paths: list[str], *, move: bool = False) -> 
     data = _root(manifest)
     runs = data / "runs"
     runs.mkdir(parents=True, exist_ok=True)
+    _remember(data)
+    host = host_root(manifest)
     rc = 0
     for raw in paths:
         src = Path(raw).expanduser()
@@ -626,6 +773,11 @@ def import_runs(manifest: Manifest, paths: list[str], *, move: bool = False) -> 
             eprint(f"rig run import: {src.name} already in the registry — remove it first "
                    f"(`rig run rm`) or rename the source")
             rc = 1
+            continue
+        if host is not None and (host / "runs" / src.name).is_dir() \
+                and src.resolve() == (host / "runs" / src.name).resolve():
+            eprint(f"rig run import: {src.name} is already in the HOST registry ({host / 'runs'}) "
+                   f"— visible from here read-through; nothing to import")
             continue
         try:
             doc = load_yaml(src / "manifest.yaml")
