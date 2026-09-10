@@ -63,6 +63,10 @@ data_dir: ""            # host dir for recordings/logs/outputs -> RIG_DATA_DIR (
 #                       #   connect: "{{{{map fleet_peer_ids peer_endpoint}}}}"
 # env:                  # exported to launchers after interpolation (for compose ${{GCS_IP}} refs):
 #   GCS_IP: "{{{{gcs_ip}}}}"
+# export_profiles:      # slim copies of runs for the trip off the vehicle (`rig run export`,
+#   review:             #   `rig fleet sync --profile review`): `omit` = run-relative globs left
+#     omit: ["recordings/**/*.mkv"]         #   out; a service (or instance) key = that service's
+#     ros2-bag-logger: {{ preset: zstd_small, exclude: ['.*/points$'] }}  # own export options
 """
 
 _SERVICES_EMPTY = """\

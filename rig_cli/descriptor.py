@@ -92,6 +92,21 @@ class ReplaySource:
         return self.data.replace("{name}", name)
 
 
+@dataclass(frozen=True)
+class ExportSource:
+    """`export:` — this service can produce a SLIM copy of the data it wrote into a run, ON the
+    vehicle, for `rig run export` (the trip off the vehicle). `data` is the run-relative directory
+    the instance writes (`{name}` = the instance name; rig checks it exists in the run, nothing
+    more). rig invokes the launcher's `export` verb with RIG_EXPORT_SOURCE (the run dir),
+    RIG_EXPORT_DEST (the export dir the launcher writes `<data>` under), RIG_EXPORT_OPTIONS (a YAML
+    file: the profile's block for this instance, verbatim — rig never interprets its keys) and
+    RIG_EXPORT_PROFILE (its name). The launcher owns the mechanics (what a slim bag is)."""
+    data: str
+
+    def data_path(self, name: str) -> str:
+        return self.data.replace("{name}", name)
+
+
 @dataclass
 class Descriptor:
     service: str
@@ -138,6 +153,10 @@ class Descriptor:
     #                                              into bags and REPLAY at this service's servers.
     #                                              Undeclared services WARN when replay selects
     #                                              services (their recorded calls likely absent)
+    export_source: ExportSource | None = None  # `export: {data}` — this service slims its own run
+    #                                              data for `rig run export` (see ExportSource);
+    #                                              None = its data travels as-is (or is omitted
+    #                                              by the profile)
     interface: dict[str, tuple[InterfaceEdge, ...]] | None = None  # `interface:` — the service's
     #                                              declared topic/service contract (publishes/
     #                                              subscribes/provides/requires). None = undeclared
@@ -290,6 +309,26 @@ def load_descriptor(service: str, repo: Path) -> Descriptor:
             msgs_source.append(MsgsSource(repo=str(repo_url), ref=str(ref),
                                           packages=tuple(str(p) for p in packages)))
 
+    export_raw = data.get("export")  # `export: { data: "bags/{name}" }` — the service slims its own
+    #                               run data for `rig run export` (see ExportSource)
+    export_source: ExportSource | None = None
+    if export_raw is not None:
+        if not isinstance(export_raw, dict):
+            raise RigError(f"{path}: `export` must be a mapping with `data` (the run-relative "
+                           f"directory the instance writes, e.g. bags/{{name}})")
+        extra = set(export_raw) - {"data"}
+        if extra:
+            raise RigError(f"{path}: export: unknown key(s) {', '.join(sorted(extra))} — it "
+                           f"carries only data")
+        data_rel = export_raw.get("data")
+        if not isinstance(data_rel, str) or not data_rel.strip():
+            raise RigError(f"{path}: export.data must be a run-relative directory the instance "
+                           f"writes, e.g. bags/{{name}}")
+        data_rel = data_rel.strip().strip("/")
+        if ".." in Path(data_rel).parts:
+            raise RigError(f"{path}: export.data must stay inside the run ({data_rel!r})")
+        export_source = ExportSource(data=data_rel)
+
     replay_raw = data.get("replay")  # `replay: { sim_time: true, service_introspection: true }` —
     #                               the launcher's PROMISES: use_sim_time wired from RIG_SIM_TIME,
     #                               and CONTENTS-level service introspection on its servers/clients
@@ -416,6 +455,7 @@ def load_descriptor(service: str, repo: Path) -> Descriptor:
         msgs_apt=msgs_apt,
         msgs_source=msgs_source,
         replay_sim_time=replay_sim_time,
+        export_source=export_source,
         replay_source=replay_source,
         replay_service_introspection=replay_service_introspection,
         interface=interface,

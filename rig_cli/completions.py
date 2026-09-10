@@ -491,6 +491,16 @@ def _artifacts(root_arg, positionals, words):
 
 
 @_soft
+def _export_profiles(root_arg, positionals, words):
+    """The `export_profiles:` names of vehicle.yaml (raw read — a profile is a plain key)."""
+    root = _deployment(root_arg)
+    if not root:
+        return []
+    profiles = _read_yaml(root / "vehicle.yaml").get("export_profiles")
+    return sorted(str(k) for k in profiles) if isinstance(profiles, dict) else []
+
+
+@_soft
 def _run_ids(root_arg, positionals, words):
     """Run-registry ids (newest first — the run you want is almost always recent) plus the
     distinct LABELS (ids are `<stamp>_<label>` — no human types the stamp; the verbs resolve a
@@ -555,6 +565,7 @@ _POSITIONAL_SOURCES: dict = {
     (("reconstruct",), "run"): _run_ids,
     (("run-retrofit",), "runs"): _run_ids,
     (("run-rm",), "runs"): _run_ids,
+    (("run-export",), "run"): _run_ids,
     (("swap",), "service"): _routed_services,
     (("swap",), "source"): _add_specs,
     (("pkg", "add"), "spec"): _add_specs,
@@ -590,6 +601,8 @@ _OPTION_SOURCES: dict = {
     (("pkg", "outdated"), "--registry"): _registry_names,
     (("graph",), "--contract"): _instances,
     (("replay",), "--live"): _instances,
+    (("run-export",), "--profile"): _export_profiles,
+    (("fleet", "sync"), "--profile"): _export_profiles,
 }
 
 

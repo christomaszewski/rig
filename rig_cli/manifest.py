@@ -94,6 +94,9 @@ class Manifest:
     #                                  so every run dir is self-contained for `rig reconstruct`;
     #                                  disk-tight vehicles opt out here or in vehicle.local.yaml
     vars: dict = field(default_factory=dict)      # resolved {{var}} context (built-ins + vars:)
+    export_profiles: dict = field(default_factory=dict)  # `export_profiles:` — named slimming
+    #                              recipes for `rig run export`: {profile: {omit: [globs],
+    #                              <service|instance>: {opaque options}}} (see export.py)
     extra_env: dict = field(default_factory=dict)  # `env:` map, interpolated — fleet_env exports it
     missing_identity: tuple = ()  # mandatory per-vehicle keys nothing provides — loading stays
     #                               LAZY so management verbs (pkg list/remove/…) work on any box;
@@ -110,6 +113,45 @@ class Manifest:
         else:
             chosen = [s for s in self.sensors if s.enabled or not enabled_only]
         return sorted(chosen, key=lambda s: (TIER_RANK[s.tier], s.order))
+
+
+_PROFILE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
+
+
+def _parse_export_profiles(raw) -> dict[str, dict]:
+    """`export_profiles:` — {name: {omit: [run-relative globs], <service-or-instance>: {…}}}. The
+    `omit` list is rig's (paths left out of the export tree entirely, e.g. recordings/**/*.mkv);
+    every other key names a service (or an instance, which wins over its service) and carries
+    that service's own export options, handed to its launcher verbatim — rig never reads them."""
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise RigError("vehicle.yaml: export_profiles must be a mapping of <profile>: "
+                       "{omit: [globs], <service|instance>: {options}}")
+    out: dict[str, dict] = {}
+    for name, body in raw.items():
+        name = str(name)
+        if not _PROFILE_NAME.match(name):
+            raise RigError(f"vehicle.yaml: export profile name {name!r} — use letters, digits, "
+                           f"'_', '-', '.' (it names a directory: <run>/exports/<profile>)")
+        body = {} if body is None else body
+        if not isinstance(body, dict):
+            raise RigError(f"vehicle.yaml: export_profiles.{name} must be a mapping")
+        omit = body.get("omit")
+        omit = [] if omit is None else omit
+        if not isinstance(omit, list) or not all(isinstance(g, str) and g.strip() for g in omit):
+            raise RigError(f"vehicle.yaml: export_profiles.{name}.omit must be a list of "
+                           f"run-relative glob patterns (e.g. 'recordings/**/*.mkv')")
+        for key, val in body.items():
+            if key == "omit":
+                continue
+            if not isinstance(val, dict):
+                raise RigError(f"vehicle.yaml: export_profiles.{name}.{key} must be a mapping — the "
+                               f"export options of service (or instance) '{key}', handed to its "
+                               f"launcher as-is")
+        out[name] = {"omit": [g.strip().strip("/") for g in omit],
+                     **{k: v for k, v in body.items() if k != "omit"}}
+    return out
 
 
 def _parse_entries(entries, tier: str, root: Path, seen: dict[str, Path]) -> list[Sensor]:
@@ -390,4 +432,5 @@ def load_manifest(root: Path) -> Manifest:
                     run_capture=bool(_effective("run_capture", sources,
                                                 data.get("run_capture")) is not False),
                     vars=ctx, extra_env=extra_env,
+                    export_profiles=_parse_export_profiles(data.get("export_profiles")),
                     missing_identity=tuple(unresolved))

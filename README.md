@@ -128,6 +128,11 @@ python3 -m venv .venv && .venv/bin/pip install pyyaml
                           #   interrupted --force, the OPEN run never) / adopt archived runs so
                           #   id-based verbs + TAB cover them. The registry home is a machine
                           #   fact: `sudo rig provision --data-dir /data/rig` (minted lazily)
+./rig run export <run> --profile review  # a SLIM copy of a sealed run under <run>/exports/review/
+                          #   made ON the vehicle: the profile's `omit` globs leave files out
+                          #   (video), services whose rigging declares `export:` re-write their
+                          #   own data smaller (the bag logger: zstd_small, topics dropped), the
+                          #   rest is hardlinked. `rig fleet sync --profile review` pulls it
 ./rig reconstruct <run-dir>  # a run dir back into a runnable tree, anywhere: every opened run
                           #   captures the deployment (surfaces + configs + rig, no image bytes)
                           #   into .rig/artifact.tar.gz — extract, verify, overlay a config
@@ -372,6 +377,12 @@ launch_surface:                              # the minimal file set `rig vendor`
 #       ref: v1.16.0                         #   are MANDATORY and must equal the pin the service builds
 #       packages: [px4_msgs]                 #   against. rig unions the blocks fleet-wide; one repo at two
 #                                            #   refs is refused ("align the riggings"), never guessed.
+# export: { data: "bags/{name}" }             # this service can SLIM the run data it wrote (under
+#                                            #   <run>/<data>) for `rig run export`: rig calls the
+#                                            #   launcher's `export` verb with RIG_EXPORT_SOURCE (run),
+#                                            #   RIG_EXPORT_DEST (write <data> under it), RIG_EXPORT_OPTIONS
+#                                            #   (the profile's block for this instance, a YAML file rig
+#                                            #   never reads), RIG_EXPORT_PROFILE, RIG_EXPORT_FORCE
 # replay: { sim_time: true,                 # the launcher wires use_sim_time from RIG_SIM_TIME (rig's
 #                                            #   one clock token under `rig replay`; explicit config wins
 #                                            #   both ways). Undeclared services under test WARN at replay

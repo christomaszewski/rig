@@ -4,8 +4,10 @@ Run: python3 tests/test_fleet_verbs.py
 Local rows exercise the REAL code path (subprocess `rig up` on real deployments — no mocks);
 ssh/scp are PATH shims (the docker-shim idiom): each logs its FULL argv (SHIM_SSH_LOG /
 SHIM_SCP_LOG — the transport-option contract stays checkable), then strips options; ssh runs the
-command locally via sh -c (SHIM_SSH_FAIL=<host> => exit 255, the transport-failure branch), scp
-copies locally (SHIM_SCP_FAIL=<host> => exit 1, the copy-failure branch).
+command locally via sh -c (SHIM_SSH_FAIL=<host> => exit 255, the transport-failure branch;
+SHIM_SSH_FAIL_CMD=<substring> fails only the hops whose command carries it), scp copies locally
+(SHIM_SCP_FAIL=<host> => exit 1, the copy-failure branch). rsync is the REAL one (the sync
+transport): its remote hop rides the ssh shim, so `rsync --server` runs locally too.
 docker is shimmed to answer `compose ls` with [] and log network verbs to SHIM_DOCKER_LOG.
 """
 import contextlib
@@ -37,6 +39,9 @@ while [ $# -gt 0 ]; do
 done
 host="$1"; shift
 if [ "$SHIM_SSH_FAIL" = "$host" ]; then echo "ssh: connect to host $host: refused" >&2; exit 255; fi
+if [ -n "$SHIM_SSH_FAIL_CMD" ]; then
+  case "$*" in *"$SHIM_SSH_FAIL_CMD"*) echo "ssh: connect to host $host: link dropped" >&2; exit 255 ;; esac
+fi
 sh -c "$*"
 """
 
@@ -442,6 +447,146 @@ def test_fleet_vars_flow_and_reboot_persistence():
     assert rendered["connect"] == ["tcp/10.0.0.9:7447"]          # the PUSHED fleet.yaml persisted
 
 
+@contextlib.contextmanager
+def _no_rsync():
+    """The scp fallback branch: a laptop without rsync."""
+    from rig_cli import fleet as fleet_mod
+    real = fleet_mod.shutil.which
+    fleet_mod.shutil.which = lambda name, *a, **k: None if name == "rsync" else real(name, *a, **k)
+    try:
+        yield
+    finally:
+        fleet_mod.shutil.which = real
+
+
+_EXPORTER = """\
+#!/bin/sh
+name=$(sed -n 's/^name: //p' "$1")
+if [ "$2" = export ]; then
+  out="$RIG_EXPORT_DEST/bags/$name/sess"; mkdir -p "$out"
+  echo slim > "$out/sess_0.mcap"; cp "$RIG_EXPORT_OPTIONS" "$out/options.yaml"
+fi
+exit 0
+"""
+
+
+def _export_tree(name: str, data_dir: pathlib.Path) -> pathlib.Path:
+    """A FIELD deployment (data_dir pinned in vehicle.yaml) with one exporting service and a
+    `review` profile; a sealed run with a fat bag + video + sidecar under its registry."""
+    root = pathlib.Path(tempfile.mkdtemp()) / name
+    svc = pathlib.Path(tempfile.mkdtemp()) / "bagsvc"
+    svc.mkdir(parents=True)
+    (svc / "rigging.yaml").write_text("service: bagsvc\nlauncher: bag-up\ntier: infra\n"
+                                      "launch_surface: [bag-up]\nexport: { data: 'bags/{name}' }\n")
+    (svc / "bag-up").write_text(_EXPORTER)
+    (svc / "bag-up").chmod(0o755)
+    (root / "config" / "infra").mkdir(parents=True)
+    (root / "vehicle.yaml").write_text(textwrap.dedent(f"""\
+        vehicle: {name}
+        vehicle_id: 1
+        data_dir: {data_dir}
+        infra:
+          - {{name: bag_logger, service: bagsvc, config: config/infra/bag_logger.yaml}}
+        export_profiles:
+          review:
+            omit: ["recordings/**/*.mkv"]
+            bagsvc: {{ preset: zstd_small }}
+        """))
+    (root / "config" / "infra" / "bag_logger.yaml").write_text("service: bagsvc\nname: bag_logger\n")
+    (root / "services.yaml").write_text(f"services:\n  bagsvc: {{ path: {svc} }}\n")
+    run = data_dir / "runs" / "20260901T100000Z_survey"
+    for rel, body in (("bags/bag_logger/sess/sess_0.mcap", "x" * 4096),
+                      ("recordings/cam/s1.mkv", "v" * 8192), ("recordings/cam/s1.csv", "t\n")):
+        (run / rel).parent.mkdir(parents=True, exist_ok=True)
+        (run / rel).write_text(body)
+    (run / "manifest.yaml").write_text("run: 20260901T100000Z_survey\nended: '2026-09-01'\n")
+    return root
+
+
+def test_fleet_sync_rsync_updates_profile_pull_and_completion_to_full():
+    """rsync is the transport (remote hop through the ssh shim): a pulled run is UPDATED on
+    re-sync; `--profile` pulls the slim export (made on the vehicle by --export when missing,
+    via the deployment's own entry point) to the SAME dest a later full pull completes; a full
+    copy is never downgraded; a dropped link mars its row and the rest of the harvest lands."""
+    dl, dr = pathlib.Path(tempfile.mkdtemp()) / "dl", pathlib.Path(tempfile.mkdtemp()) / "dr"
+    a, b = _export_tree("veh_l", dl), _export_tree("far", dr)
+    fy = _fleet_yaml([{"id": 1, "name": "veh_l", "path": str(a), "data_dir": str(dl)},
+                      {"id": 2, "name": "far", "host": "farhost", "path": str(b),
+                       "data_dir": str(dr)}], mode="field")
+    rid = "20260901T100000Z_survey"
+    # 1. slim first: no export on either vehicle -> skipped; --export makes it THERE, then pulls
+    into = pathlib.Path(tempfile.mkdtemp()) / "harvest"
+    rc, _, err = _run("fleet", "sync", "--fleet", str(fy), "--into", str(into), "--profile", "review")
+    assert rc == 0 and "0 run(s) pulled" in err and "no 'review' export" in err, err
+    assert not into.exists()
+    log = pathlib.Path(tempfile.mkdtemp()) / "ssh.log"
+    with _env(SHIM_SSH_LOG=str(log)):
+        rc, _, err = _run("fleet", "sync", "--fleet", str(fy), "--into", str(into),
+                          "--profile", "review", "--export")
+    assert rc == 0, err
+    assert "2 run(s) pulled" in err and "2 exported on the vehicle" in err
+    assert "run-export 20260901T100000Z_survey --profile review" in log.read_text()  # via chooser
+    assert "rsync --server" in log.read_text()                    # the transport's remote hop
+    for name, dd in (("veh_l", dl), ("far", dr)):
+        dest = into / "survey" / name / rid
+        assert (dest / "bags" / "bag_logger" / "sess" / "sess_0.mcap").read_text().strip() == "slim"
+        assert yaml.safe_load((dest / "bags" / "bag_logger" / "sess" / "options.yaml").read_text()) \
+            == {"preset": "zstd_small"}
+        assert (dest / "recordings" / "cam" / "s1.csv").is_file()   # sidecar travels…
+        assert not (dest / "recordings" / "cam" / "s1.mkv").exists()  # …the video does not
+        assert (dest / ".rig" / "export.yaml").is_file()           # slim-copy provenance
+        assert (dd / "runs" / rid / "exports" / "review" / ".rig" / "export.yaml").is_file()
+    # 2. a profile re-sync UPDATES (idempotent: nothing new, still reported)
+    rc, _, err = _run("fleet", "sync", "--fleet", str(fy), "--into", str(into), "--profile", "review")
+    assert rc == 0 and "0 run(s) pulled, 2 updated" in err, err
+    # 3. the full pull later COMPLETES the slim copies in place: video appears, provenance goes,
+    #    the vehicle's own exports/ never travels
+    rc, _, err = _run("fleet", "sync", "--fleet", str(fy), "--into", str(into))
+    assert rc == 0 and "0 run(s) pulled, 2 updated" in err, err
+    assert err.count("completed to a full copy") == 2
+    for name in ("veh_l", "far"):
+        dest = into / "survey" / name / rid
+        assert (dest / "recordings" / "cam" / "s1.mkv").read_text() == "v" * 8192
+        assert (dest / "bags" / "bag_logger" / "sess" / "sess_0.mcap").read_text() == "x" * 4096
+        assert not (dest / ".rig" / "export.yaml").exists()
+        assert not (dest / "exports").exists()
+    # 4. a full copy is never downgraded by a profile pull
+    rc, _, err = _run("fleet", "sync", "--fleet", str(fy), "--into", str(into), "--profile", "review")
+    assert rc == 0 and "already a FULL copy" in err and "2 skipped" in err, err
+    assert (into / "survey" / "veh_l" / rid / "recordings" / "cam" / "s1.mkv").is_file()
+    # 5. a late file on the vehicle rides the next re-sync (update semantics)
+    (dl / "runs" / rid / "late.txt").write_text("retrofit")
+    rc, _, err = _run("fleet", "sync", "--fleet", str(fy), "--into", str(into))
+    assert rc == 0 and (into / "survey" / "veh_l" / rid / "late.txt").is_file()
+    # 6. a dropped link on the remote hop mars that row; the local row still lands
+    into2 = pathlib.Path(tempfile.mkdtemp()) / "harvest2"
+    with _env(SHIM_SSH_FAIL_CMD="rsync --server"):
+        rc, _, err = _run("fleet", "sync", "--fleet", str(fy), "--into", str(into2))
+    assert rc == 1 and "far/20260901T100000Z_survey: rsync failed" in err, err
+    assert "1 run(s) pulled" in err and (into2 / "survey" / "veh_l" / rid / "manifest.yaml").is_file()
+    # 7. --export without --profile is refused up front
+    rc, _, err = _run("fleet", "sync", "--fleet", str(fy), "--into", str(into2), "--export")
+    assert rc == 1 and "--export needs --profile" in err
+
+
+def test_fleet_sync_without_rsync_pulls_once_and_cannot_update():
+    dl = pathlib.Path(tempfile.mkdtemp()) / "dl"
+    a = _export_tree("veh_s", dl)
+    fy = _fleet_yaml([{"id": 1, "name": "veh_s", "path": str(a), "data_dir": str(dl)}], mode="field")
+    into = pathlib.Path(tempfile.mkdtemp()) / "harvest"
+    rid = "20260901T100000Z_survey"
+    (dl / "runs" / rid / "exports" / "old").mkdir(parents=True)  # a stale export dir on the vehicle
+    with _no_rsync():
+        rc, _, err = _run("fleet", "sync", "--fleet", str(fy), "--into", str(into))
+        assert rc == 0 and "1 run(s) pulled" in err, err
+        dest = into / "survey" / "veh_s" / rid
+        assert (dest / "recordings" / "cam" / "s1.mkv").is_file()
+        assert not (dest / "exports").exists()                    # copytree honored the exclude
+        rc, _, err = _run("fleet", "sync", "--fleet", str(fy), "--into", str(into))
+        assert rc == 0 and "0 run(s) pulled, 0 updated, 1 skipped" in err
+        assert "rsync is unavailable" in err
+
+
 def test_fleet_sync_skips_open_runs():
     a = _sil_tree("veh_a")
     dd = pathlib.Path(tempfile.mkdtemp()) / "data"
@@ -478,7 +623,7 @@ def test_fleet_sync_label_filter_and_scp_fail_soft():
                        "data_dir": str(dr)}], mode="field")
     into = pathlib.Path(tempfile.mkdtemp()) / "harvest"
     log = pathlib.Path(tempfile.mkdtemp()) / "scp.log"
-    with _env(SHIM_SCP_FAIL="farhost", SHIM_SCP_LOG=str(log)):
+    with _env(SHIM_SCP_FAIL="farhost", SHIM_SCP_LOG=str(log)), _no_rsync():
         rc, _, err = _run("fleet", "sync", "--fleet", str(fy), "--label", "dock",
                           "--into", str(into))
     assert rc == 1 and "scp failed" in err                       # the marred remote row…

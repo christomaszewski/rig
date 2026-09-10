@@ -275,7 +275,25 @@ rig fleet up --run tuesday-swarm --var gcs_ip=192.168.44.10
 rig fleet down --end-run              # tear down + seal everywhere (full success rms the network)
 rig fleet sync --into fleet-runs      # harvest SEALED runs (ended: = safe) into
                                       #   fleet-runs/<label>/<vehicle>/<run-id> — the SAME tree
-                                      #   the SIL view shows live; idempotent re-sync
+                                      #   the SIL view shows live. rsync: a dropped link resumes,
+                                      #   a run already there is UPDATED (late files ride along)
+rig fleet sync --profile review --export   # the SLIM version instead: each run's exports/review/
+                                      #   (vehicle.yaml export_profiles — video omitted, bags
+                                      #   re-written small by the logger), made ON the vehicle
+                                      #   first where missing (--export). Same dest: a plain
+                                      #   `fleet sync` later completes the slim copy to a full one
+```
+
+```yaml
+# vehicle.yaml — export profiles: what `rig run export` / `fleet sync --profile` leave out
+export_profiles:
+  review:
+    omit: ["recordings/**/*.mkv"]      # rig: run-relative globs left out entirely (sidecars stay)
+    ros2-bag-logger:                   # per SERVICE (or instance name — wins): handed to its
+      preset: zstd_small               #   launcher's `export` verb verbatim; the bag logger
+      exclude: ['.*/points$', '.*/image_raw$']   #   (rig-infra ≥ v1.14.0) re-writes each session
+  notes:                               #   at the preset, minus these topic regexes (`topics:`
+    omit: ["recordings/**", "bags/**"] #   allow-lists instead; `from_s`/`to_s` cut a window)
 ```
 
 The SIL network is create/teardown + env only: `RIG_NETWORK`/`RIG_VEHICLE_IP` are exported to

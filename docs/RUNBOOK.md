@@ -220,8 +220,34 @@ rig graph <rehearsal-run> --check    #   the topology looks right. Cheap today, 
 ```
 
 On the day: `up --run <label>` (label every session), `down --end-run` after landing (captures
-docker logs, seals), copy the SEALED run dir off (`ended:` present = safe to sync), and leave
-disk headroom ≥ 2× the expected bag+video volume.
+docker logs, seals), copy the SEALED run dir off (`ended:` present = safe to sync — a slim
+export first over a thin link, the full run later: next section), and leave disk headroom ≥ 2×
+the expected bag+video volume.
+
+## Getting runs off the vehicle — slim exports (rig ≥ v0.2.54)
+
+A run dir is mostly video and bags, both already compressed: zipping it gains nothing. What
+shrinks it is leaving data out and having the writer re-write the rest smaller — so the
+vehicle does the slimming, with the services that wrote the data. Declare the recipes once in
+vehicle.yaml (`export_profiles:` — CHEATSHEET §1.6 has the block), then:
+
+```bash
+# on the vehicle (or from the bench through fleet): a slim copy under <run>/exports/review/,
+# hardlinked where kept (no disk cost), video omitted, bags re-written at zstd_small minus the
+# point clouds by the bag logger's own `export` verb (rig-infra ≥ v1.14.0)
+rig run export <run|label> --profile review        # --dry-run shows kept/omitted + the exporters
+rig fleet sync --into fleet-runs --profile review --export   # make it there if missing, pull it
+rig fleet sync --into fleet-runs                   # later, on a fat link: complete the SAME
+                                                   #   copies to full runs (rsync adds what the
+                                                   #   slim pull lacked; a full copy is never
+                                                   #   downgraded by a later --profile pull)
+```
+
+An export is a plain run dir (manifest, config snapshots, graph epochs, sidecars) plus
+`.rig/export.yaml` naming the profile, the source run, what was omitted and each exporter's
+outcome — `rig run import` adopts it like any run, `rig replay` plays what the slim bags hold.
+Transport is rsync (resumable; on a laptop without it, scp pulls once and cannot update). The
+camera services do not export yet: video is either omitted (`omit:`) or travels as recorded.
 
 ## Archive → laptop replay (rig ≥ v0.2.36)
 

@@ -38,6 +38,16 @@ platform: ""                   # e.g. jp7; empty = platform-independent deployme
 # path, so bake leaves it literal instead of relativizing outputs into the artifact). e.g. /data
 data_dir: ""
 
+# Slim copies of runs for the trip off the vehicle: `rig run export <run> --profile review` builds
+# <run>/exports/review/ ON the vehicle (hardlinks where kept), `rig fleet sync --profile review` pulls it.
+# `omit` = run-relative globs left out entirely (rig's); any other key names a service (or an instance —
+# it wins) and carries that service's own export options, handed to its launcher's `export` verb verbatim
+# (the bag logger, rig-infra ≥ v1.14.0: preset / exclude / topics / from_s / to_s).
+# export_profiles:
+#   review:
+#     omit: ["recordings/**/*.mkv"]
+#     ros2-bag-logger: { preset: zstd_small, exclude: ['.*/points$'] }
+
 # infra: shared vehicle-wide services, brought up FIRST (and torn down last). The zenoh router (one per
 # vehicle) lives here for rmw_zenoh; omit it (or enabled: false) for a DDS RMW or a ROS-less vehicle.
 infra:

@@ -58,6 +58,10 @@ def fleet_env(manifest: Manifest, descriptors: dict[str, Descriptor] | None = No
                        ("RIG_REPLAY_SERVICES", None), ("RIG_REPLAY_CALLS", None),
                        ("RIG_REPLAY_FROM_S", None), ("RIG_REPLAY_TO_S", None),
                            ("RIG_REPLAY_START_AT_UNIX_S", None),
+                       # the export channel (export.py): per-invocation like the replay one
+                       ("RIG_EXPORT_SOURCE", None), ("RIG_EXPORT_DEST", None),
+                       ("RIG_EXPORT_OPTIONS", None), ("RIG_EXPORT_PROFILE", None),
+                       ("RIG_EXPORT_FORCE", None),
                        # the operational-state posture token: None on EVERY verb (popped — a
                        # leaked shell value must never park a fleet); cmd_up alone sets it on its
                        # env copy when --standby/--active is passed (honored by launchers at `up`

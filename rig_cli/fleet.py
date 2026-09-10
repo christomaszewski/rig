@@ -479,19 +479,88 @@ def cmd_down(fleet: Fleet, names: list[str], *, end_run: bool, force: bool, dry_
 
 
 def _enumerate_runs(vehicle: Vehicle, data_dir: str) -> Outcome:
-    """One pass reading the MACHINE CONTRACT (grep-able flat manifest keys) — never a table."""
+    """One pass reading the MACHINE CONTRACT (grep-able flat manifest keys) — never a table.
+    Columns: id, `ended:` value, the run's export profiles (an `exports/<p>/` carrying its
+    `.rig/export.yaml` = a finished `rig run export`), space-separated."""
     script = (f'for d in {_pathexpr(data_dir)}/runs/*/; do [ -d "$d" ] || continue; '
-              f'printf \'%s\\t%s\\n\' "$(basename "$d")" '
-              f'"$(sed -n \'s/^ended: //p\' "$d/manifest.yaml" 2>/dev/null | head -1)"; done')
+              f'ex=""; for e in "$d"exports/*/; do [ -f "$e.rig/export.yaml" ] && '
+              f'ex="$ex $(basename "$e")"; done; '
+              f'printf \'%s\\t%s\\t%s\\n\' "$(basename "$d")" '
+              f'"$(sed -n \'s/^ended: //p\' "$d/manifest.yaml" 2>/dev/null | head -1)" "${{ex# }}"; done')
     return _run_script(vehicle, script, timeout=60)
 
 
-def cmd_sync(fleet: Fleet, names: list[str], *, label: str | None, into: str, jobs: int) -> int:
+EXPORTS_DIR = "exports"
+_RSYNC_FLAGS = ("-a", "--partial")  # a dropped link resumes from the partial file (delta
+#                                     transfer picks up its blocks); no wire compression — the
+#                                     data already is (mkv, zstd mcap). Only flags BOTH rsync 3
+#                                     (the vehicles) and macOS openrsync (the laptop) take
+
+
+def _pull(vehicle: Vehicle, src: str, dest: Path, *, exclude: tuple[str, ...] = ()) -> str | None:
+    """Bring `src` (a dir on the vehicle) to `dest` (a local dir, created or UPDATED): rsync when
+    both ends have it — resumable, and a re-sync only moves what changed — else scp (a first
+    pull only; scp cannot update a dir in place). Returns an error line or None."""
+    rsync = shutil.which("rsync")
+    existed = dest.exists()
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if rsync:
+        ex = [f"--exclude={e}" for e in exclude]
+        if vehicle.is_local:
+            cmd = [rsync, *_RSYNC_FLAGS, *ex, str(Path(src).expanduser()) + "/", str(dest) + "/"]
+        else:
+            cmd = [rsync, *_RSYNC_FLAGS, *ex, "-e", "ssh " + " ".join(_SSH_OPTS),
+                   f"{vehicle.host}:{src}/", str(dest) + "/"]
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=6 * 3600)
+        except subprocess.TimeoutExpired:
+            return "rsync timed out"
+        if proc.returncode in (0, 24):  # 24 = a source file vanished mid-transfer: still a pull
+            return None
+        err = (proc.stderr or "").strip()
+        missing_remote = proc.returncode in (12, 127) and "not found" in err
+        if not missing_remote:
+            if "No such file or directory" in err and "exports/" in src:
+                return f"no '{src.rsplit('/', 1)[-1]}' export on the vehicle"
+            return f"rsync failed — {err.splitlines()[-1][:120] if err else 'exit ' + str(proc.returncode)}"
+        eprint(f"  {vehicle.name}: no rsync on the vehicle — falling back to scp (first pull "
+               f"only, not resumable; `apt install rsync` there)")
+    if existed:
+        return "already pulled and rsync is unavailable — scp cannot update it in place"
+    if vehicle.is_local:
+        shutil.copytree(Path(src).expanduser(), dest,
+                        ignore=shutil.ignore_patterns(*[e.strip("/") for e in exclude]) if exclude
+                        else None)
+        return None
+    scp = subprocess.run(["scp", "-r", "-q", *_SSH_OPTS, f"{vehicle.host}:{src}", str(dest)],
+                         capture_output=True, text=True, timeout=6 * 3600)
+    if scp.returncode != 0:
+        return f"scp failed — {(scp.stderr or '').strip()[:120]}"
+    if exclude:  # scp -r has no exclude: drop the run's exports/ after the fact
+        for e in exclude:
+            shutil.rmtree(dest / e.strip("/"), ignore_errors=True)
+    return None
+
+
+def _export_remote(fleet: Fleet, vehicle: Vehicle, run_id: str, profile: str) -> Outcome:
+    """`rig run export` ON the vehicle (its deployment's entry point, like every fleet verb)."""
+    argv = ["run-export", run_id, "--profile", profile]
+    return _run_script(vehicle, _chooser(vehicle, argv, _vehicle_env(fleet, vehicle, {})),
+                       timeout=6 * 3600)
+
+
+def cmd_sync(fleet: Fleet, names: list[str], *, label: str | None, into: str, jobs: int,
+             profile: str | None = None, export: bool = False) -> int:
+    """Harvest sealed runs. Whole runs by default (a run's own `exports/` stays on the vehicle);
+    `--profile p` pulls each run's slim export instead — the SAME dest, so a slim pull today
+    and a full pull later compose: rsync adds what the slim copy lacked (and the slim copy's
+    export provenance goes, it is a full copy then). A dest already holding a FULL copy is never
+    downgraded by a profile pull."""
     vehicles = _select(fleet, names)
     dest_root = Path(into).expanduser()
     problems = 0
-    pulled = skipped = 0
-    for v in vehicles:  # sequential: scp -r of data is bandwidth-bound, not latency-bound
+    pulled = updated = skipped = exported = 0
+    for v in vehicles:  # sequential: the transfer is bandwidth-bound, not latency-bound
         data_dir = _row_data_dir(fleet, v)
         if data_dir is None:
             eprint(f"  {v.name}: no data_dir in the roster row (and no sil.data_root to derive "
@@ -505,7 +574,8 @@ def cmd_sync(fleet: Fleet, names: list[str], *, label: str | None, into: str, jo
             problems += 1
             continue
         for line in listing.out.splitlines():
-            run_id, _, ended = line.partition("\t")
+            run_id, _, rest = line.partition("\t")
+            ended, _, exports_col = rest.partition("\t")
             run_id = run_id.strip()
             if not run_id:
                 continue
@@ -518,23 +588,57 @@ def cmd_sync(fleet: Fleet, names: list[str], *, label: str | None, into: str, jo
                 skipped += 1
                 continue
             dest = dest_root / run_label / v.name / run_id
-            if dest.exists():
-                skipped += 1
-                continue
-            dest.parent.mkdir(parents=True, exist_ok=True)
+            existed = dest.exists()
             src = f"{data_dir}/runs/{run_id}"
-            if v.is_local:
-                shutil.copytree(Path(src).expanduser(), dest)
-            else:
-                scp = subprocess.run(["scp", "-r", "-q", *_SSH_OPTS, f"{v.host}:{src}", str(dest)],
-                                     capture_output=True, text=True, timeout=3600)
-                if scp.returncode != 0:
-                    eprint(f"  {v.name}/{run_id}: scp failed — "
-                           f"{(scp.stderr or '').strip()[:120]}")
-                    problems += 1
+            exclude: tuple[str, ...] = ()
+            if profile:
+                if existed and not (dest / ".rig" / "export.yaml").exists():
+                    eprint(f"  {v.name}/{run_id}: skipped (already a FULL copy at {dest} — a "
+                           f"'{profile}' export would only shrink it)")
+                    skipped += 1
                     continue
-            eprint(f"  {v.name}/{run_id} -> {dest}")
-            pulled += 1
-    eprint(f"fleet sync: {pulled} run(s) pulled, {skipped} skipped, into {dest_root}"
+                have = set(exports_col.split())
+                if profile not in have:
+                    if not export:
+                        eprint(f"  {v.name}/{run_id}: skipped (no '{profile}' export on the "
+                               f"vehicle — `--export` makes it there, or `rig run export` "
+                               f"on the vehicle)")
+                        skipped += 1
+                        continue
+                    eprint(f"  {v.name}/{run_id}: exporting '{profile}' on the vehicle…")
+                    out = _export_remote(fleet, v, run_id, profile)
+                    if out.rc != 0:
+                        tail = (out.err.strip().splitlines() or [""])[-1][:160]
+                        eprint(f"  {v.name}/{run_id}: export failed"
+                               f"{(' — ' + tail) if tail else ''}")
+                        problems += 1
+                        continue
+                    exported += 1
+                src = f"{src}/{EXPORTS_DIR}/{profile}"
+            else:
+                exclude = (f"/{EXPORTS_DIR}/",)
+            err = _pull(v, src, dest, exclude=exclude)
+            if err is not None:
+                eprint(f"  {v.name}/{run_id}: {err}")
+                if err.startswith("already pulled"):
+                    skipped += 1
+                else:
+                    problems += 1
+                continue
+            if not profile:  # a full copy now — a slim pull's provenance no longer describes it
+                stale = dest / ".rig" / "export.yaml"
+                if stale.exists():
+                    stale.unlink()
+                    shutil.rmtree(dest / ".rig" / "export", ignore_errors=True)
+                    eprint(f"  {v.name}/{run_id}: completed to a full copy (was a slim export)")
+            eprint(f"  {v.name}/{run_id}{' [' + profile + ']' if profile else ''} "
+                   f"{'~>' if existed else '->'} {dest}")
+            if existed:
+                updated += 1
+            else:
+                pulled += 1
+    eprint(f"fleet sync: {pulled} run(s) pulled, {updated} updated, {skipped} skipped"
+           + (f", {exported} exported on the vehicle" if exported else "")
+           + f", into {dest_root}"
            + (f" — {problems} problem(s)" if problems else ""))
     return 1 if problems else 0

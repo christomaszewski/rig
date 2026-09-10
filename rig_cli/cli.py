@@ -240,6 +240,19 @@ def cmd_run_import(args, manifest, catalog, descriptors) -> int:
     return runs_mod.import_runs(manifest, args.paths, move=args.move)
 
 
+def cmd_run_export(args, manifest, catalog, descriptors) -> int:
+    from . import export as export_mod
+    profile = args.profile
+    if profile is None:  # exactly one declared profile needs no naming
+        names = sorted(manifest.export_profiles or {})
+        if len(names) != 1:
+            raise RigError("run export: --profile <name> — vehicle.yaml declares "
+                           + (f"{', '.join(names)}" if names else "no `export_profiles:`"))
+        profile = names[0]
+    return export_mod.cmd(manifest, catalog, descriptors, args.rig_root, run_ref=args.run,
+                          profile=profile, force=args.force, dry_run=args.dry_run)
+
+
 def cmd_runs(args, manifest, catalog, descriptors) -> int:
     if args.names:  # `rig runs rm <id>` must not silently LIST — the verbs live under `run`
         verbs = _GROUP_VERBS["run"]
@@ -573,6 +586,7 @@ _HANDLERS = {
     "runs": cmd_runs,
     "run-rm": cmd_run_rm,
     "run-import": cmd_run_import,
+    "run-export": cmd_run_export,
     "graph": cmd_graph,
     "replay": cmd_replay,
     "config-render": cmd_config_render,
@@ -585,7 +599,7 @@ _HANDLERS = {
 _GROUP_VERBS: dict[str, dict[str, str]] = {
     "config": {"show": "config", "render": "config-render", "diff": "config-diff"},
     "run": {"new": "new-run", "end": "end-run", "list": "runs", "retrofit": "run-retrofit",
-            "rm": "run-rm", "import": "run-import"},
+            "rm": "run-rm", "import": "run-import", "export": "run-export"},
     "artifact": {"bake": "bake", "unbake": "unbake", "list": "artifact-list"},
     "image": {"build": "build", "pull": "pull", "audit": "image-audit"},
     "service": {"rigify": "rigify", "vendor": "vendor", "certify": "certify"},
@@ -818,6 +832,22 @@ def build_parser() -> argparse.ArgumentParser:
     rim.add_argument("paths", nargs="+", help="path(s) to run dirs (scp'd/downloaded)")
     rim.add_argument("--move", action="store_true",
                      help="move instead of copy (same-disk adoption)")
+
+    rex = sub.add_parser("run-export", help="produce a SLIM copy of a sealed run under "
+                                            "<run>/exports/<profile>/ ON the vehicle (canonical: "
+                                            "run export): the profile's `omit` globs leave files "
+                                            "out, services whose rigging declares `export:` "
+                                            "re-write their own data smaller (the bag logger: "
+                                            "zstd_small, topics dropped), the rest is hardlinked. "
+                                            "`rig fleet sync --profile` pulls it")
+    rex.add_argument("run", help="run id, label (newest), or run-dir path — sealed; never the OPEN run")
+    rex.add_argument("--profile", default=None, metavar="NAME",
+                     help="an `export_profiles:` entry of vehicle.yaml (optional when exactly "
+                          "one is declared)")
+    rex.add_argument("--force", action="store_true",
+                     help="redo an export that already exists (removed first)")
+    rex.add_argument("--dry-run", action="store_true", dest="dry_run",
+                     help="print what would be kept/omitted and which exporters would run")
 
     rf = sub.add_parser("run-retrofit", help="stamp pre-capture runs with the deploy artifact "
                                              "their manifests name (canonical: run retrofit)")
@@ -1216,12 +1246,22 @@ def build_parser() -> argparse.ArgumentParser:
     fld.add_argument("--force", action="store_true", help="forwarded to each vehicle's down")
     fld.add_argument("--dry-run", action="store_true")
     fly = flsub.add_parser("sync", parents=[flc], help="harvest SEALED runs (ended: present = "
-                                                       "safe to sync) into <into>/<label>/<vehicle>/")
+                                                       "safe to sync) into <into>/<label>/<vehicle>/ "
+                                                       "over rsync (resumable; a run already "
+                                                       "there is UPDATED, so a slim pull can be "
+                                                       "completed later by a full one)")
     fly.add_argument("names", nargs="*", default=[], help="vehicle name(s); default: all")
     fly.add_argument("--label", default=None, help="only runs with this label")
     fly.add_argument("--into", default="fleet-runs", metavar="DIR",
                      help="harvest root (default: fleet-runs/) — the same tree a SIL fleet "
                           "view produces live")
+    fly.add_argument("--profile", default=None, metavar="NAME",
+                     help="pull each run's SLIM export of this profile (<run>/exports/<NAME>/, "
+                          "made by `rig run export` on the vehicle) instead of the whole run; "
+                          "a run without one is skipped unless --export")
+    fly.add_argument("--export", action="store_true",
+                     help="with --profile: produce the export ON the vehicle first "
+                          "(`rig run export`) where it is missing")
 
     ov = sub.add_parser("overlay", help="overlay BINDINGS on instances (apply/remove/reorder/list) "
                                         "— authoring/publishing is `pkg promote`")
@@ -1325,8 +1365,12 @@ def main(argv=None) -> int:
                 return fleet_mod.cmd_down(fleet, args.names, end_run=args.end_run,
                                           force=args.force, dry_run=args.dry_run,
                                           jobs=args.jobs)
+            if args.export and not args.profile:
+                raise RigError("fleet sync: --export needs --profile <name> (it names what to "
+                               "export)")
             return fleet_mod.cmd_sync(fleet, args.names, label=args.label, into=args.into,
-                                      jobs=args.jobs)
+                                      jobs=args.jobs, profile=args.profile,
+                                      export=args.export)
         if args.cmd == "pkg":
             if args.pkg_cmd in ("add", "install", "remove", "rm", "upgrade", "lock", "promote",
                                 "list", "save"):
