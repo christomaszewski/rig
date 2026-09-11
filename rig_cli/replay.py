@@ -693,7 +693,8 @@ def auto_end(manifest, descriptors, root: Path, pairs, env, player, grace_s: int
     eprint(f"rig replay: bag finished — {grace_s}s grace for consumers to drain, then sealing")
     time.sleep(grace_s)
     if manifest.data_dir:
-        runs_mod.capture_docker_logs(manifest)
+        # Replay explicitly launches disabled rows, including the player and source instances.
+        runs_mod.capture_docker_logs(manifest, also={s.name for s, _ in pairs})
     outcomes = dispatch.run_verb(list(reversed(pairs)), env, "down")
     failed = [o for o in outcomes if o.returncode != 0]
     if failed:

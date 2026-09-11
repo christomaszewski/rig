@@ -588,6 +588,63 @@ def test_export_calls_dispatches_the_launcher_verb_without_a_session():
 
 
 
+def test_auto_end_saves_disabled_session_logs_before_teardown():
+    import subprocess
+    from unittest.mock import patch
+    from rig_cli.manifest import project_name
+
+    with tempfile.TemporaryDirectory() as tmp:
+        data = pathlib.Path(tmp)
+        run_dir = data / "runs" / "replay"
+        run_dir.mkdir(parents=True)
+        (run_dir / "manifest.yaml").write_text("run: replay\n")
+        (data / "current").symlink_to(pathlib.Path("runs") / "replay")
+        rows = [_row("planner", tier="autonomy"),
+                _row("cam", enabled=False), PLAYER]
+        m = _manifest(rows + [_row("unused", enabled=False)], data_dir=str(data))
+        pairs = [(s, object()) for s in rows]
+        containers = {project_name(s.name, m.vehicle_id): [f"{s.name}-1"] for s in rows}
+        containers[project_name(PLAYER.name, m.vehicle_id)].append("call-injector-1")
+        expected = {run_dir / ".rig" / "logs" / s.name / f"{name}.log": f"log for {name}\n"
+                    for s in rows for name in containers[project_name(s.name, m.vehicle_id)]}
+        real_run = subprocess.run
+        queried = []
+        down_calls = []
+
+        def _docker(cmd, **kwargs):
+            if cmd[0] != "docker":
+                return real_run(cmd, **kwargs)
+            if cmd[1:3] == ["compose", "ls"]:
+                return subprocess.CompletedProcess(cmd, 0, stdout="[]")
+            if cmd[1] == "ps":
+                assert "-a" in cmd  # the player has already exited
+                project = cmd[cmd.index("--filter") + 1].rsplit("=", 1)[1]
+                queried.append(project)
+                return subprocess.CompletedProcess(cmd, 0, stdout="\n".join(containers[project]))
+            assert cmd[1:3] == ["logs", "--timestamps"]
+            kwargs["stdout"].write(f"log for {cmd[-1]}\n".encode())
+            return subprocess.CompletedProcess(cmd, 0)
+
+        def _down(selected, env, verb):
+            assert verb == "down"
+            down_calls.append([s.name for s, _ in selected])
+            for path, body in expected.items():
+                assert path.is_file(), f"missing replay log before teardown: {path}"
+                assert path.read_text() == body
+            containers.clear()  # compose down removes the containers and their Docker logs
+            return []
+
+        with patch.object(replay, "_player_finished", return_value=True), \
+                patch.object(subprocess, "run", side_effect=_docker), \
+                patch.object(replay.dispatch, "run_verb", side_effect=_down):
+            assert replay.auto_end(m, {}, data, pairs, {}, PLAYER, 0) == 0
+        assert down_calls == [[s.name for s in reversed(rows)]]
+        assert set(queried) == {project_name(s.name, m.vehicle_id) for s in rows}
+        doc = runs.load_yaml(run_dir / "manifest.yaml")
+        assert doc["docker_logs"]["containers"] == len(expected)
+        assert doc["ended"] and not (data / "current").is_symlink()
+
+
 def test_auto_end_waits_then_downs_reversed_and_seals():
     src = _source_run(epochs=(EPOCH_SVC,))
     data = pathlib.Path(tempfile.mkdtemp())
@@ -614,7 +671,7 @@ def test_auto_end_waits_then_downs_reversed_and_seals():
             return [O()]
         replay.dispatch.run_verb = _run_verb
         replay._player_finished = lambda *_a: next(finished)
-        replay.runs_mod.capture_docker_logs = lambda *_a: events.append(("logs", []))
+        replay.runs_mod.capture_docker_logs = lambda *_a, **_k: events.append(("logs", []))
         replay.runs_mod.end_run = lambda *a, **k: events.append(("seal", []))
         replay.runs_mod.new_run = lambda *a, **k: "rid"
         replay.runs_mod.snapshot = lambda *a, **k: None
