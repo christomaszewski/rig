@@ -164,6 +164,10 @@ python3 -m venv .venv && .venv/bin/pip install pyyaml
                           #   the A/B pair. Refuses while stacks run; teardown = down --end-run
                           #   --from S / --to S replay a SECTION (seconds from bag start — the
                           #   call-script zero; latches restored; --auto-end composes for sweeps)
+./rig run replay <run> --skip-service camera-service --auto-end
+                          # replay without camera services/video; skips every camera instance
+                          # and its bag topics. Repeat --skip-service for other services.
+                          # `rig replay` and `rig run replay` are equivalent; --dry-run previews.
 ./rig down                # tear down in reverse (autonomy FIRST); --purge also GCs external volumes
 ./rig swap <svc> <path|ref>  # re-point an INSTALLED service at different code — a local checkout
                           #   (routed live: edit, rebuild, re-up) or a registry ref (vendored +

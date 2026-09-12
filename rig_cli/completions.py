@@ -664,6 +664,7 @@ _OPTION_SOURCES: dict = {
     (("pkg", "outdated"), "--registry"): _registry_names,
     (("graph",), "--contract"): _instances,
     (("replay",), "--live"): _instances,
+    (("replay",), "--skip-service"): _services,
     (("run-export",), "--profile"): _export_profiles,
     (("catalog-search",), "--tag"): _catalog_tags,
     (("fleet", "sync"), "--profile"): _export_profiles,

@@ -1280,6 +1280,178 @@ def test_an_up_that_outlasts_the_release_gate_is_warned_with_the_delay_to_use():
          replay.render_sources) = orig
 
 
+def test_skip_service_filters_namespaces_remapped_topics_and_preserves_shared_topics():
+    import re
+    epoch = """schema: 1
+nodes:
+  /front_cam/bridge:
+    pubs:
+      - {topic: /front/video+raw, type: sensor_msgs/msg/Image}
+      - {topic: /tf, type: tf2_msgs/msg/TFMessage}
+      - {topic: /rosout, type: rcl_interfaces/msg/Log}
+  /gnss/driver:
+    pubs:
+      - {topic: /tf, type: tf2_msgs/msg/TFMessage}
+"""
+    src = _source_run(epochs=(epoch,))
+    pattern, notices = replay.skipped_topic_pattern(src, ["front_cam", "rear_cam"],
+                                                   {"front_cam", "rear_cam", "gnss"})
+    assert notices == []
+    for topic in ("/front_cam", "/front_cam/image", "/rear_cam/info", "/front/video+raw"):
+        assert re.search(pattern, topic), topic
+    for topic in ("/front_camera/image", "/front/videoraw", "/gnss/fix", "/tf", "/rosout"):
+        assert not re.search(pattern, topic), topic
+    pattern, notices = replay.skipped_topic_pattern(_source_run(epochs=()), ["front_cam"],
+                                                   {"front_cam"})
+    assert re.search(pattern, "/front_cam/image") and notices
+    assert "namespace only" in notices[0]
+
+
+def test_skip_service_omits_camera_launches_and_bag_topics_and_records_provenance():
+    import contextlib
+    import io
+    from unittest.mock import patch
+    epoch = """schema: 1
+nodes:
+  /front_cam/bridge:
+    pubs: [{topic: /remapped/video, type: sensor_msgs/msg/Image}]
+  /lidar/driver:
+    pubs: [{topic: /lidar/points, type: sensor_msgs/msg/PointCloud2}]
+  /planner/node:
+    subs:
+      - {topic: /remapped/video, type: sensor_msgs/msg/Image}
+      - {topic: /rear_cam/image, type: sensor_msgs/msg/Image}
+      - {topic: /gnss/fix, type: sensor_msgs/msg/NavSatFix}
+"""
+    src = _source_run(epochs=(epoch,))
+    topics = ["/remapped/video", "/front_cam/status", "/rear_cam/image", "/gnss/fix", "/lidar/points"]
+    _bag_metadata(src, topics=[(t, 1) for t in topics])
+    _record(src, "front_cam")
+    _record(src, "rear_cam")
+    _record(src, "lidar", files=("capture.pcap",))
+    rows = [_row("front_cam", service="camera-service"),
+            _row("rear_cam", service="camera-service", enabled=False),
+            _row("lidar", service="lidar-service"),
+            _row("planner", service="plan", tier="autonomy", order=20), PLAYER]
+    m = _manifest(rows, data_dir=str(pathlib.Path(tempfile.mkdtemp())))
+    descriptors = {"camera-service": _source_desc(), "lidar-service": _source_desc(),
+                   "plan": _Desc(), replay.PLAYER_SERVICE: _Desc()}
+    before = {p.relative_to(src): p.read_bytes() for p in src.rglob("*") if p.is_file()}
+    for names in ([], ["planner"]):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), \
+                patch.object(replay.doctor_mod, "collect", return_value=[]) as preflight, \
+                patch.object(replay, "_guard_clean_host") as guard, \
+                patch.object(replay, "render_sources", return_value={}) as render, \
+                patch.object(replay.runs_mod, "new_run", return_value="new") as opened, \
+                patch.object(replay.runs_mod, "snapshot") as snapshot, \
+                patch.object(replay.dispatch, "fleet_env", return_value={}), \
+                patch.object(replay.dispatch, "run_verb", return_value=[]) as up, \
+                patch.object(replay, "auto_end", return_value=0) as ended:
+            assert replay.cmd(m, {}, descriptors, pathlib.Path("."), run_ref=str(src), names=names,
+                              label=None, wall_clock=False, force=False, dry_run=False,
+                              skip_services=["camera-service", "camera-service"], auto_end_grace=0) == 0
+        selected = [s.name for s, _ in up.call_args.args[0]]
+        assert selected == ["lidar"] + names + ["bag_player"]
+        assert up.call_args.args[1]["RIG_REPLAY_TOPICS"] == "/gnss/fix"
+        assert "RIG_REPLAY_EXCLUDE" not in up.call_args.args[1]
+        assert [sp.row.name for sp in render.call_args.args[3]] == ["lidar"]
+        assert all(s.service != "camera-service" for s in preflight.call_args.args[0].sensors)
+        assert "camera-service" not in preflight.call_args.args[2]
+        assert guard.call_args.args[0] is m  # an already-running camera still blocks the replay
+        provenance = opened.call_args.kwargs["replay"]
+        assert provenance["skipped"] == {"services": ["camera-service"],
+                                         "instances": ["front_cam", "rear_cam"]}
+        assert set(provenance["sources"]) == {"lidar"}
+        assert snapshot.call_args.kwargs["stacks"] == selected
+        assert [s.name for s, _ in ended.call_args.args[3]] == selected
+        assert "omitting front_cam, rear_cam" in err.getvalue()
+    assert {p.relative_to(src): p.read_bytes() for p in src.rglob("*") if p.is_file()} == before
+
+
+def test_skip_service_namespace_fallback_and_preview():
+    import re
+    from unittest.mock import patch
+    src = _source_run(epochs=())
+    _record(src, "cam")
+    rows = [_row("cam", service="camera-service"),
+            _row("planner", service="plan", tier="autonomy", order=20), PLAYER]
+    m = _manifest(rows)
+    descriptors = {"camera-service": _source_desc(), "plan": _Desc(), replay.PLAYER_SERVICE: _Desc()}
+    with patch.object(replay.doctor_mod, "collect", return_value=[]), \
+            patch.object(replay, "_guard_clean_host"), \
+            patch.object(replay, "render_sources") as render, \
+            patch.object(replay.runs_mod, "new_run") as opened, \
+            patch.object(replay.dispatch, "fleet_env", return_value={}), \
+            patch.object(replay.dispatch, "run_verb", return_value=[]) as up:
+        assert replay.cmd(m, {}, descriptors, pathlib.Path("."), run_ref=str(src), names=["planner"],
+                          label=None, wall_clock=False, force=False, dry_run=True,
+                          skip_services=["camera-service"]) == 0
+    assert [s.name for s, _ in up.call_args.args[0]] == ["planner", "bag_player"]
+    assert up.call_args.kwargs["dry_run"] is True
+    env = up.call_args.args[1]
+    assert "RIG_REPLAY_TOPICS" not in env
+    for topic in ("/cam/image", "/planner/output"):
+        assert re.search(env["RIG_REPLAY_EXCLUDE"], topic)
+    for topic in ("/camera_other/image", "/gnss/fix"):
+        assert not re.search(env["RIG_REPLAY_EXCLUDE"], topic)
+    render.assert_not_called()
+    opened.assert_not_called()
+
+
+def test_skip_service_rejects_conflicts_and_empty_replays_before_starting():
+    from unittest.mock import patch
+    rows = [_row("cam", service="camera-service"),
+            _row("planner", service="plan", tier="autonomy"), PLAYER]
+    m = _manifest(rows)
+    descriptors = {"camera-service": _source_desc(), "plan": _Desc(), replay.PLAYER_SERVICE: _Desc()}
+    base = dict(run_ref="unused", names=[], label=None, wall_clock=False, force=False, dry_run=False)
+    with patch.object(replay.doctor_mod, "collect", return_value=[]), \
+            patch.object(replay.dispatch, "run_verb") as up, \
+            patch.object(replay.runs_mod, "new_run") as opened:
+        for extra, needle in (({"skip_services": ["typo"]}, "unknown service"),
+                              ({"skip_services": [replay.PLAYER_SERVICE]}, "cannot skip"),
+                              ({"skip_services": ["camera-service"], "names": ["cam"]}, "conflicting"),
+                              ({"skip_services": ["camera-service"], "live": ["cam"]}, "conflicting"),
+                              ({"skip_services": ["camera-service"], "export_calls": True}, "exports")):
+            try:
+                replay.cmd(m, {}, descriptors, pathlib.Path("."), **{**base, **extra})
+                assert False, extra
+            except RigError as exc:
+                assert needle in str(exc), str(exc)
+        # Both selection modes and a camera-recordings-only run must refuse an empty result.
+        for bags, epochs, names in ((False, (), []), (True, (), []),
+                                     (True, (), ["planner"]), (True, (EPOCH,), [])):
+            src = _source_run(bags=bags, epochs=epochs)
+            _record(src, "cam")
+            if bags:
+                _bag_metadata(src, topics=[("/cam/image", 1)])
+            try:
+                replay.cmd(m, {}, descriptors, pathlib.Path("."),
+                           **{**base, "run_ref": str(src), "names": names,
+                              "skip_services": ["camera-service"]})
+                assert False, "all recorded inputs were skipped"
+            except RigError as exc:
+                assert "no recorded inputs remain" in str(exc), str(exc)
+    up.assert_not_called()
+    opened.assert_not_called()
+
+
+def test_skip_service_cli_grouped_alias_and_forwarding():
+    from unittest.mock import patch
+    from rig_cli.cli import build_parser, cmd_replay, translate_argv
+    argv = ["run", "replay", "flight", "--skip-service", "camera-service",
+            "--skip-service", "lidar-service", "--auto-end", "--dry-run"]
+    args = build_parser().parse_args(translate_argv(argv))
+    args.rig_root = pathlib.Path(".")
+    with patch.object(replay, "cmd", return_value=0) as cmd:
+        assert cmd_replay(args, _manifest([]), {}, {}) == 0
+    assert cmd.call_args.kwargs["skip_services"] == ["camera-service", "lidar-service"]
+    assert cmd.call_args.kwargs["auto_end_grace"] == 10
+    assert cmd.call_args.kwargs["dry_run"] is True
+    assert build_parser().parse_args(["replay", "flight"]).skip_services == []
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

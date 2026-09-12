@@ -38,6 +38,8 @@ names REPRODUCES the run (infra + every source + the player for what the bag hol
 `rig replay <run> <names…>` keeps its meaning — the names are under test, live — with the sources
 riding along (a named source is still a source: a replay has no live camera to offer it; that is
 the "new camera-service against this run's video" case). `--live NAME` forces one live (HIL).
+`--skip-service SERVICE` omits all instances of that service and their recorded bag topics
+(e.g. camera-service for a replay without cameras). The source run stays untouched.
 A source's config is rendered for the session with the descriptor's `overrides` patch on top
 (resolve.materialize's verb-time layer) — the next plain `up` re-renders without it. Every source
 gets one timeline: the bag's zero as `replay_epoch_unix_ns`, one release instant
@@ -148,6 +150,28 @@ def discover_sources(manifest, descriptors, src_dir: Path, *, live: set[str] = f
                          f"never listed it — replayed anyway")
         out.append(SourceSpec(row=row, rel=rel, path=path))
     return out, notes
+
+
+def skipped_topic_pattern(src_dir: Path, skipped: list[str], known: set[str]) -> tuple[str, list[str]]:
+    """Exclude skipped namespaces plus their observed, exclusively published topics.
+    Shared topics outside those namespaces stay: dropping /tf would also lose other sensors'
+    transforms. Without graph epochs, only the namespace contract can identify ownership."""
+    pattern = "^/(?:" + "|".join(re.escape(n) for n in skipped) + ")(?:/.*)?$"
+    epochs = graph_mod.load_epochs(src_dir)
+    if not epochs:
+        return pattern, ["--skip-service: no graph epochs — excluding bag topics by instance "
+                         "namespace only; remapped topics outside those namespaces cannot be identified"]
+    u = graph_mod.union(epochs)
+    groups = graph_mod.group_nodes(u.nodes, sorted(known))
+    skipped_nodes = {fqn for name in skipped for fqn in groups.get(name, ())}
+    omitted, kept = set(), set()
+    for fqn, edges in u.nodes.items():
+        pubs = {e.name for e in edges if e.kind == "pubs" and not graph_mod.is_plumbing(e)}
+        (omitted if fqn in skipped_nodes else kept).update(pubs)
+    exclusive = sorted(t for t in omitted - kept if not re.search(pattern, t))
+    if exclusive:
+        pattern += "|^(?:" + "|".join(re.escape(t) for t in exclusive) + ")$"
+    return pattern, []
 
 
 def bag_epoch_ns(src_dir: Path) -> int | None:
@@ -711,8 +735,11 @@ def cmd(manifest, catalog, descriptors, root: Path, *, run_ref: str, names: list
         calls: str | None = None, export_calls: bool = False,
         auto_end_grace: int | None = None, window_from=None, window_to=None,
         live: list[str] | None = None, session: str | None = None,
-        start_delay: float = 20.0) -> int:
+        start_delay: float = 20.0, skip_services: list[str] | None = None) -> int:
     if export_calls:
+        if skip_services:
+            raise RigError("replay --export-calls: --skip-service applies to replay sessions, "
+                           "not call-script exports")
         # NOT a session: one launcher-verb dispatch (the export runs in a one-shot container —
         # ROS stays on the player's side of the line; rig resolves run + row + launcher, which
         # is exactly what it resolves for a replay anyway). Clean YAML rides the child's stdout
@@ -739,6 +766,25 @@ def cmd(manifest, catalog, descriptors, root: Path, *, run_ref: str, names: list
 
     with_names = list(dict.fromkeys(names))          # under test (live); [] = REPRODUCE the run
     live_flags = list(dict.fromkeys(live or []))
+    skip_flags = list(dict.fromkeys(skip_services or []))
+    known_services = {s.service for s in manifest.sensors}
+    for service in skip_flags:
+        if service not in known_services:
+            raise RigError(f"replay --skip-service: unknown service '{service}' (see vehicle.yaml)")
+        if service == PLAYER_SERVICE:
+            raise RigError(f"replay --skip-service: cannot skip {PLAYER_SERVICE}; it plays the "
+                           "remaining bag topics")
+    skipped = [s.name for s in manifest.sensors if s.service in skip_flags]
+    conflicts = sorted(set(skipped) & set(with_names + live_flags))
+    if conflicts:
+        raise RigError(f"replay --skip-service: {', '.join(conflicts)} also requested under test "
+                       "or with --live — remove the conflicting selection")
+    # Omitted services must not contribute platform/port/launcher preflight errors. Keep the
+    # original manifest for the clean-host guard and run snapshot: even an omitted camera
+    # left running from an earlier session must prevent a replay from silently keeping it up.
+    active_manifest = dataclasses.replace(manifest, sensors=[s for s in manifest.sensors
+                                                            if s.name not in skipped])
+    active_descriptors = {k: v for k, v in descriptors.items() if k not in skip_flags}
     player = _player_row(manifest, required=False)   # needed iff the bag has something to play
     if player is not None and (player.name in with_names or player.name in live_flags):
         raise RigError(f"replay: '{player.name}' is the player — it is added automatically; "
@@ -748,7 +794,7 @@ def cmd(manifest, catalog, descriptors, root: Path, *, run_ref: str, names: list
         if n not in known:
             raise RigError(f"replay: unknown instance '{n}' (see vehicle.yaml)")
     w_from, w_to = validate_window(window_from, window_to)  # cheap, before any docker preflight
-    blocking = [i for i in doctor_mod.collect(manifest, catalog, descriptors)
+    blocking = [i for i in doctor_mod.collect(active_manifest, catalog, active_descriptors)
                 if i.level == doctor_mod.ERROR]
     if blocking and not force:
         eprint("rig: preflight failed (pass --force to override):")
@@ -758,11 +804,16 @@ def cmd(manifest, catalog, descriptors, root: Path, *, run_ref: str, names: list
 
     src_id, src_dir = resolve_source(manifest, run_ref, require_bags=False)
     has_bags = (src_dir / "bags").is_dir()
-    sources, notices = discover_sources(manifest, descriptors, src_dir, live=set(live_flags))
+    sources, notices = discover_sources(active_manifest, active_descriptors, src_dir, live=set(live_flags))
+    if skipped:
+        notices.append(f"--skip-service: omitting {', '.join(skipped)} "
+                       f"(services: {', '.join(skip_flags)})")
     source_names = [sp.row.name for sp in sources]
     if not has_bags and not sources:
+        if skipped:
+            raise RigError("replay --skip-service: no recorded inputs remain to replay")
         raise RigError(f"replay: {src_id} has no bags/ and no instance recordings — nothing to play")
-    infra = [s.name for s in manifest.sensors if s.tier == "infra" and s.enabled]
+    infra = [s.name for s in active_manifest.sensors if s.tier == "infra" and s.enabled]
     # everything that PUBLISHES live in this session — infra regenerates its own topics, sources
     # re-deliver theirs, the with-set computes its outputs: the bag must not double-publish any
     live_names = list(dict.fromkeys(infra + source_names + with_names))
@@ -778,14 +829,27 @@ def cmd(manifest, catalog, descriptors, root: Path, *, run_ref: str, names: list
         else:
             mode, value, sel_notices = select_topics_reproduce(src_dir, live_names)
         notices += sel_notices
+        if skipped:
+            pattern, skip_notices = skipped_topic_pattern(src_dir, skipped, known)
+            notices += skip_notices
+            if mode == "topics":
+                value = " ".join(t for t in value.split() if not re.search(pattern, t))
+            else:
+                value = f"(?:{value})|(?:{pattern})"
+                recorded = bag_topics(src_dir)
+                if recorded is not None and not any(not re.search(value, t) for t in recorded):
+                    mode, value = "topics", ""
         if mode == "topics" and not value.strip():
-            notices.append("every recorded topic is regenerated live in this session — the bag "
-                           "player is not started")
+            notices.append("no bag topics remain after replay selection — the bag player is not "
+                           "started" if skipped else "every recorded topic is regenerated live in "
+                           "this session — the bag player is not started")
             player, mode, value = None, None, None
     else:
         player = None
         notices.append(f"{src_id} has no bags/ — a session of instance recordings only "
                        f"({', '.join(source_names)}); no player")
+    if skipped and player is None and not sources:
+        raise RigError("replay --skip-service: no recorded inputs remain to replay")
     sim_time = (not wall_clock) and player is not None   # no player = no /clock = no sim time
     if not wall_clock and player is None:
         notices.append("wall clock: no bag player in this session, so no /clock — the sources "
@@ -882,6 +946,8 @@ def cmd(manifest, catalog, descriptors, root: Path, *, run_ref: str, names: list
             run_label = label or re.sub(r"[^A-Za-z0-9_-]", "-", f"replay-{src_id}")
             replay_doc: dict = {"of": src_id, "source": str(src_dir), "with": list(with_names),
                                 "clock": "sim" if sim_time else "wall"}
+            if skipped:
+                replay_doc["skipped"] = {"services": skip_flags, "instances": skipped}
             if sources:
                 replay_doc["sources"] = {sp.row.name: ({"data": sp.rel, "session": session}
                                                        if session else {"data": sp.rel})

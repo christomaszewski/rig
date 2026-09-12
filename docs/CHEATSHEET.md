@@ -475,12 +475,24 @@ rig replay <stamp>_dock-test                               # REPRODUCE the run: 
 rig replay <stamp>_dock-test planner                       # SIL: play planner's recorded inputs at
                                                            #   the CURRENT planner build/config —
                                                            #   new run links back via replay-of
+rig run replay <stamp>_dock-test --skip-service camera-service --auto-end
+                                                           # omit all camera instances + their bag
+                                                           # topics; repeat --skip-service as needed
+                                                           # --dry-run previews; source run unchanged
 rig replay <stamp>_dock-test planner --from 120 --to 300   # a SECTION of the run (seconds from
                                                            #   bag start; --auto-end for sweeps)
 rig swap planner ../planner                                # in a reconstructed tree: same rows +
 rig swap planner public/planner@2.1.0                      #   configs, DIFFERENT code (drift named)
 ```
 (bare-Docker hosts: `./new-run.sh dock-test && ./up.sh` — the flagged forms need the bundled rig.)
+
+`rig run replay` also accepts every `rig replay` option. `--skip-service` matches the service
+key in `vehicle.yaml`, across enabled and disabled instances. It excludes instance namespaces
+from bag playback and uses recorded graph epochs to exclude remapped topics published only by
+those instances. Shared topics such as `/tf` stay; without graph epochs, rig warns that only
+namespace filtering is possible. The new run records `replay.skipped` for provenance. A skipped
+instance cannot also be named under test or requested with `--live`; if no recorded inputs remain,
+rig refuses to start the replay.
 
 ## 6 — iterate
 

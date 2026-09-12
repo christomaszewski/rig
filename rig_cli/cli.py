@@ -326,7 +326,8 @@ def cmd_replay(args, manifest, catalog, descriptors) -> int:
                           force=args.force, dry_run=args.dry_run, calls=args.calls,
                           export_calls=args.export_calls, auto_end_grace=args.auto_end,
                           window_from=args.window_from, window_to=args.window_to,
-                          live=args.live, session=args.session, start_delay=args.start_delay)
+                          live=args.live, session=args.session, start_delay=args.start_delay,
+                          skip_services=args.skip_services)
 
 
 def cmd_graph(args, manifest, catalog, descriptors) -> int:
@@ -636,7 +637,7 @@ _GROUP_VERBS: dict[str, dict[str, str]] = {
     "config": {"show": "config", "render": "config-render", "diff": "config-diff"},
     "run": {"new": "new-run", "end": "end-run", "list": "runs", "retrofit": "run-retrofit",
             "rm": "run-rm", "import": "run-import", "export": "run-export",
-            "tag": "run-tag", "untag": "run-untag", "archive": "run-archive"},
+            "tag": "run-tag", "untag": "run-untag", "archive": "run-archive", "replay": "replay"},
     "catalog": {"search": "catalog-search", "list": "catalog-search", "add": "catalog-add",
                 "remove": "catalog-remove", "rm": "catalog-remove", "roots": "catalog-roots"},
     "artifact": {"bake": "bake", "unbake": "unbake", "list": "artifact-list"},
@@ -696,7 +697,7 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="noun groups (canonical forms; the flat spellings above stay as permanent aliases):\n"
                "  rig config   show | render          rig run      new | end | list | rm | "
-               "import | export | tag | untag | archive | retrofit\n"
+               "import | export | tag | untag | archive | retrofit | replay\n"
                "  rig catalog  [query] [--tag --label --vehicle --since] | add | remove | roots"
                "   (every run rig knows about)\n"
                "  rig registry init | add | remove | list | sync | validate | index\n"
@@ -784,6 +785,9 @@ def build_parser() -> argparse.ArgumentParser:
     rp.add_argument("--live", action="append", default=[], metavar="NAME",
                     help="force an instance LIVE although the run holds its recordings (HIL: "
                          "replay the rest, run the real device); repeatable")
+    rp.add_argument("--skip-service", action="append", default=[], dest="skip_services", metavar="SERVICE",
+                    help="omit every instance of a service and its recorded bag topics; repeatable. "
+                         "Use --skip-service camera-service to replay without cameras/video")
     rp.add_argument("--session", default=None, metavar="PREFIX",
                     help="pin ONE recorded session (its <prefix>) for every source instead of "
                          "playing all of them in order")

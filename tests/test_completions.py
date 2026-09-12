@@ -72,7 +72,7 @@ def test_global_flags():
 
 def test_group_menus():
     assert _c("image", "") == ["audit", "build", "pull"]
-    assert _c("run", "") == ["archive", "end", "export", "import", "list", "new", "retrofit",
+    assert _c("run", "") == ["archive", "end", "export", "import", "list", "new", "replay", "retrofit",
                              "rm", "tag", "untag"]
     assert _c("artifact", "") == ["bake", "list", "unbake"]
     assert _c("service", "") == ["certify", "rigify", "vendor"]
@@ -91,6 +91,8 @@ def test_grouped_flags_equal_flat_flags():
     for flag in ("--registry", "--tag", "--platform", "--jobs", "--no-cache",
                  "--base-image", "--dry-run"):
         assert flag in grouped
+    assert _c("run", "replay", "--") == _c("replay", "--")
+    assert "--skip-service" in _c("run", "replay", "--")
 
 
 def test_group_unknown_verb_completes_nothing():

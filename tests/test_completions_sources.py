@@ -103,6 +103,12 @@ def test_cleanup_covers_disabled_instances():
     assert "gnss" in _c("--root", R, "cleanup", "")
 
 
+def test_replay_skip_service_completes_both_spellings():
+    for verb in (("replay",), ("run", "replay")):
+        assert _c("--root", R, *verb, "flight", "--skip-service", "") == ["cam", "gnss"]
+        assert _c("--root", R, *verb, "flight", "--skip-service", "ca") == ["cam"]
+
+
 def test_pkg_instance_verbs():
     assert _c("--root", R, "pkg", "upgrade", "pl") == ["planner"]
     assert _c("--root", R, "pkg", "save", "cam") == ["cam", "cam0"]  # service + instance
