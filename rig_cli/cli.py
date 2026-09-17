@@ -243,6 +243,10 @@ def cmd_run_import(args, manifest, catalog, descriptors) -> int:
 def cmd_run_export(args, manifest, catalog, descriptors) -> int:
     from . import export as export_mod
     profile = args.profile
+    if args.in_place:  # no profile = the exporters' lossless defaults; a named one applies as-is
+        return export_mod.cmd(manifest, catalog, descriptors, args.rig_root, run_ref=args.run,
+                              profile=profile, force=args.force, dry_run=args.dry_run,
+                              in_place_mode=True, lossy=args.lossy)
     if profile is None:  # exactly one declared profile needs no naming
         names = sorted(manifest.export_profiles or {})
         if len(names) != 1:
@@ -250,7 +254,8 @@ def cmd_run_export(args, manifest, catalog, descriptors) -> int:
                            + (f"{', '.join(names)}" if names else "no `export_profiles:`"))
         profile = names[0]
     return export_mod.cmd(manifest, catalog, descriptors, args.rig_root, run_ref=args.run,
-                          profile=profile, force=args.force, dry_run=args.dry_run)
+                          profile=profile, force=args.force, dry_run=args.dry_run,
+                          lossy=args.lossy)
 
 
 def cmd_run_archive(args, manifest, catalog, descriptors) -> int:
@@ -891,8 +896,19 @@ def build_parser() -> argparse.ArgumentParser:
     rex.add_argument("--profile", default=None, metavar="NAME",
                      help="an `export_profiles:` entry of vehicle.yaml (optional when exactly "
                           "one is declared)")
+    rex.add_argument("--in-place", action="store_true", dest="in_place",
+                     help="REWRITE the data inside the run instead of making a copy — reclaims "
+                          "disk: the bag logger re-writes each session at the preset (default "
+                          "zstd_small), verifies per-topic message counts against the original, "
+                          "then swaps it in. No --profile = the lossless defaults; nothing is "
+                          "ever omitted/deleted; works on any run that holds the data, old ones "
+                          "and other deployments' included")
+    rex.add_argument("--lossy", action="store_true",
+                     help="with --in-place: allow profile options that DROP data for good "
+                          "(excluded topics, an allow-list, a time window)")
     rex.add_argument("--force", action="store_true",
-                     help="redo an export that already exists (removed first)")
+                     help="redo an export that already exists (removed first); in place: "
+                          "rewrite again although the run manifest records these options")
     rex.add_argument("--dry-run", action="store_true", dest="dry_run",
                      help="print what would be kept/omitted and which exporters would run")
 

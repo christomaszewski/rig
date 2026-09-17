@@ -148,6 +148,12 @@ python3 -m venv .venv && .venv/bin/pip install pyyaml
                           #   (video), services whose rigging declares `export:` re-write their
                           #   own data smaller (the bag logger: zstd_small, topics dropped), the
                           #   rest is hardlinked. `rig fleet sync --profile review` pulls it
+./rig run export <run> --in-place        # RECLAIM disk instead: the same exporters REWRITE their data
+                          #   inside the run (bags re-written at zstd_small, per-topic counts
+                          #   verified against the original, then swapped in). Lossless with no
+                          #   --profile; a profile that drops topics needs --lossy; nothing is
+                          #   ever omitted/deleted; any run that holds the data works — old
+                          #   ones and other deployments' included. The manifest records it
 ./rig reconstruct <run-dir>  # a run dir back into a runnable tree, anywhere: every opened run
                           #   captures the deployment (surfaces + configs + rig, no image bytes)
                           #   into .rig/artifact.tar.gz — extract, verify, overlay a config

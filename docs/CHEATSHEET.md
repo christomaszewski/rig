@@ -450,6 +450,10 @@ derives the union view at read time, `--check` WARNs on drift vs the riggings' `
 ```bash
 ssh $VEHICLE 'cd ~/ws/v1 && ./run.sh up --run dock-test'   # open a labeled session + up (idempotent)
 ssh $VEHICLE 'cd ~/ws/v1 && ./run.sh runs'                 # registry: OPEN / sealed / interrupted
+rig run export <run> --in-place [--dry-run]                # reclaim disk: bags RE-WRITTEN inside the
+                                                           #   run at zstd_small, verified, swapped
+                                                           #   (lossless; `--profile p --lossy` to
+                                                           #   drop topics for good). Old runs too
 rig run archive <id…> --to /Volumes/nas/runs               # bytes to a drive/NAS, a LINKED entry
                                                            #   stays (replay/TAB resolve it; rm unlinks)
 rig run tag <run> site:mojave event:demo-day               # tags ride in the run's manifest (untag

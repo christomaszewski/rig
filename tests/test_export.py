@@ -34,11 +34,20 @@ _LAUNCHER = """\
 #!/bin/sh
 # $1 = config, $2 = verb. `export`: the contract — RIG_EXPORT_SOURCE (the run), RIG_EXPORT_DEST
 # (write <data> under it), RIG_EXPORT_OPTIONS (the profile block for this instance), PROFILE, FORCE.
-name=$(sed -n 's/^name: //p' "$1")
+name="${RIG_EXPORT_NAME:-$(sed -n 's/^name: //p' "$1")}"   # the DATA name rig hands over
 case "$2" in
   export)
     [ -d "$RIG_EXPORT_SOURCE" ] && [ -d "$RIG_EXPORT_DEST" ] && [ -f "$RIG_EXPORT_OPTIONS" ] || exit 3
     [ -f "$RIG_EXPORT_SOURCE/bags/$name/sess/sess_0.mcap" ] || exit 4
+    if [ "$RIG_EXPORT_INPLACE" = 1 ]; then   # rewrite inside the run; refuse "lossy" without the flag
+      [ "$RIG_EXPORT_SOURCE" = "$RIG_EXPORT_DEST" ] || exit 5
+      if grep -q exclude "$RIG_EXPORT_OPTIONS" && [ "$RIG_EXPORT_LOSSY" != 1 ]; then exit 6; fi
+      [ "$STUB_EXPORT_FAIL" = "$name" ] && exit 7
+      echo small > "$RIG_EXPORT_SOURCE/bags/$name/sess/sess_0.mcap"
+      echo "$RIG_EXPORT_PROFILE lossy=${RIG_EXPORT_LOSSY:-0} force=${RIG_EXPORT_FORCE:-0}" \
+        > "$RIG_EXPORT_SOURCE/bags/$name/sess/inplace.txt"
+      exit 0
+    fi
     out="$RIG_EXPORT_DEST/bags/$name/sess"
     mkdir -p "$out"
     cp "$RIG_EXPORT_OPTIONS" "$out/options.yaml"
@@ -332,16 +341,110 @@ def test_exporter_without_data_in_the_run_is_noted_not_run():
     assert list(prov["services"]) == ["bag_logger"]
 
 
+def test_foreign_data_names_are_exported_by_the_services_row():
+    """A run recorded by another deployment (or before an instance was renamed): bags/<other>
+    matches the service's `bags/{name}` pattern, so the service's row exports it under the
+    run's OWN name — options keyed by that name win."""
+    root, data = tree(profiles=PROFILES + "    old_logger: { preset: none }\n".replace("    ", "    ", 1))
+    run = run_dir(data)
+    import shutil
+    shutil.move(str(run / "bags" / "bag_logger"), str(run / "bags" / "old_logger"))
+    m = load_manifest(root)
+    descs = {"bagsvc": load_descriptor("bagsvc", pathlib.Path(
+        yaml.safe_load((root / "services.yaml").read_text())["services"]["bagsvc"]["path"]))}
+    exporters, notes = export.discover_exporters(m, descs, run)
+    assert [(e.name, e.rel, e.row.name) for e in exporters] == [
+        ("bag_aux", "bags/bag_aux", "bag_aux"), ("old_logger", "bags/old_logger", "bag_logger")]
+    assert any("no instance named 'old_logger'" in n for n in notes)
+    assert not any("nothing under" in n for n in notes)       # the data IS here, renamed
+    rc, err = _cli(root, "run", "export", run.name, "--profile", "novideo")
+    assert rc == 0, err
+    dest = run / "exports" / "novideo"
+    assert (dest / "bags" / "old_logger" / "sess" / "sess_0.mcap").read_text().strip() == "slim"
+    prov = yaml.safe_load((dest / ".rig" / "export.yaml").read_text())["export"]
+    assert set(prov["services"]) == {"bag_aux", "old_logger"}
+
+
+def test_in_place_rewrites_the_run_records_it_and_is_idempotent():
+    root, data = tree()                                       # NO profiles declared: the defaults
+    run = run_dir(data)
+    rc, err = _cli(root, "run", "export", run.name, "--in-place", "--dry-run")
+    assert rc == 0 and "would rewrite in place" in err
+    assert (run / "bags" / "bag_logger" / "sess" / "sess_0.mcap").read_text() == "x" * 4096
+    rc, err = _cli(root, "run", "export", run.name, "--in-place")
+    assert rc == 0, err
+    assert "reclaimed" in err
+    assert not (run / "exports" / "recompress").exists()      # no export tree in place
+    for name in ("bag_logger", "bag_aux"):
+        sess = run / "bags" / name / "sess"
+        assert (sess / "sess_0.mcap").read_text().strip() == "small"
+        assert (sess / "inplace.txt").read_text().strip() == "recompress lossy=0 force=0"
+        assert yaml.safe_load((run / ".rig" / "export" / f"{name}.yaml").read_text()) == {}
+    assert (run / "recordings" / "cam_front" / "s1.mkv").is_file()   # nothing else touched
+    doc = yaml.safe_load((run / "manifest.yaml").read_text())
+    assert [(h["data"], h["profile"], h["ok"], h["lossy"]) for h in doc["rewrites"]] == [
+        ("bags/bag_logger", "recompress", True, False), ("bags/bag_aux", "recompress", True, False)]
+    assert doc["rewrites"][0]["bytes"]["after"] < doc["rewrites"][0]["bytes"]["before"]
+    assert doc["ended"]                                        # the manifest's own keys kept
+    # idempotent by the manifest's record; --force redoes and tells the exporter
+    rc, err = _cli(root, "run", "export", run.name, "--in-place")
+    assert rc == 0 and err.count("already rewritten with these options") == 2
+    assert len(yaml.safe_load((run / "manifest.yaml").read_text())["rewrites"]) == 2
+    rc, err = _cli(root, "run", "export", run.name, "--in-place", "--force")
+    assert rc == 0
+    assert (run / "bags" / "bag_aux" / "sess" / "inplace.txt").read_text().strip().endswith("force=1")
+    # a later copy-export never drags the rewrite's scratch along
+    kept, _, _ = export.plan(run, [], ["bags/bag_logger", "bags/bag_aux"])
+    assert not any(p.startswith(".rig/export/") for p in kept)
+
+
+def test_in_place_never_omits_gates_lossy_and_a_refusal_leaves_no_history():
+    root, data = tree(profiles=PROFILES)
+    run = run_dir(data)
+    # the `review` profile excludes topics for bagsvc: the LAUNCHER refuses without --lossy
+    rc, err = _cli(root, "run", "export", run.name, "--in-place", "--profile", "review")
+    assert rc == 1 and "in-place rewrite failed (exit 6)" in err
+    assert "--in-place never deletes" in err and "recordings/**/*.mkv" in err
+    assert (run / "recordings" / "cam_front" / "s1.mkv").is_file()
+    assert (run / "scratch" / "tmp.bin").is_file()
+    assert (run / "bags" / "bag_logger" / "sess" / "sess_0.mcap").read_text() == "x" * 4096
+    doc = yaml.safe_load((run / "manifest.yaml").read_text())
+    assert [h["data"] for h in doc["rewrites"]] == ["bags/bag_aux"]   # bag_aux (no exclude) went
+    rc, err = _cli(root, "run", "export", run.name, "--in-place", "--profile", "review", "--lossy")
+    assert rc == 0, err
+    assert (run / "bags" / "bag_logger" / "sess" / "inplace.txt").read_text().strip() == "review lossy=1 force=0"
+    doc = yaml.safe_load((run / "manifest.yaml").read_text())
+    assert doc["rewrites"][-1] == {**doc["rewrites"][-1], "data": "bags/bag_logger", "lossy": True,
+                                   "options": {"preset": "zstd_small", "exclude": [".*/points$"]}}
+    # --lossy without --in-place means nothing; the OPEN run is never rewritten
+    rc, err = _cli(root, "run", "export", run.name, "--profile", "novideo", "--lossy")
+    assert rc == 1 and "only means something with --in-place" in err
+    opened = run_dir(data, "20260902T100000Z_open", sealed=False)
+    (data / "current").symlink_to(pathlib.Path("runs") / opened.name)
+    rc, err = _cli(root, "run", "export", opened.name, "--in-place")
+    assert rc == 1 and "OPEN" in err
+    # a failing exporter that touched nothing is not history
+    (data / "current").unlink()
+    os.environ["STUB_EXPORT_FAIL"] = "bag_aux"
+    try:
+        rc, err = _cli(root, "run", "export", opened.name, "--in-place")
+    finally:
+        os.environ.pop("STUB_EXPORT_FAIL")
+    assert rc == 1
+    doc = yaml.safe_load((opened / "manifest.yaml").read_text())
+    assert [h["data"] for h in doc["rewrites"]] == ["bags/bag_logger"]
+
+
 def test_fleet_env_strips_the_export_channel():
     root, _ = tree()
     m = load_manifest(root)
-    os.environ.update({"RIG_EXPORT_SOURCE": "/x", "RIG_EXPORT_DEST": "/y",
-                       "RIG_EXPORT_OPTIONS": "/z", "RIG_EXPORT_PROFILE": "p", "RIG_EXPORT_FORCE": "1"})
+    keys = ("RIG_EXPORT_SOURCE", "RIG_EXPORT_DEST", "RIG_EXPORT_OPTIONS", "RIG_EXPORT_PROFILE",
+            "RIG_EXPORT_FORCE", "RIG_EXPORT_NAME", "RIG_EXPORT_INPLACE", "RIG_EXPORT_LOSSY")
+    os.environ.update({k: "1" for k in keys})
     try:
         env = dispatch.fleet_env(m)
     finally:
-        for k in ("RIG_EXPORT_SOURCE", "RIG_EXPORT_DEST", "RIG_EXPORT_OPTIONS",
-                  "RIG_EXPORT_PROFILE", "RIG_EXPORT_FORCE"):
+        for k in keys:
             os.environ.pop(k)
     assert not any(k.startswith("RIG_EXPORT_") for k in env)
 

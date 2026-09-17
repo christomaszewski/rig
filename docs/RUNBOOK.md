@@ -243,6 +243,29 @@ rig fleet sync --into fleet-runs                   # later, on a fat link: compl
                                                    #   downgraded by a later --profile pull)
 ```
 
+**Reclaiming disk in place** (rig ≥ v0.2.59, rig-infra ≥ v1.15.0). An export is a COPY — the
+run gets bigger by it. To shrink the run itself, the same exporters rewrite their data inside it:
+
+```bash
+rig run export <run|label> --in-place --dry-run   # what would be rewritten, and its size now
+rig run export <run|label> --in-place             # lossless: every session re-written at
+                                                  #   zstd_small, per-topic message counts checked
+                                                  #   against the original's metadata, THEN swapped
+rig run export <run> --in-place --profile review --lossy   # a profile's exclude/topics/window
+                                                  #   applied for good — refused without --lossy
+```
+
+One session converts at a time beside the original (free space for one is checked first); a
+session that fails to convert or verify stays exactly as it was, and a crash between the two
+renames of the swap is repaired on the next run. `omit` globs never apply in place — nothing is
+deleted. Runs recorded BEFORE this existed work as they are (a rosbag2 session with its
+`metadata.yaml` is all it needs), and so do runs from another deployment or an instance since
+renamed: `bags/<other-name>` is rewritten by this tree's logger row under the run's own name.
+A session the recorder never closed (no `metadata.yaml`) is skipped with the fix named. The run
+manifest records every rewrite (`rewrites:` — options, bytes before/after, lossy or not), which
+is also why a second `--in-place` with the same options is a no-op (`--force` redoes it). A
+multi-file session becomes one file unless the profile sets `split_duration_s` / `max_size_mb`.
+
 An export is a plain run dir (manifest, config snapshots, graph epochs, sidecars) plus
 `.rig/export.yaml` naming the profile, the source run, what was omitted and each exporter's
 outcome — `rig run import` adopts it like any run, `rig replay` plays what the slim bags hold.
