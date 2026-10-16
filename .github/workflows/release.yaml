@@ -15,8 +15,10 @@ jobs:
     runs-on: ubuntu-latest
     env:
       TAP_TOKEN: ${{ secrets.TAP_PUSH_TOKEN }}  # secrets aren't valid in step `if` — env is
+      RIG_TEST_REQUIRE_SANDBOX: "1"
     steps:
       - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-build-probe
       - uses: actions/setup-python@v7
         with: { python-version: "3.12" }
       - run: pip install pyyaml build

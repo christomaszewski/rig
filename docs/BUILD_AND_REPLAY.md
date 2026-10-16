@@ -95,6 +95,15 @@ build context or unavailable containment reports **NOT CHECKED**, which fails st
 Normal `doctor` only reports declared capability; `doctor --deep` runs the behavioral check when
 the full local source context exists. Neither silently substitutes a different source checkout.
 
+Ubuntu 24.04 can also require an AppArmor profile granting `/usr/bin/bwrap` the `userns`
+permission. A `bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted` error means
+the host denied sandbox setup before the build probe ran. Rig's Ubuntu CI uses
+[setup-build-probe](../.github/actions/setup-build-probe/action.yml) to install the dependencies
+and a profile for that executable, keeping the host-wide namespace restriction enabled.
+Service CI can use the same local action after checking out Rig. See Ubuntu's
+[namespace restriction guidance](https://documentation.ubuntu.com/release-notes/24.04/)
+for administrator-managed workstations; certification never changes host security policy.
+
 ## Reconstruction and selection
 
 ```sh

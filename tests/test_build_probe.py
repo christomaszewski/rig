@@ -16,6 +16,11 @@ from rig_cli.descriptor import load_descriptor
 
 
 class BuildProbe(unittest.TestCase):
+    def sandbox_unavailable(self, reason):
+        if os.environ.get('RIG_TEST_REQUIRE_SANDBOX') == '1':
+            self.fail(reason)
+        self.skipTest(reason)
+
     def test_real_sandbox_denies_host_unix_socket_and_writes(self):
         with tempfile.TemporaryDirectory() as stage, tempfile.TemporaryDirectory() as outside:
             tmp = Path(stage).resolve()
@@ -25,7 +30,7 @@ class BuildProbe(unittest.TestCase):
                     server.bind(sock_path)
                     server.listen()
                 except PermissionError:
-                    self.skipTest('outer environment cannot bind the test socket')
+                    self.sandbox_unavailable('outer environment cannot bind the test socket')
                 code = '''import errno, socket, sys
 from pathlib import Path
 try:
@@ -35,6 +40,14 @@ except OSError as e:
     assert e.errno in (errno.EPERM, errno.EACCES), e
 else:
     raise SystemExit('host Unix socket was reachable')
+for family in (socket.AF_INET, socket.AF_INET6):
+    try:
+        s = socket.socket(family)
+        s.connect(('127.0.0.1' if family == socket.AF_INET else '::1', 9))
+    except OSError as e:
+        assert e.errno in (errno.EPERM, errno.EACCES), e
+    else:
+        raise SystemExit('network socket was reachable')
 try:
     Path(sys.argv[2]).write_text('escaped')
 except OSError as e:
@@ -45,10 +58,10 @@ else:
                 cmd = probe.sandbox_command(tmp, tmp, [sys.executable, '-c', code,
                                                        sock_path, str(Path(outside)/'sentinel')])
                 if cmd is None:
-                    self.skipTest('supported containment unavailable')
+                    self.sandbox_unavailable('supported containment unavailable')
                 result = probe.run_probe(cmd, cwd=tmp, env=dict(os.environ))
                 if 'sandbox_apply:' in result.stderr or 'bwrap:' in result.stderr:
-                    self.skipTest(result.stderr.strip())
+                    self.sandbox_unavailable(result.stderr.strip())
                 self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_command_boundary_mutants(self):

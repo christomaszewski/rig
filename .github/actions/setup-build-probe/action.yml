@@ -1,0 +1,22 @@
+name: Set up isolated build probes
+description: Install Bubblewrap and allow its namespaces on Ubuntu CI runners
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y bubblewrap libseccomp2
+        # Ubuntu 24.04 restricts unprivileged namespace capabilities unless
+        # the executable has a userns profile. Keep the host-wide policy on.
+        if [[ -f /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]] &&
+           [[ $(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns) == 1 ]]; then
+          sudo tee /etc/apparmor.d/rig-ci-bwrap >/dev/null <<'PROFILE'
+        abi <abi/4.0>,
+        include <tunables/global>
+        profile rig-ci-bwrap /usr/bin/bwrap flags=(unconfined) {
+          userns,
+        }
+        PROFILE
+          sudo apparmor_parser -r /etc/apparmor.d/rig-ci-bwrap
+        fi
