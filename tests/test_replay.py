@@ -1453,6 +1453,59 @@ def test_skip_service_cli_grouped_alias_and_forwarding():
     assert build_parser().parse_args(["replay", "flight"]).skip_services == []
 
 
+def test_replay_startup_policy_retains_radio_bag_data_and_explicit_include_wins():
+    from unittest.mock import patch
+    from types import SimpleNamespace
+    src = _source_run(epochs=('schema: 1\nnodes: {/radio/node: {pubs: [{topic: /radio/status}]}}\n',))
+    _bag_metadata(src, topics=[('/radio/status', 1), ('/gnss/fix', 1)])
+    rows = [_row('radio', service='doodle', tier='infra'), PLAYER]
+    m = _manifest(rows, data_dir=str(pathlib.Path(tempfile.mkdtemp())))
+    descs = {'doodle': SimpleNamespace(replay_start=False), replay.PLAYER_SERVICE: _Desc()}
+    for include, expected, topics in (([], ['bag_player'], '/radio/status /gnss/fix'),
+                                      (['doodle'], ['radio', 'bag_player'], '/gnss/fix')):
+        with patch.object(replay.doctor_mod, 'collect', return_value=[]), \
+                patch.object(replay, '_guard_clean_host'), \
+                patch.object(replay.runs_mod, 'new_run', return_value='new') as opened, \
+                patch.object(replay.runs_mod, 'snapshot'), \
+                patch.object(replay.dispatch, 'fleet_env', return_value={}), \
+                patch.object(replay.dispatch, 'run_verb', return_value=[]) as up:
+            assert replay.cmd(m, {}, descs, pathlib.Path('.'), run_ref=str(src), names=[],
+                              label=None, wall_clock=False, force=False, dry_run=False,
+                              include_services=include) == 0
+        assert [s.name for s, _ in up.call_args.args[0]] == expected
+        assert set(up.call_args.args[1]['RIG_REPLAY_TOPICS'].split()) == set(topics.split())
+        assert ('radio' in opened.call_args.kwargs['replay'].get('not_started', {})) == (not include)
+
+
+def test_replay_policy_precedence_and_skip_instance_validation():
+    from types import SimpleNamespace
+    from rig_cli.manifest import _parse_replay_policy
+    rows = [_row('radio', service='doodle', tier='infra'), PLAYER]
+    m = _manifest(rows)
+    descs = {'doodle': SimpleNamespace(replay_start=False)}
+    assert replay.startup_selection(m, descs, set(), []) == {'radio': 'service default'}
+    m.replay_policy = _parse_replay_policy({'services': {'doodle': {'start': True}},
+                                          'instances': {'radio': {'start': False}}}, rows)
+    assert replay.startup_selection(m, descs, set(), []) == {'radio': 'replay.instances.radio'}
+    assert replay.startup_selection(m, descs, {'radio'}, []) == {}
+    for policy in ({'services': {'typo': {'start': False}}},
+                   {'instances': {'radio': {'start': 'false'}}},
+                   {'instances': {'bag_player': {'start': False}}}):
+        try:
+            _parse_replay_policy(policy, rows)
+            assert False, 'invalid policy accepted'
+        except RigError:
+            pass
+    for skips, includes in ((['bag_player'], []), (['missing'], []), (['radio'], ['doodle'])):
+        try:
+            replay.cmd(m, {}, descs, pathlib.Path('.'), run_ref='/unused', names=[],
+                       label=None, wall_clock=False, force=False, dry_run=False,
+                       skip_instances=skips, include_services=includes)
+            assert False, 'invalid selection accepted'
+        except RigError:
+            pass
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

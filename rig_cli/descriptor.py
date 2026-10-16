@@ -119,10 +119,14 @@ class Descriptor:
     build_command: str | None = None             # `rig build` runs this: <command> <registry> [tag]
     build_images: list[str] = field(default_factory=list)  # image repos the build produces (certify checks
     #                                              the compose pulls them as :RIG_IMAGE_TAG — build/pull agreement)
-    build_platforms: list[str] = field(default_factory=list)  # the build MATRIX (e.g. [jp7, jp6]): distinct
-    #                                              image sets per hardware/OS target. Presence makes the
-    #                                              service platform-dependent: rig composes its pull tag as
-    #                                              <tag>-<platform> and certify checks each entry renders.
+    # Runtime variants select userspace/hardware capabilities; architectures select CPU members.
+    # Runtime tags compose as <tag>-<platform> and certify checks each declared variant.
+    build_platforms: list[str] = field(default_factory=list)
+    build_architectures: list[str] = field(default_factory=list)
+    build_variants: dict = field(default_factory=dict)
+    build_no_cache: bool | None = None
+    build_multiarch: bool = False
+    image_env: dict[str, str] = field(default_factory=dict)
     build_provides: str | None = None            # "base": this service's build produces the deployment's
     #                                              base image (build.images[0]) — rig builds it FIRST and
     #                                              exports it as RIG_BASE_IMAGE; vehicle.yaml images.base
@@ -153,6 +157,8 @@ class Descriptor:
     #                                              into bags and REPLAY at this service's servers.
     #                                              Undeclared services WARN when replay selects
     #                                              services (their recorded calls likely absent)
+    replay_start: bool = True  # default live startup; recorded bag topics are independent
+    replay_platform: str | None = None  # portable replay runtime when the host has no provisioned one
     export_source: ExportSource | None = None  # `export: {data}` — this service slims its own run
     #                                              data for `rig run export` (see ExportSource);
     #                                              None = its data travels as-is (or is omitted
@@ -341,11 +347,11 @@ def load_descriptor(service: str, repo: Path) -> Descriptor:
     if replay_raw is not None:
         if not isinstance(replay_raw, dict):
             raise RigError(f"{path}: `replay` must be a mapping with "
-                           f"sim_time/service_introspection/source")
-        unknown = set(replay_raw) - {"sim_time", "service_introspection", "source"}
+                           f"sim_time/service_introspection/source/start/platform")
+        unknown = set(replay_raw) - {"sim_time", "service_introspection", "source", "start", "platform"}
         if unknown:  # a typo'd key would silently drop the promise doctor relies on
             raise RigError(f"{path}: replay: unknown key(s) {', '.join(sorted(unknown))} — it "
-                           f"carries only sim_time, service_introspection, source")
+                           f"carries only sim_time, service_introspection, source, start, platform")
         src_raw = replay_raw.get("source")
         if src_raw is not None:
             if not isinstance(src_raw, dict):
@@ -367,12 +373,14 @@ def load_descriptor(service: str, repo: Path) -> Descriptor:
                 raise RigError(f"{path}: replay.source.overrides must be a non-empty mapping — the "
                                f"config patch that flips the instance to replay its recordings")
             replay_source = ReplaySource(data=data_rel, overrides=ov)
-        for key in ("sim_time", "service_introspection"):
+        for key in ("sim_time", "service_introspection", "start"):
             if key in replay_raw and not isinstance(replay_raw[key], bool):
                 raise RigError(f"{path}: replay.{key} must be true or false (a declaration is a "
                                f"promise the launcher wires the capability from the fleet env)")
         replay_sim_time = bool(replay_raw.get("sim_time"))
         replay_service_introspection = bool(replay_raw.get("service_introspection"))
+        if replay_raw.get("platform") is not None and replay_raw["platform"] not in build_platforms:
+            raise RigError(f"{path}: replay.platform must be one of build.platforms")
 
     interface_raw = data.get("interface")  # `interface: { publishes/subscribes: [{topic, type?}],
     #                               provides/requires: [{service, type?}] }` — the service's declared
@@ -438,7 +446,9 @@ def load_descriptor(service: str, repo: Path) -> Descriptor:
             raise RigError(f"{path}: platform.override_env '{override_env}' collides with a rig-owned "
                            f"variable — declare the service's OWN env name (e.g. CAM_PLATFORM)")
 
+    from .build_contract import parse_contract
     return Descriptor(
+        **parse_contract(data, path),
         service=service,
         repo=repo,
         launcher=data.get("launcher") or f"{service}-up",
@@ -457,6 +467,8 @@ def load_descriptor(service: str, repo: Path) -> Descriptor:
         replay_sim_time=replay_sim_time,
         export_source=export_source,
         replay_source=replay_source,
+        replay_start=(replay_raw or {}).get("start", True),
+        replay_platform=(replay_raw or {}).get("platform"),
         replay_service_introspection=replay_service_introspection,
         interface=interface,
         platform_auto_detect=(str(platform_raw["auto_detect"]) if platform_raw.get("auto_detect")

@@ -196,15 +196,22 @@ vendor` step) and digest-pins images against the registry from `vehicle.yaml` (`
 `--registry <ip:5000>` only to override it:
 
 ```bash
-rig build                                   # build/push + mirror images into the registry
-rig build --no-cache                        # full rebuild: RIG_BUILD_NO_CACHE=1 to every build command
-                                            #   (re-converges apt-level drift across images)
+rig build                                   # all declared runtimes and CPU architectures, build/push
+rig build --platform dev --arch amd64 --tag iteration-1   # faster targeted iteration
+rig build --no-cache                         # disable instruction caching in every participating build
 rig image audit                             # inspect what the stacks will RUN: one ROS distro, the
                                             #   declared rmw installed, ros-* versions agree across images
 rig bake --tag v1                           # -> var/artifacts/v1.tar.gz (auto-vendored + digest-pinned)
 # rig bake                                 # same when vehicle.yaml has images.tag: v1
 scp var/artifacts/v1.tar.gz vehicle:~/      # on the vehicle: `tar xzf v1.tar.gz && cd v1 && ./run.sh up`
 ```
+
+[Portable builds and replay](docs/BUILD_AND_REPLAY.md) covers the build contract, Buildx setup,
+companion digests, reconstruction onto another host, replay startup policy, and migration of old runs.
+Hardware runtimes use separate tags (`v1-jp6m`, `v1-dev`); multiarch indexes select the CPU within a
+runtime. `rig reconstruct RUN --platform dev` selects the software runtime; `--platform recorded`
+keeps the source runtime. Doodle's updated descriptor omits live radio startup during replay while
+preserving recorded topics; `rig replay RUN --include-service doodle` opts back in.
 
 `--tag` overrides the artifact name; when omitted, it defaults to the literal `images.tag` in
 `vehicle.yaml`. A missing or templated image tag still needs `--tag`; host-local overrides do
@@ -258,6 +265,7 @@ fleet ROS env reaching containers unmangled, deterministic output, identity full
 
 ```bash
 rig certify --repo . --config core-driver/config/usb-real.yaml          # the service's own CI gate
+rig certify --repo . --require-build-check   # also require a completed isolated cache/platform check
 rig certify cam_front --emit /tmp/mac.yaml                              # then the same on the vehicle...
 rig certify --diff /tmp/mac.yaml /tmp/orin.yaml   # identical = `config` output is host-independent, so a
                                                   # dev-box bake is provably correct for the target

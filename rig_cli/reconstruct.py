@@ -269,7 +269,7 @@ def wire_player(tree: Path, target: tuple[str, Path | str]) -> None:
 def cmd_reconstruct(root: Path | None, *, run_ref: str, into: str | None,
                     config: str | None, copy_run: bool = False,
                     no_import: bool = False, registry: str | None = None,
-                    enable_replay: str | None = None) -> int:
+                    enable_replay: str | None = None, platform: str | None = None) -> int:
     run_dir = _resolve_run(root, run_ref)
     doc = _run_manifest(run_dir)
     # Flag validation BEFORE extraction: a refused host or player target must not leave a
@@ -353,6 +353,8 @@ def cmd_reconstruct(root: Path | None, *, run_ref: str, into: str | None,
         except RigError:
             local = {}
     local["data_dir"] = str((dest / "var" / "data").resolve())
+    from .image_catalog import localize
+    localize(dest, local, platform)
     if reg_host:  # the bench's image mirror — per SUBKEY: the run's tag/base pins still apply,
         #           only the host swaps (machine-wide instead: `rig provision --registry`)
         local["images"] = {**(local.get("images") or {}), "registry": reg_host}

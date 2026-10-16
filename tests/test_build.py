@@ -196,6 +196,7 @@ def test_build_no_cache_and_base_image_ride_the_env_set_or_popped():
                        "sensors: [{name: i0, service: cam, config: config/i0.yaml}]\n", {"cam": svc})
     m = load_manifest(root)
     descs = {"cam": load_descriptor("cam", svc)}
+    descs['cam'].build_no_cache = True
     assert build(m, descs, registry=None, tag=None, dry_run=False, no_cache=True) == 0
     assert (svc / "seen").read_text().strip() == "1 my/base:2"
     # not requested + leaked from the shell -> POPPED, never inherited

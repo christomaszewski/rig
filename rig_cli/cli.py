@@ -332,7 +332,8 @@ def cmd_replay(args, manifest, catalog, descriptors) -> int:
                           export_calls=args.export_calls, auto_end_grace=args.auto_end,
                           window_from=args.window_from, window_to=args.window_to,
                           live=args.live, session=args.session, start_delay=args.start_delay,
-                          skip_services=args.skip_services)
+                          skip_services=args.skip_services,
+                          include_services=args.include_services, skip_instances=args.skip_instances)
 
 
 def cmd_graph(args, manifest, catalog, descriptors) -> int:
@@ -409,7 +410,8 @@ def cmd_certify(args, root: Path) -> int:
             eprint("rig certify: no enabled stacks to certify")
             return 0
         targets = [(f"{s.service}/{s.name}", descriptors[s.service], s.config) for s in sensors]
-    return certify_mod.run_targets(targets, dict(os.environ), emit=emit)
+    return certify_mod.run_targets(targets, dict(os.environ), emit=emit,
+                                   require_build_check=args.require_build_check)
 
 
 def cmd_vendor(args, root: Path) -> int:
@@ -582,7 +584,7 @@ def cmd_build(args, root: Path) -> int:
                "building without a push target unless --registry/--tag are passed")
     return build_mod.build(manifest, descriptors, registry=args.registry, tag=args.tag,
                            dry_run=args.dry_run, jobs=args.jobs, root=root,
-                           platform=args.platform, no_cache=args.no_cache,
+                           platform=args.platform, arch=args.arch, no_cache=args.no_cache,
                            base_image=args.base_image)
 
 
@@ -809,6 +811,10 @@ def build_parser() -> argparse.ArgumentParser:
     rp.add_argument("--skip-service", action="append", default=[], dest="skip_services", metavar="SERVICE",
                     help="omit every instance of a service and its recorded bag topics; repeatable. "
                          "Use --skip-service camera-service to replay without cameras/video")
+    rp.add_argument("--include-service", action="append", default=[], dest="include_services",
+                    help="start a service despite its replay startup policy; repeatable")
+    rp.add_argument("--skip-instance", action="append", default=[], dest="skip_instances",
+                    help="omit one instance and its recorded topics; repeatable")
     rp.add_argument("--session", default=None, metavar="PREFIX",
                     help="pin ONE recorded session (its <prefix>) for every source instead of "
                          "playing all of them in order")
@@ -868,6 +874,9 @@ def build_parser() -> argparse.ArgumentParser:
     rec.add_argument("run", help="run dir path (an id resolves only inside a deployment)")
     rec.add_argument("--into", default=None, metavar="DIR",
                      help="destination tree (default: ./<run-id>-tree)")
+    rec.add_argument("--platform", default=None,
+                     help="replay runtime; default: destination provisioning or service replay default; "
+                          "use recorded to retain the source runtime")
     rec.add_argument("--config", default=None, metavar="DIGEST12",
                      help="overlay this config snapshot from the run's .rig/config/ (default: "
                           "as-opened for native captures, the LAST ups snapshot for retrofits)")
@@ -1029,6 +1038,8 @@ def build_parser() -> argparse.ArgumentParser:
     crt = sub.add_parser("certify", help="launcher-contract conformance checks (poison-env)")
     crt.add_argument("names", nargs="*", help="sensor name(s); default: all enabled")
     crt.add_argument("--repo", default=None, help="certify a service repo directly (no deployment needed)")
+    crt.add_argument("--require-build-check", action="store_true",
+                     help="fail if the isolated build-contract check cannot complete (for service CI)")
     crt.add_argument("--config", default=None,
                      help="config to drive the launcher with (with --repo: defaults to the first "
                           "`examples:` entry in rigging.yaml)")
@@ -1107,13 +1118,14 @@ def build_parser() -> argparse.ArgumentParser:
     bld.add_argument("--registry", default=None, help="target registry (overrides vehicle.yaml images.registry)")
     bld.add_argument("--tag", default=None, help="tag to pass to each service's build command")
     bld.add_argument("--platform", default=None,
-                     help="hardware/OS target (overrides vehicle.yaml `platform:`) — matrix services "
-                          "build/push the composed <tag>-<platform> and get RIG_TARGET_PLATFORM")
+                     help="build only this runtime variant (default: all declared variants)")
+    bld.add_argument("--arch", choices=("arm64", "amd64"), default=None,
+                     help="build only this CPU architecture (default: all supported architectures)")
     bld.add_argument("-j", "--jobs", type=int, default=1, metavar="N",
                      help="build/mirror up to N services concurrently (output grouped per service)")
     bld.add_argument("--no-cache", action="store_true", dest="no_cache",
-                     help="full rebuild: export RIG_BUILD_NO_CACHE=1 to every build command (scripts "
-                          "opt in, e.g. `docker build ${RIG_BUILD_NO_CACHE:+--no-cache}`)")
+                     help="disable image-build instruction cache; requires declared service support "
+                          "(verify with rig certify --require-build-check)")
     bld.add_argument("--base-image", default=None, metavar="REF", dest="base_image",
                      help="deployment base image ref (overrides vehicle.yaml images.base and any "
                           "`provides: base` service) — exported to builds as RIG_BASE_IMAGE")
@@ -1612,7 +1624,7 @@ def main(argv=None) -> int:
                 root if (root / "vehicle.yaml").exists() else None,
                 run_ref=args.run, into=args.into, config=args.config,
                 copy_run=args.copy_run, no_import=args.no_import,
-                registry=args.registry, enable_replay=args.enable_replay)
+                registry=args.registry, enable_replay=args.enable_replay, platform=args.platform)
         if args.cmd == "run-retrofit":  # reads run dirs + var/artifacts, not the manifest
             from . import reconstruct as reconstruct_mod
             return reconstruct_mod.cmd_retrofit(root, run_refs=args.runs,

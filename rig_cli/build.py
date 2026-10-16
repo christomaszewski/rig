@@ -210,6 +210,8 @@ def _build_env(distro: str | None, desc: Descriptor | None = None, platform: str
     name is exported in most ROS shells: a dev box's `.bashrc` must not decide what a fleet image
     contains. (The service's own override_env is NOT popped — operators use it standalone.)"""
     env = dict(os.environ)
+    for key in ('RIG_BUILD_PLATFORMS', 'RIG_BUILD_RESULT', 'RIG_BUILD_PULL'):
+        env.pop(key, None)
     if distro:
         env["ROS_DISTRO"] = distro
     plat_active = platform and desc is not None and (desc.build_platforms
@@ -320,7 +322,7 @@ def _one_captured(service: str, desc: Descriptor, cwd: Path, reg, tag, distro: s
     return service, rc, "\n".join(log)
 
 
-def build(manifest: Manifest, descriptors: dict[str, Descriptor], *, registry: str | None,
+def _build_single(manifest: Manifest, descriptors: dict[str, Descriptor], *, registry: str | None,
           tag: str | None, dry_run: bool, jobs: int = 1, root: Path | None = None,
           platform: str | None = None, no_cache: bool = False,
           base_image: str | None = None) -> int:
@@ -525,3 +527,28 @@ def build(manifest: Manifest, descriptors: dict[str, Descriptor], *, registry: s
                 rc = 1
                 eprint(f"  mirror {img} FAILED")
     return rc
+
+
+def build(manifest: Manifest, descriptors: dict[str, Descriptor], *, registry: str | None,
+          tag: str | None, dry_run: bool, jobs: int = 1, root: Path | None = None,
+          platform: str | None = None, arch: str | None = None, no_cache: bool = False,
+          base_image: str | None = None) -> int:
+    used = {s.service for s in manifest.sensors}
+    descriptors = {s: d for s, d in descriptors.items() if s in used}
+    if arch or any(d.build_architectures or d.build_platforms for d in descriptors.values()):
+        from .matrix_build import run
+        return run(manifest, descriptors, registry=registry, tag=tag, dry_run=dry_run,
+                   jobs=jobs, root=root, platform=platform, arch=arch, no_cache=no_cache,
+                   base_image=base_image)
+    if no_cache:
+        for service, desc in descriptors.items():
+            if desc.build_command and desc.build_no_cache is not True:
+                from . import RigError
+                raise RigError(f'{service}: --no-cache requires build.capabilities.no_cache; '
+                               'update the service and run rig certify')
+    if any(d.build_command for d in descriptors.values()):
+        eprint('rig build: legacy build contract (no architecture matrix); update service metadata '
+               'to publish a portable release with companion digests')
+    return _build_single(manifest, descriptors, registry=registry, tag=tag, dry_run=dry_run,
+                         jobs=jobs, root=root, platform=platform, no_cache=no_cache,
+                         base_image=base_image)

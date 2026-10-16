@@ -127,6 +127,10 @@ def _poison_env(base_env: dict[str, str], name: str, desc: Descriptor | None = N
     env.pop("RIG_TARGET_PLATFORM", None)  # never inherit a real one from the caller's shell
     env.pop("RIG_BASE_IMAGE", None)  # ditto — RIG_BASE_IMAGE is optional; launchers carry a fallback
     env.pop("RIG_MSGS_IMAGE", None)  # ditto — certify exercises the compose's own fallback chain
+    env.pop('RIG_IMAGE_PINS', None)
+    if desc is not None:
+        for key in desc.image_env.values():
+            env.pop(key, None)
     if desc is not None and platform:
         env["RIG_TARGET_PLATFORM"] = platform
         env = service_env(env, desc)
@@ -460,6 +464,8 @@ def certify_target(desc: Descriptor, config_path: Path, base_env: dict[str, str]
                                               f"against one from the vehicle to prove host-independence)"))
 
     _cleanup(desc)
+    from .build_probe import certify_build
+    checks.extend(certify_build(desc))
     return checks
 
 
@@ -488,13 +494,17 @@ def report(label: str, checks: list[Check]) -> tuple[int, int]:
 
 
 def run_targets(targets: list[tuple[str, Descriptor, Path]], base_env: dict[str, str],
-                *, emit: Path | None = None) -> int:
+                *, emit: Path | None = None, require_build_check: bool = False) -> int:
     """Certify each (label, descriptor, config) target; summarize; exit code 1 on any ERROR."""
     if emit is not None and len(targets) != 1:
         raise RigError("--emit compares one launcher run across hosts; name exactly one target")
     errors = warnings = 0
     for label, desc, config in targets:
-        e, w = report(label, certify_target(desc, config, base_env, emit=emit))
+        checks = certify_target(desc, config, base_env, emit=emit)
+        if require_build_check and desc.build_command and not any(
+                c.name == 'build-no-cache' and c.level == OK for c in checks):
+            checks.append(Check(ERROR, 'build-required', 'a completed build-contract check is required'))
+        e, w = report(label, checks)
         errors += e
         warnings += w
     eprint(f"rig certify: {len(targets)} target(s) — {errors} error(s), {warnings} warning(s)")

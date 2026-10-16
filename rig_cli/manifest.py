@@ -27,12 +27,13 @@ MACHINE_LOCAL_DEFAULT = "/etc/rig/vehicle.local.yaml"
 # The only keys a vehicle-local file may carry: the per-host knobs that genuinely vary across a
 # fleet. Never sensor rows — a local file silently flipping stacks makes fleet debugging miserable.
 LOCAL_KEYS = {"vehicle", "vehicle_id", "vars", "env", "data_dir", "images", "platform",
-              "run_capture"}
+              "run_capture", "replay"}
 # rig's SIL companion service (rig-infra's ros2-bag-player): the one service rig knows by NAME —
 # replay selects its row by service, the graph check exempts it from interface declarations.
 PLAYER_SERVICE = "ros2-bag-player"
 # Env keys rig owns end-to-end (fleet_env sets them; an `env:` map may not shadow them).
-RIG_OWNED_ENV = {"VEHICLE_ID", "ROS_DOMAIN_ID", "RMW_IMPLEMENTATION", "RIG_IMAGE_REGISTRY",
+RIG_OWNED_ENV = {"RIG_BUILD_PLATFORMS", "RIG_BUILD_RESULT", "RIG_BUILD_PULL", "RIG_IMAGE_PINS",
+                 "VEHICLE_ID", "ROS_DOMAIN_ID", "RMW_IMPLEMENTATION", "RIG_IMAGE_REGISTRY",
                  "RIG_IMAGE_TAG", "RIG_TARGET_PLATFORM", "RIG_DATA_DIR", "COMPOSE_PROJECT_NAME",
                  "RIG_BASE_IMAGE", "RIG_BUILD_NO_CACHE", "RIG_ROS_RMW", "RIG_MSGS_IMAGE",
                  "RIG_MSGS_MANIFEST",
@@ -104,6 +105,9 @@ class Manifest:
     #                              recipes for `rig run export`: {profile: {omit: [globs],
     #                              <service|instance>: {opaque options}}} (see export.py)
     extra_env: dict = field(default_factory=dict)  # `env:` map, interpolated — fleet_env exports it
+    replay_policy: dict = field(default_factory=dict)
+    build_catalog: dict = field(default_factory=dict)
+    replay_execution: dict = field(default_factory=dict)
     missing_identity: tuple = ()  # mandatory per-vehicle keys nothing provides — loading stays
     #                               LAZY so management verbs (pkg list/remove/…) work on any box;
     #                               identity-CONSUMING commands (up/render/…) enforce via require_identity
@@ -158,6 +162,28 @@ def _parse_export_profiles(raw) -> dict[str, dict]:
         out[name] = {"omit": [g.strip().strip("/") for g in omit],
                      **{k: v for k, v in body.items() if k != "omit"}}
     return out
+
+
+def _parse_replay_policy(raw, rows) -> dict:
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict) or set(raw) - {"services", "instances"}:
+        raise RigError("replay must contain only services and instances mappings")
+    for kind, allowed in (("services", {s.service for s in rows}),
+                          ("instances", {s.name for s in rows})):
+        entries = raw.get(kind, {})
+        if not isinstance(entries, dict):
+            raise RigError(f"replay.{kind} must be a mapping")
+        for name, entry in entries.items():
+            if name not in allowed:
+                raise RigError(f"replay.{kind}: unknown {name!r}")
+            if (not isinstance(entry, dict) or set(entry) != {"start"}
+                    or not isinstance(entry["start"], bool)):
+                raise RigError(f"replay.{kind}.{name} must contain start: true or false")
+            if not entry["start"] and (name == PLAYER_SERVICE or
+                    any(s.name == name and s.service == PLAYER_SERVICE for s in rows)):
+                raise RigError("replay: cannot disable the bag player")
+    return raw
 
 
 def _parse_entries(entries, tier: str, root: Path, seen: dict[str, Path]) -> list[Sensor]:
@@ -479,10 +505,19 @@ def load_manifest(root: Path) -> Manifest:
     infra = _parse_entries(data.get("infra"), "infra", root, seen)
     sensors = _parse_entries(data.get("sensors"), "sensor", root, seen)
     autonomy = _parse_entries(data.get("autonomy"), "autonomy", root, seen)
+    replay_policy = {}
+    for source in [data, *reversed(sources)]:
+        layer = _parse_replay_policy(source.get('replay'), infra + sensors + autonomy)
+        for kind, entries in layer.items():
+            replay_policy.setdefault(kind, {}).update(entries)
 
     # Concatenation order matters beyond select(): bake iterates `manifest.sensors` as-is, so the tier
     # partition must already hold here for up.sh line order (autonomy last) and down.sh (reversed).
+    from .lock import load_lock
+    lock = load_lock(root)
     return Manifest(vehicle=vehicle, ros=ros,
+                    build_catalog=lock.get('build_catalog', {}),
+                    replay_execution=lock.get('replay_execution', {}),
                     sensors=infra + sensors + autonomy,
                     image_registry=eff_images["registry"], vehicle_id=vehicle_id,
                     image_tag=eff_images["tag"], image_base=eff_images["base"], platform=platform,
@@ -491,4 +526,5 @@ def load_manifest(root: Path) -> Manifest:
                                                 data.get("run_capture")) is not False),
                     vars=ctx, extra_env=extra_env, host_data_dir=host_data_dir,
                     export_profiles=_parse_export_profiles(data.get("export_profiles")),
+                    replay_policy=replay_policy,
                     missing_identity=tuple(unresolved))

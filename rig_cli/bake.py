@@ -131,6 +131,8 @@ def _resolve_digest(ref: str, *, local_only: bool = False) -> str | None:
     content digest). Returns None if neither resolves (then the ref stays a tag). ``local_only`` skips the
     registry round-trip — bundle mode records digests as audit metadata only, and must not stall on an
     unreachable registry (the whole point of bundling)."""
+    if '@sha256:' in ref:
+        return ref  # a catalog already chose the immutable index; never substitute a local child
     repo = _repo_of(ref)
     try:  # 1. local image's repo digest
         proc = subprocess.run(["docker", "inspect", "--format", "{{json .RepoDigests}}", ref],
@@ -584,6 +586,8 @@ def _stage_tree(staging: Path, manifest, catalog, *, registry: str | None = None
     # into every run on a disk-tight vehicle that had said not to.
     if manifest.extra_env:
         veh["env"] = dict(manifest.extra_env)
+    if manifest.replay_policy:
+        veh["replay"] = manifest.replay_policy
     if not manifest.run_capture:
         veh["run_capture"] = False
     if tier_rows["infra"]:
@@ -603,8 +607,19 @@ def _stage_tree(staging: Path, manifest, catalog, *, registry: str | None = None
 def bake(root: Path, manifest, catalog, descriptors, env, tag: str, *, registry: str | None = None,
          bundle_images: bool = False) -> Path:
     safe_component(tag, what="bake --tag")  # names var/bake/<tag>, which is rmtree'd below
+    if bundle_images and manifest.build_catalog:
+        raise RigError('bake: portable releases currently require a reachable registry; '
+                       '--bundle-images cannot preserve the companion indexes with docker save')
     if registry:
         env = {**env, "RIG_IMAGE_REGISTRY": registry}  # override vehicle.yaml images.registry for this bake
+        if manifest.build_catalog:
+            from dataclasses import replace
+            from .dispatch import fleet_env
+            localized = fleet_env(replace(manifest, image_registry=registry), descriptors)
+            for key in ('RIG_IMAGE_PINS', 'RIG_BASE_IMAGE', 'RIG_MSGS_IMAGE'):
+                env.pop(key, None)
+                if key in localized:
+                    env[key] = localized[key]
     staging = root / "var" / "bake" / tag
     if staging.exists():
         shutil.rmtree(staging)
@@ -743,6 +758,8 @@ def capture_run(root: Path, manifest, run_dir: Path) -> dict:
     staging.mkdir()
     try:
         _stage_tree(staging, manifest, catalog)
+        from .lock import load_lock, save_lock
+        save_lock(staging, load_lock(root))
         meta = {
             "kind": "run-capture",  # reconstruct treats deploy artifacts (retrofits) and captures alike
             "tag": f"run-capture-{run_dir.name}",

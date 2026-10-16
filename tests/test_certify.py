@@ -102,6 +102,8 @@ def run_certify(repo: pathlib.Path, emit=None):
     cfg = repo / "instance.yaml"
     cfg.write_text("service: fak\ncamera: {}\n")
     checks = certify_target(load_descriptor("fak", repo), cfg, dict(os.environ), emit=emit)
+    # This fixture models only a launcher. The absent build context is covered in test_build_probe.
+    checks = [c for c in checks if c.name != 'build-no-cache']
     by_level = lambda lvl: {c.name for c in checks if c.level == lvl}  # noqa: E731
     return checks, by_level("ERROR"), by_level("WARN"), by_level("OK")
 
@@ -288,7 +290,7 @@ def test_repo_dir_bind_warns():
     cfg = repo / "instance.yaml"
     cfg.write_text("service: fak\n")
     checks = certify_target(load_descriptor("fak", repo), cfg, dict(os.environ))
-    assert {c.name for c in checks if c.level == "WARN"} == {"binds"}
+    assert {c.name for c in checks if c.level == "WARN"} == {"binds", "build-no-cache"}
     assert not {c.name for c in checks if c.level == "ERROR"}
 
 

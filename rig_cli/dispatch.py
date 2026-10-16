@@ -38,6 +38,14 @@ def fleet_env(manifest: Manifest, descriptors: dict[str, Descriptor] | None = No
         base_ref, _, _ = resolve_base_image(manifest, descriptors)
         msgs_ref, _, _ = resolve_msgs_image(manifest, descriptors)
     env = dict(os.environ)
+    import json
+    from .image_catalog import pins, canonical_ref
+    image_pins = pins(manifest)
+    base_ref = image_pins.get(canonical_ref(base_ref), base_ref)
+    msgs_ref = image_pins.get(canonical_ref(msgs_ref), msgs_ref)
+    env.pop('RIG_IMAGE_PINS', None)
+    if image_pins:
+        env['RIG_IMAGE_PINS'] = json.dumps(image_pins)
     env["ROS_DOMAIN_ID"] = str(manifest.ros.domain_id)
     env["RMW_IMPLEMENTATION"] = manifest.ros.rmw
     # rig OWNS these vars: when the manifest doesn't define one, POP any inherited value — a leaked
@@ -95,14 +103,20 @@ def service_env(env: dict[str, str], desc: Descriptor) -> dict[str, str]:
     `images.tag: jp7` keeps behaving exactly as before).
     """
     platform = env.get("RIG_TARGET_PLATFORM")
-    if not platform:
-        return env
     out = dict(env)
-    if desc.platform_override_env:
+    if platform and desc.platform_override_env:
         out[desc.platform_override_env] = platform
-    if desc.build_platforms:
+    if platform and desc.build_platforms:
         tag = env.get("RIG_IMAGE_TAG")
         out["RIG_IMAGE_TAG"] = f"{tag}-{platform}" if tag else platform
+    if env.get('RIG_IMAGE_PINS'):
+        import json
+        image_pins = json.loads(env['RIG_IMAGE_PINS'])
+        prefix = f"{env['RIG_IMAGE_REGISTRY']}/" if env.get('RIG_IMAGE_REGISTRY') else ''
+        for image, key in desc.image_env.items():
+            ref = f"{prefix}{image}:{out.get('RIG_IMAGE_TAG', 'latest')}"
+            if ref in image_pins:
+                out.setdefault(key, image_pins[ref])
     return out
 
 

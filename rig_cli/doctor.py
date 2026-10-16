@@ -58,6 +58,10 @@ def collect(
     manifest: Manifest, catalog: dict[str, ServiceEntry], descriptors: dict[str, Descriptor]
 ) -> list[Issue]:
     issues: list[Issue] = []
+    for service, desc in descriptors.items():
+        if desc.build_command and desc.build_no_cache is not True:
+            issues.append(Issue(WARN, f'{service}: no-cache build support is undeclared/unsupported; '
+                                      'update build.capabilities and run rig certify on its source'))
 
     vid = f" (id {manifest.vehicle_id})" if manifest.vehicle_id is not None else ""
     issues.append(Issue(OK, f"vehicle '{manifest.vehicle}'{vid} · ROS domain {manifest.ros.domain_id} · "

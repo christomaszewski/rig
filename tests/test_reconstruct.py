@@ -686,6 +686,22 @@ def test_retrofit_recordings_refusals_are_legible():
     assert rc == 1 and "none of the 1 session(s)" in err.getvalue() and "--all-sessions" in err.getvalue()
 
 
+def test_native_capture_carries_companion_catalog_and_replay_policy():
+    from rig_cli.lock import save_lock
+    root, m = _deployment()
+    m.replay_policy = {'services': {'sensa': {'start': False}}}
+    catalog = {'registry/core:v1-dev': {'digest': 'sha256:' + 'a' * 64,
+                                       'image': 'core', 'architectures': ['arm64', 'amd64']}}
+    save_lock(root, {'schema': 1, 'build_catalog': catalog})
+    rid, data = _open(m, root)
+    with tarfile.open(data / 'runs' / rid / '.rig/artifact.tar.gz') as tf:
+        import yaml
+        lock = next(n for n in tf.getnames() if n.endswith('/rig.lock'))
+        vehicle = next(n for n in tf.getnames() if n.endswith('/vehicle.yaml'))
+        assert yaml.safe_load(tf.extractfile(lock))['build_catalog'] == catalog
+        assert yaml.safe_load(tf.extractfile(vehicle))['replay'] == m.replay_policy
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

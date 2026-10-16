@@ -730,15 +730,38 @@ def auto_end(manifest, descriptors, root: Path, pairs, env, player, grace_s: int
     return 0
 
 
+def startup_selection(manifest, descriptors, explicit: set[str], include_services: list[str]):
+    """Resolve replay-only startup defaults. Omitted live services keep their bag topics."""
+    known = {s.service for s in manifest.sensors}
+    unknown = set(include_services) - known
+    if unknown:
+        raise RigError(f"replay --include-service: unknown service(s): {', '.join(sorted(unknown))}")
+    omitted = {}
+    policy = manifest.replay_policy
+    for row in manifest.sensors:
+        if row.service == PLAYER_SERVICE or row.name in explicit or row.service in include_services:
+            continue
+        start = getattr(descriptors.get(row.service), "replay_start", True)
+        reason = "service default"
+        for kind, key in (("services", row.service), ("instances", row.name)):
+            if key in policy.get(kind, {}):
+                start = policy[kind][key]["start"]
+                reason = f"replay.{kind}.{key}"
+        if not start:
+            omitted[row.name] = reason
+    return omitted
+
+
 def cmd(manifest, catalog, descriptors, root: Path, *, run_ref: str, names: list[str],
         label: str | None, wall_clock: bool, force: bool, dry_run: bool,
         calls: str | None = None, export_calls: bool = False,
         auto_end_grace: int | None = None, window_from=None, window_to=None,
         live: list[str] | None = None, session: str | None = None,
-        start_delay: float = 20.0, skip_services: list[str] | None = None) -> int:
+        start_delay: float = 20.0, skip_services: list[str] | None = None,
+        include_services: list[str] | None = None, skip_instances: list[str] | None = None) -> int:
     if export_calls:
-        if skip_services:
-            raise RigError("replay --export-calls: --skip-service applies to replay sessions, "
+        if skip_services or include_services or skip_instances:
+            raise RigError("replay --export-calls: startup/data-selection switches apply to replay sessions, "
                            "not call-script exports")
         # NOT a session: one launcher-verb dispatch (the export runs in a one-shot container —
         # ROS stays on the player's side of the line; rig resolves run + row + launcher, which
@@ -767,6 +790,12 @@ def cmd(manifest, catalog, descriptors, root: Path, *, run_ref: str, names: list
     with_names = list(dict.fromkeys(names))          # under test (live); [] = REPRODUCE the run
     live_flags = list(dict.fromkeys(live or []))
     skip_flags = list(dict.fromkeys(skip_services or []))
+    include_services = list(dict.fromkeys(include_services or []))
+    skip_instances = list(dict.fromkeys(skip_instances or []))
+    known = {s.name for s in manifest.sensors}
+    if set(skip_instances) - known:
+        raise RigError("replay --skip-instance: unknown instance(s): " +
+                       ", ".join(sorted(set(skip_instances) - known)))
     known_services = {s.service for s in manifest.sensors}
     for service in skip_flags:
         if service not in known_services:
@@ -774,17 +803,22 @@ def cmd(manifest, catalog, descriptors, root: Path, *, run_ref: str, names: list
         if service == PLAYER_SERVICE:
             raise RigError(f"replay --skip-service: cannot skip {PLAYER_SERVICE}; it plays the "
                            "remaining bag topics")
-    skipped = [s.name for s in manifest.sensors if s.service in skip_flags]
-    conflicts = sorted(set(skipped) & set(with_names + live_flags))
+    skipped = [s.name for s in manifest.sensors if s.service in skip_flags or s.name in skip_instances]
+    if any(s.name in skipped and s.service == PLAYER_SERVICE for s in manifest.sensors):
+        raise RigError("replay: cannot skip the bag player")
+    included = [s.name for s in manifest.sensors if s.service in include_services]
+    conflicts = sorted(set(skipped) & set(with_names + live_flags + included))
     if conflicts:
         raise RigError(f"replay --skip-service: {', '.join(conflicts)} also requested under test "
                        "or with --live — remove the conflicting selection")
     # Omitted services must not contribute platform/port/launcher preflight errors. Keep the
     # original manifest for the clean-host guard and run snapshot: even an omitted camera
     # left running from an earlier session must prevent a replay from silently keeping it up.
+    omitted = startup_selection(manifest, descriptors, set(with_names + live_flags), include_services)
     active_manifest = dataclasses.replace(manifest, sensors=[s for s in manifest.sensors
-                                                            if s.name not in skipped])
-    active_descriptors = {k: v for k, v in descriptors.items() if k not in skip_flags}
+                                    if s.name not in skipped and s.name not in omitted])
+    active_services = {s.service for s in active_manifest.sensors}
+    active_descriptors = {k: v for k, v in descriptors.items() if k in active_services}
     player = _player_row(manifest, required=False)   # needed iff the bag has something to play
     if player is not None and (player.name in with_names or player.name in live_flags):
         raise RigError(f"replay: '{player.name}' is the player — it is added automatically; "
@@ -805,6 +839,8 @@ def cmd(manifest, catalog, descriptors, root: Path, *, run_ref: str, names: list
     src_id, src_dir = resolve_source(manifest, run_ref, require_bags=False)
     has_bags = (src_dir / "bags").is_dir()
     sources, notices = discover_sources(active_manifest, active_descriptors, src_dir, live=set(live_flags))
+    for name, reason in omitted.items():
+        notices.append(f"{name}: no live startup ({reason}); recorded bag topics remain eligible")
     if skipped:
         notices.append(f"--skip-service: omitting {', '.join(skipped)} "
                        f"(services: {', '.join(skip_flags)})")
@@ -814,6 +850,7 @@ def cmd(manifest, catalog, descriptors, root: Path, *, run_ref: str, names: list
             raise RigError("replay --skip-service: no recorded inputs remain to replay")
         raise RigError(f"replay: {src_id} has no bags/ and no instance recordings — nothing to play")
     infra = [s.name for s in active_manifest.sensors if s.tier == "infra" and s.enabled]
+    infra = list(dict.fromkeys(infra + included + live_flags))
     # everything that PUBLISHES live in this session — infra regenerates its own topics, sources
     # re-deliver theirs, the with-set computes its outputs: the bag must not double-publish any
     live_names = list(dict.fromkeys(infra + source_names + with_names))
@@ -891,6 +928,14 @@ def cmd(manifest, catalog, descriptors, root: Path, *, run_ref: str, names: list
                                           sources=source_names):
         eprint(f"  [{doctor_mod._SYMBOL[issue.level]}] {issue.message}")
 
+    # Resolve image availability before scheduling a release instant: registry lookups can be slow.
+    up_names = list(dict.fromkeys(infra + source_names + with_names
+                                  + ([player.name] if player is not None else [])))
+    sensors = manifest.select(up_names, enabled_only=True)
+    from .image_catalog import validate_replay
+    execution = validate_replay(manifest, {s.service: descriptors[s.service] for s in sensors},
+                                dry_run=dry_run, fleet_descriptors=descriptors)
+
     # The timeline every source shares (rig-sensor-replay-plan §4/§5): the bag's zero, one release
     # instant, the window, the clock decision — rendered into each source's config via its
     # descriptor's overrides. Computed once, BEFORE the up, so every producer gets the same values.
@@ -901,9 +946,6 @@ def cmd(manifest, catalog, descriptors, root: Path, *, run_ref: str, names: list
     # Up-set: enabled infra (logger + its graph sidecar ride along, recording the A/B outputs)
     # + the sources + the with-set + the player — explicit names, so select's tier/order gives
     # producers-first and the player (autonomy, high order) LAST.
-    up_names = list(dict.fromkeys(infra + source_names + with_names
-                                  + ([player.name] if player is not None else [])))
-    sensors = manifest.select(up_names, enabled_only=True)  # explicit names win over enabled:
     rendered = render_sources(manifest, descriptors, root, sources, variables) if not dry_run \
         else {}
     sensors = [dataclasses.replace(s, config=rendered[s.name]) if s.name in rendered else s
@@ -946,6 +988,12 @@ def cmd(manifest, catalog, descriptors, root: Path, *, run_ref: str, names: list
             run_label = label or re.sub(r"[^A-Za-z0-9_-]", "-", f"replay-{src_id}")
             replay_doc: dict = {"of": src_id, "source": str(src_dir), "with": list(with_names),
                                 "clock": "sim" if sim_time else "wall"}
+            if execution:
+                replay_doc['execution'] = execution
+            if omitted:
+                replay_doc["not_started"] = omitted
+            if include_services:
+                replay_doc["included_services"] = include_services
             if skipped:
                 replay_doc["skipped"] = {"services": skip_flags, "instances": skipped}
             if sources:
