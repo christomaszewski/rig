@@ -1047,7 +1047,8 @@ def test_discover_sources_finds_recordings_never_names():
     # a reconstructed tree whose vendored camera rigging predates replay.source: recordings
     # present, no declaration -> not a source, and the way out is named (swap the service in)
     sources, notes = replay.discover_sources(_manifest(rows), {"cam": _Desc(), "nov": _Desc()}, src)
-    assert sources == [] and any("cam_a" in n and "replay.source" in n and "rig swap cam_a" in n for n in notes)
+    assert sources == [] and any("cam_a" in n and "replay.source" in n
+                                and "rig swap cam <a current cam checkout>" in n for n in notes)
     assert not any("cam_b" in n for n in notes)                           # nothing recorded: nothing to say
 
 

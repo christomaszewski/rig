@@ -593,6 +593,51 @@ def test_bake_tag_must_be_a_single_path_component():
     assert (root / "config" / "sensors" / "a.yaml").is_file()   # nothing was deleted
 
 
+def test_cli_bake_defaults_to_vehicle_image_tag_and_explicit_tag_wins():
+    import contextlib
+    import io
+    from unittest.mock import patch
+
+    from rig_cli import bake as bake_mod
+    from rig_cli.cli import main
+    from rig_cli.common import load_yaml
+
+    root, _, _, _ = _deployment_fixture(_COMPOSE_LAUNCHER)
+    vehicle = root / "vehicle.yaml"
+    vehicle.write_text(vehicle.read_text() + "images: {tag: release-1}\n")
+    # Host-specific image overrides must not rename the artifact from the deployment file.
+    (root / "vehicle.local.yaml").write_text("images: {tag: bench-only}\n")
+    with patch.object(bake_mod, "_resolve_digest", return_value=None), \
+            contextlib.redirect_stderr(io.StringIO()):
+        assert main(["--root", str(root), "bake"]) == 0
+        assert main(["--root", str(root), "artifact", "bake", "--tag", "snapshot-2"]) == 0
+    for tag in ("release-1", "snapshot-2"):
+        assert (root / "var" / "artifacts" / f"{tag}.tar.gz").is_file()
+        assert load_yaml(root / "var" / "bake" / tag / "metadata.yaml")["tag"] == tag
+    assert not (root / "var" / "artifacts" / "bench-only.tar.gz").exists()
+
+
+def test_cli_bake_missing_or_unsafe_default_tag_refuses_before_staging():
+    import contextlib
+    import io
+
+    from rig_cli.cli import main
+
+    for images, message in (("", "pass --tag"), ("images: {tag: null}\n", "pass --tag"),
+                            ("images: {tag: ''}\n", "pass --tag"),
+                            ("images: {tag: '   '}\n", "pass --tag"),
+                            ("images: {tag: '../../config'}\n", "single path component")):
+        root, _, _, _ = _deployment_fixture(_COMPOSE_LAUNCHER)
+        vehicle = root / "vehicle.yaml"
+        vehicle.write_text(vehicle.read_text() + images)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            assert main(["--root", str(root), "artifact", "bake"]) == 1
+        assert message in err.getvalue(), err.getvalue()
+        assert not (root / "var" / "bake").exists()
+        assert (root / "config" / "sensors" / "a.yaml").is_file()
+
+
 def test_compose_only_reads_each_row_from_its_tier_dir_and_follows_dispatch_order():
     """_stage_tree lays configs out by tier; _compose_only read config/sensors/ for every row, so
     every infra and autonomy stack failed its render and vanished from up.sh — a 2-infra +

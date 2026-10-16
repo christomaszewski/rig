@@ -1,8 +1,18 @@
 # rig — project state & handoff (resume here)
 
 > Snapshot for picking the project up cold in a new session. Read this first, then `CHEATSHEET.md` /
-> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.2.53**,
-> branch **`main`**, 699 tests passing (`for t in tests/test_*.py; do python3 $t; done`).
+> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.2.60**,
+> branch **`main`**, 760 tests passing across 52 suites
+> (`for t in tests/test_*.py; do python3 "$t"; done`).
+> **v0.2.60 (2026-10-16) — bake tag defaults and the end-to-end replay workflow.** `rig bake`
+> (also `rig artifact bake`) accepts an omitted `--tag` when `vehicle.yaml` supplies a literal
+> `images.tag`; an explicit flag wins. Missing/templated defaults require an explicit artifact
+> name, host-local values do not choose it, and existing path validation still applies. Both
+> ordinary and fleet bakes are covered. The runbook follows sealed-run transfer (full, compressed
+> copy, or in-place rewrite), reconstruction, image restoration, code swaps, bag-session selection,
+> and replay into target instances. It covers camera files and `--copy-run`, recorded-image limits,
+> service-call replay, and the distinction between service keys and instance names. The camera
+> replay diagnostic now recommends `swap` with the service key. Four new regression tests.
 > **v0.2.53 (2026-09-07) — the replay session's teardown, and old runs for replay.** Review
 > finding 4: `runs.running_projects` now counts EVERY declared row (a replay starts the disabled
 > player and source rows by explicit name; the seal/rotation guard sealed the run under a running

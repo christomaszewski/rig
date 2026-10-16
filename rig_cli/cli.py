@@ -587,16 +587,32 @@ def cmd_build(args, root: Path) -> int:
 
 
 def cmd_bake(args, root: Path) -> int:
+    tag = args.tag
+    if tag is None:
+        from .common import load_yaml
+        from .interpolate import referenced_vars
+
+        # Artifact naming comes from the deployment file, even for a fleet bake: do not
+        # resolve vehicle-local identity or shell variables just to choose its filename.
+        images = load_yaml(root / "vehicle.yaml").get("images") or {}
+        value = images.get("tag") if isinstance(images, dict) else None
+        if (isinstance(value, bool) or not isinstance(value, (str, int, float))
+                or not str(value).strip()):
+            raise RigError("bake: pass --tag or set images.tag in vehicle.yaml")
+        tag = str(value)
+        if referenced_vars(tag):
+            raise RigError("bake: images.tag in vehicle.yaml is templated — pass --tag to name "
+                           "the artifact without resolving per-vehicle values")
     # Fleet-ness is a property of the deployment, not a flag: {{var}} references anywhere mean
     # bake stages the UNRESOLVED tree (a mandatory-marker deployment can't even load resolved
     # here — bake never reads vehicle.local.yaml/shell vars by design).
     if bake_mod.is_fleet(root):
-        bake_mod.bake_fleet(root, args.tag, registry=args.registry,
+        bake_mod.bake_fleet(root, tag, registry=args.registry,
                             bundle_images=args.bundle_images)
         return 0
     manifest, catalog, descriptors = _load(root)
     env = dispatch.fleet_env(manifest, descriptors)
-    bake_mod.bake(root, manifest, catalog, descriptors, env, args.tag, registry=args.registry,
+    bake_mod.bake(root, manifest, catalog, descriptors, env, tag, registry=args.registry,
                   bundle_images=args.bundle_images)
     return 0
 
@@ -1104,7 +1120,8 @@ def build_parser() -> argparse.ArgumentParser:
     bld.add_argument("--dry-run", action="store_true")
 
     bk = sub.add_parser("bake", help="freeze the deployment into a tagged, content-addressed artifact")
-    bk.add_argument("--tag", required=True, help="artifact tag (names the .tar.gz)")
+    bk.add_argument("--tag", default=None,
+                    help="artifact tag (names the .tar.gz; default: literal images.tag in vehicle.yaml)")
     bk.add_argument("--registry", default=None,
                     help="registry the vehicle pulls from (overrides vehicle.yaml images.registry); "
                          "images are digest-pinned against it")

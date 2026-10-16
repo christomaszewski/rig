@@ -109,6 +109,34 @@ def test_fleet_bake_stages_unresolved_and_flags_reject():
         assert rc == 1 and "per-vehicle" in err
 
 
+def test_fleet_bake_default_tag_needs_no_vehicle_identity():
+    root = _fleet_deployment()
+    vehicle = root / "vehicle.yaml"
+    vehicle.write_text(vehicle.read_text() + "images: {tag: fleet-release}\n")
+    (root / "vehicle.local.yaml").write_text("images: {tag: local-only}\n")
+    with _env(RIG_VAR_image_tag="shell-only"):
+        rc, _, err = _run("--root", str(root), "artifact", "bake")
+    assert rc == 0, err
+    assert (root / "var" / "artifacts" / "fleet-release.tar.gz").is_file()
+    staged = yaml.safe_load((root / "var" / "bake" / "fleet-release" / "vehicle.yaml").read_text())
+    assert staged["vehicle_id"] == "{{vehicle_id}}"
+    assert staged["images"]["tag"] == "fleet-release"
+
+
+def test_fleet_bake_templated_tag_requires_explicit_artifact_name():
+    root = _fleet_deployment()
+    vehicle = root / "vehicle.yaml"
+    vehicle.write_text(vehicle.read_text() + 'images: {tag: "{{image_tag}}"}\n')
+    with _env(RIG_VAR_image_tag="shell-only"):
+        rc, _, err = _run("--root", str(root), "bake")
+        assert rc == 1 and "templated" in err and "--tag" in err, err
+        assert not (root / "var" / "bake").exists()
+        rc, _, err = _run("--root", str(root), "bake", "--tag", "snapshot")
+    assert rc == 0, err
+    staged = root / "var" / "bake" / "snapshot" / "vehicle.yaml"
+    assert yaml.safe_load(staged.read_text())["images"]["tag"] == "{{image_tag}}"
+
+
 def _map_deployment() -> pathlib.Path:
     """A deployment whose ONLY templating is the {{map …}} form — the fleet-detection blind spot
     (MARKER alone does not match it)."""

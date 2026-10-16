@@ -202,8 +202,13 @@ rig build --no-cache                        # full rebuild: RIG_BUILD_NO_CACHE=1
 rig image audit                             # inspect what the stacks will RUN: one ROS distro, the
                                             #   declared rmw installed, ros-* versions agree across images
 rig bake --tag v1                           # -> var/artifacts/v1.tar.gz (auto-vendored + digest-pinned)
+# rig bake                                 # same when vehicle.yaml has images.tag: v1
 scp var/artifacts/v1.tar.gz vehicle:~/      # on the vehicle: `tar xzf v1.tar.gz && cd v1 && ./run.sh up`
 ```
+
+`--tag` overrides the artifact name; when omitted, it defaults to the literal `images.tag` in
+`vehicle.yaml`. A missing or templated image tag still needs `--tag`; host-local overrides do
+not choose the artifact name. This does not change the images' tags.
 
 The artifact bundles the resolved configs + vendored surfaces + rig + a **compose-only** form that runs on
 just Docker (graceful fallback when Python/PyYAML are absent). `--bundle-images` additionally docker-saves

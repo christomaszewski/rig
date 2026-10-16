@@ -129,7 +129,7 @@ def discover_sources(manifest, descriptors, src_dir: Path, *, live: set[str] = f
             if rec.is_dir() and any(rec.iterdir()):
                 notes.append(f"{row.name}: the source run holds its recordings (recordings/{row.name}) "
                              f"but {row.service}'s rigging declares no replay.source — this tree's "
-                             f"{row.service} predates replay; `rig swap {row.name} <a current "
+                             f"{row.service} predates replay; `rig swap {row.service} <a current "
                              f"{row.service} checkout>` and replay again")
             continue
         rel = rs.data_path(row.name)

@@ -391,9 +391,13 @@ a base rebuild — that single point of update is the point. Audit reports any r
 
 ```bash
 rig bake --tag v1                             # -> var/artifacts/v1.tar.gz  (sha256 printed)
+# rig bake                                   # same if vehicle.yaml has literal images.tag: v1
 rig bake --tag v1 --bundle-images             # + docker-saves the image set INTO the artifact (multi-GB):
                                               #   zero registry at deploy time; up.sh self-loads on first run
 ```
+
+An explicit `--tag` wins; otherwise the artifact name comes from literal `images.tag` in
+`vehicle.yaml`, not host-local overrides. Missing or templated tags require `--tag`.
 
 The artifact = resolved configs + complete vehicle.yaml + vendored launch surfaces + rig + a **compose-only**
 form (build-stripped; built images digest-pinned, mirrored images by tag). It runs on bare Docker.
