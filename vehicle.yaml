@@ -28,11 +28,13 @@ images:
                                #   (it must contain the ros.distro + ros.rmw declared above — `rig image
                                #   audit` checks).
 
-# THIS host's hardware/OS target (e.g. jp7 = JetPack 7 userspace) -> RIG_TARGET_PLATFORM. Services that
+# Deployment runtime (e.g. jp7 = JetPack 7 userspace) -> RIG_TARGET_PLATFORM. Services that
 # declare a build matrix (rigging.yaml build.platforms) pull <image>:<tag>-<platform> and get their
 # declared override env (e.g. CAM_PLATFORM) set to it — declared beats the launcher's host auto-detect.
-# A per-host fact: /etc/rig/vehicle.local.yaml may carry it (sudo rig provision --platform jp7).
+# Local execution may override it via /etc/rig/vehicle.local.yaml (rig provision --platform jp7).
+# Bake ignores local overrides; --platform / --arch override this deployment target explicitly.
 platform: ""                   # e.g. jp7; empty = platform-independent deployment (or legacy tag above)
+# arch: arm64                  # optional; infer only from a single common service CPU, never the builder
 
 # Host dir for recordings/logs/outputs, exported as RIG_DATA_DIR; stacks write under it (an absolute host
 # path, so bake leaves it literal instead of relativizing outputs into the artifact). e.g. /data

@@ -206,6 +206,27 @@ def _external_volume_names(compose: dict) -> set[str]:
 
 # --- the check suite ---------------------------------------------------------------------------------
 
+def check_image_overrides(desc: Descriptor, config: Path, env: dict[str, str], compose: dict):
+    """Exercise the digest channel used by the build catalog against actual rendered images."""
+    pins = {image: f"{POISON_REGISTRY}/{image}@sha256:{'a' * 64}" for image in desc.image_env}
+    expected = {name: pins[_ref_parts(ref)[0]] for name, ref in _service_images(compose).items()
+                if _ref_parts(ref)[0] in pins}
+    if not expected:
+        return []
+    pinned_env = dict(env, **{desc.image_env[image]: ref for image, ref in pins.items()})
+    result = _run_launcher(desc, config, desc.verb_args("config"), pinned_env)
+    try:
+        rendered = yaml.safe_load(result.stdout)
+    except yaml.YAMLError:
+        rendered = None
+    if result.returncode or not isinstance(rendered, dict) or not rendered.get('services'):
+        return [Check(ERROR, 'image-overrides', 'config failed with declared image digest overrides')]
+    actual = _service_images(rendered)
+    missing = [name for name, ref in expected.items() if actual.get(name) != ref]
+    return [Check(ERROR, 'image-overrides', f'declared image overrides ignored by: {", ".join(missing)}')] \
+        if missing else [Check(OK, 'image-overrides')]
+
+
 def certify_target(desc: Descriptor, config_path: Path, base_env: dict[str, str],
                    *, emit: Path | None = None) -> list[Check]:
     """Run the conformance suite against one launcher + one config. Returns the per-check results."""
@@ -286,6 +307,7 @@ def certify_target(desc: Descriptor, config_path: Path, base_env: dict[str, str]
                         f"{composed} — `rig build` pushes what the compose won't find: {mistagged}")
         elif desc.build_images:
             ok("tag")
+        checks.extend(check_image_overrides(desc, cfg_a, env_a, compose))
 
         # ros-env: a ROS service must pass the fleet DDS/zenoh graph env into its containers — but WHICH
         # containers run ROS nodes is the config's business (a plugin-less camera runs none; ros1 has no
@@ -444,6 +466,8 @@ def certify_target(desc: Descriptor, config_path: Path, base_env: dict[str, str]
                     plat_fail = True
                     fail("platform", f"platform '{alt}': `config` stdout is not a compose document")
                     continue
+                checks.extend(check_image_overrides(desc, cfg_a,
+                              _poison_env(base_env, NAME_A, desc, alt), compose_p))
                 bad = _mistagged(compose_p, desc, f"{POISON_TAG}-{alt}")
                 if bad:
                     plat_fail = True

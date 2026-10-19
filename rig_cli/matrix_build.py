@@ -32,19 +32,26 @@ class Task:
     narrowed: bool = False
 
 
-def plan(manifest, descriptors, *, registry, tag, platform=None, arch=None, root=None, base=None):
+def plan(manifest, descriptors, *, registry, tag, platform=None, arch=None, root=None, base=None,
+         scopes=None, selections=None):
     from .build import (_resolve_build_cwd, _script_identity, _service_tag,
                         resolve_base_image, resolve_msgs_image)
     if arch and arch not in ('arm64', 'amd64'):
         raise RigError('--arch must be arm64 or amd64')
     used = {s.service for s in manifest.sensors}
     descriptors = {s: d for s, d in descriptors.items() if s in used}
+    from .targets import build_selections, parse_scopes
+    scopes = parse_scopes(scopes)
+    if scopes != ["all"] and selections is None:
+        selections, notes = build_selections(manifest, descriptors, scopes, platform=platform, arch=arch)
+        for note in notes:
+            eprint(f"target {note}")
     version = tag or manifest.image_tag
     _, base_origin, error = resolve_base_image(manifest, descriptors, registry=registry,
                                                    tag=version, platform=platform, base=base)
     if error:
         raise RigError(error)
-    if platform and any(d.build_platforms for d in descriptors.values()):
+    if selections is None and platform and any(d.build_platforms for d in descriptors.values()):
         for d in descriptors.values():
             if d.build_platforms and platform not in d.build_platforms:
                 raise RigError(f'{d.service}: runtime {platform!r} is not in {d.build_platforms}')
@@ -57,6 +64,8 @@ def plan(manifest, descriptors, *, registry, tag, platform=None, arch=None, root
     producers = {}
     base_outputs = {d.build_images[0] for d in descriptors.values() if d.build_provides == 'base'}
     for service, desc in descriptors.items():
+        if selections is not None and service not in selections:
+            continue
         if not desc.build_command:
             continue
         cwd, note = _resolve_build_cwd(service, desc, root)
@@ -64,13 +73,16 @@ def plan(manifest, descriptors, *, registry, tag, platform=None, arch=None, root
             raise RigError(f'{service}: {note}')
         if note:
             eprint(f'{service}: {note}')
-        for variant in ([platform] if platform and desc.build_platforms else desc.build_platforms or [None]):
+        variants = (selections[service] if selections is not None else
+                    [platform] if platform and desc.build_platforms else desc.build_platforms or [None])
+        for variant in variants:
             supported, images = variant_spec(desc, variant)
             if not supported or not desc.build_multiarch:
                 raise RigError(f'{service}: declare build.architectures and capabilities.platforms '
                                'before building a portable release (update the pinned service)')
-            selected = [arch] if arch else list(supported)
-            if not variant and platform and required and not arch:
+            selected = (sorted(selections[service][variant]) if selections is not None else
+                        [arch] if arch else list(supported))
+            if selections is None and not variant and platform and required and not arch:
                 selected = sorted(required)
             if set(selected) - set(supported):
                 raise RigError(f'{service}/{variant or "generic"}: unsupported architecture(s) '
@@ -177,14 +189,24 @@ def preflight(tasks, registry):
 
 
 def run(manifest, descriptors, *, registry, tag, dry_run, jobs=1, root=None,
-        platform=None, arch=None, no_cache=False, base_image=None):
+        platform=None, arch=None, no_cache=False, base_image=None, scopes=None):
     from .build import _build_cmd, _build_env, msgs_union
     from .lock import load_lock, save_lock
     reg = registry or manifest.image_registry
     if not reg:
         raise RigError('matrix build needs --registry or images.registry')
+    from .targets import build_selections, parse_scopes
+    scopes = parse_scopes(scopes)
+    selections = None
+    if scopes != ["all"]:
+        used = {s.service for s in manifest.sensors}
+        selections, notes = build_selections(manifest, {s: d for s, d in descriptors.items() if s in used},
+                                            scopes, platform=platform, arch=arch)
+        for note in notes:
+            eprint(f"target {note}")
+    complete = scopes == ["all"] and platform is None and arch is None
     tasks = plan(manifest, descriptors, registry=reg, tag=tag, platform=platform,
-                 arch=arch, root=root, base=base_image)
+                 arch=arch, root=root, base=base_image, scopes=scopes, selections=selections)
     for task in tasks:
         if no_cache and task.desc.build_no_cache is not True:
             raise RigError(f'{task.service} ({task.cwd}): no declared no-cache capability; update its build contract '
@@ -268,7 +290,8 @@ def run(manifest, descriptors, *, registry, tag, dry_run, jobs=1, root=None,
                     results.extend(rows)
             for row in results:
                 completed_refs[row['ref']] = row['ref'].rsplit(':', 1)[0] + '@' + row['digest']
-    mirrors = {image for d in descriptors.values() for image in d.mirror}
+    mirrors = {image for name, d in descriptors.items() if selections is None or name in selections
+               for image in d.mirror}
     for image in sorted(mirrors):
         # Preserve all architectures, unlike pull/tag/push through a host-local image store.
         proc = subprocess.run(['docker', 'buildx', 'imagetools', 'create', '-t', f'{reg}/{image}', image])
@@ -285,10 +308,10 @@ def run(manifest, descriptors, *, registry, tag, dry_run, jobs=1, root=None,
                     del catalog[old]
             catalog[row['ref']] = row
         lock['last_build'] = dict(tag=tag or manifest.image_tag or 'latest',
-                                  complete=platform is None and arch is None,
+                                  complete=complete, scopes=scopes,
                                   platform=platform, architecture=arch,
                                   outputs=[r['ref'] for r in results])
         save_lock(root, lock)
     eprint(f'rig build: published and verified {len(results)} images; '
-           f'{"complete matrix" if platform is None and arch is None else "targeted build"}')
+           f'{"complete matrix" if complete else "targeted build"}')
     return 0

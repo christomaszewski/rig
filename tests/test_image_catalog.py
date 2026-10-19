@@ -68,13 +68,13 @@ replay: {platform: dev}
         with self.assertRaisesRegex(RigError, 'missing companion image mirror:5000/dev:v1-dev'):
             catalog.validate_replay(self.m, {'camera': self.desc}, dry_run=True)
 
-    def test_bake_keeps_index_digest_and_refuses_an_incomplete_offline_bundle(self):
+    def test_bake_keeps_index_digest_and_requires_a_bundle_target(self):
         from rig_cli import bake
         ref = 'registry/dev@' + DIGEST
         with patch.object(bake.subprocess, 'run') as run:
             self.assertEqual(bake._resolve_digest(ref), ref)
             run.assert_not_called()
-        with self.assertRaisesRegex(RigError, 'companion indexes'):
+        with self.assertRaisesRegex(RigError, 'architecture is unknown'):
             bake.bake(self.root, self.m, {}, {}, {}, 'test', bundle_images=True)
 
     def test_localize_prefers_host_then_software_mapping_and_preserves_recorded_choice(self):
@@ -90,7 +90,9 @@ replay: {platform: dev}
                     patch.object(catalog, 'docker_arch', return_value='amd64'):
                 catalog.localize(self.root, local, requested)
             self.assertEqual(local['platform'], expected)
+            self.assertNotIn('arch', local)  # legacy embedded Rig may not accept this local key
             lock = load_lock(self.root)
+            self.assertEqual(lock['replay_execution']['architecture'], 'amd64')
             self.assertEqual(lock['replay_execution']['source_platform'], 'jp6m')
             self.assertEqual(lock['build_catalog'], self.m.build_catalog)
             self.assertEqual(lock['images'], {'original:5000/core:v1-jp6m': DIGEST})

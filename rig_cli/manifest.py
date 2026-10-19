@@ -26,7 +26,7 @@ from .interpolate import MAP, MARKER, resolve_map, substitute_scalar
 MACHINE_LOCAL_DEFAULT = "/etc/rig/vehicle.local.yaml"
 # The only keys a vehicle-local file may carry: the per-host knobs that genuinely vary across a
 # fleet. Never sensor rows — a local file silently flipping stacks makes fleet debugging miserable.
-LOCAL_KEYS = {"vehicle", "vehicle_id", "vars", "env", "data_dir", "images", "platform",
+LOCAL_KEYS = {"vehicle", "vehicle_id", "vars", "env", "data_dir", "images", "platform", "arch",
               "run_capture", "replay"}
 # rig's SIL companion service (rig-infra's ros2-bag-player): the one service rig knows by NAME —
 # replay selects its row by service, the graph check exempts it from interface declarations.
@@ -34,7 +34,7 @@ PLAYER_SERVICE = "ros2-bag-player"
 # Env keys rig owns end-to-end (fleet_env sets them; an `env:` map may not shadow them).
 RIG_OWNED_ENV = {"RIG_BUILD_PLATFORMS", "RIG_BUILD_RESULT", "RIG_BUILD_PULL", "RIG_IMAGE_PINS",
                  "VEHICLE_ID", "ROS_DOMAIN_ID", "RMW_IMPLEMENTATION", "RIG_IMAGE_REGISTRY",
-                 "RIG_IMAGE_TAG", "RIG_TARGET_PLATFORM", "RIG_DATA_DIR", "COMPOSE_PROJECT_NAME",
+                 "RIG_IMAGE_TAG", "RIG_TARGET_PLATFORM", "RIG_TARGET_ARCH", "RIG_DATA_DIR", "COMPOSE_PROJECT_NAME",
                  "RIG_BASE_IMAGE", "RIG_BUILD_NO_CACHE", "RIG_ROS_RMW", "RIG_MSGS_IMAGE",
                  "RIG_MSGS_MANIFEST",
                  # the SIL replay channel (replay.py sets them; every other verb POPS them — a
@@ -108,6 +108,8 @@ class Manifest:
     replay_policy: dict = field(default_factory=dict)
     build_catalog: dict = field(default_factory=dict)
     replay_execution: dict = field(default_factory=dict)
+    context: str = "execution"  # deployment planning never reads host/workspace/shell overrides
+    arch: str | None = None
     missing_identity: tuple = ()  # mandatory per-vehicle keys nothing provides — loading stays
     #                               LAZY so management verbs (pkg list/remove/…) work on any box;
     #                               identity-CONSUMING commands (up/render/…) enforce via require_identity
@@ -378,23 +380,32 @@ def _derive_domain(vehicle_id, ros_raw: dict) -> int:
     return 0
 
 
-def load_manifest(root: Path) -> Manifest:
+def load_manifest(root: Path, *, context: str = "execution", target_overrides: dict | None = None) -> Manifest:
+    if context not in ("execution", "deployment"):
+        raise ValueError(f"unknown manifest context: {context}")
     data = load_yaml(root / "vehicle.yaml")
+    # Explicit target arguments participate before interpolation, so dependent vars/env agree.
+    if target_overrides:
+        if set(target_overrides) - {"platform", "arch"}:
+            raise ValueError("target overrides accept only platform and arch")
+        data.update({key: value for key, value in target_overrides.items() if value is not None})
 
     # --- vehicle-local sources & {{var}} resolution (load-time pass) --------------------------
     # Precedence, most-specific-wins: shell > deployment-local > machine (/etc/rig) >
     # fleet.yaml (the FLEET tempo tier — pushed by `rig fleet up`, persists across reboots) >
     # vehicle.yaml. A self-referencing vehicle.yaml field ("{{vehicle_id}}") is MANDATORY.
-    sources = [_shell_source()] + _local_sources(root)
-    if (root / "fleet.yaml").is_file():
+    sources = [_shell_source()] + _local_sources(root) if context == "execution" else []
+    if context == "execution" and (root / "fleet.yaml").is_file():
         from .fleet import vars_source
         sources.append(vars_source(root / "fleet.yaml"))
     eff_vehicle = _effective("vehicle", sources, data.get("vehicle"))
     eff_id = _effective("vehicle_id", sources, data.get("vehicle_id"))
     eff_data_dir = _effective("data_dir", sources, data.get("data_dir"))
     eff_platform = _effective("platform", sources, data.get("platform"))
+    eff_arch = _effective("arch", sources, data.get("arch"))
     missing = tuple(key for key, eff in (("vehicle", eff_vehicle), ("vehicle_id", eff_id),
-                                         ("data_dir", eff_data_dir), ("platform", eff_platform))
+                                         ("data_dir", eff_data_dir), ("platform", eff_platform),
+                                         ("arch", eff_arch))
                     if _missing_mandatory(key, eff, data.get(key)))
 
     merged_vars: dict = {}
@@ -411,7 +422,10 @@ def load_manifest(root: Path) -> Manifest:
         raw_ctx["vehicle"] = eff_vehicle
     if eff_id is not None:
         raw_ctx["vehicle_id"] = eff_id
-    ctx = resolve_map(raw_ctx, where="vars")  # vars may reference identity/other vars; cycles error
+    for key, value in (("platform", eff_platform), ("arch", eff_arch)):
+        if value is not None:
+            raw_ctx[key] = value
+    ctx = resolve_map(raw_ctx, where="vars", allow_unresolved=context == "deployment")
 
     vehicle = str(ctx.get("vehicle", "vehicle"))
     vehicle_id = ctx.get("vehicle_id")
@@ -446,7 +460,11 @@ def load_manifest(root: Path) -> Manifest:
                            f"manifest fields and env: values take plain {{{{var}}}} markers")
         if isinstance(value, str) and MARKER.search(value):
             try:
-                return substitute_scalar(value, ctx, where=label)
+                result = substitute_scalar(value, ctx, where=label)
+                if isinstance(result, str) and MARKER.search(result):
+                    unresolved.append(label)
+                    return None
+                return result
             except RigError:
                 unresolved.append(label)
                 return None
@@ -461,7 +479,7 @@ def load_manifest(root: Path) -> Manifest:
     # workspace, a bench experiment), the shared registry stays visible READ-THROUGH
     # (lookup/list/TAB), so a run imported into it is found from every deployment on the box —
     # never the reverse. Same dir = no layering.
-    host_data_dir = host_registry_dir()
+    host_data_dir = host_registry_dir() if context == "execution" else None
     if host_data_dir and MARKER.search(host_data_dir):
         try:
             host_data_dir = str(substitute_scalar(host_data_dir, ctx, where="host data_dir"))
@@ -477,6 +495,12 @@ def load_manifest(root: Path) -> Manifest:
     platform = (str(eff_platform or "").strip()) or None
     if platform is not None:
         ctx["platform"] = platform
+    arch = _lazy(eff_arch, "arch")
+    if arch not in (None, "", "arm64", "amd64"):
+        raise RigError("arch must be arm64 or amd64")
+    arch = arch or None
+    if arch:
+        ctx["arch"] = arch
 
     base_images = data.get("images") or {}
     eff_images = {}
@@ -515,9 +539,9 @@ def load_manifest(root: Path) -> Manifest:
     # partition must already hold here for up.sh line order (autonomy last) and down.sh (reversed).
     from .lock import load_lock
     lock = load_lock(root)
-    return Manifest(vehicle=vehicle, ros=ros,
+    return Manifest(vehicle=vehicle, ros=ros, context=context, arch=arch,
                     build_catalog=lock.get('build_catalog', {}),
-                    replay_execution=lock.get('replay_execution', {}),
+                    replay_execution=lock.get('replay_execution', {}) if context == "execution" else {},
                     sensors=infra + sensors + autonomy,
                     image_registry=eff_images["registry"], vehicle_id=vehicle_id,
                     image_tag=eff_images["tag"], image_base=eff_images["base"], platform=platform,

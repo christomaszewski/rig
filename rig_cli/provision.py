@@ -78,10 +78,11 @@ def _show(root: Path | None) -> int:
 
 def provision(root: Path | None, *, vehicle_id: str | None, name: str | None,
               set_vars: list[str], platform: str | None = None,
+              arch: str | None = None,
               data_dir: str | None = None, registry: str | None = None, force: bool,
               migrate: bool = False, keep_old: bool = False) -> int:
     if vehicle_id is None and name is None and not set_vars and platform is None \
-            and data_dir is None and registry is None and not migrate:
+            and arch is None and data_dir is None and registry is None and not migrate:
         return _show(root)
 
     target = _target()
@@ -122,6 +123,10 @@ def provision(root: Path | None, *, vehicle_id: str | None, name: str | None,
             raise RigError(f"provision: --platform must be a valid image-tag fragment "
                            f"([A-Za-z0-9][A-Za-z0-9._-]*), got '{platform}'")
         data["platform"] = platform
+    if arch is not None:
+        if arch not in ("arm64", "amd64"):
+            raise RigError("provision: --arch must be arm64 or amd64")
+        data["arch"] = arch
     if data_dir is not None:  # the run registry's home — a HOST fact like platform (runs.py's
         #                       absolute-path rule: a relative path would fork the registry per
         #                       working directory). Registry creation itself stays LAZY: the
@@ -154,6 +159,7 @@ def provision(root: Path | None, *, vehicle_id: str | None, name: str | None,
     eprint(f"rig provision: {target} written — vehicle "
            f"'{data.get('vehicle', '?')}' id {data.get('vehicle_id', '?')}"
            + (f", platform {data['platform']}" if data.get("platform") else "")
+           + (f", arch {data['arch']}" if data.get("arch") else "")
            + (f", data_dir {data['data_dir']}" if data.get("data_dir") else "")
            + (f", registry {data['images']['registry']}"
               if (data.get("images") or {}).get("registry") else "")

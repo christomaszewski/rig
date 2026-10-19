@@ -1,4 +1,6 @@
 """Mutant build scripts must fail certification; unavailable containment must never pass."""
+import hashlib
+import json
 import os
 from pathlib import Path
 import shutil
@@ -73,6 +75,29 @@ else:
         self.assertTrue(probe.check_commands(good, {'a', 'b'}, False))
         self.assertTrue(probe.check_commands(good, {'a', 'b'}, True, 'linux/arm64,linux/amd64'))
 
+    def test_portable_build_requires_publication_and_exact_platform_selection(self):
+        good = ['buildx', 'build', '--push', '--platform', 'linux/arm64,linux/amd64', '-t', 'a', '.']
+        check = lambda command: probe.check_commands([command], {'a'}, False, 'linux/arm64,linux/amd64')
+        self.assertEqual(check(good), [])
+        for command in (good[:2] + good[3:], [v if v != '--push' else '--load' for v in good],
+                        good + ['--platform', 'linux/arm64'], ['build'] + good[2:]):
+            self.assertTrue(check(command))
+
+    def test_results_must_match_each_published_output(self):
+        with tempfile.TemporaryDirectory() as folder:
+            report = Path(folder) / 'result.jsonl'
+            rows = [{'ref': ref, 'digest': 'sha256:' + hashlib.sha256(ref.encode()).hexdigest()}
+                    for ref in ('a', 'b')]
+            self.assertTrue(probe.check_results(report, {'a', 'b'}))
+            for bad in ('not json', '{}', '[]', '', json.dumps(rows[0]),
+                        '\n'.join(json.dumps(rows[0]) for _ in range(2)),
+                        '\n'.join(json.dumps(dict(row, digest='sha256:' + 'f'*64)) for row in rows),
+                        json.dumps({'ref': [], 'digest': 'bad'})):
+                report.write_text(bad)
+                self.assertTrue(probe.check_results(report, {'a', 'b'}), bad)
+            report.write_text('\n'.join(json.dumps(row) for row in rows) + '\n')
+            self.assertEqual(probe.check_results(report, {'a', 'b'}), [])
+
     def test_script_matrix_capture_uses_clean_environment(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
@@ -104,6 +129,16 @@ rig_build "$1/b:$2" .
                 self.assertEqual(check.level, 'ERROR')
                 self.assertIn('missing --no-cache', check.detail)
                 self.assertIn('certify.invalid/b:certify', check.detail)
+                script.write_text('''#!/bin/sh
+set -eu
+. ./helper.sh
+unset RIG_BUILD_RESULT
+rig_build "$1/a:$2" .
+rig_build "$1/b:$2" .
+''')
+                check = probe.certify_build(desc)[0]
+                self.assertEqual(check.level, 'ERROR')
+                self.assertIn('RIG_BUILD_RESULT', check.detail)
             with patch.object(probe, 'sandbox_command', return_value=None):
                 check = probe.certify_build(desc)[0]
                 self.assertEqual(check.level, 'WARN')

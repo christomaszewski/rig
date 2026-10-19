@@ -160,7 +160,7 @@ def _resolve_digest(ref: str, *, local_only: bool = False) -> str | None:
     return None
 
 
-def _bundle_images(staging: Path, refs: list[str]) -> dict:
+def _bundle_images(staging: Path, refs: list[str], *, arch: str | None = None) -> dict:
     """``docker save`` the resolved image set into staging/images.tar (one multi-ref save, so shared base
     layers are stored once). Missing images are pulled first; still-missing is a HARD error — a silently
     incomplete bundle would betray the air-gap promise. Returns the metadata block."""
@@ -175,18 +175,32 @@ def _bundle_images(staging: Path, refs: list[str]) -> dict:
     if still:
         raise RigError(f"bake --bundle-images: not in the local store and not pullable: {still} "
                        f"(run `rig build` / `rig pull` first, or check the registry)")
+
+    def image_ids() -> dict[str, str]:
+        ids = {}
+        for ref in refs:
+            p = subprocess.run(["docker", "image", "inspect", "--format", "{{.Id}}", ref],
+                               capture_output=True, text=True)
+            image_id = p.stdout.strip()
+            if p.returncode or not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id):
+                raise RigError(f"bake --bundle-images: cannot determine image ID for {ref}")
+            ids[ref] = image_id
+        return ids
+
+    ids = image_ids()
     tar = staging / "images.tar"
     eprint(f"  bundle: docker save {len(refs)} image(s) -> images.tar (can take minutes)")
-    proc = subprocess.run(["docker", "save", "-o", str(tar), *refs], capture_output=True, text=True)
+    selection = ["--platform", "linux/" + arch] if arch else []
+    proc = subprocess.run(["docker", "save", *selection, "-o", str(tar), *refs], capture_output=True, text=True)
     if proc.returncode != 0 or not tar.exists():
         raise RigError(f"bake --bundle-images: docker save failed: {(proc.stderr or '').strip()[:200]}")
-    ids = {}
-    for ref in refs:
-        p = subprocess.run(["docker", "image", "inspect", "--format", "{{.Id}}", ref],
-                           capture_output=True, text=True)
-        if p.returncode == 0:
-            ids[ref] = p.stdout.strip()
-    return {"file": "images.tar", "size_bytes": tar.stat().st_size, "image_ids": ids}
+    # Refuse a tag moving during the save: startup must check the identities we captured,
+    # never record a different image merely because it now occupies the same tag.
+    if image_ids() != ids:
+        raise RigError("bake --bundle-images: image IDs changed during docker save; retry with stable tags")
+    from .image_archive import archive_identities
+    identities = archive_identities(tar, ids, arch)
+    return {"file": "images.tar", "size_bytes": tar.stat().st_size, "image_ids": ids, **identities}
 
 
 # --- bake -------------------------------------------------------------------------------------------
@@ -199,19 +213,60 @@ def _sha256(path: Path) -> str:
     return h.hexdigest()
 
 
-def _load_guard(refs: list[str]) -> list[str]:
-    """sh block: load the bundled images.tar iff any bundled ref is absent from the local store —
-    so the first `up` on an air-gapped vehicle self-loads, and every later run skips the (slow) load."""
-    quoted = " ".join(shlex.quote(r) for r in refs)
+def _load_guard(image_ids: dict[str, str], *, accepted_ids: dict[str, list[str]] | None = None,
+                force: bool = False) -> list[str]:
+    """Load missing OR different images, then verify every identity before starting anything.
+
+    Docker stores report either config or OCI digests. Accept only identities verified
+    from this archive; mutable tags and registry digest restoration are insufficient.
+    """
+    lines = ["bundle_images_match() {"]
+    for ref, image_id in sorted(image_ids.items()):
+        identities = (accepted_ids or {}).get(ref, [image_id])
+        pattern = "|".join(shlex.quote(value) for value in identities)
+        lines += [
+            f"  actual=$(docker image inspect --format '{{{{.Id}}}}' {shlex.quote(ref)} 2>/dev/null) || actual=",
+            f'  case "$actual" in {pattern}) ;; *)',
+            f"    echo {shlex.quote(f'bundle: {ref}: expected {image_id} (verified archive identity), got ')}\"${{actual:-missing}}\" >&2",
+            "    return 1",
+            "  esac",
+        ]
+    lines += ["  return 0", "}"]
+    if force:
+        lines.append("docker load -i ./images.tar")
+    else:
+        lines += [
+            "if ! bundle_images_match >/dev/null 2>&1; then",
+            '  [ -f ./images.tar ] || { echo "bundle: images differ or are missing, but images.tar is absent" >&2; exit 1; }',
+            '  echo "loading bundled images (missing or different image IDs) ..." >&2',
+            "  docker load -i ./images.tar",
+            "fi",
+        ]
+    return lines + ["bundle_images_match"]
+
+
+def _target_guard(target: dict | None) -> list[str]:
+    if not target or not target.get("arch"):
+        return []
+    expected = shlex.quote("linux/" + target["arch"])
     return [
-        "if [ -f ./images.tar ]; then",
-        "  need=0",
-        f"  for img in {quoted}; do",
-        '    docker image inspect "$img" >/dev/null 2>&1 || { need=1; break; }',
-        "  done",
-        '  [ "$need" = 1 ] && { echo "loading bundled images (one-time) ..." >&2; docker load -i ./images.tar; }',
+        "actual=$(docker info --format '{{.OSType}}/{{.Architecture}}')",
+        'case "$actual" in linux/aarch64) actual=linux/arm64 ;; linux/x86_64) actual=linux/amd64 ;; esac',
+        f'[ "$actual" = {expected} ] || {{ echo "artifact requires {expected}; Docker engine is $actual" >&2; exit 1; }}',
+        "if command -v python3 >/dev/null 2>&1 && python3 -c 'import yaml' >/dev/null 2>&1; then",
+        "  python3 -c 'from pathlib import Path; from rig_cli.artifact_runtime import check_target; check_target(Path.cwd(), check_arch=False)'",
         "fi",
     ]
+
+
+def _write_bundle_guard(staging: Path, bundle: dict) -> None:
+    for filename, force in (("ensure-images.sh", False), ("load.sh", True)):
+        script = staging / filename
+        lines = ["#!/usr/bin/env sh", "set -e", 'cd "$(dirname "$0")"',
+                 *_target_guard(bundle.get("target")),
+                 *_load_guard(bundle["image_ids"], accepted_ids=bundle.get("accepted_ids"), force=force)]
+        script.write_text("\n".join(lines) + "\n")
+        script.chmod(0o755)
 
 
 def _manifest_echo_lines(ctx: dict, indent: str = "  ") -> list[str]:
@@ -359,18 +414,21 @@ def _cleanup_script(entries: list[dict], refs: list[str]) -> list[str]:
     return lines
 
 
-def _write_scripts(staging: Path, entries: list[dict], *, bundle_refs: list[str] | None = None,
+def _write_scripts(staging: Path, entries: list[dict], *, bundle_ids: dict[str, str] | None = None,
+                   bundle_accepted_ids: dict[str, list[str]] | None = None,
                    run_ctx: dict | None = None, aliases: dict[str, str] | None = None,
-                   cleanup_refs: list[str] | None = None) -> None:
+                   cleanup_refs: list[str] | None = None, target: dict | None = None) -> None:
     up = ["#!/usr/bin/env sh", "set -e", "cd \"$(dirname \"$0\")\""]
+    up += _target_guard(target)
     if run_ctx:
         up += _run_ensure_guard(run_ctx)
-    if bundle_refs:
-        up += _load_guard(bundle_refs)
+    if bundle_ids:
+        up += _load_guard(bundle_ids, accepted_ids=bundle_accepted_ids)
     for e in entries:
         for vol in e["external_volumes"]:
             up.append(f'docker volume create "{vol}" >/dev/null')
-        up.append(f'docker compose -p "{e["project"]}" -f "{e["compose"]}" up -d')
+        pull_policy = " --pull never" if bundle_ids else ""
+        up.append(f'docker compose -p "{e["project"]}" -f "{e["compose"]}" up -d{pull_policy}')
     if aliases:  # after up: everything referenced is now local — leave the namespace unified
         up += _alias_lines(aliases)
     down = ["#!/usr/bin/env sh", "cd \"$(dirname \"$0\")\""]
@@ -383,8 +441,11 @@ def _write_scripts(staging: Path, entries: list[dict], *, bundle_refs: list[str]
     # pull: prime the vehicle's image cache while the registry is reachable — touches NO containers,
     # so it's safe against a running deployment (unlike `up`, which recreates changed services).
     pull = ["#!/usr/bin/env sh", "set -e", "cd \"$(dirname \"$0\")\""]
-    for e in entries:
-        pull.append(f'docker compose -p "{e["project"]}" -f "{e["compose"]}" pull')
+    if bundle_ids:
+        pull += _target_guard(target) + _load_guard(bundle_ids, accepted_ids=bundle_accepted_ids)
+    else:
+        for e in entries:
+            pull.append(f'docker compose -p "{e["project"]}" -f "{e["compose"]}" pull')
     if aliases:
         pull += _alias_lines(aliases)
     if run_ctx:  # status header: the open run, in pure sh (after shebang+cd, before the stack tables)
@@ -396,9 +457,9 @@ def _write_scripts(staging: Path, entries: list[dict], *, bundle_refs: list[str]
     scripts = [("up.sh", up), ("down.sh", down), ("status.sh", status), ("pull.sh", pull)]
     if cleanup_refs is not None:
         scripts.append(("cleanup.sh", _cleanup_script(entries, cleanup_refs)))
-    if bundle_refs:  # explicit/forced load (up.sh already self-loads when refs are missing)
+    if bundle_ids:  # explicit load also verifies that the archive restored the expected content
         scripts.append(("load.sh", ["#!/usr/bin/env sh", "set -e", "cd \"$(dirname \"$0\")\"",
-                                    "exec docker load -i ./images.tar"]))
+                                    *_load_guard(bundle_ids, accepted_ids=bundle_accepted_ids, force=True)]))
     for fname, lines in scripts:
         path = staging / fname
         path.write_text("\n".join(lines) + "\n")
@@ -419,7 +480,7 @@ def _write_bootstrap(staging: Path) -> None:
         '# bare verbs run the static scripts; FLAGGED forms (up --run X, down --end-run) fall through to\n'
         '# the bundled rig, which owns those semantics.\n'
         'case "$verb" in\n'
-        "  up)     [ $# -eq 1 ] && [ -f ./up.sh ]     && exec ./up.sh ;;\n"
+        "  up)     [ $# -eq 1 ] && [ -f ./up.sh ] && exec ./up.sh ;;\n"
         "  down)   [ $# -eq 1 ] && [ -f ./down.sh ]   && exec ./down.sh ;;\n"
         "  status) [ $# -eq 1 ] && [ -f ./status.sh ] && exec ./status.sh ;;\n"
         "  pull)   [ $# -eq 1 ] && [ -f ./pull.sh ]   && exec ./pull.sh ;;\n"
@@ -439,14 +500,13 @@ def _write_bootstrap(staging: Path) -> None:
 
 
 def _compose_only(manifest, descriptors, env, staging: Path, images: dict, *,
-                  pin: bool = True) -> tuple[list[dict], list[str]]:
+                  pin: bool = True, source_root: Path | None = None) -> tuple[list[dict], list[str]]:
     """Per ENABLED instance, in launch order: run the VENDORED launcher's `config` verb, capture the
     resolved compose, transform it for portable/offline use, and write compose/<name>/. Returns
     (entries, skipped): a stack whose launcher can't run is skipped and NAMED — the caller decides
     what a partial capture means (bake withholds the scripts: the rig-runnable tree still ships).
-    ``pin=False`` (bundle mode) keeps tag refs: ``docker load`` can't restore registry digests, so a
-    bundled artifact's integrity is its own sha256, not @sha256 pins — digests are still collected
-    (local-only) as audit metadata."""
+    ``pin=False`` keeps logical refs for the bundle exporter to map to verified content aliases;
+    local digests are collected only as audit metadata."""
     entries: list[dict] = []
     skipped: list[str] = []
     # Images declared `mirror:` in a rigging.yaml are kept as their registry TAG, not digest-pinned: a
@@ -458,11 +518,11 @@ def _compose_only(manifest, descriptors, env, staging: Path, images: dict, *,
     # (every row, YAML order) started disabled stacks and ignored `order`.
     for sensor in manifest.select([], enabled_only=True):
         desc = descriptors[sensor.service]
-        repo = staging / "services" / sensor.service
+        repo = (source_root or staging) / "services" / sensor.service
         launcher = repo / desc.launcher
         # _stage_tree lays configs out by TIER (config/infra|sensors|autonomy) — read the row's
         # own tier, or every infra and autonomy stack fails its render and drops out of up.sh.
-        config = staging / "config" / TIER_SUB[sensor.tier] / f"{sensor.name}.yaml"
+        config = sensor.config if source_root else staging / "config" / TIER_SUB[sensor.tier] / f"{sensor.name}.yaml"
         cmd = [str(launcher), str(config), *desc.verb_args("config")]
         try:
             # The per-INSTANCE env `up` runs with — platform routing AND the compose project. A
@@ -484,6 +544,14 @@ def _compose_only(manifest, descriptors, env, staging: Path, images: dict, *,
 
         _strip_build(compose)
         _strip_profiles(compose)
+        if manifest.arch:
+            for _, svc in _services(compose):
+                requested = svc.get("platform")
+                expected = "linux/" + manifest.arch
+                accepted = (expected, expected + "/v8") if manifest.arch == "arm64" else (expected,)
+                if requested and requested not in accepted:
+                    raise RigError(f"{sensor.name}: compose platform {requested} conflicts with {expected}")
+                svc["platform"] = expected
         for ref in _service_images(compose).values():
             r = _repo_of(ref)
             if any(r == m or r.endswith("/" + m) for m in mirrored):
@@ -492,6 +560,12 @@ def _compose_only(manifest, descriptors, env, staging: Path, images: dict, *,
                 images.setdefault(ref, _resolve_digest(ref, local_only=not pin))
         if pin:
             _pin_images(compose, images)
+        else:
+            # Bundled images must not be replaced by an upstream `always` policy or the
+            # special handling of :latest. This also protects direct compose invocations.
+            for _, svc in _services(compose):
+                if svc.get("image"):
+                    svc["pull_policy"] = "never"
         ext = _external_volume_names(compose)
         outdir = staging / "compose" / sensor.name
         outdir.mkdir(parents=True, exist_ok=True)
@@ -578,6 +652,8 @@ def _stage_tree(staging: Path, manifest, catalog, *, registry: str | None = None
                                            ("base", manifest.image_base)) if v}
     if manifest.platform:  # the host's declared target — a rig re-run on the unbaked tree must
         veh["platform"] = manifest.platform  # export the same RIG_TARGET_PLATFORM / composed tags
+    if manifest.arch:
+        veh["arch"] = manifest.arch
     if manifest.data_dir:
         veh["data_dir"] = manifest.data_dir
     # The rest of what a `rig up` on the unbaked tree needs to behave like the source did: the
@@ -605,11 +681,27 @@ def _stage_tree(staging: Path, manifest, catalog, *, registry: str | None = None
 
 
 def bake(root: Path, manifest, catalog, descriptors, env, tag: str, *, registry: str | None = None,
-         bundle_images: bool = False) -> Path:
+         bundle_images: bool = False, platform: str | None = None, arch: str | None = None,
+         overwrite: bool = False) -> Path:
     safe_component(tag, what="bake --tag")  # names var/bake/<tag>, which is rmtree'd below
-    if bundle_images and manifest.build_catalog:
-        raise RigError('bake: portable releases currently require a reachable registry; '
-                       '--bundle-images cannot preserve the companion indexes with docker save')
+    from .artifacts import confirm_overwrite, publish
+    overwrite = confirm_overwrite(root, tag, overwrite=overwrite)
+    from dataclasses import replace
+    from .targets import deployment_target
+    active = {s.service for s in manifest.sensors if s.enabled}
+    target = deployment_target(manifest, {n: d for n, d in descriptors.items() if n in active},
+                               platform=platform, arch=arch,
+                               required=bundle_images or bool(manifest.build_catalog))
+    manifest = replace(manifest, platform=target.runtime, arch=target.arch)
+    if registry:
+        manifest = replace(manifest, image_registry=registry)
+    if manifest.context == "deployment":
+        from .dispatch import fleet_env
+        env = fleet_env(manifest, descriptors)
+    if target.runtime:
+        env = {**env, "RIG_TARGET_PLATFORM": target.runtime}
+    if target.arch:
+        env = {**env, "RIG_TARGET_ARCH": target.arch}
     if registry:
         env = {**env, "RIG_IMAGE_REGISTRY": registry}  # override vehicle.yaml images.registry for this bake
         if manifest.build_catalog:
@@ -650,7 +742,9 @@ def bake(root: Path, manifest, catalog, descriptors, env, tag: str, *, registry:
         if not images:
             raise RigError("bake --bundle-images: no images captured — the compose-only rendering must "
                            "succeed for every stack you want bundled (see the skip messages above)")
-        bundle = _bundle_images(staging, sorted(images))
+        from .artifact_images import export_images, rewrite_compose
+        bundle = export_images(staging, sorted(images), manifest, target)
+        rewrite_compose(staging, entries, bundle["refs"])
     run_ctx = None
     if manifest.data_dir:  # runs feature: inert without data_dir
         run_ctx = {"data_dir": manifest.data_dir, "vehicle": manifest.vehicle,
@@ -659,13 +753,16 @@ def bake(root: Path, manifest, catalog, descriptors, env, tag: str, *, registry:
                                 for s in manifest.sensors if s.enabled]}
         _write_run_scripts(staging, run_ctx)
     if entries:
-        # Registry mode: alias every digest-pinned image back to its tag post-pull/up (bundle mode keeps
-        # tag refs throughout, so there is no split namespace to unify).
+        # Registry mode also exposes the logical tags; bundles use their own content aliases.
         aliases = {} if bundle else {ref: dig for ref, dig in images.items() if dig}
-        _write_scripts(staging, entries, bundle_refs=sorted(images) if bundle else None,
+        _write_scripts(staging, entries, bundle_ids=bundle["image_ids"] if bundle else None,
+                       bundle_accepted_ids=bundle.get("accepted_ids") if bundle else None,
                        run_ctx=run_ctx, aliases=aliases,
                        # cleanup.sh untags BOTH names of a pinned image (tag ref + digest ref)
-                       cleanup_refs=sorted(set(images) | {d for d in images.values() if d}))
+                       cleanup_refs=sorted(bundle["image_ids"] if bundle else set(images) | {d for d in images.values() if d}),
+                       target=target.as_dict())
+    if bundle:
+        _write_bundle_guard(staging, bundle)
     _write_bootstrap(staging)
 
     # 5. metadata + lock. A re-bake INSIDE an extracted artifact (field edits on the vehicle) records its
@@ -692,8 +789,9 @@ def bake(root: Path, manifest, catalog, descriptors, env, tag: str, *, registry:
         "registry": registry or manifest.image_registry,
         "image_tag": manifest.image_tag,
         "platform": manifest.platform,
+        "target": target.as_dict(),
         "data_dir": manifest.data_dir,
-        "pinning": "tag+bundle" if bundle else "digest",
+        "pinning": "target+bundle" if bundle else "digest",
         "sensors": [s.name for s in manifest.sensors],
         "compose_only": [e["sensor"] for e in entries],
         "compose_only_skipped": skipped,
@@ -710,20 +808,17 @@ def bake(root: Path, manifest, catalog, descriptors, env, tag: str, *, registry:
     # artifact carries registries+packages+instances+images under a single rig.lock.
     from .lock import load_lock, save_lock
     locked = load_lock(root)
+    locked.pop("replay_execution", None)  # execution-local selection is not a release input
     locked["images"] = {ref: dig for ref, dig in images.items() if dig}
     save_lock(staging, locked)
 
     # 6. bundle
-    artifacts = root / "var" / "artifacts"
-    artifacts.mkdir(parents=True, exist_ok=True)
-    tarpath = artifacts / f"{tag}.tar.gz"
-    with tarfile.open(tarpath, "w:gz") as tf:
-        tf.add(staging, arcname=tag)
+    tarpath = publish(staging, root, tag, overwrite=overwrite)
     digest = _sha256(tarpath)
     eprint(f"baked '{tag}' -> {tarpath}")
     eprint(f"  sha256:{digest}")
-    pin_note = (f"{len(images)} images BUNDLED ({bundle['size_bytes'] / 1e9:.1f} GB tar; tag-pinned, "
-                f"integrity = the artifact sha256)" if bundle
+    pin_note = (f"{len(images)} images BUNDLED ({bundle['size_bytes'] / 1e9:.1f} GB tar; "
+                f"target + exact image IDs verified)" if bundle
                 else f"{pinned}/{len(images)} images digest-pinned")
     lineage = f" · parent: {parent['tag']}" if parent else ""
     eprint(f"  {stack_summary(manifest.sensors)} · {len(entries)} compose-only · {pin_note}{lineage}")
@@ -767,6 +862,7 @@ def capture_run(root: Path, manifest, run_dir: Path) -> dict:
             "created": datetime.datetime.now().isoformat(timespec="seconds"),
             "rig_version": __version__,
             "platform": manifest.platform,
+            "arch": manifest.arch,
             "data_dir": manifest.data_dir,
         }
         if (root / "metadata.yaml").exists():  # capture INSIDE an extracted artifact: keep lineage
@@ -870,7 +966,8 @@ def fleet_refs(root: Path) -> set[str]:
 
 
 def bake_fleet(root: Path, tag: str, *, registry: str | None = None,
-               bundle_images: bool = False) -> Path:
+               bundle_images: bool = False, platform: str | None = None, arch: str | None = None,
+               overwrite: bool = False) -> Path:
     """The fleet artifact: ONE tar for N vehicles. Stages the UNRESOLVED tree (vehicle.yaml +
     the whole config/ tree incl. .pins/.overlays, verbatim) + vendored launch surfaces + the
     bundled rig; rendering happens on-vehicle at `rig up` from /etc/rig/vehicle.local.yaml.
@@ -880,17 +977,34 @@ def bake_fleet(root: Path, tag: str, *, registry: str | None = None,
     from .catalog import load_catalog
     from .interpolate import MARKER
 
-    if bundle_images:
-        raise RigError("bake: --bundle-images needs the resolved compose-only form, which a fleet "
-                       "(templated) artifact deliberately omits — pre-pull per vehicle instead "
-                       "(`./run.sh pull`)")
     if registry:
         raise RigError("bake: --registry cannot override a fleet artifact (values resolve "
                        "per-vehicle) — set images.registry in vehicle.yaml, or per vehicle in "
                        "vehicle.local.yaml")
     safe_component(tag, what="bake --tag")  # names var/bake/<tag>, which is rmtree'd below
+    from .artifacts import confirm_overwrite, publish
+    overwrite = confirm_overwrite(root, tag, overwrite=overwrite)
     refs = sorted(fleet_refs(root))
     raw = load_yaml(root / "vehicle.yaml")
+    manifest, descriptors, target = None, {}, None
+    if bundle_images or platform or arch:
+        from .manifest import load_manifest
+        from .descriptor import load_descriptor
+        from .targets import deployment_target
+        manifest = load_manifest(root, context="deployment",
+                                 target_overrides={"platform": platform, "arch": arch})
+        routes = load_catalog(root)
+        descriptors = {s.service: load_descriptor(s.service, routes[s.service].path) for s in manifest.sensors}
+        active = {s.service for s in manifest.sensors if s.enabled}
+        if bundle_images:
+            missing = sorted(n for n in active if "images" not in descriptors[n].verbs)
+            if missing:
+                raise RigError(f"bundle: {', '.join(missing)} needs a declared verbs.images image planner "
+                               "for a templated artifact (no resolved compose-only form)")
+        target = deployment_target(manifest, {n: d for n, d in descriptors.items() if n in active},
+                                   platform=platform, arch=arch, required=True)
+        manifest = load_manifest(root, context="deployment",
+                                 target_overrides={"platform": target.runtime, "arch": target.arch})
 
     staging = root / "var" / "bake" / tag
     if staging.exists():
@@ -903,7 +1017,10 @@ def bake_fleet(root: Path, tag: str, *, registry: str | None = None,
     if (root / "config").is_dir():
         shutil.copytree(root / "config", staging / "config")
     if (root / "rig.lock").is_file():
-        shutil.copy2(root / "rig.lock", staging / "rig.lock")
+        from .lock import load_lock, save_lock
+        locked = load_lock(root)
+        locked.pop("replay_execution", None)
+        save_lock(staging, locked)
 
     # vendor every service the rows reference; route the staged catalog at the vendored copies
     rows = [row for tier in ("infra", "sensors", "autonomy") for row in (raw.get(tier) or [])
@@ -916,6 +1033,22 @@ def bake_fleet(root: Path, tag: str, *, registry: str | None = None,
         vendor(service, catalog[service].path, staging)
         catalog_out[service] = {"path": f"services/{service}"}
     (staging / "services.yaml").write_text(yaml.safe_dump({"services": catalog_out}, sort_keys=False))
+
+    bundle = None
+    if target:
+        from .artifact_images import export_images, fleet_image_refs
+        raw = dict(raw, arch=target.arch)
+        if target.runtime:
+            raw["platform"] = target.runtime
+        (staging / "vehicle.yaml").write_text(yaml.safe_dump(raw, sort_keys=False))
+        if bundle_images:
+            if any(u.startswith("images.") for u in manifest.missing_identity):
+                raise RigError("bundle: image registry/tag/base must resolve from deployment inputs")
+            refs_to_bundle = fleet_image_refs(root, staging, manifest, descriptors)
+            if not refs_to_bundle:
+                raise RigError("bundle: no enabled service images selected")
+            bundle = export_images(staging, refs_to_bundle, manifest, target)
+            _write_bundle_guard(staging, bundle)
 
     # vehicle.local.example.yaml: every referenced var, split mandatory vs fleet-defaulted
     defaults = raw.get("vars") or {}
@@ -957,13 +1090,14 @@ def bake_fleet(root: Path, tag: str, *, registry: str | None = None,
         "vars": refs,
         "sensors": [str(row.get("name")) for row in rows],
     }
+    if target:
+        meta["target"] = target.as_dict()
+    if bundle:
+        meta["bundle"] = bundle
+        meta["pinning"] = "target+bundle"
     (staging / "metadata.yaml").write_text(yaml.safe_dump(meta, sort_keys=False))
 
-    artifacts = root / "var" / "artifacts"
-    artifacts.mkdir(parents=True, exist_ok=True)
-    tarpath = artifacts / f"{tag}.tar.gz"
-    with tarfile.open(tarpath, "w:gz") as tf:
-        tf.add(staging, arcname=tag)
+    tarpath = publish(staging, root, tag, overwrite=overwrite)
     eprint(f"baked FLEET artifact '{tag}' -> {tarpath}")
     eprint(f"  sha256:{_sha256(tarpath)}")
     eprint(f"  vars: {', '.join(refs)} — resolved per vehicle (vehicle.local.yaml); "

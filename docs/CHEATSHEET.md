@@ -209,7 +209,7 @@ hash; `rig pkg add <ref> --locked` reproduces byte-identical configs on a second
 Canonical grouped commands (old flat spellings stay as permanent aliases): `config show|render|diff` ·
 `run new|end|list|rm|import|retrofit` · `registry init|add|remove|list|sync|pending|push|discard|validate|index` · `pkg
 search|info|list|outdated|add|remove|upgrade|lock|save|promote|repin|rebase|yank` · `overlay
-apply|remove|reorder|list` · `service rigify|vendor|certify` · `artifact bake|unbake|list` ·
+apply|remove|reorder|list` · `service rigify|vendor|certify` · `artifact bake|unbake|list|show|rm|prune` ·
 `image build|pull`.
 
 Airgap: `sync` → `install` → `rig pull` → `rig bake --bundle-images` — the deployment is
@@ -393,16 +393,41 @@ a base rebuild — that single point of update is the point. Audit reports any r
 rig bake --tag v1                             # -> var/artifacts/v1.tar.gz  (sha256 printed)
 # rig bake                                   # same if vehicle.yaml has literal images.tag: v1
 rig bake --tag v1 --bundle-images             # + docker-saves the image set INTO the artifact (multi-GB):
-                                              #   zero registry at deploy time; up.sh self-loads on first run
+                                              #   zero registry at deploy time; up.sh loads missing/different images
+rig bake --tag laptop-test --platform dev --arch amd64 --bundle-images
+rig build --scope deployment,replay          # vehicle target + replay companions; bare build stays full matrix
+rig build --scope host --tag bench-1         # machine provisioned runtime + Docker engine CPU
 ```
 
 An explicit `--tag` wins; otherwise the artifact name comes from literal `images.tag` in
 `vehicle.yaml`, not host-local overrides. Missing or templated tags require `--tag`.
+An existing artifact requires confirmation before replacement. `--overwrite` confirms intentional
+replacement for automation; a failed archive write leaves the old archive intact.
+
+```bash
+rig artifact ls                              # archive + staging + extracted-tree sizes, target and provenance
+rig artifact show v1 --format json            # detailed metadata, bundle IDs and companion catalog
+rig artifact rm v1 --dry-run                  # exact paths and file sizes; no deletion
+rig artifact rm v1                           # asks first; --yes for non-interactive removal
+rig artifact prune --keep 3 --dry-run          # keep newest archives by modification time (default: 3)
+rig artifact prune --keep 3 --yes              # remove older archives and matching var/bake trees
+```
+
+`rm` also accepts multiple tags or a tag with only an orphaned staging tree. Extracted
+`var/unbaked/<tag>` trees are preserved unless `--include-unbaked` is supplied. Arbitrary `unbake
+--into` directories, configs, Docker images and recorded runs are outside artifact cleanup.
 
 The artifact = resolved configs + complete vehicle.yaml + vendored launch surfaces + rig + a **compose-only**
 form (build-stripped; built images digest-pinned, mirrored images by tag). It runs on bare Docker.
-Bundled artifacts keep **tag** refs (loaded images can't carry registry digests) — integrity is the
-artifact's own sha256; digests are still recorded in `metadata.yaml`/`rig.lock` for audit.
+Bundled artifacts contain only the deployment runtime/CPU images and use content-specific aliases
+with recorded image IDs; the full companion catalog stays in `rig.lock`. Target selection comes from
+explicit bake flags, then `vehicle.yaml`, then unambiguous service declarations. No local overrides
+enter the bake. Bundling requires Docker API 1.48+; templated fleet bundles also require a declared
+`verbs.images` planner on each enabled service (see [build and replay](BUILD_AND_REPLAY.md)).
+`up.sh` compares each local image ID against the bundle, reloads if any image is missing or different,
+and verifies all IDs before starting Compose with pulls disabled. `./run.sh load` forces a reload
+and verifies it too. If loading is needed, an unreadable or incorrect bundle stops startup. Existing
+artifacts need to be re-baked to get this identity check.
 
 ## 5 — ship + run on the vehicle
 

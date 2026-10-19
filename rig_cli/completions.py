@@ -472,6 +472,18 @@ def _save_specs(root_arg, positionals, words):
 
 
 @_soft
+def _artifact_tags(root_arg, positionals, words):
+    from .artifacts import _tags
+    root = _deployment(root_arg)
+    return [tag for tag in _tags(root) if tag not in positionals] if root else []
+
+
+@_soft
+def _build_scopes(root_arg, positionals, words):
+    return ["all", "deployment", "host", "replay"]
+
+
+@_soft
 def _registry_names(root_arg, positionals, words):
     return [name for name, _ in _registry_entries()]
 
@@ -617,6 +629,8 @@ _POSITIONAL_SOURCES: dict = {
     (("add",), "service"): _add_specs,
     (("vendor",), "service"): _services,
     (("unbake",), "artifact"): _artifacts,
+    (("artifact-show",), "tag"): _artifact_tags,
+    (("artifact-rm",), "tags"): _artifact_tags,
     (("graph",), "run"): _run_ids,
     (("replay",), "run"): _run_ids,
     (("replay",), "names"): _instances,
@@ -658,6 +672,7 @@ _POSITIONAL_SOURCES: dict = {
 # NOTE the near-miss: build/bake --registry is a DOCKER registry host, never a configured
 # rig registry — absent here by design (file/no fallback beats a wrong menu).
 _OPTION_SOURCES: dict = {
+    (("build",), "--scope"): _build_scopes,
     **{(("pkg", verb), "--to"): _registry_names for verb in ("promote", "repin", "rebase")},
     (("pkg", "yank"), "--from"): _registry_names,
     (("pkg", "search"), "--registry"): _registry_names,

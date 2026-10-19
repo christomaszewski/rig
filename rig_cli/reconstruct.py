@@ -266,6 +266,30 @@ def wire_player(tree: Path, target: tuple[str, Path | str]) -> None:
         eprint("rig reconstruct: the player row is NOT wired yet — paste the row printed above")
 
 
+def _detach_deployment_target(tree: Path) -> None:
+    """Keep a retrofitted deployment's frozen entrypoints as provenance, not replay commands."""
+    meta_file = tree / "metadata.yaml"
+    if not meta_file.is_file():
+        return
+    meta = load_yaml(meta_file)
+    if not (meta.get("target") or meta.get("bundle")):
+        return
+    saved = tree / "var" / "source-deployment"
+    saved.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(meta_file, saved / "metadata.yaml")
+    for name in ("up.sh", "down.sh", "status.sh", "pull.sh", "cleanup.sh", "load.sh",
+                 "ensure-images.sh", "new-run.sh", "end-run.sh", "runs.sh", "compose", "images.tar"):
+        path = tree / name
+        if path.exists():
+            shutil.move(str(path), str(saved / name))
+    meta["source_deployment"] = {"path": "var/source-deployment", "target": meta.pop("target", None)}
+    meta.pop("bundle", None)
+    import yaml
+    meta_file.write_text(yaml.safe_dump(meta, sort_keys=False))
+    from .bake import _write_bootstrap
+    _write_bootstrap(tree)
+
+
 def cmd_reconstruct(root: Path | None, *, run_ref: str, into: str | None,
                     config: str | None, copy_run: bool = False,
                     no_import: bool = False, registry: str | None = None,
@@ -355,6 +379,7 @@ def cmd_reconstruct(root: Path | None, *, run_ref: str, into: str | None,
     local["data_dir"] = str((dest / "var" / "data").resolve())
     from .image_catalog import localize
     localize(dest, local, platform)
+    _detach_deployment_target(dest)
     if reg_host:  # the bench's image mirror — per SUBKEY: the run's tag/base pins still apply,
         #           only the host swaps (machine-wide instead: `rig provision --registry`)
         local["images"] = {**(local.get("images") or {}), "registry": reg_host}

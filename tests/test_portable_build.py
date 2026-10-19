@@ -58,13 +58,14 @@ build:
     jp6m: {architectures: [arm64], images: [core, bridge]}
     jp7: {architectures: [arm64], images: [core, bridge]}
     dev: {architectures: [arm64, amd64], images: [dev, bridge]}
+replay: {platform: dev}
 ''', '[core, dev, bridge]')
 
     def test_default_matrix_ignores_execution_host_and_uses_per_variant_outputs(self):
         descs = {'camera': self.camera(), 'radio': self.service('radio', images='[radio]')}
         snapshots = []
         for host in ('jp6m', 'dev', None):
-            m = self.manifest(*descs, platform=host)
+            m = self.manifest(*descs, platform=host, arch='arm64')
             tasks = matrix.plan(m, descs, registry=m.image_registry, tag=None)
             snapshots.append([(t.variant, t.architectures, t.images, t.tag) for t in tasks])
         self.assertEqual(snapshots[0], snapshots[1])
@@ -74,6 +75,64 @@ build:
             ('jp7', ['arm64'], ['core', 'bridge'], 'v1-jp7'),
             ('dev', ['arm64', 'amd64'], ['dev', 'bridge'], 'v1-dev'),
             (None, ['arm64', 'amd64'], ['radio'], 'v1')])
+
+    def test_scopes_union_targets_and_deduplicate_generic_dependencies(self):
+        from rig_cli.targets import Target
+        descs = {'camera': self.camera(), 'base': self.service('base', '  provides: base\n', '[fleet-ros]')}
+        m = self.manifest(*descs, platform='jp6m')
+        def plan(scope):
+            return matrix.plan(m, descs, registry=m.image_registry, tag=None, scopes=scope)
+        deploy = plan('deployment')
+        self.assertEqual([(t.variant, t.architectures) for t in deploy],
+                         [(None, ['arm64']), ('jp6m', ['arm64'])])
+        with patch('rig_cli.targets.host_target', return_value=Target('dev', 'amd64', 'test host')):
+            host = plan('host')
+            self.assertEqual([(t.variant, t.architectures) for t in host],
+                             [(None, ['amd64']), ('dev', ['amd64'])])
+            union = plan(['deployment,host', 'deployment'])
+        self.assertEqual([(t.variant, t.architectures) for t in union],
+                         [(None, ['amd64', 'arm64']), ('jp6m', ['arm64']), ('dev', ['amd64'])])
+        replay = plan('deployment,replay')
+        self.assertEqual([(t.variant, t.architectures) for t in replay],
+                         [(None, ['amd64', 'arm64']), ('jp6m', ['arm64']), ('dev', ['amd64', 'arm64'])])
+
+    def test_scopes_reject_invalid_or_ambiguous_requests_before_building(self):
+        descs = {'camera': self.camera()}
+        m = self.manifest(*descs, platform='dev')
+        for opts, message in (({'scopes': 'deployment'}, 'architecture is ambiguous'),
+                              ({'scopes': 'all,host'}, 'cannot be combined'),
+                              ({'scopes': 'typo'}, 'accepts all'),
+                              ({'scopes': 'host', 'arch': 'arm64'}, 'require deployment')):
+            with self.assertRaisesRegex(RigError, message):
+                matrix.plan(m, descs, registry=m.image_registry, tag=None, **opts)
+        tasks = matrix.plan(m, descs, registry=m.image_registry, tag=None,
+                            scopes='deployment', arch='amd64')
+        self.assertEqual(tasks[0].architectures, ['amd64'])
+
+    def test_replay_scope_respects_startup_policy_and_includes_disabled_player(self):
+        descs = {'camera': self.camera(), 'radio': self.service('radio', images='[radio]'),
+                 'ros2-bag-player': self.service('ros2-bag-player', images='[player]')}
+        m = self.manifest(*descs, platform='jp6m')
+        m.sensors[-1] = dataclasses.replace(m.sensors[-1], enabled=False)
+        m.replay_policy = {'services': {'radio': {'start': False}}}
+        tasks = matrix.plan(m, descs, registry=m.image_registry, tag=None, scopes='replay')
+        self.assertEqual({t.service for t in tasks}, {'camera', 'ros2-bag-player'})
+        self.assertTrue(all(set(t.architectures) == {'arm64', 'amd64'} for t in tasks))
+        m.replay_policy['instances'] = {'radio': {'start': True}}
+        tasks = matrix.plan(m, descs, registry=m.image_registry, tag=None, scopes='replay')
+        self.assertEqual({t.service for t in tasks}, set(descs))
+
+    def test_replay_matrix_provider_follows_consumers_runtime_and_cpu(self):
+        base = self.service('base', '  provides: base\n  platforms: [jp6m, dev]\n', '[fleet-ros]')
+        camera = self.camera()
+        descs = {'base': base, 'camera': camera}
+        m = self.manifest(*descs, platform='jp6m')
+        tasks = matrix.plan(m, descs, registry=m.image_registry, tag=None, scopes='replay')
+        self.assertEqual([(t.service, t.variant) for t in tasks], [('base', 'dev'), ('camera', 'dev')])
+        self.assertTrue(all(set(t.architectures) == {'arm64', 'amd64'} for t in tasks))
+        base.build_architectures = ['arm64']
+        with self.assertRaisesRegex(RigError, 'shared replay provider lacks'):
+            matrix.plan(m, descs, registry=m.image_registry, tag=None, scopes='replay')
 
     def test_selectors_narrow_generic_dependencies_and_reject_unsupported_pairs(self):
         descs = {'camera': self.camera(), 'radio': self.service('radio', images='[radio]')}

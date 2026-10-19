@@ -133,6 +133,8 @@ def test_lock_images_include_tags_and_digest_pins():
     assert lock_images(root) == {"reg:5000/fak-core:v1-alpha",
                                  "reg:5000/fak-core@sha256:abc", "reg:5000/other:v1"}
     assert lock_images(pathlib.Path(tempfile.mkdtemp())) == set()   # no lock -> empty
+    (root / "metadata.yaml").write_text("bundle: {image_ids: {'rig-bundle/content:id': 'sha256:abc'}}\n")
+    assert "rig-bundle/content:id" in lock_images(root)
 
 
 def test_declared_volumes_format_instance_names():

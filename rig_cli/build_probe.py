@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import ctypes
 import errno
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -15,9 +16,16 @@ import tempfile
 from .build_contract import variant_spec
 
 STUB = '''#!/usr/bin/env python3
-import json, os, sys
+import hashlib, json, os, sys
 a = sys.argv[1:]
 with open(os.environ['RIG_PROBE_LOG'], 'a') as f: f.write(json.dumps(a)+'\\n')
+if a[:2] == ['buildx', 'build'] and '--metadata-file' in a:
+    tags = [a[i+1] for i, v in enumerate(a[:-1]) if v in ('-t', '--tag')]
+    tags += [v.split('=', 1)[1] for v in a if v.startswith('--tag=')]
+    ref = tags[0] if tags else ''
+    digest = 'sha256:' + hashlib.sha256(ref.encode()).hexdigest()
+    with open(a[a.index('--metadata-file')+1], 'w') as f:
+        json.dump({'containerimage.digest': digest}, f)
 if a[:1] in (['build'], ['push']) or a[:2] == ['buildx', 'build']: sys.exit(0)
 sys.stderr.write('unsupported Docker operation in probe: '+repr(a))
 sys.exit(96)
@@ -113,9 +121,26 @@ def check_commands(commands, expected, no_cache, platforms=None):
             if requested != [platforms]:
                 errors.append(f'{", ".join(tags) or "untagged build"}: '
                               f'expected --platform {platforms}, observed {requested}')
+            if command[:2] != ['buildx', 'build'] or '--push' not in command or '--load' in command:
+                errors.append(f'{", ".join(tags) or "untagged build"}: portable build must publish with buildx --push')
     if produced != set(expected):
         errors.append(f'expected image builds {sorted(expected)}, observed {sorted(produced)}')
     return errors
+
+
+def check_results(path, expected):
+    """Require one report per output, matching the metadata returned by the Docker stub."""
+    try:
+        rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    except (OSError, ValueError):
+        return ['missing or invalid RIG_BUILD_RESULT JSONL']
+    wanted = {ref: 'sha256:' + hashlib.sha256(ref.encode()).hexdigest() for ref in expected}
+    if (len(rows) != len(wanted) or any(not isinstance(row, dict) for row in rows)
+            or {row.get('ref') for row in rows if isinstance(row.get('ref'), str)} != set(wanted)
+            or any(not isinstance(row.get('ref'), str)
+                   or row.get('digest') != wanted.get(row['ref']) for row in rows)):
+        return ['RIG_BUILD_RESULT must report each published ref and its builder metadata digest exactly once']
+    return []
 
 
 def _copy(source, dest):
@@ -164,7 +189,7 @@ def certify_build(desc):
             docker = bin_dir / 'docker'
             docker.write_text(STUB)
             docker.chmod(0o755)
-            log, msgs = tmp / 'calls.jsonl', tmp / 'msgs.yaml'
+            log, msgs, report = tmp / 'calls.jsonl', tmp / 'msgs.yaml', tmp / 'results.jsonl'
             msgs.write_text('apt: [diagnostic_msgs]\n')
             # Allow only tool/runtime basics; operator image/subset overrides cannot weaken a check.
             base_env = {k: v for k, v in os.environ.items() if k in ('LANG', 'LC_ALL', 'SYSTEMROOT')}
@@ -190,9 +215,11 @@ def certify_build(desc):
                                 env[desc.platform_override_env] = variant
                             if platforms:
                                 env['RIG_BUILD_PLATFORMS'] = platforms
+                                env['RIG_BUILD_RESULT'] = str(report)
                             if no_cache:
                                 env['RIG_BUILD_NO_CACHE'] = '1'
                             log.write_text('')
+                            report.unlink(missing_ok=True)
                             cmd = sandbox_command(tmp, cwd, [str(cwd / command), 'certify.invalid', tag])
                             if cmd is None:
                                 return unchecked('install bubblewrap and libseccomp2 (Linux) '
@@ -208,6 +235,9 @@ def certify_build(desc):
                             expected = {f'certify.invalid/{image}:{tag}' for image in outputs}
                             errors.extend(f'{variant or "generic"}/{arch or "native"}: {e}'
                                           for e in check_commands(calls, expected, no_cache, platforms))
+                            if platforms:
+                                errors.extend(f'{variant or "generic"}/{arch}: {e}'
+                                              for e in check_results(report, expected))
     except (OSError, subprocess.TimeoutExpired, ValueError) as exc:
         return [Check(ERROR, 'build-no-cache', f'probe failed: {exc}')]
     return [Check(ERROR, 'build-no-cache', f'{desc.repo}@{revision}: ' + '; '.join(errors))] \

@@ -39,8 +39,9 @@ def find_root() -> Path:
 
 
 def _load(root: Path, *, identity: bool = True,
-          render: bool = True) -> tuple[Manifest, dict[str, ServiceEntry], dict[str, Descriptor]]:
-    manifest = load_manifest(root)
+          render: bool = True, context: str = "execution", target_overrides=None
+          ) -> tuple[Manifest, dict[str, ServiceEntry], dict[str, Descriptor]]:
+    manifest = load_manifest(root, context=context, target_overrides=target_overrides)
     # Most of what routes through _load CONSUMES identity (renders configs, names compose
     # projects, exports fleet env) — the mandatory-marker gate lives here, so management verbs
     # that load the manifest directly (pkg list/remove/…) keep working on an unprovisioned box.
@@ -90,6 +91,10 @@ def _summarize(outcomes: list[dispatch.Outcome]) -> int:
 # --- command handlers -------------------------------------------------------
 
 def cmd_up(args, manifest, catalog, descriptors) -> int:
+    from .artifact_runtime import check_target, run_bundle
+    artifact_root = getattr(args, "rig_root", None)
+    if artifact_root:
+        check_target(artifact_root, manifest, check_arch=not args.dry_run)
     blocking = [i for i in doctor_mod.collect(manifest, catalog, descriptors) if i.level == doctor_mod.ERROR]
     if blocking and not args.force:
         eprint("rig: preflight failed (pass --force to override):")
@@ -114,6 +119,11 @@ def cmd_up(args, manifest, catalog, descriptors) -> int:
         # every up logs the effective config against the run (dedup'd; fail-soft — never blocks up)
         runs_mod.snapshot(manifest, args.rig_root, stacks=[s.name for s, _ in pairs])
     eprint(f"rig up: {manifest.vehicle} — {stack_summary([p[0] for p in pairs])}")
+    from dataclasses import replace
+    bundled = (run_bundle(artifact_root, replace(manifest, sensors=[replace(s, enabled=True) for s, _ in pairs]),
+                          descriptors, env, dry_run=args.dry_run) if artifact_root else None)
+    if bundled is not None:
+        return bundled
     return _summarize(dispatch.run_verb(pairs, env, "up", dry_run=args.dry_run))
 
 
@@ -496,32 +506,25 @@ def cmd_config_render(args, manifest, catalog, descriptors) -> int:
 
 
 def cmd_artifact_list(args, root: Path) -> int:
-    """`rig artifact list` — the baked artifacts under var/artifacts with their provenance."""
-    import tarfile
+    from .artifacts import list_artifacts
+    return list_artifacts(root)
 
-    import yaml as _yaml
 
-    artifacts = sorted((root / "var" / "artifacts").glob("*.tar.gz"))
-    if not artifacts:
-        print("no artifacts baked (var/artifacts is empty)")
-        return 0
-    rows = [("TAG", "VEHICLE", "CREATED", "PINNING", "PARENT", "SIZE")]
-    for path in artifacts:
-        tag = path.name[:-len(".tar.gz")]
-        meta = {}
-        try:
-            with tarfile.open(path) as tf:
-                member = tf.extractfile(f"{tag}/metadata.yaml")
-                meta = _yaml.safe_load(member.read()) if member else {}
-        except (tarfile.TarError, KeyError, OSError, _yaml.YAMLError):
-            pass
-        size_mb = path.stat().st_size / 1e6
-        rows.append((tag, str(meta.get("vehicle", "?")), str(meta.get("created", "?")),
-                     str(meta.get("pinning", "?")), str((meta.get("parent") or {}).get("tag", "—")),
-                     f"{size_mb:,.0f}M" if size_mb >= 1 else f"{path.stat().st_size / 1e3:.0f}K"))
-    from .common import print_table
-    print_table(rows)
-    return 0
+def cmd_artifact_show(args, root: Path) -> int:
+    from .artifacts import show
+    return show(root, args.tag, format=args.format)
+
+
+def cmd_artifact_rm(args, root: Path) -> int:
+    from .artifacts import remove
+    return remove(root, args.tags, dry_run=args.dry_run, yes=args.yes,
+                  include_unbaked=args.include_unbaked)
+
+
+def cmd_artifact_prune(args, root: Path) -> int:
+    from .artifacts import prune
+    return prune(root, keep=args.keep, dry_run=args.dry_run, yes=args.yes,
+                 include_unbaked=args.include_unbaked)
 
 
 def _optional_root(args) -> Path | None:
@@ -578,14 +581,15 @@ def cmd_pkg(args) -> int:
 def cmd_build(args, root: Path) -> int:
     # Building images consumes NO vehicle identity (service list + descriptors + registry/tag +
     # ROS_DISTRO) and never renders configs — a fleet deployment builds on any box.
-    manifest, catalog, descriptors = _load(root, identity=False, render=False)
+    manifest, catalog, descriptors = _load(root, identity=False, render=False, context="deployment",
+                                         target_overrides={"platform": args.platform, "arch": args.arch})
     if any(u.startswith("images.") for u in manifest.missing_identity):
         eprint("rig build: note — images.registry/tag are per-vehicle and unresolved here; "
                "building without a push target unless --registry/--tag are passed")
     return build_mod.build(manifest, descriptors, registry=args.registry, tag=args.tag,
                            dry_run=args.dry_run, jobs=args.jobs, root=root,
                            platform=args.platform, arch=args.arch, no_cache=args.no_cache,
-                           base_image=args.base_image)
+                           base_image=args.base_image, scopes=args.scope)
 
 
 def cmd_bake(args, root: Path) -> int:
@@ -610,12 +614,28 @@ def cmd_bake(args, root: Path) -> int:
     # here — bake never reads vehicle.local.yaml/shell vars by design).
     if bake_mod.is_fleet(root):
         bake_mod.bake_fleet(root, tag, registry=args.registry,
-                            bundle_images=args.bundle_images)
+                            bundle_images=args.bundle_images, platform=args.platform, arch=args.arch,
+                            overwrite=args.overwrite)
         return 0
-    manifest, catalog, descriptors = _load(root)
+    manifest, catalog, descriptors = _load(root, context="deployment", identity=False, render=False,
+                                         target_overrides={"platform": args.platform, "arch": args.arch})
+    from dataclasses import replace
+    from .targets import deployment_target
+    from .manifest import require_identity
+    active = {s.service for s in manifest.sensors if s.enabled}
+    target = deployment_target(manifest, {n: d for n, d in descriptors.items() if n in active},
+                               platform=args.platform, arch=args.arch,
+                               required=args.bundle_images or bool(manifest.build_catalog))
+    overrides = {k: v for k, v in (("platform", target.runtime), ("arch", target.arch)) if v}
+    manifest = replace(manifest, platform=target.runtime, arch=target.arch,
+                       vars={**manifest.vars, **overrides},
+                       missing_identity=tuple(k for k in manifest.missing_identity if k not in overrides))
+    require_identity(manifest, what="bake")
+    manifest = resolve.materialize_manifest(manifest, root)
     env = dispatch.fleet_env(manifest, descriptors)
     bake_mod.bake(root, manifest, catalog, descriptors, env, tag, registry=args.registry,
-                  bundle_images=args.bundle_images)
+                  bundle_images=args.bundle_images, platform=args.platform, arch=args.arch,
+                  overwrite=args.overwrite)
     return 0
 
 
@@ -663,7 +683,8 @@ _GROUP_VERBS: dict[str, dict[str, str]] = {
             "tag": "run-tag", "untag": "run-untag", "archive": "run-archive", "replay": "replay"},
     "catalog": {"search": "catalog-search", "list": "catalog-search", "add": "catalog-add",
                 "remove": "catalog-remove", "rm": "catalog-remove", "roots": "catalog-roots"},
-    "artifact": {"bake": "bake", "unbake": "unbake", "list": "artifact-list"},
+    "artifact": {"bake": "bake", "unbake": "unbake", "list": "artifact-list",
+                 "show": "artifact-show", "rm": "artifact-rm", "prune": "artifact-prune"},
     "image": {"build": "build", "pull": "pull", "audit": "image-audit"},
     "service": {"rigify": "rigify", "vendor": "vendor", "certify": "certify"},
 }
@@ -729,7 +750,7 @@ def build_parser() -> argparse.ArgumentParser:
                "  rig overlay  apply | remove | reorder | list     rig setup (first-run host setup)\n"
                "  rig completion bash|zsh (TAB completion — deb/brew ship it; `rig setup --shell` wires it)\n"
                "  rig service  rigify | vendor | certify\n"
-               "  rig artifact bake | unbake | list   rig image    build | pull | audit\n"
+               "  rig artifact bake | unbake | list | show | rm | prune   rig image build | pull | audit\n"
                "  rig fleet    list | status | sync | up | down    (GCS-side fan-out; fleet.yaml)\n"
                "  (`ls` aliases `list` under every noun above)")
     parser.add_argument("--version", action="version", version=f"rig {__version__}")
@@ -1121,6 +1142,8 @@ def build_parser() -> argparse.ArgumentParser:
                      help="build only this runtime variant (default: all declared variants)")
     bld.add_argument("--arch", choices=("arm64", "amd64"), default=None,
                      help="build only this CPU architecture (default: all supported architectures)")
+    bld.add_argument("--scope", action="append", default=None,
+                     help="all (default), deployment, host, replay; combine with commas or repeat")
     bld.add_argument("-j", "--jobs", type=int, default=1, metavar="N",
                      help="build/mirror up to N services concurrently (output grouped per service)")
     bld.add_argument("--no-cache", action="store_true", dest="no_cache",
@@ -1137,15 +1160,33 @@ def build_parser() -> argparse.ArgumentParser:
     bk.add_argument("--registry", default=None,
                     help="registry the vehicle pulls from (overrides vehicle.yaml images.registry); "
                          "images are digest-pinned against it")
+    bk.add_argument("--platform", default=None, help="deployment runtime (overrides vehicle.yaml platform)")
+    bk.add_argument("--arch", choices=("arm64", "amd64"), default=None,
+                    help="deployment CPU architecture (otherwise declared or unambiguously inferred)")
     bk.add_argument("--bundle-images", action="store_true",
-                    help="docker-save the image set INTO the artifact (multi-GB): zero registry at deploy "
-                         "time; refs stay tags and integrity is the artifact's sha256")
+                    help="save only the deployment runtime/CPU images for offline startup; "
+                         "content aliases and image IDs are verified on load")
+    bk.add_argument("--overwrite", action="store_true",
+                    help="replace an existing artifact without the interactive confirmation")
 
     ub = sub.add_parser("unbake", help="extract a baked artifact to an editable tree")
     ub.add_argument("artifact", help="path to the .tar.gz artifact")
     ub.add_argument("--into", default=None, help="destination dir (default: var/unbaked/<tag>)")
 
     sub.add_parser("artifact-list", help="list baked artifacts with provenance (canonical: artifact list)")
+    ash = sub.add_parser("artifact-show", help="inspect artifact target, images and provenance")
+    ash.add_argument("tag", help="artifact tag in this deployment")
+    ash.add_argument("--format", choices=("yaml", "json"), default="yaml")
+    arm = sub.add_parser("artifact-rm", help="remove named artifact archives and generated staging trees")
+    arm.add_argument("tags", nargs="+", help="artifact tags to remove")
+    apr = sub.add_parser("artifact-prune", help="remove older artifacts, keeping the newest archives")
+    apr.add_argument("--keep", type=int, default=3, metavar="N",
+                     help="keep N newest archives by file modification time (default: 3; 0 removes all)")
+    for cleanup_parser in (arm, apr):
+        cleanup_parser.add_argument("--dry-run", action="store_true", help="preview paths and sizes without deleting")
+        cleanup_parser.add_argument("--yes", action="store_true", help="confirm removal without prompting")
+        cleanup_parser.add_argument("--include-unbaked", action="store_true",
+                                    help="also remove matching var/unbaked/<tag> trees, which may contain edits")
 
     reg = sub.add_parser("registry", help="package registries — client (add/remove/list/sync) and "
                                           "authoring (init/validate/index)")
@@ -1437,6 +1478,8 @@ def build_parser() -> argparse.ArgumentParser:
     pv.add_argument("--platform", default=None,
                     help="THIS machine's hardware/OS target (e.g. jp7) -> RIG_TARGET_PLATFORM; "
                          "matrix services pull <tag>-<platform>")
+    pv.add_argument("--arch", choices=("arm64", "amd64"), default=None,
+                    help="optional assertion of this machine's Docker execution architecture")
     pv.add_argument("--data-dir", dest="data_dir", default=None, metavar="PATH",
                     help="THIS machine's run-registry home (absolute; the registry itself is "
                          "minted lazily by the first up/new-run — nothing else to initialize)")
@@ -1591,7 +1634,7 @@ def main(argv=None) -> int:
             return provision_mod.provision(
                 root if (root / "vehicle.yaml").exists() else None,
                 vehicle_id=args.vehicle_id, name=args.name, set_vars=args.var,
-                platform=args.platform, data_dir=args.data_dir, registry=args.registry,
+                platform=args.platform, arch=args.arch, data_dir=args.data_dir, registry=args.registry,
                 migrate=args.migrate, keep_old=args.keep_old,
                 force=args.force)
         root = (args.root or find_root()).resolve()
@@ -1631,8 +1674,10 @@ def main(argv=None) -> int:
                                                 artifact=args.artifact, from_dir=args.from_dir,
                                                 recordings=args.recordings,
                                                 all_sessions=args.all_sessions, copy=args.copy)
-        if args.cmd == "artifact-list":  # reads var/artifacts, not the manifest
-            return cmd_artifact_list(args, root)
+        artifact_handlers = {"artifact-list": cmd_artifact_list, "artifact-show": cmd_artifact_show,
+                             "artifact-rm": cmd_artifact_rm, "artifact-prune": cmd_artifact_prune}
+        if args.cmd in artifact_handlers:  # generated files; no vehicle identity resolution
+            return artifact_handlers[args.cmd](args, root)
         if args.cmd == "config-diff":  # needs the RAW rows (working files), not the rendered output
             return workingcopy_mod.cmd_diff(args, root)
         if args.cmd == "overlay":  # bindings edit vehicle.yaml rows + config/.overlays

@@ -104,7 +104,7 @@ def substitute(value, variables: dict, *, where: str):
     return value
 
 
-def resolve_map(raw: dict, *, where: str, max_depth: int = 5) -> dict:
+def resolve_map(raw: dict, *, where: str, max_depth: int = 5, allow_unresolved: bool = False) -> dict:
     """Resolve a var mapping whose VALUES may reference other vars in the same mapping
     (`camera_ip: 10.160.{{vehicle_id}}.25` as a fleet default). Iterates to a fixpoint;
     no fixpoint within `max_depth` passes = a reference cycle -> error."""
@@ -132,6 +132,17 @@ def resolve_map(raw: dict, *, where: str, max_depth: int = 5) -> dict:
         if not changed:
             break
     cyclic = sorted(k for k, v in resolved.items() if isinstance(v, str) and MARKER.search(v))
+    if allow_unresolved:
+        # Deployment planning may defer external vehicle variables, but not an internal cycle.
+        def visit(key, visiting):
+            if key in visiting:
+                raise RigError(f"{where}: var reference cycle involving '{key}'")
+            for dep in MARKER.findall(str(resolved.get(key, ""))):
+                if dep in cyclic:
+                    visit(dep, visiting | {key})
+        for key in cyclic:
+            visit(key, set())
+        return resolved
     raise RigError(f"{where}: unresolvable var reference cycle or unknown var among: "
                    f"{', '.join(cyclic)}")
 

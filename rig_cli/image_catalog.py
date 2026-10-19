@@ -44,7 +44,7 @@ def docker_arch(*, fallback=False):
     if fallback:
         return {'aarch64': 'arm64', 'arm64': 'arm64', 'x86_64': 'amd64', 'AMD64': 'amd64'}.get(
             host_platform.machine())
-    raise RigError('cannot determine replay Docker engine architecture; start/connect the Linux Docker engine')
+    raise RigError('cannot determine Docker engine architecture; start/connect the Linux Docker engine')
 
 
 def localize(tree, local, requested):
@@ -78,9 +78,15 @@ def localize(tree, local, requested):
             raise RigError(f'reconstruct: {desc.service} does not support replay runtime {selected!r}')
     # Empty is intentional: it prevents the destination machine overriding --platform recorded.
     local['platform'] = selected or ''
+    architecture = docker_arch(fallback=True)
+    source_arch = local.get('arch') or vehicle.get('arch')
+    # Older captured Rig versions reject unknown local keys. Only write an arch override when
+    # the source already declares one; every workspace still records CPU selection in the lock.
+    if 'arch' in vehicle or 'arch' in local:
+        local['arch'] = architecture or ''
     lock = load_lock(tree)
-    lock['replay_execution'] = dict(source_platform=recorded, platform=selected,
-                                    architecture=docker_arch(fallback=True))
+    lock['replay_execution'] = dict(source_platform=recorded, source_architecture=source_arch,
+                                    platform=selected, architecture=architecture)
     save_lock(tree, lock)
     eprint(f'reconstruct: recorded runtime {recorded or "generic"}; replay runtime {selected or "generic"}')
     if not lock.get('build_catalog'):

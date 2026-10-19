@@ -197,6 +197,8 @@ vendor` step) and digest-pins images against the registry from `vehicle.yaml` (`
 
 ```bash
 rig build                                   # all declared runtimes and CPU architectures, build/push
+rig build --scope host --tag iteration-1      # this machine's provisioned runtime + Docker CPU
+rig build --scope deployment,replay          # vehicle target plus supported replay companions
 rig build --platform dev --arch amd64 --tag iteration-1   # faster targeted iteration
 rig build --no-cache                         # disable instruction caching in every participating build
 rig image audit                             # inspect what the stacks will RUN: one ROS distro, the
@@ -216,10 +218,36 @@ preserving recorded topics; `rig replay RUN --include-service doodle` opts back 
 `--tag` overrides the artifact name; when omitted, it defaults to the literal `images.tag` in
 `vehicle.yaml`. A missing or templated image tag still needs `--tag`; host-local overrides do
 not choose the artifact name. This does not change the images' tags.
+Reusing an existing artifact tag prompts before replacement; non-interactive jobs must pass
+`--overwrite`. Publication is atomic, so a failed archive write preserves the previous archive.
+
+```bash
+rig artifact ls                             # target, provenance and archive/staging/extracted sizes
+rig artifact show v1                         # target, bundled image IDs and complete release catalog
+rig artifact show v1 --format json
+rig artifact rm v1 --dry-run                 # preview removal of the archive and generated staging
+rig artifact rm v1                           # confirm interactively; --yes for automation
+rig artifact prune --keep 3 --dry-run         # preview removal of all but the 3 newest archives
+```
+
+Removal preserves extracted trees by default; `--include-unbaked` explicitly includes matching
+`var/unbaked/<tag>` trees, which may contain edits. Pruning orders archives by file modification time
+and removes their matching staging trees. Orphaned staging trees are listed and can be removed by tag
+with `artifact rm`. These commands leave Docker images and recorded runs alone; `rig cleanup` and
+`rig run rm` manage those separately.
+
+Bake uses deployment declarations and explicit flags; workspace/machine `vehicle.local.yaml`, shell
+configuration overrides and generated fleet/replay state cannot leak into it. `platform` selects the
+runtime and optional `arch: arm64|amd64` selects the CPU. `--platform`/`--arch` override them for one bake;
+missing values are inferred only when the service matrices have one common choice.
 
 The artifact bundles the resolved configs + vendored surfaces + rig + a **compose-only** form that runs on
 just Docker (graceful fallback when Python/PyYAML are absent). `--bundle-images` additionally docker-saves
-the image set into the artifact (multi-GB) for **zero-registry deploys** — `up.sh` self-loads on first run.
+only the deployment runtime/CPU image set into the artifact (multi-GB) for **zero-registry deploys**
+(Docker API 1.48+). The complete release catalog remains metadata. Content aliases preserve identity
+across save/load. `up.sh` checks the target and compares local image
+IDs with the bundle, reloads missing or different images, verifies the result, and starts Compose
+without pulling. `./run.sh load` forces a reload and the same identity verification.
 Re-baking *inside an extracted artifact* (on the vehicle, after field edits) records the parent artifact in
 `metadata.yaml`, so save-points form a lineage. Full offline / local-registry flow: `docs/HOST_SETUP.md`.
 
@@ -228,6 +256,9 @@ Re-baking *inside an extracted artifact* (on the vehicle, after field edits) rec
 renders it locally from its provisioned identity — one artifact serves the whole fleet
 (`sudo ./provision.sh --id 7 --name skiff-07` once per vehicle, then `./run.sh up` forever).
 CHEATSHEET §1.6 has the full lifecycle.
+Bundled fleet artifacts require each enabled service's `verbs.images` planner so images can be selected
+without resolving vehicle identity. [The contract and scopes](docs/BUILD_AND_REPLAY.md#targets-and-scopes)
+describe the workflow and defaults.
 
 ## Registries & package kinds
 
@@ -310,10 +341,12 @@ shell (`RIG_VAR_*`) > `vehicle.local.yaml` > `/etc/rig/vehicle.local.yaml` > `ve
 defaults. A self-marker (`vehicle_id: "{{vehicle_id}}"`) makes the value MANDATORY per vehicle —
 and since v0.2.20 `rig init` scaffolds `vehicle`/`vehicle_id` as markers by default (nothing comes
 up as "vehicle 1" by accident; `--vehicle-id N` pins a single-vehicle literal). `platform:` (e.g.
-`jp7`) declares the host's hardware/OS target → `RIG_TARGET_PLATFORM`; services with a build matrix
+`jp7`) declares the deployment runtime → `RIG_TARGET_PLATFORM`; optional `arch: arm64|amd64` declares
+the CPU → `RIG_TARGET_ARCH`. Services with a build matrix
 pull `<image>:<tag>-<platform>` and `images.tag` means VERSION only. Both identity and platform are
 per-host facts the machine tier (`sudo rig provision --id 7 --name skiff-07 --platform jp7`) may
-override.
+override during local execution. Build scopes and bake use the separate deployment/host selection
+rules above; an artifact's recorded target is validated before startup.
 An `env:` map exports extra (interpolated) variables to every launcher. One mapping form,
 `{{map <list_var> <template_var>}}`, builds lists (e.g. zenoh peer endpoints from
 `{{fleet_peer_ids}}` — the fleet minus THIS vehicle, derived). CHEATSHEET §1.6.

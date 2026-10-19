@@ -81,6 +81,11 @@ def lock_images(root: Path) -> set[str]:
         refs.add(str(ref))
         if digest:
             refs.add(str(digest))
+    # Offline bundles run content aliases, which are separate from the release catalog refs.
+    if (root / "metadata.yaml").is_file():
+        from .common import load_yaml
+        bundle = load_yaml(root / "metadata.yaml").get("bundle") or {}
+        refs.update(str(ref) for ref in bundle.get("image_ids", {}))
     return refs
 
 

@@ -5,8 +5,10 @@ import os
 import pathlib
 import sys
 import tempfile
+import tarfile
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+from image_archive_fixture import CONFIG_ID
 
 # Hermetic on ANY host, provisioned included: shell identity would rename the baked compose
 # projects (<name>-vehicle-<id>) out from under the ordering assertions below.
@@ -178,7 +180,8 @@ def test_scripts_alias_digest_pins_back_to_tags():
         assert subprocess.run(["sh", "-n", str(staging / script)]).returncode == 0
     # bundle mode keeps tag refs everywhere — no split namespace, no aliases:
     staging2 = pathlib.Path(tempfile.mkdtemp())
-    _write_scripts(staging2, entries, bundle_refs=["reg:5000/ouster_driver:jp6"], aliases={})
+    _write_scripts(staging2, entries, bundle_ids={"reg:5000/ouster_driver:jp6": "sha256:" + "a" * 64},
+                   aliases={})
     assert "docker tag" not in (staging2 / "pull.sh").read_text()
 
 
@@ -239,19 +242,23 @@ printf 'services:\\n  core:\\n    image: reg.test/foo:t1\\n'
 
 # Fake docker: reports a RepoDigest (so REGISTRY mode would pin), succeeds image-inspect, and `save`
 # writes the -o file — everything the bundle path shells out for, with no daemon.
-_DOCKER_SHIM = """\
-#!/bin/sh
-case "$1" in
-  image) [ "$3" = "--format" ] && echo "sha256:fakeimageid"; exit 0 ;;
-  inspect) echo '["reg.test/foo@sha256:deadbeef"]'; exit 0 ;;
-  save) printf 'fake-image-layers' > "$3"; exit 0 ;;
-  pull) exit 0 ;;
-esac
-exit 0
+_IMAGE_ID = CONFIG_ID
+_DOCKER_SHIM = f"""#!{sys.executable}
+import json,sys
+sys.path.insert(0, {str(pathlib.Path(__file__).resolve().parent)!r})
+from image_archive_fixture import write_archive
+args=sys.argv[1:]
+if args[0]=='version':print('1.48')
+elif args[0]=='image' and '--format' in args:
+    if args[args.index('--format')+1]=='{{{{json .}}}}':
+        print(json.dumps(dict(Id={_IMAGE_ID!r},Os='linux',Architecture='arm64')))
+    else:print({_IMAGE_ID!r})
+elif args[0]=='inspect':print('["reg.test/foo@sha256:deadbeef"]')
+elif args[0]=='save':write_archive(args[args.index('-o')+1],args[args.index('-o')+2:])
 """
 
 
-def test_bundle_images_saves_tar_and_keeps_tag_refs():
+def test_bundle_images_saves_target_tar_with_content_aliases():
     import os
 
     from rig_cli.bake import bake, unbake
@@ -268,27 +275,96 @@ def test_bundle_images_saves_tar_and_keeps_tag_refs():
     old_path = os.environ["PATH"]
     os.environ["PATH"] = f"{shim}:{old_path}"        # for bundle/digest subprocesses (inherit os.environ)
     try:
-        artifact = bake(root, m, cat, descs, env, "t", bundle_images=True)
+        artifact = bake(root, m, cat, descs, env, "t", bundle_images=True, arch="arm64")
     finally:
         os.environ["PATH"] = old_path
     into = pathlib.Path(tempfile.mkdtemp())
     unbake(artifact, into)
     tree = into / "t"
-    assert (tree / "images.tar").read_text() == "fake-image-layers"
+    assert tarfile.is_tarfile(tree / "images.tar")
     compose = (tree / "compose" / "a" / "docker-compose.yaml").read_text()
-    assert "reg.test/foo:t1" in compose and "@sha256" not in compose  # tags kept despite a known digest
+    assert "rig-bundle/" in compose and "@sha256" not in compose
+    assert "platform: linux/arm64" in compose
+    assert "pull_policy: never" in compose
     up = (tree / "up.sh").read_text()
-    assert "images.tar" in up and "reg.test/foo:t1" in up             # guarded self-load on first up
+    assert "images.tar" in up and "rig-bundle/" in up
     assert "docker tag " not in up and "docker tag " not in (tree / "pull.sh").read_text()  # bundle
     #                                  mode keeps tag refs throughout — bake() must emit NO aliases
     assert "docker load" in (tree / "load.sh").read_text()
+    pull = (tree / "pull.sh").read_text()
+    assert "docker load" in pull and "docker compose" not in pull
     assert "load)" in (tree / "run.sh").read_text()
     meta = (tree / "metadata.yaml").read_text()
-    assert "pinning: tag+bundle" in meta and "fakeimageid" in meta    # audit ids recorded
+    assert "pinning: target+bundle" in meta and _IMAGE_ID in meta
+    assert _IMAGE_ID in up and "--pull never" in up
     assert "reg.test/foo@sha256:deadbeef" in meta                     # digest kept as metadata, not as ref
     lock = (tree / "rig.lock").read_text()
     assert "public/demo@1.0.0" in lock                                # deployment lock carried through
     assert "reg.test/foo:t1" in lock                                  # + bake's images section merged in
+
+
+def test_bundle_startup_checks_content_and_verifies_load_before_compose():
+    """Execute generated POSIX shell against a stateful Docker fake, including a reused tag."""
+    import subprocess
+    from rig_cli.bake import _write_bootstrap, _write_scripts
+
+    image_ids = {"reg.test/foo:t1": _IMAGE_ID, "reg.test/bar:latest": "sha256:" + "b" * 64}
+    shim = '''#!/bin/sh
+printf '%s\\n' "$*" >> "$STATE/calls"
+case "$1" in
+  image)
+    case "$5" in
+      reg.test/foo:t1) cat "$STATE/foo" ;;
+      reg.test/bar:latest) cat "$STATE/bar" ;;
+      *) exit 1 ;;
+    esac ;;
+  load)
+    [ "$LOAD_MODE" = fail ] && exit 9
+    [ "$LOAD_MODE" = wrong ] && exit 0
+    printf '%s\\n' "$FOO_ID" > "$STATE/foo"
+    printf '%s\\n' "$BAR_ID" > "$STATE/bar" ;;
+  compose) exit 0 ;;
+  *) exit 1 ;;
+esac
+'''
+    scenarios = [
+        # initial foo, archive present, loader behavior, verb, success, load count
+        (None, True, "ok", "up", True, 1),
+        ("sha256:" + "c" * 64, True, "ok", "up", True, 1),
+        (_IMAGE_ID, True, "ok", "up", True, 0),
+        (_IMAGE_ID, False, "ok", "up", True, 0),
+        (None, False, "ok", "up", False, 0),
+        (None, True, "fail", "up", False, 1),
+        (None, True, "wrong", "up", False, 1),
+        (_IMAGE_ID, True, "ok", "load", True, 1),
+        (None, True, "wrong", "load", False, 1),
+    ]
+    with _docker_on_path(shim):
+        for initial, archive, mode, verb, success, loads in scenarios:
+            with tempfile.TemporaryDirectory() as tmp:
+                root = pathlib.Path(tmp)
+                if archive:
+                    (root / "images.tar").write_bytes(b"fake archive")
+                if initial is not None:
+                    (root / "foo").write_text(initial)
+                # One correct image must not hide another missing or stale tag.
+                (root / "bar").write_text(image_ids["reg.test/bar:latest"])
+                _write_scripts(root, [{"sensor": "a", "project": "a", "compose": "compose.yaml",
+                                       "external_volumes": []}], bundle_ids=image_ids)
+                _write_bootstrap(root)
+                env = dict(os.environ, STATE=str(root), LOAD_MODE=mode, FOO_ID=_IMAGE_ID,
+                           BAR_ID=image_ids["reg.test/bar:latest"])
+                proc = subprocess.run([str(root / "run.sh"), verb], env=env,
+                                      capture_output=True, text=True)
+                assert (proc.returncode == 0) == success, (initial, archive, mode, verb, proc.stderr)
+                calls = (root / "calls").read_text().splitlines()
+                assert sum(c.startswith("load ") for c in calls) == loads, calls
+                compose = [c for c in calls if c.startswith("compose ")]
+                assert bool(compose) == (success and verb == "up"), calls
+                if compose:
+                    assert compose == ["compose -p a -f compose.yaml up -d --pull never"]
+                elif not success and mode == "wrong":
+                    assert "expected " + _IMAGE_ID in proc.stderr
 
 
 def test_bake_preserves_all_three_tiers_and_script_order():
@@ -473,7 +549,7 @@ def test_bundle_images_hard_errors():
     # Images all present but `docker save` fails (e.g. disk full): hard error, stderr surfaced.
     save_fail = ("#!/bin/sh\n"
                  'case "$1" in\n'
-                 "  image) exit 0 ;;\n"
+                 f'  image) echo "{_IMAGE_ID}"; exit 0 ;;\n'
                  '  save) echo "write images.tar: no space left on device" >&2; exit 1 ;;\n'
                  "esac\n"
                  "exit 0\n")
@@ -483,6 +559,42 @@ def test_bundle_images_hard_errors():
             raise AssertionError("expected RigError for failed save")
         except RigError as exc:
             assert "docker save failed" in str(exc) and "no space left" in str(exc)
+
+
+def test_bundle_requires_complete_stable_image_ids():
+    import subprocess
+    from unittest.mock import patch
+    from rig_cli import RigError
+    from rig_cli.bake import _bundle_images
+
+    # Successful existence checks are insufficient: every ref needs an actual content ID.
+    for exit_code, output in ((1, ""), (0, ""), (0, "not-an-image-id")):
+        with tempfile.TemporaryDirectory() as tmp:
+            def inspect_fail(cmd, **kwargs):
+                if "--format" in cmd:
+                    return subprocess.CompletedProcess(cmd, exit_code, output, "")
+                assert cmd[:3] == ["docker", "image", "inspect"], cmd  # never gets to save
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+            with patch("rig_cli.bake.subprocess.run", side_effect=inspect_fail):
+                try:
+                    _bundle_images(pathlib.Path(tmp), ["reg.test/foo:t1"])
+                    raise AssertionError("accepted missing/invalid image ID")
+                except RigError as exc:
+                    assert "cannot determine image ID" in str(exc)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        def moving_tag(cmd, **kwargs):
+            if cmd[1] == "save":
+                (root / "images.tar").write_bytes(b"archive of the original image")
+            image_id = "sha256:" + ("b" if (root / "images.tar").exists() else "a") * 64
+            return subprocess.CompletedProcess(cmd, 0, image_id if "--format" in cmd else "", "")
+        with patch("rig_cli.bake.subprocess.run", side_effect=moving_tag):
+            try:
+                _bundle_images(root, ["reg.test/foo:t1"])
+                raise AssertionError("accepted a tag that changed during save")
+            except RigError as exc:
+                assert "image IDs changed during docker save" in str(exc)
 
 
 def test_resolve_digest_registry_fallback_chain():
@@ -721,7 +833,7 @@ def test_compose_only_is_all_or_nothing():
     assert not (tree / "up.sh").exists() and not (tree / "down.sh").exists()   # no partial startup
     assert (tree / "rig").exists() and (tree / "run.sh").exists()              # the rig fallback ships
     try:
-        _bake_quiet(root, m, cat, descs, {"PATH": os.environ["PATH"]}, "t2", bundle_images=True)
+        _bake_quiet(root, m, cat, descs, {"PATH": os.environ["PATH"]}, "t2", bundle_images=True, arch="arm64")
     except RigError as exc:
         assert "b did not" in str(exc)
     else:

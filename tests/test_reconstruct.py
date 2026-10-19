@@ -175,6 +175,49 @@ def test_reconstruct_lays_configs_out_by_tier():
     assert rows["nav"].endswith("config/autonomy/nav.yaml") and pathlib.Path(rows["nav"]).is_file()
 
 
+def test_reconstruct_detaches_vehicle_bundle_but_retains_source_provenance():
+    import yaml
+    from unittest.mock import patch
+    from rig_cli.artifact_runtime import check_target, run_bundle
+    from rig_cli.lock import load_lock
+    from rig_cli.manifest import load_manifest
+    root, m = _deployment()
+    m.platform, m.arch = 'jp6m', 'arm64'
+    rid, data = _open(m, root)
+    run_dir = data / 'runs' / rid
+    archive = run_dir / '.rig/artifact.tar.gz'
+    work = pathlib.Path(tempfile.mkdtemp())
+    with tarfile.open(archive) as tf:
+        tf.extractall(work)
+    source = work / 'capture'
+    meta = load_yaml(source / 'metadata.yaml')
+    meta.update(target={'runtime': 'jp6m', 'arch': 'arm64'}, bundle={'refs': {'live:v1': 'alias:v1'}})
+    (source / 'metadata.yaml').write_text(yaml.safe_dump(meta))
+    (source / 'up.sh').write_text('#!/bin/sh\nexit 99\n')
+    (source / 'ensure-images.sh').write_text('#!/bin/sh\nexit 99\n')
+    (source / 'images.tar').write_bytes(b'source bundle')
+    with tarfile.open(archive, 'w:gz') as tf:
+        tf.add(source, arcname='capture')
+    doc = load_yaml(run_dir / 'manifest.yaml')
+    doc['capture']['sha256'] = before = bake._sha256(archive)
+    (run_dir / 'manifest.yaml').write_text(yaml.safe_dump(doc))
+    dest = work / 'replay'
+    with patch('rig_cli.image_catalog.docker_arch', return_value='amd64'), \
+            patch('rig_cli.manifest.machine_file', return_value=work / 'absent'), \
+            contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        assert reconstruct.cmd_reconstruct(None, run_ref=str(run_dir), into=str(dest),
+                                           config=None, platform='dev', no_import=True) == 0
+        replay = load_manifest(dest)
+        check_target(dest, replay)  # source arm64 runtime no longer constrains this workspace
+        assert run_bundle(dest, replay, {}, {}) is None
+    assert (replay.platform, replay.arch) == ('dev', 'amd64')
+    assert not (dest / 'up.sh').exists() and not (dest / 'ensure-images.sh').exists()
+    assert (dest / 'var/source-deployment/images.tar').read_bytes() == b'source bundle'
+    assert load_yaml(dest / 'var/source-deployment/metadata.yaml')['target']['arch'] == 'arm64'
+    assert load_lock(dest)['replay_execution']['source_architecture'] == 'arm64'
+    assert bake._sha256(archive) == before
+
+
 def test_reconstructed_tree_is_editable_by_the_line_verbs():
     """A staged tree IS a deployment tree: `rig swap` (and `pkg remove`) edit services.yaml by
     line, so the capture must write rig's generated form — safe_dump's block form parsed fine but

@@ -210,7 +210,7 @@ def _build_env(distro: str | None, desc: Descriptor | None = None, platform: str
     name is exported in most ROS shells: a dev box's `.bashrc` must not decide what a fleet image
     contains. (The service's own override_env is NOT popped — operators use it standalone.)"""
     env = dict(os.environ)
-    for key in ('RIG_BUILD_PLATFORMS', 'RIG_BUILD_RESULT', 'RIG_BUILD_PULL'):
+    for key in ('RIG_BUILD_PLATFORMS', 'RIG_BUILD_RESULT', 'RIG_BUILD_PULL', 'RIG_TARGET_ARCH'):
         env.pop(key, None)
     if distro:
         env["ROS_DISTRO"] = distro
@@ -532,14 +532,16 @@ def _build_single(manifest: Manifest, descriptors: dict[str, Descriptor], *, reg
 def build(manifest: Manifest, descriptors: dict[str, Descriptor], *, registry: str | None,
           tag: str | None, dry_run: bool, jobs: int = 1, root: Path | None = None,
           platform: str | None = None, arch: str | None = None, no_cache: bool = False,
-          base_image: str | None = None) -> int:
+          base_image: str | None = None, scopes=None) -> int:
     used = {s.service for s in manifest.sensors}
     descriptors = {s: d for s, d in descriptors.items() if s in used}
-    if arch or any(d.build_architectures or d.build_platforms for d in descriptors.values()):
+    from .targets import parse_scopes
+    scopes = parse_scopes(scopes)
+    if scopes != ["all"] or arch or any(d.build_architectures or d.build_platforms for d in descriptors.values()):
         from .matrix_build import run
         return run(manifest, descriptors, registry=registry, tag=tag, dry_run=dry_run,
                    jobs=jobs, root=root, platform=platform, arch=arch, no_cache=no_cache,
-                   base_image=base_image)
+                   base_image=base_image, scopes=scopes)
     if no_cache:
         for service, desc in descriptors.items():
             if desc.build_command and desc.build_no_cache is not True:

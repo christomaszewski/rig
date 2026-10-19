@@ -116,6 +116,25 @@ def test_conformant_fixture_is_green():
             "volumes", "determinism", "identity", "status"} <= oks
 
 
+def test_declared_image_override_must_reach_compose():
+    rigging = RIGGING + 'images: {override_env: {fak-core: FAK_IMAGE}}\n'
+    _, errors, _, _ = run_certify(make_service(rigging))
+    assert errors == {'image-overrides'}
+    checks, errors, _, oks = run_certify(make_service(rigging,
+        **{'@IMAGE@': '${FAK_IMAGE:-$RIG_IMAGE_REGISTRY/fak-core:$RIG_IMAGE_TAG}'}))
+    assert not errors, [(c.name, c.detail) for c in checks if c.level == 'ERROR']
+    assert 'image-overrides' in oks
+
+
+def test_image_override_checked_for_each_runtime():
+    rigging = RIGGING_MATRIX + 'images: {override_env: {fak-core: FAK_IMAGE}}\n'
+    checks, errors, _, _ = run_certify(make_service(rigging, **{
+        '@PRELUDE@': '    if [ "$FAK_PLATFORM" = "beta" ]; then unset FAK_IMAGE; fi',
+        '@ENVBLOCK@': MATRIX_ENV,
+        '@IMAGE@': '${FAK_IMAGE:-$RIG_IMAGE_REGISTRY/fak-core:$RIG_IMAGE_TAG}'}))
+    assert errors == {'image-overrides'}, [(c.name, c.detail) for c in checks if c.level == 'ERROR']
+
+
 def test_status_failure_without_docker_daemon_is_a_skip_not_an_error():
     # A failing `status` verb is a contract ERROR only when a docker daemon is reachable —
     # `docker compose ps` needs one, while every other check renders client-side. On a daemon-less

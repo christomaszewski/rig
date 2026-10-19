@@ -231,12 +231,18 @@ CHEATSHEET §1.5 "the daily loop", RUNBOOK "registry maintainer loop"):
 nvidia runtime vs ubuntu 24.04 + runc/CDI). You could not pin `v1.3.0` and declare `jp7` at once, and
 cam-up carried the scar tissue ("is RIG_IMAGE_TAG a platform name?"). Now the two are first-class:
 
-- **`platform:` is a HOST fact** — top-level in vehicle.yaml, sibling of `data_dir`. In rig's model
-  vehicle.yaml plus the vehicle-local tier IS the per-host declaration: `/etc/rig/vehicle.local.yaml`
-  may carry it per machine (`sudo rig provision --platform jp7`), a self-marker
+- **`platform:` selects a runtime** — top-level in vehicle.yaml, with optional `arch: arm64|amd64`.
+  The deployment file provides release defaults. During execution, `/etc/rig/vehicle.local.yaml`
+  may override them per machine (`sudo rig provision --platform jp7 --arch arm64`), a self-marker
   (`platform: "{{platform}}"`) makes it mandatory-from-local for fleet artifacts, and the resolved
   value joins the var context so configs may CONSUME `{{platform}}`. Never declared in sensor/instance
-  configs or profiles — those stay portable across vehicles.
+  configs or profiles — those stay portable across vehicles. Bake uses deployment context, excluding
+  local files, ambient configuration variables and generated fleet/replay state. Explicit bake flags
+  override deployment defaults before interpolation; a missing target is inferred only when unambiguous.
+- **Build scope is independent of deployment target.** Bare `rig build` remains the full runtime/CPU
+  matrix. `--scope deployment`, `host`, `replay` and their unions narrow it explicitly. Host selection
+  uses machine provisioning and the Docker engine CPU; workspace local files never identify that host.
+  Shared build outputs are deduplicated. See [targets and scopes](BUILD_AND_REPLAY.md#targets-and-scopes).
 - **Services declare their dependency** in rigging.yaml: `build.platforms: [jp7, jp6]` (the build
   matrix — absence = platform-independent) and `platform: {auto_detect: <probe>, override_env:
   CAM_PLATFORM}` (the launcher's standalone host probe, and the env var it honors as override).
@@ -248,10 +254,15 @@ cam-up carried the scar tissue ("is RIG_IMAGE_TAG a platform name?"). Now the tw
 - **Composed refs**: for a matrix service the per-service env carries `RIG_IMAGE_TAG=<tag>-<platform>`
   (bare `<platform>` when no tag — the platform's moving head), so its compose pulls
   `cam-core:v1.3.0-jp7`. The launcher contract is unchanged (composes still pull `:${RIG_IMAGE_TAG}`);
-  bake/pull/lock inherit the composed refs (one digest per host's resolved ref). NOT multi-arch
-  manifest lists: jp6/jp7 are the same arch, the tag must carry the platform. `rig build` passes the
+  bake/pull/lock inherit the composed refs. Each runtime tag may carry a multiarch index; jp6/jp7
+  still need different tags because they share a CPU architecture. `rig build` passes the
   composed tag as the existing `<cmd> <registry> [tag]` second arg plus the platform env
   (`--platform` overrides, like `--registry`/`--tag`).
+- **Bundles select runtime payloads.** The full release catalog remains in the artifact, but only
+  enabled vehicle images for its target CPU are saved. Content aliases plus exact image IDs bridge
+  registry digests to Docker save/load. Fleet templates require an explicit service `verbs.images`
+  planner; runtime Compose must use only its planned image set. Reconstruction retains the source
+  bundle as provenance and selects companion images for the replay host independently.
 - **certify** runs the suite AS the first matrix entry (tag agreement expects the composed
   `certify-tag-x-<p>`) and adds a `platform` check: every other matrix entry must render on any host,
   pull built images as its composed tag, and differ from the first entry's render (byte-identical =

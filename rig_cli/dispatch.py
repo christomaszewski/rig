@@ -17,6 +17,14 @@ from .descriptor import Descriptor
 from .manifest import Manifest, Sensor, project_name
 
 
+def deployment_env() -> dict[str, str]:
+    """Transport/tool settings only; ambient launcher/Compose overrides are not release inputs."""
+    allowed = {"PATH", "HOME", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL", "SYSTEMROOT",
+               "DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG", "DOCKER_CERT_PATH",
+               "DOCKER_TLS_VERIFY", "SSH_AUTH_SOCK"}
+    return {k: v for k, v in os.environ.items() if k in allowed}
+
+
 def fleet_env(manifest: Manifest, descriptors: dict[str, Descriptor] | None = None) -> dict[str, str]:
     """The process env with which to call every launcher: inherit + pin the shared DDS graph.
 
@@ -37,7 +45,7 @@ def fleet_env(manifest: Manifest, descriptors: dict[str, Descriptor] | None = No
         from .build import resolve_base_image, resolve_msgs_image
         base_ref, _, _ = resolve_base_image(manifest, descriptors)
         msgs_ref, _, _ = resolve_msgs_image(manifest, descriptors)
-    env = dict(os.environ)
+    env = deployment_env() if manifest.context == "deployment" else dict(os.environ)
     import json
     from .image_catalog import pins, canonical_ref
     image_pins = pins(manifest)
@@ -57,6 +65,7 @@ def fleet_env(manifest: Manifest, descriptors: dict[str, Descriptor] | None = No
                        ("RIG_BASE_IMAGE", base_ref),
                        ("RIG_MSGS_IMAGE", msgs_ref),
                        ("RIG_TARGET_PLATFORM", manifest.platform),
+                       ("RIG_TARGET_ARCH", manifest.arch),
                        ("RIG_DATA_DIR", manifest.data_dir),
                        # the replay channel: None here on EVERY verb (popped) — replay.py alone
                        # sets them on its env copy after this returns (per-invocation, never
