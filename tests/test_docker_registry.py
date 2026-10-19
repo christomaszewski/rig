@@ -17,7 +17,9 @@ HOST = 'registry.test:5000'
 REF = HOST + '/team/core:v1'
 POLICY = {'IndexConfigs': {HOST: {'Secure': False}, 'docker.io': {'Secure': True}},
           'InsecureRegistryCIDRs': ['127.0.0.0/8', '::1/128']}
-INFO = {'id': 'test-daemon', 'registries': POLICY}
+INFO = {'id': 'test-daemon', 'registries': POLICY,
+        'driver_status': [['driver-type', 'io.containerd.snapshotter.v1']]}
+CLASSIC_INFO = {**INFO, 'driver_status': [['Backing Filesystem', 'extfs']]}
 
 
 def completed(cmd, output='', code=0, error=''):
@@ -83,6 +85,11 @@ class RegistryPolicyTests(unittest.TestCase):
                 self.assertEqual(registry.prepare([REF]), registry.Access())
                 builder.assert_not_called()
 
+    def test_daemon_query_reads_image_store_capability_with_registry_policy(self):
+        with patch.object(registry.subprocess, 'run', return_value=completed([], json.dumps(INFO))) as run:
+            self.assertEqual(registry._docker_info(), INFO)
+        self.assertIn('{{json .DriverStatus}}', run.call_args.args[0][-1])
+
     def test_secure_registry_does_not_probe_or_create_builder(self):
         with patch.object(registry, '_docker_info', return_value=INFO), \
                 patch.object(registry, 'registry_transport') as transport, \
@@ -141,26 +148,62 @@ class ManagedBuilderTests(unittest.TestCase):
                 with self.assertRaises(RigError):
                     registry._managed_builder(INFO, {HOST: 'http'})
 
-    def prepare_with_driver(self, driver, *, overrides=None, endpoints=('default',)):
+    def prepare_with_driver(self, driver, *, overrides=None, endpoints=('default',), info=INFO,
+                            insecure=True, context='default'):
         output = f'Name: selected\nDriver: {driver}\nNodes:\n' + ''.join(
             f'Name: node{i}\nEndpoint: {ep}\n' for i, ep in enumerate(endpoints))
         with patch.dict(os.environ, {'BUILDX_BUILDER': '', 'BUILDKIT_HOST': '', 'DOCKER_HOST': '',
+                                     'DOCKER_CONTEXT': '',
                                      **(overrides or {})}), \
-                patch.object(registry, '_docker_info', return_value=INFO), \
+                patch.object(registry, '_docker_info', return_value=info), \
                 patch.object(registry, 'registry_transport', return_value='http'), \
-                patch.object(registry, '_managed_builder', return_value='rig-registry-test'), \
+                patch.object(registry, '_managed_builder', return_value='rig-registry-test') as builder, \
                 patch.object(registry.subprocess, 'run', side_effect=[completed([], output),
-                                                                    completed([], 'default\n')]):
-            access = registry.prepare([REF, REF], for_build=True)
-        self.assertEqual(access.registry_env, {'BUILDX_BUILDER': 'rig-registry-test'})
+                                                                    completed([], context + '\n')]):
+            access = registry.prepare([REF, REF] if insecure else ['docker.io/team/core:v1'],
+                                      for_build=True)
+        self.assertEqual(access.registry_env, {'BUILDX_BUILDER': 'rig-registry-test'} if insecure else {})
+        if access.build_env or access.registry_env:
+            builder.assert_called_once_with(info, {HOST: 'http'} if insecure else {})
+        else:
+            builder.assert_not_called()
         return access
 
-    def test_daemon_builder_keeps_its_cache_and_build_selection(self):
-        self.assertEqual(self.prepare_with_driver('docker').build_env, {})
+    def test_containerd_daemon_keeps_its_cache_and_build_selection(self):
+        for insecure in (True, False):
+            with self.subTest(insecure=insecure):
+                self.assertEqual(self.prepare_with_driver('docker', insecure=insecure).build_env, {})
+
+    def test_classic_daemon_uses_container_builder_for_attestations_and_multiarch(self):
+        for insecure in (True, False):
+            for status in (CLASSIC_INFO['driver_status'], [], None):
+                with self.subTest(insecure=insecure, status=status):
+                    access = self.prepare_with_driver('docker', insecure=insecure,
+                                                      info={**INFO, 'driver_status': status})
+                    self.assertEqual(access.build_env, {'BUILDX_BUILDER': 'rig-registry-test'})
+
+    def test_classic_daemon_selection_respects_context_and_host(self):
+        cases = [({'DOCKER_HOST': 'unix:///docker.sock'}, 'unix:///docker.sock', 'default'),
+                 ({'DOCKER_CONTEXT': 'engine', 'DOCKER_HOST': 'tcp://ignored:2376'}, 'engine', 'engine')]
+        for overrides, endpoint, context in cases:
+            with self.subTest(overrides=overrides):
+                self.assertEqual(self.prepare_with_driver('docker', info=CLASSIC_INFO,
+                    overrides=overrides, endpoints=(endpoint,), context=context).build_env,
+                    {'BUILDX_BUILDER': 'rig-registry-test'})
+
+    def test_classic_daemon_explicit_or_other_endpoint_selection_is_preserved(self):
+        for insecure in (True, False):
+            for overrides, endpoints in (({'BUILDX_BUILDER': 'chosen'}, ('default',)),
+                                         ({'BUILDKIT_HOST': 'tcp://builder.test:1234'}, ('default',)),
+                                         ({}, ('other-engine',))):
+                with self.subTest(insecure=insecure, overrides=overrides, endpoints=endpoints):
+                    self.assertEqual(self.prepare_with_driver('docker', info=CLASSIC_INFO,
+                        insecure=insecure, overrides=overrides, endpoints=endpoints).build_env, {})
 
     def test_local_container_builder_automatically_gets_policy(self):
         self.assertEqual(self.prepare_with_driver('docker-container').build_env,
                          {'BUILDX_BUILDER': 'rig-registry-test'})
+        self.assertEqual(self.prepare_with_driver('docker-container', insecure=False).build_env, {})
 
     def test_explicit_remote_and_multinode_build_choices_are_preserved(self):
         for driver, overrides, endpoints in (

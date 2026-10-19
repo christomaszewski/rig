@@ -94,13 +94,20 @@ retain normal TLS verification; authentication failures do not trigger an HTTP f
 Buildx's registry client does not inherit dockerd's policy itself. Rig supplies it through a reusable
 `rig-registry-<hash>` builder configuration for manifest inspection and mirroring. The configuration
 is scoped to the Docker daemon and registry policy; Rig never changes the globally selected builder.
-With the built-in `docker` driver, image builds continue using the existing builder and cache; the
-registry helper does not start a BuildKit container. For a single `docker-container` node on the
-current Docker context, Rig also uses the managed builder for builds, retaining its cache between
-runs. Its host network lets it reach registries published on the Docker host's loopback interface.
+With the built-in `docker` driver and Docker's **containerd image store**, image builds continue
+using the existing builder and cache; the registry helper does not start a BuildKit container.
+Docker's classic image store cannot publish multiarch images with attestations. Rig detects that
+store and automatically uses a managed `docker-container` builder, even for secure registries.
+This retains provenance without requiring a daemon configuration change. For a single
+`docker-container` node on the current Docker context, Rig also uses the managed builder when it
+needs inherited registry policy. Managed builders retain their own cache between runs; the first
+build cannot reuse the built-in Docker driver's cache. Their host network lets them reach
+registries published on the Docker host's loopback interface.
 
 Explicit `BUILDX_BUILDER` / `BUILDKIT_HOST` selections and remote/cloud/multinode builders keep their
 build settings and topology; those build servers must already have the required registry access.
+An explicitly selected `docker` builder also needs the containerd image store for attestations;
+unset `BUILDX_BUILDER` to let Rig select a compatible builder automatically.
 Rig still inherits the Docker daemon's policy for its own registry inspections. Bake and replay
 manifest lookups also retry HTTP/TLS failures using that policy. Existing Docker credentials and
 context are preserved. Old managed builders can be listed with `docker buildx ls` and removed by

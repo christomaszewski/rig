@@ -2,8 +2,9 @@
 
 Buildx imagetools does not read dockerd's insecure-registries. A config-only, Rig-owned
 builder supplies that missing policy without changing the user's selected builder. Builds
-using the docker driver stay there (and keep its cache); an unconfigured container builder
-can use the same managed builder for builds. Explicit builder overrides remain authoritative.
+using the docker driver keep its cache when its image store supports portable builds; classic
+stores and unconfigured container builders can use the managed builder instead. Explicit
+builder overrides remain authoritative.
 """
 from __future__ import annotations
 
@@ -123,7 +124,8 @@ def registry_transport(host):
 def _docker_info():
     try:
         proc = subprocess.run(
-            ['docker', 'info', '--format', '{"id":{{json .ID}},"registries":{{json .RegistryConfig}}}'],
+            ['docker', 'info', '--format', '{"id":{{json .ID}},"registries":{{json .RegistryConfig}},'
+             '"driver_status":{{json .DriverStatus}}}'],
             capture_output=True, text=True, timeout=10)
         info = json.loads(proc.stdout) if proc.returncode == 0 else None
         if isinstance(info, dict) and isinstance(info.get('registries'), dict) and info.get('id'):
@@ -173,10 +175,11 @@ def prepare(refs, *, for_build=False):
     hosts = sorted({registry_host(ref) for ref in refs})
     settings = {host: registry_transport(host) for host in hosts
                 if insecure_registry(host, info['registries'])}
-    if not settings:
-        return Access()
-    builder = _managed_builder(info, settings)
-    access = Access(registry_env={'BUILDX_BUILDER': builder})
+    access = Access()
+    builder = None
+    if settings:
+        builder = _managed_builder(info, settings)
+        access.registry_env = {'BUILDX_BUILDER': builder}
     if for_build and not (os.environ.get('BUILDX_BUILDER') or os.environ.get('BUILDKIT_HOST')):
         try:
             selected = subprocess.run(['docker', 'buildx', 'inspect'], capture_output=True,
@@ -187,7 +190,7 @@ def prepare(refs, *, for_build=False):
             raise RigError(f'cannot inspect selected Buildx builder: {selected.stderr.strip()}')
         driver = re.search(r'^Driver:\s+(\S+)', selected.stdout, re.M)
         endpoints = re.findall(r'^\s*Endpoint:\s+(\S+)', selected.stdout, re.M)
-        if driver and driver[1] == 'docker-container' and len(endpoints) == 1:
+        if driver and driver[1] in ('docker', 'docker-container') and len(endpoints) == 1:
             try:
                 context = subprocess.run(['docker', 'context', 'show'], capture_output=True,
                                          text=True, timeout=10)
@@ -195,12 +198,22 @@ def prepare(refs, *, for_build=False):
                 raise RigError(f'cannot determine current Docker context: {exc}') from exc
             # A named context or explicit DOCKER_HOST identifies this same daemon. A selected
             # remote endpoint is not permission to move its build to the local engine.
-            current = os.environ.get('DOCKER_HOST') or context.stdout.strip()
+            current = (context.stdout.strip() if os.environ.get('DOCKER_CONTEXT') else
+                       os.environ.get('DOCKER_HOST') or context.stdout.strip())
             if context.returncode == 0 and endpoints[0] == current:
-                access.build_env = dict(access.registry_env)
-        # docker already inherits dockerd policy; remote/cloud/multinode builders remain
-        # under the operator's control rather than silently moving work to this daemon.
-    eprint('rig: using Docker insecure-registry settings for ' + ', '.join(settings))
+                containerd = ['driver-type', 'io.containerd.snapshotter.v1'] in (
+                    info.get('driver_status') or [])
+                classic = driver[1] == 'docker' and not containerd
+                if classic or (driver[1] == 'docker-container' and settings):
+                    builder = builder or _managed_builder(info, settings)
+                    access.build_env = {'BUILDX_BUILDER': builder}
+                    if classic:
+                        eprint('rig: Docker image store lacks multiarch/attestation support; '
+                               'using a managed container builder')
+        # docker with containerd already supports attestations and dockerd policy; remote/cloud/
+        # multinode builders remain under the operator's control rather than moving their work.
+    if settings:
+        eprint('rig: using Docker insecure-registry settings for ' + ', '.join(settings))
     if access.build_env:
         eprint(f'rig: using managed Buildx builder {builder} for this build')
     return access
