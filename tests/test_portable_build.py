@@ -198,7 +198,7 @@ replay: {platform: dev}
             matrix.preflight(tasks, m.image_registry)
         with patch.object(matrix.subprocess, 'run', return_value=subprocess.CompletedProcess(
                 [], 0, 'Platforms: linux/amd64', '')):
-            with self.assertRaisesRegex(RigError, 'builder lacks'):
+            with self.assertRaisesRegex(RigError, 'builder .* lacks'):
                 matrix.preflight(tasks, m.image_registry)
 
     def test_no_cache_rejected_without_capability_and_build_channels_do_not_leak(self):
@@ -282,6 +282,75 @@ Path(a[a.index('--metadata-file')+1]).write_text(json.dumps({'containerimage.dig
             self.assertEqual(len(lock['build_catalog']), 3)
             self.assertTrue(all(r['digest'] == DIGEST and r['no_cache']
                                 for r in lock['build_catalog'].values()))
+
+
+class BuilderPreflight(unittest.TestCase):
+    def setUp(self):
+        self.tasks = [matrix.Task('core', None, Path('.'), None, ['arm64', 'amd64'],
+                                  ['core'], 'v1', 'build.sh')]
+        self.access = matrix.docker_registry.Access(build_env={'BUILDX_BUILDER': 'managed'})
+
+    def result(self, output):
+        return subprocess.CompletedProcess([], 0, output, '')
+
+    def test_reported_architectures_and_variants_are_accepted(self):
+        for arm in ('linux/arm64', 'linux/arm64/v8*'):
+            output = (f'Name: managed\nDriver: docker-container\nNodes:\nName: managed0\n'
+                      f'Platforms: {arm}, linux/amd64/v1, linux/arm/v7, linux/arm/v6\n')
+            with self.subTest(arm=arm), patch.object(matrix.subprocess, 'run',
+                                                    return_value=self.result(output)) as run:
+                matrix.preflight(self.tasks, 'registry.test', access=self.access)
+                self.assertEqual(run.call_count, 1)
+
+    def test_incomplete_bootstrap_retries_same_managed_builder(self):
+        responses = [self.result('Name: managed\nDriver: docker-container\n'
+                                 'Error: context deadline exceeded\n'),
+                     self.result('Name: managed\nPlatforms: linux/arm64, linux/amd64/v1\n')]
+        with patch.object(matrix.subprocess, 'run', side_effect=responses) as run:
+            matrix.preflight(self.tasks, 'registry.test', access=self.access)
+        self.assertEqual([call.args[0] for call in run.call_args_list], [
+            ['docker', 'buildx', 'inspect', 'managed', '--bootstrap'],
+            ['docker', 'buildx', 'inspect', 'managed']])
+        self.assertTrue(all(call.kwargs['env']['BUILDX_BUILDER'] == 'managed'
+                            for call in run.call_args_list))
+
+    def test_persistent_node_error_is_not_missing_architecture(self):
+        output = ('Name: managed\nNodes:\nName: managed0\nPlatforms: linux/amd64\n'
+                  'Name: managed1\nError: failed connecting to linux/arm64 worker\n')
+        with patch.object(matrix.subprocess, 'run', return_value=self.result(output)) as run:
+            with self.assertRaisesRegex(RigError, "builder 'managed' unavailable: failed connecting"):
+                matrix.preflight(self.tasks, 'registry.test', access=self.access)
+        self.assertEqual(run.call_count, 2)
+
+    def test_missing_platform_rows_are_inspection_failure(self):
+        with patch.object(matrix.subprocess, 'run', return_value=self.result(
+                'Name: managed\nStatus: running\n')) as run:
+            with self.assertRaisesRegex(RigError, 'no platforms reported after bootstrap'):
+                matrix.preflight(self.tasks, 'registry.test', access=self.access)
+        self.assertEqual(run.call_count, 2)
+
+    def test_missing_architecture_names_builder_and_actual_platforms(self):
+        output = ('Name: managed\nPlatforms: linux/amd64/v1, linux/arm/v7\n'
+                  'Labels:\n description: builds linux/arm64 images\n')
+        with patch.object(matrix.subprocess, 'run', return_value=self.result(output)) as run:
+            with self.assertRaisesRegex(RigError, "builder 'managed' lacks.*arm64.*"
+                                         'advertised platforms: linux/amd64/v1, linux/arm/v7'):
+                matrix.preflight(self.tasks, 'registry.test', access=self.access)
+        self.assertEqual(run.call_count, 1)
+
+    def test_retry_pins_initially_selected_builder(self):
+        responses = [self.result('Name: selected\nError: deadline exceeded\n'),
+                     self.result('Name: selected\nPlatforms: linux/amd64, linux/arm64\n')]
+        with patch.dict(os.environ, BUILDX_BUILDER=''), \
+                patch.object(matrix.subprocess, 'run', side_effect=responses) as run:
+            matrix.preflight(self.tasks, 'registry.test')
+        self.assertEqual(run.call_args.args[0], ['docker', 'buildx', 'inspect', 'selected'])
+
+    def test_inspecting_unexpected_builder_fails(self):
+        with patch.object(matrix.subprocess, 'run', return_value=self.result(
+                'Name: other\nPlatforms: linux/amd64, linux/arm64\n')):
+            with self.assertRaisesRegex(RigError, "inspected builder 'other', expected 'managed'"):
+                matrix.preflight(self.tasks, 'registry.test', access=self.access)
 
 
 if __name__ == '__main__':

@@ -162,21 +162,50 @@ def manifest_architectures(raw):
             if m.get('platform', {}).get('os') == 'linux'}
 
 
-def preflight(tasks, registry, *, access=None):
+def _builder_platforms(access):
     import os
-    options = {'env': dict(os.environ, **access.build_env)} if access and access.build_env else {}
-    try:
-        result = subprocess.run(['docker', 'buildx', 'inspect', '--bootstrap'],
-                                capture_output=True, text=True, timeout=60, **options)
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise RigError(f'Buildx builder unavailable: {exc}') from exc
-    if result.returncode:
-        raise RigError(f'Buildx builder unavailable: {result.stderr.strip()}')
-    available = set(re.findall(r'linux/(arm64|amd64)', result.stdout))
+    env = dict(os.environ, **access.build_env) if access else dict(os.environ)
+    name = env.get('BUILDX_BUILDER')
+    command = ['docker', 'buildx', 'inspect', *([name] if name else []), '--bootstrap']
+    for attempt in range(2):
+        try:
+            result = subprocess.run(command, capture_output=True, text=True, timeout=60, env=env)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise RigError(f'Buildx builder {name or "current"!r} unavailable: {exc}') from exc
+        if result.returncode:
+            raise RigError(f'Buildx builder {name or "current"!r} unavailable: {result.stderr.strip()}')
+        actual = re.search(r'^Name:[ \t]*(\S+)', result.stdout, re.M)
+        if actual:
+            if name and name != actual[1]:
+                raise RigError(f'Buildx inspected builder {actual[1]!r}, expected {name!r}')
+            name = actual[1]
+        errors = re.findall(r'^[ \t]*Error:[ \t]*(.*)$', result.stdout, re.M)
+        platforms = sorted({p.strip().rstrip('*')
+                            for line in re.findall(r'^[ \t]*Platforms:[ \t]*(.*)$', result.stdout, re.M)
+                            for p in line.split(',') if p.strip()})
+        if platforms and not errors:
+            return name or 'current', platforms
+        # Buildx can exit zero after node inspection fails. Older versions also reuse an
+        # expired status deadline after a slow bootstrap. Reinspect the same builder once,
+        # without rebooting it, before treating missing output as a capability limitation.
+        if attempt == 0:
+            eprint(f'rig: rechecking builder {name or "current"!r} after incomplete inspection')
+            command = ['docker', 'buildx', 'inspect', *([name] if name else [])]
+        else:
+            detail = '; '.join(errors) if errors else 'no platforms reported after bootstrap'
+            raise RigError(f'Buildx builder {name or "current"!r} unavailable: {detail}')
+
+
+def preflight(tasks, registry, *, access=None):
+    name, platforms = _builder_platforms(access)
+    available = {match[1] for p in platforms
+                 if (match := re.fullmatch(r'linux/(arm64|amd64)(?:/[^/]+)?', p))}
     needed = {a for task in tasks for a in task.architectures}
     if needed - available:
-        raise RigError(f'builder lacks {sorted(needed - available)}; configure native nodes/emulation '
-                       'or narrow --platform/--arch')
+        raise RigError(f'builder {name!r} lacks {sorted(needed - available)}; '
+                       f'advertised platforms: {", ".join(platforms)}; '
+                       'configure native nodes/emulation or narrow --platform/--arch')
+    eprint(f'rig: builder {name!r} supports {", ".join(sorted(available))}')
     for task in tasks:
         if not task.narrowed:
             continue

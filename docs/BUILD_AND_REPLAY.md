@@ -72,6 +72,13 @@ such as PATH and Docker connection settings. A workspace `vehicle.local.yaml` ma
 identity, paths and execution overrides for `rig up`; those values cannot choose a baked target or
 enter baked configs. Native run capture intentionally records the effective configuration that ran.
 
+`rig build` also ignores local `images.registry` and `images.tag` overrides. If the same registry is
+reachable as `localhost:5000` on the build machine and by a LAN address on vehicles, keep the LAN
+address in `vehicle.yaml` and run `rig build --registry localhost:5000`. This argument changes the
+build destination only; a later bake retains the address declared in `vehicle.yaml`. The registry
+must serve the same repositories and digests through both addresses. A local registry override in
+`vehicle.local.yaml` still applies to execution commands such as `rig up` and `rig pull`.
+
 Replay companions come from each service's `replay.platform` (falling back to the deployment runtime)
 and its supported architectures. `replay.start` and deployment `replay.services`/`replay.instances`
 select the default replay services. Use `all` to include every optional live/replay service in a release.
@@ -83,6 +90,9 @@ Use a Buildx builder that can **push** multiarch indexes to the deployment regis
 `linux/amd64` platform. Native builder nodes are preferable for expensive GStreamer/ROS compilation;
 emulation must also support the instructions executed during builds. Rig checks builder support
 before starting. Registry authentication uses your Docker CLI configuration (`docker login`).
+Rig reports the builder it checked. If Buildx returns an incomplete inspection after startup,
+Rig retries that same builder once; persistent inspection errors are reported separately from
+missing architectures. A missing-architecture error includes the actual advertised platforms.
 
 Rig inherits insecure-registry settings from the **active Docker daemon's** `docker info`, including
 explicit host:port entries and CIDR ranges. Keep `images.registry` as `host:port[/namespace]`, without
