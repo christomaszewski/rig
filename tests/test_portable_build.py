@@ -215,6 +215,15 @@ replay: {platform: dev}
             self.assertFalse(any(k in env for k in ('RIG_BUILD_PLATFORMS', 'RIG_BUILD_RESULT',
                                                     'RIG_BUILD_PULL', 'RIG_BUILD_NO_CACHE')))
 
+    def test_dry_run_does_not_prepare_registry_or_create_builder(self):
+        desc = self.service('a')
+        with patch.object(matrix.docker_registry, 'prepare') as prepare, \
+                patch.object(matrix, 'preflight') as preflight:
+            self.assertEqual(build(self.manifest('a'), {'a': desc}, registry=None, tag=None,
+                                   dry_run=True), 0)
+        prepare.assert_not_called()
+        preflight.assert_not_called()
+
     def test_sequential_and_parallel_builds_pin_fresh_parent_and_save_catalog(self):
         base = self.service('base', '  provides: base\n  msgs_overlay: {command: msgs.sh, image: fleet-msgs}\n',
                             '[fleet-ros]')
@@ -239,6 +248,7 @@ import json, os, sys
 from pathlib import Path
 a = sys.argv[1:]
 assert a[:2] == ['buildx', 'build'], a
+assert os.environ['BUILDX_BUILDER'] == 'rig-scoped-test'
 with open(os.environ['BUILD_LOG'], 'a') as f: f.write(json.dumps(a)+'\\n')
 Path(a[a.index('--metadata-file')+1]).write_text(json.dumps({'containerimage.digest': 'sha256:'+'a'*64}))
 ''')
@@ -249,9 +259,15 @@ Path(a[a.index('--metadata-file')+1]).write_text(json.dumps({'containerimage.dig
             log.write_text('')
             with patch.dict(os.environ, PATH=f'{bin_dir}:{os.environ["PATH"]}',
                             BUILD_LOG=str(log), PUSH='0'), \
+                    patch.object(matrix.docker_registry, 'prepare', return_value=matrix.docker_registry.Access(
+                        build_env={'BUILDX_BUILDER': 'rig-scoped-test'},
+                        registry_env={'BUILDX_BUILDER': 'rig-registry-test'})) as prepare, \
                     patch.object(matrix, 'preflight'), patch.object(matrix, 'inspect_raw', return_value=index()):
                 self.assertEqual(build(m, descs, registry=None, tag=None, dry_run=False,
                                        jobs=jobs, no_cache=True, root=self.root), 0)
+            self.assertTrue(prepare.call_args.kwargs['for_build'])
+            self.assertIn('registry.test:5000/fleet-ros:v1', prepare.call_args.args[0])
+            self.assertIn('registry.test:5000/core:v1', prepare.call_args.args[0])
             calls = [json.loads(x) for x in log.read_text().splitlines()]
             self.assertEqual([c[c.index('-t')+1].split('/')[-1] for c in calls],
                              ['fleet-ros:v1', 'fleet-msgs:v1', 'core:v1'])

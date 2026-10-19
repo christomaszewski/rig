@@ -82,8 +82,29 @@ Use a Buildx builder that can **push** multiarch indexes to the deployment regis
 `docker buildx inspect --bootstrap`; it must advertise every requested `linux/arm64` and/or
 `linux/amd64` platform. Native builder nodes are preferable for expensive GStreamer/ROS compilation;
 emulation must also support the instructions executed during builds. Rig checks builder support
-before starting. Configure the builder's registry authentication and HTTP/TLS trust separately from
-the host Docker daemon as needed.
+before starting. Registry authentication uses your Docker CLI configuration (`docker login`).
+
+Rig inherits insecure-registry settings from the **active Docker daemon's** `docker info`, including
+explicit host:port entries and CIDR ranges. Keep `images.registry` as `host:port[/namespace]`, without
+a URL scheme. No deployment HTTP setting or hand-written BuildKit configuration is required. Rig
+prefers HTTPS for approved insecure registries that support it (including self-signed TLS), and
+selects HTTP for approved registries that only speak HTTP. Registries outside that daemon policy
+retain normal TLS verification; authentication failures do not trigger an HTTP fallback.
+
+Buildx's registry client does not inherit dockerd's policy itself. Rig supplies it through a reusable
+`rig-registry-<hash>` builder configuration for manifest inspection and mirroring. The configuration
+is scoped to the Docker daemon and registry policy; Rig never changes the globally selected builder.
+With the built-in `docker` driver, image builds continue using the existing builder and cache; the
+registry helper does not start a BuildKit container. For a single `docker-container` node on the
+current Docker context, Rig also uses the managed builder for builds, retaining its cache between
+runs. Its host network lets it reach registries published on the Docker host's loopback interface.
+
+Explicit `BUILDX_BUILDER` / `BUILDKIT_HOST` selections and remote/cloud/multinode builders keep their
+build settings and topology; those build servers must already have the required registry access.
+Rig still inherits the Docker daemon's policy for its own registry inspections. Bake and replay
+manifest lookups also retry HTTP/TLS failures using that policy. Existing Docker credentials and
+context are preserved. Old managed builders can be listed with `docker buildx ls` and removed by
+name with `docker buildx rm` when their caches are no longer needed.
 
 Rig publishes the shared base first, then its messages overlay, then service images. Consumers receive
 the freshly published base **digest**. Shared build contexts are deduplicated. Every published output

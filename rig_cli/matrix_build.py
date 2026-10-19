@@ -11,7 +11,7 @@ import tempfile
 
 import yaml
 
-from . import RigError
+from . import RigError, docker_registry
 from .build_contract import variant_spec
 from .common import eprint
 from .image_catalog import canonical_ref
@@ -138,10 +138,10 @@ def plan(manifest, descriptors, *, registry, tag, platform=None, arch=None, root
     return sorted(tasks, key=lambda t: t.stage)
 
 
-def inspect_raw(ref):
+def inspect_raw(ref, *, access=None):
     try:
-        result = subprocess.run(['docker', 'buildx', 'imagetools', 'inspect', '--raw', ref],
-                                capture_output=True, text=True, timeout=45)
+        result = docker_registry.imagetools(['inspect', '--raw', ref], [ref], access=access,
+                                           capture_output=True, text=True, timeout=45)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise RigError(f'cannot inspect {ref}: {exc}') from exc
     if result.returncode:
@@ -162,10 +162,12 @@ def manifest_architectures(raw):
             if m.get('platform', {}).get('os') == 'linux'}
 
 
-def preflight(tasks, registry):
+def preflight(tasks, registry, *, access=None):
+    import os
+    options = {'env': dict(os.environ, **access.build_env)} if access and access.build_env else {}
     try:
         result = subprocess.run(['docker', 'buildx', 'inspect', '--bootstrap'],
-                                capture_output=True, text=True, timeout=60)
+                                capture_output=True, text=True, timeout=60, **options)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise RigError(f'Buildx builder unavailable: {exc}') from exc
     if result.returncode:
@@ -180,7 +182,7 @@ def preflight(tasks, registry):
             continue
         for image in task.images:
             ref = f'{registry}/{image}:{task.tag}'
-            raw = inspect_raw(ref)
+            raw = inspect_raw(ref, access=access)
             if raw is not None:
                 existing = manifest_architectures(raw)
                 if not existing or existing - set(task.architectures):
@@ -223,7 +225,13 @@ def run(manifest, descriptors, *, registry, tag, dry_run, jobs=1, root=None,
         raise RigError(error)
     if dry_run:
         return 0
-    preflight(tasks, reg)
+    mirrors = {image for name, d in descriptors.items() if selections is None or name in selections
+               for image in d.mirror}
+    refs = [f'{reg}/{image}:{task.tag}' for task in tasks for image in task.images]
+    refs += [task.base for task in tasks if task.base]
+    refs += [ref for image in mirrors for ref in (image, f'{reg}/{image}')]
+    access = docker_registry.prepare(refs, for_build=True)
+    preflight(tasks, reg, access=access)
     results = []
     completed_refs = {}
     with tempfile.TemporaryDirectory(prefix='rig-build-') as tmp:
@@ -237,6 +245,7 @@ def run(manifest, descriptors, *, registry, tag, dry_run, jobs=1, root=None,
             env = _build_env(manifest.ros.distro, task.desc, task.variant,
                              completed_refs.get(task.base, task.base), no_cache, manifest.ros.rmw,
                              str(msgs) if task.stage == 1 else None)
+            env.update(access.build_env)
             env['RIG_BUILD_PLATFORMS'] = ','.join(f'linux/{a}' for a in task.architectures)
             env['RIG_BUILD_RESULT'] = str(report)
             env['PUSH'] = '1'  # matrix builds publish indexes; never inherit a standalone --load path
@@ -268,7 +277,7 @@ def run(manifest, descriptors, *, registry, tag, dry_run, jobs=1, root=None,
                 digest = row.get('digest', '')
                 if not re.fullmatch(r'sha256:[0-9a-f]{64}', digest):
                     raise RigError(f'{task.service}: missing image digest in build report')
-                raw = inspect_raw(f'{row["ref"].rsplit(":", 1)[0]}@{digest}')
+                raw = inspect_raw(f'{row["ref"].rsplit(":", 1)[0]}@{digest}', access=access)
                 if raw is None:
                     raise RigError(f'{task.service}: published digest is unavailable')
                 actual = manifest_architectures(raw)
@@ -290,11 +299,10 @@ def run(manifest, descriptors, *, registry, tag, dry_run, jobs=1, root=None,
                     results.extend(rows)
             for row in results:
                 completed_refs[row['ref']] = row['ref'].rsplit(':', 1)[0] + '@' + row['digest']
-    mirrors = {image for name, d in descriptors.items() if selections is None or name in selections
-               for image in d.mirror}
     for image in sorted(mirrors):
         # Preserve all architectures, unlike pull/tag/push through a host-local image store.
-        proc = subprocess.run(['docker', 'buildx', 'imagetools', 'create', '-t', f'{reg}/{image}', image])
+        proc = docker_registry.imagetools(['create', '-t', f'{reg}/{image}', image],
+                                         [image, f'{reg}/{image}'], access=access)
         if proc.returncode:
             raise RigError(f'failed to mirror {image}')
     if root is not None:

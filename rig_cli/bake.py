@@ -146,9 +146,9 @@ def _resolve_digest(ref: str, *, local_only: bool = False) -> str | None:
     if local_only:
         return None
     try:  # 2. registry manifest digest (multi-arch index digest -> the vehicle pulls the right arch)
-        proc = subprocess.run(["docker", "buildx", "imagetools", "inspect", ref,
-                               "--format", "{{.Manifest.Digest}}"], capture_output=True, text=True,
-                              timeout=_digest_timeout())
+        from .docker_registry import imagetools
+        proc = imagetools(["inspect", ref, "--format", "{{.Manifest.Digest}}"], [ref],
+                          capture_output=True, text=True, timeout=_digest_timeout())
         dig = proc.stdout.strip()
         if proc.returncode == 0 and dig.startswith("sha256:"):
             return f"{repo}@{dig}"
