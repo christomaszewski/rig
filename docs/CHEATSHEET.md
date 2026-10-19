@@ -19,8 +19,10 @@ docker run -d --restart always -p 5000:5000 -v registry-data:/var/lib/registry -
 # Docker Desktop → Settings → Docker Engine → "insecure-registries": ["<dev-box-LAN-IP>:5000"] → Restart
 # Use the dev-box LAN IP the VEHICLE can reach, always WITH the :5000 port.
 #
-# rig learns this registry from vehicle.yaml `images.registry` (step 1), or `rig build/bake --registry
-# <ip:5000>` to override — there is NO $REGISTRY env var. (`VEHICLE=<user@orin-ip>` below is just an ssh
+# Keep the vehicle-reachable registry in vehicle.yaml `images.registry` (step 1). Build defaults can
+# use images.registry in deployment/machine vehicle.local.yaml; `rig build/bake --registry` overrides
+# that command's destination. Bake ignores local files. There is NO $REGISTRY env var.
+# (`VEHICLE=<user@orin-ip>` below is just an ssh
 # alias for the scp/ssh lines, your convenience — also not read by rig.)
 
 # VEHICLE (Jetson): trust the registry — MERGE into /etc/docker/daemon.json (NEVER overwrite: it carries
@@ -545,9 +547,10 @@ it to images. Then the tree is safe to delete. Dev registry off:
 
 ## Gotchas (each learned the hard way)
 
-- The registry rig uses is `vehicle.yaml: images.registry` (or `rig build/bake --registry`) — **there is no
-  `$REGISTRY` env var.** Exporting one does nothing; if `rig build` pushes to the "wrong" IP, it's the one
-  in vehicle.yaml. A baked artifact also pins that host, so fix vehicle.yaml *before* you bake.
+- Build registry precedence: `--registry`, deployment `vehicle.local.yaml`, machine
+  `/etc/rig/vehicle.local.yaml`, then `vehicle.yaml` (`images.registry` in each file). Build prints the
+  selected source. Bake uses `vehicle.yaml` or `--registry` and excludes local overrides. **There is no
+  `$REGISTRY` env var.** Keep the vehicle-reachable address in `vehicle.yaml` before baking.
 - Registry trust is needed on **both** machines, **with the port** — a bare IP doesn't match `IP:5000`.
 - **MERGE** the Jetson's `daemon.json` — overwriting drops the `nvidia` runtime the camera needs.
 - One `images.tag` (version) + one `platform:` per host: platform-agnostic services pull `:<tag>`,

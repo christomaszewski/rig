@@ -1,5 +1,7 @@
 """Portable release planning and the actual script/report boundary, without Docker builds."""
+import contextlib
 import dataclasses
+import io
 import json
 import os
 from pathlib import Path
@@ -7,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -220,9 +223,84 @@ replay: {platform: dev}
         with patch.object(matrix.docker_registry, 'prepare') as prepare, \
                 patch.object(matrix, 'preflight') as preflight:
             self.assertEqual(build(self.manifest('a'), {'a': desc}, registry=None, tag=None,
-                                   dry_run=True), 0)
+                                   dry_run=True, root=self.root), 0)
         prepare.assert_not_called()
         preflight.assert_not_called()
+        self.assertFalse((self.root / 'var' / 'build').exists())
+
+    def test_consumers_overlap_only_after_base_and_overlay_verification(self):
+        base = self.service('base', '  provides: base\n  msgs_overlay: {command: msgs.sh, image: fleet-msgs}\n',
+                            '[fleet-ros]')
+        descs = {'base': base, 'camera': self.service('camera', images='[camera]'),
+                 'radio': self.service('radio', images='[radio]')}
+        descs['camera'].msgs_apt = ['diagnostic_msgs']
+        (base.repo / 'msgs.sh').write_text('#!/bin/sh\nexit 0\n')
+        for jobs in (1, 2):
+            with self.subTest(jobs=jobs):
+                barrier = threading.Barrier(2)
+                lock = threading.Lock()
+                verified, active, peak = set(), set(), []
+                order = []
+
+                def run(step, cmd, *, cwd, env):
+                    image = 'fleet-msgs' if Path(cmd[0]).name == 'msgs.sh' else (
+                        'fleet-ros' if cwd.name == 'base' else cwd.name)
+                    if image != 'fleet-ros':
+                        self.assertIn('fleet-ros', verified)
+                        self.assertEqual(env['RIG_BASE_IMAGE'], f'registry.test:5000/fleet-ros@{DIGEST}')
+                    if image in ('camera', 'radio'):
+                        self.assertIn('fleet-msgs', verified)
+                        with lock:
+                            active.add(image)
+                            peak.append(len(active))
+                        if jobs == 2:
+                            barrier.wait(timeout=5)  # both consumers must run at once
+                        with lock:
+                            active.remove(image)
+                    with lock:
+                        order.append(image)
+                    Path(env['RIG_BUILD_RESULT']).write_text(json.dumps(
+                        {'ref': f'registry.test:5000/{image}:v1', 'digest': DIGEST}) + '\n')
+
+                def inspect(ref, **kw):
+                    with lock:
+                        verified.add(ref.split('/')[-1].split('@')[0])
+                    return index()
+
+                with contextlib.redirect_stderr(io.StringIO()), \
+                        patch.object(matrix.docker_registry, 'prepare', return_value=matrix.docker_registry.Access()), \
+                        patch.object(matrix, 'preflight'), patch.object(matrix, 'inspect_raw', side_effect=inspect), \
+                        patch('rig_cli.build_progress.BuildStep.run', new=run):
+                    self.assertEqual(build(self.manifest(*descs), descs, registry=None, tag=None,
+                                           dry_run=False, jobs=jobs, root=self.root), 0)
+                self.assertEqual(order[:2], ['fleet-ros', 'fleet-msgs'])
+                self.assertEqual(max(peak), jobs)
+                self.assertEqual(verified, {'fleet-ros', 'fleet-msgs', 'camera', 'radio'})
+
+    def test_verification_failure_never_completes_or_starts_dependents(self):
+        descs = {'base': self.service('base', '  provides: base\n', '[fleet-ros]'),
+                 'consumer': self.service('consumer')}
+
+        def run(step, cmd, *, cwd, env):
+            Path(env['RIG_BUILD_RESULT']).write_text(json.dumps(
+                {'ref': 'registry.test:5000/fleet-ros:v1', 'digest': DIGEST}) + '\n')
+
+        output = io.StringIO()
+        with contextlib.redirect_stderr(output), \
+                patch.object(matrix.docker_registry, 'prepare', return_value=matrix.docker_registry.Access()), \
+                patch.object(matrix, 'preflight'), patch.object(matrix, 'inspect_raw', return_value=None), \
+                patch('rig_cli.build_progress.BuildStep.run', autospec=True, side_effect=run) as command:
+            with self.assertRaisesRegex(RigError, 'published digest is unavailable'):
+                build(self.manifest(*descs), descs, registry=None, tag=None,
+                      dry_run=False, jobs=2, root=self.root)
+        self.assertEqual(command.call_count, 1)
+        self.assertIn('FAILED build base', output.getvalue())
+        self.assertIn('0/2 complete, 1 failed, 1 remaining', output.getvalue())
+        self.assertNotIn('DONE', output.getvalue())
+        self.assertFalse((self.root / 'rig.lock').exists())
+        logs = list((self.root / 'var' / 'build').glob('*/*.log'))
+        self.assertEqual(len(logs), 1)
+        self.assertIn('published digest is unavailable', logs[0].read_text())
 
     def test_sequential_and_parallel_builds_pin_fresh_parent_and_save_catalog(self):
         base = self.service('base', '  provides: base\n  msgs_overlay: {command: msgs.sh, image: fleet-msgs}\n',

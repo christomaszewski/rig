@@ -219,17 +219,18 @@ def prepare(refs, *, for_build=False):
     return access
 
 
-def imagetools(args, refs, *, access=None, **kwargs):
+def imagetools(args, refs, *, access=None, runner=None, **kwargs):
     """All registry reads/copies share policy; standalone bake/replay retry only TLS failures."""
     env = access.registry_env if access is not None else {}
     command = ['docker', 'buildx', 'imagetools', *args]
+    run = runner or subprocess.run
     if env:
         kwargs['env'] = dict(os.environ, **env)
-    result = subprocess.run(command, **kwargs)
+    result = run(command, **kwargs)
     if access is None and result.returncode and re.search(
             r'HTTP response to HTTPS|server gave HTTP|x509:|certificate verify failed',
             result.stderr or '', re.I):
         inherited = prepare(refs)
         if inherited.registry_env:
-            result = subprocess.run(command, **dict(kwargs, env=dict(os.environ, **inherited.registry_env)))
+            result = run(command, **dict(kwargs, env=dict(os.environ, **inherited.registry_env)))
     return result

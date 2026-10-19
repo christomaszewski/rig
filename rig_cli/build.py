@@ -30,6 +30,7 @@ import yaml
 
 from .refs import unqualified
 from .common import eprint
+from .build_progress import BuildProgress
 from .descriptor import Descriptor
 from .manifest import Manifest
 
@@ -239,17 +240,6 @@ def _service_tag(desc: Descriptor, tag: str | None, platform: str | None) -> str
     return tag
 
 
-def _env_note(distro: str | None, platform: str | None = None, base: str | None = None,
-              no_cache: bool = False, rmw: str | None = None,
-              msgs_manifest: str | None = None) -> str:
-    parts = [f"{k}={v}" for k, v in (("ROS_DISTRO", distro), ("RIG_ROS_RMW", rmw),
-                                     ("RIG_TARGET_PLATFORM", platform),
-                                     ("RIG_BASE_IMAGE", base),
-                                     ("RIG_MSGS_MANIFEST", msgs_manifest),
-                                     ("RIG_BUILD_NO_CACHE", "1" if no_cache else None)) if v]
-    return (" " + " ".join(parts)) if parts else ""
-
-
 def _script_identity(script: Path):
     """What makes two base-build scripts ONE build: the resolved path — widened to the git tree
     hash of the script's directory when that directory is a CLEAN checkout, so identical content
@@ -283,49 +273,10 @@ def _mirror_steps(img: str, target: str):
     return [["docker", "pull", img], ["docker", "tag", img, target], ["docker", "push", target]]
 
 
-def _one_captured(service: str, desc: Descriptor, cwd: Path, reg, tag, distro: str | None,
-                  platform: str | None, base_image: str | None = None, no_cache: bool = False,
-                  skip_note: str | None = None, rmw: str | None = None):
-    """Concurrent worker: run a service's build + mirrors, capturing output. Returns (service, rc, text)."""
-    log: list[str] = []
-    rc = 0
-
-    def run(cmd, run_cwd=None, env=None) -> int:
-        p = subprocess.run(cmd, cwd=run_cwd, env=env, capture_output=True, text=True)
-        out = (p.stdout + p.stderr).strip()
-        if out:
-            log.append(out)
-        return p.returncode
-
-    if desc.build_command and skip_note:
-        log.append(f"build skipped: {skip_note}")
-    elif desc.build_command:
-        cmd, args = _build_cmd(desc, cwd, reg, _service_tag(desc, tag, platform))
-        note = _env_note(distro, platform if desc.build_platforms else None, base_image, no_cache,
-                         rmw)
-        log.append(f"$ {desc.build_command} {' '.join(args)}  (cwd={cwd}){note}")
-        if run(cmd, run_cwd=str(cwd),
-               env=_build_env(distro, desc, platform, base_image, no_cache, rmw)):
-            rc = 1
-            log.append("  build FAILED")
-    for img in desc.mirror:
-        if not reg:
-            log.append(f"mirror {img}: no registry; skipped")
-            continue
-        target = f"{reg}/{img}"
-        log.append(f"mirror {img} -> {target}")
-        for step in _mirror_steps(img, target):
-            if run(step):
-                rc = 1
-                log.append(f"  mirror {img} FAILED")
-                break
-    return service, rc, "\n".join(log)
-
-
 def _build_single(manifest: Manifest, descriptors: dict[str, Descriptor], *, registry: str | None,
           tag: str | None, dry_run: bool, jobs: int = 1, root: Path | None = None,
           platform: str | None = None, no_cache: bool = False,
-          base_image: str | None = None) -> int:
+          base_image: str | None = None, verbose: bool = False) -> int:
     reg = registry or manifest.image_registry
     tag = tag or manifest.image_tag  # default the build tag to vehicle.yaml images.tag (a version)
     platform = platform or manifest.platform  # matrix services build/push <tag>-<platform>
@@ -456,83 +407,131 @@ def _build_single(manifest: Manifest, descriptors: dict[str, Descriptor], *, reg
         eprint(f"rig build: base image {base_ref} ({base_origin}) -> RIG_BASE_IMAGE")
     if msgs_ref and msgs_runner:
         eprint(f"rig build: msgs overlay {msgs_ref} ({msgs_origin}) -> RIG_MSGS_IMAGE")
-    for s in stage0:  # stage 0: the base — sequential, live-streamed, before any dependent build
+    operations = []
+    groups = {0: [], 1: [], 2: {s: [] for s in services}}
+
+    def add(label, commands, service, stage, env=None, cwd=None):
+        index = len(operations)
+        operations.append((label, commands, cwd, env))
+        (groups[2][service] if stage == 2 else groups[stage]).append(index)
+        return index
+
+    def add_build(s, stage, command=None, parent=None):
         desc = descriptors[s]
-        cmd, args = _build_cmd(desc, cwds[s], reg, _service_tag(desc, tag, platform))
-        note = _env_note(distro, platform if desc.build_platforms else None, no_cache=no_cache,
-                         rmw=rmw)
-        eprint(f"build {s} [base]: {desc.build_command} {' '.join(args)}  (cwd={cwds[s]}){note}")
-        if not dry_run and subprocess.run(cmd, cwd=str(cwds[s]),
-                                          env=_build_env(distro, desc, platform, no_cache=no_cache,
-                                                         rmw=rmw)).returncode:
-            eprint(f"  build {s} FAILED — the other services build FROM {base_ref}; stopping here")
-            return 1
-        skip_build[s] = "built in the base stage above"
+        cmd, _ = _build_cmd(desc, cwds[s], reg, _service_tag(desc, tag, platform), command=command)
+        kind = ' [base]' if stage == 0 else ' [msgs]' if stage == 1 else ''
+        return add(f'build {s}{kind}', [cmd], s, stage,
+                   _build_env(distro, desc, platform, parent, no_cache, rmw), cwds[s])
 
-    if msgs_runner:  # the overlay: an ordinary dependent build (FROM the base) — right after stage 0
-        s, desc = msgs_runner, descriptors[msgs_runner]
-        if not reg:
-            eprint(f"build {s} [msgs]: no registry (pass --registry or set images.registry); skipped")
+    for s in stage0:
+        add_build(s, 0)
+        skip_build[s] = 'built in the base stage above'
+    overlay_index = None
+    if msgs_runner:
+        if reg:
+            overlay_index = add_build(msgs_runner, 1, descriptors[msgs_runner].msgs_overlay_command, base_ref)
         else:
-            fd, msgs_path = tempfile.mkstemp(prefix="rig-msgs-manifest-", suffix=".yaml")
-            with os.fdopen(fd, "w") as fh:  # the rendered union — build-msgs.sh's RIG_MSGS_MANIFEST
-                yaml.safe_dump(union, fh, sort_keys=False)
-            cmd, args = _build_cmd(desc, cwds[s], reg, _service_tag(desc, tag, platform),
-                                   command=desc.msgs_overlay_command)
-            note = _env_note(distro, platform if desc.build_platforms else None, base_ref, no_cache,
-                             rmw, msgs_path)
-            eprint(f"build {s} [msgs]: {desc.msgs_overlay_command} {' '.join(args)}  "
-                   f"(cwd={cwds[s]}){note}")
-            if not dry_run and subprocess.run(
-                    cmd, cwd=str(cwds[s]),
-                    env=_build_env(distro, desc, platform, base_ref, no_cache, rmw,
-                                   msgs_manifest=msgs_path)).returncode:
-                rc = 1  # no dependents build FROM the overlay — flag it, keep going
-                eprint(f"  build {s} [msgs] FAILED — {msgs_ref} is unpushed; `rig up` pulls will "
-                       f"fail until it succeeds")
-
-    if jobs > 1 and len(services) > 1 and not dry_run:  # concurrent: capture + print grouped per service
-        eprint(f"rig build: {len(services)} services, up to {jobs} concurrent (output grouped per service)")
-        with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as ex:
-            futures = [ex.submit(_one_captured, s, descriptors[s], cwds[s], reg, tag, distro,
-                                 platform, base_ref, no_cache, skip_build.get(s), rmw)
-                       for s in services]
-            for fut in concurrent.futures.as_completed(futures):
-                svc, rc1, out = fut.result()
-                eprint(f"\n───── {svc} {'✓' if not rc1 else '✗ FAILED'} ─────\n{out}")
-                rc |= rc1
-        return rc
-
-    for s in services:  # sequential: live-streamed
+            eprint(f'build {msgs_runner} [msgs]: no registry; skipped')
+    for s in services:
         desc = descriptors[s]
         if desc.build_command and s in skip_build:
-            eprint(f"build {s}: skipped — {skip_build[s]}")
+            if s not in stage0:
+                eprint(f'build {s}: skipped — {skip_build[s]}')
         elif desc.build_command:
-            cmd, args = _build_cmd(desc, cwds[s], reg, _service_tag(desc, tag, platform))
-            note = _env_note(distro, platform if desc.build_platforms else None, base_ref, no_cache,
-                             rmw)
-            eprint(f"build {s}: {desc.build_command} {' '.join(args)}  (cwd={cwds[s]}){note}")
-            if not dry_run and subprocess.run(cmd, cwd=str(cwds[s]),
-                                              env=_build_env(distro, desc, platform, base_ref,
-                                                             no_cache, rmw)).returncode:
-                rc = 1
-                eprint(f"  build {s} FAILED")
+            add_build(s, 2, parent=base_ref)
         for img in desc.mirror:
             if not reg:
-                eprint(f"mirror {s}: {img} — no registry (pass --registry or set images.registry); skipped")
+                eprint(f'mirror {s}: {img} — no registry (pass --registry or set images.registry); skipped')
                 continue
-            target = f"{reg}/{img}"
-            eprint(f"mirror {s}: {img} -> {target}")
-            if not dry_run and any(subprocess.run(st).returncode for st in _mirror_steps(img, target)):
-                rc = 1
-                eprint(f"  mirror {img} FAILED")
+            add(f'mirror {img}', _mirror_steps(img, f'{reg}/{img}'), s, 2)
+    if dry_run:
+        for label, commands, cwd, env in operations:
+            note = ' '.join(f'{k}={v}' for k, v in (env or {}).items()
+                            if k in ('ROS_DISTRO', 'RIG_TARGET_PLATFORM', 'RIG_BASE_IMAGE',
+                                     'RIG_BUILD_NO_CACHE', 'RIG_ROS_RMW'))
+            eprint(f'{label}: ' + ' && '.join(shlex.join(cmd) for cmd in commands)
+                   + (f' (cwd={cwd})' if cwd else '') + (' ' + note if note else ''))
+        return rc
+    if not operations:
+        return rc
+    from . import RigError
+    with tempfile.TemporaryDirectory(prefix='rig-build-') as tmp, \
+            BuildProgress([op[0] for op in operations], root=root, verbose=verbose) as progress:
+        if overlay_index is not None:
+            msgs_path = Path(tmp) / 'msgs.yaml'
+            msgs_path.write_text(yaml.safe_dump(union, sort_keys=False))
+            operations[overlay_index][3]['RIG_MSGS_MANIFEST'] = str(msgs_path)
+
+        def execute(index):
+            label, commands, cwd, env = operations[index]
+            try:
+                with progress.step(index) as step:
+                    for cmd in commands:
+                        step.run(cmd, cwd=cwd, env=env)
+                return 0
+            except RigError:
+                eprint(f'{label} FAILED')
+                return 1
+
+        for index in groups[0]:
+            if execute(index):
+                eprint(f'rig build: base failed — dependent builds require {base_ref}; stopping here')
+                return 1
+        for index in groups[1]:
+            rc |= execute(index)
+
+        def execute_service(indices):
+            status = 0
+            for index in indices:
+                status |= execute(index)
+            return status
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, jobs)) as pool:
+            for status in pool.map(execute_service, groups[2].values()):
+                rc |= status
     return rc
+
+
+def build_registry(root: Path | None, manifest: Manifest, registry: str | None = None):
+    """Select only the build destination; never merge local files into release inputs."""
+    if registry:
+        return registry, '--registry'
+    from .common import load_yaml
+    from .interpolate import MARKER, MAP
+    from .manifest import machine_file
+    from . import RigError
+    paths = ([root / 'vehicle.local.yaml'] if root is not None else []) + [machine_file()]
+    for path in paths:
+        if not path.is_file():
+            continue
+        images = load_yaml(path).get('images')
+        if images is None:
+            continue
+        if not isinstance(images, dict):
+            raise RigError(f'{path}: images must be a mapping')
+        value = images.get('registry')
+        if value is None or value == '':
+            continue
+        if not isinstance(value, str) or MARKER.search(value) or MAP.search(value):
+            raise RigError(f'{path}: build images.registry must be a literal registry address; '
+                           'set host:port[/namespace] or pass --registry')
+        if value.strip():
+            return value.strip().rstrip('/'), str(path)
+    return manifest.image_registry, 'vehicle.yaml'
 
 
 def build(manifest: Manifest, descriptors: dict[str, Descriptor], *, registry: str | None,
           tag: str | None, dry_run: bool, jobs: int = 1, root: Path | None = None,
           platform: str | None = None, arch: str | None = None, no_cache: bool = False,
-          base_image: str | None = None, scopes=None) -> int:
+          base_image: str | None = None, scopes=None, verbose: bool = False) -> int:
+    registry, registry_source = build_registry(root, manifest, registry)
+    if registry:
+        eprint(f'rig build: registry {registry} (from {registry_source})')
+    unresolved = [key for key, value in (('images.registry', registry), ('images.tag', tag))
+                  if key in manifest.missing_identity and not value]
+    if unresolved:
+        eprint(f'rig build: unresolved deployment settings: {", ".join(unresolved)}; '
+               'pass --registry/--tag to supply build values')
     used = {s.service for s in manifest.sensors}
     descriptors = {s: d for s, d in descriptors.items() if s in used}
     from .targets import parse_scopes
@@ -541,7 +540,7 @@ def build(manifest: Manifest, descriptors: dict[str, Descriptor], *, registry: s
         from .matrix_build import run
         return run(manifest, descriptors, registry=registry, tag=tag, dry_run=dry_run,
                    jobs=jobs, root=root, platform=platform, arch=arch, no_cache=no_cache,
-                   base_image=base_image, scopes=scopes)
+                   base_image=base_image, scopes=scopes, verbose=verbose)
     if no_cache:
         for service, desc in descriptors.items():
             if desc.build_command and desc.build_no_cache is not True:
@@ -553,4 +552,4 @@ def build(manifest: Manifest, descriptors: dict[str, Descriptor], *, registry: s
                'to publish a portable release with companion digests')
     return _build_single(manifest, descriptors, registry=registry, tag=tag, dry_run=dry_run,
                          jobs=jobs, root=root, platform=platform, no_cache=no_cache,
-                         base_image=base_image)
+                         base_image=base_image, verbose=verbose)

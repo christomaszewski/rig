@@ -583,13 +583,10 @@ def cmd_build(args, root: Path) -> int:
     # ROS_DISTRO) and never renders configs — a fleet deployment builds on any box.
     manifest, catalog, descriptors = _load(root, identity=False, render=False, context="deployment",
                                          target_overrides={"platform": args.platform, "arch": args.arch})
-    if any(u.startswith("images.") for u in manifest.missing_identity):
-        eprint("rig build: note — images.registry/tag are per-vehicle and unresolved here; "
-               "building without a push target unless --registry/--tag are passed")
     return build_mod.build(manifest, descriptors, registry=args.registry, tag=args.tag,
                            dry_run=args.dry_run, jobs=args.jobs, root=root,
                            platform=args.platform, arch=args.arch, no_cache=args.no_cache,
-                           base_image=args.base_image, scopes=args.scope)
+                           base_image=args.base_image, scopes=args.scope, verbose=args.verbose)
 
 
 def cmd_bake(args, root: Path) -> int:
@@ -1136,7 +1133,8 @@ def build_parser() -> argparse.ArgumentParser:
                      help="source repo path (default: the service's services.yaml path)")
 
     bld = sub.add_parser("build", help="build/push or mirror each service's images into the registry")
-    bld.add_argument("--registry", default=None, help="target registry (overrides vehicle.yaml images.registry)")
+    bld.add_argument("--registry", default=None,
+                     help="build registry (default: deployment-local, machine-local, then vehicle.yaml images.registry)")
     bld.add_argument("--tag", default=None, help="tag to pass to each service's build command")
     bld.add_argument("--platform", default=None,
                      help="build only this runtime variant (default: all declared variants)")
@@ -1144,8 +1142,10 @@ def build_parser() -> argparse.ArgumentParser:
                      help="build only this CPU architecture (default: all supported architectures)")
     bld.add_argument("--scope", action="append", default=None,
                      help="all (default), deployment, host, replay; combine with commas or repeat")
-    bld.add_argument("-j", "--jobs", type=int, default=1, metavar="N",
-                     help="build/mirror up to N services concurrently (output grouped per service)")
+    bld.add_argument("-j", "--jobs", type=int, default=2, metavar="N",
+                     help="build up to N independent service/runtime tasks concurrently (default: 2; 1 for serial)")
+    bld.add_argument("-v", "--verbose", action="store_true",
+                     help="stream full build output (default: progress with per-step log files)")
     bld.add_argument("--no-cache", action="store_true", dest="no_cache",
                      help="disable image-build instruction cache; requires declared service support "
                           "(verify with rig certify --require-build-check)")

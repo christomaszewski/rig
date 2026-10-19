@@ -20,6 +20,18 @@ Use the same version in `images.tag` when running an iteration built with `--tag
 cannot replace an existing tag that contains other CPU architectures; use a new iteration tag.
 Omitting `images.tag` retains platform tags such as `dev` and generic `latest` tags.
 
+Builds run in stages: shared base images first, then the messages overlay, then independent
+service/runtime builds. Rig runs up to **two builds concurrently** by default within each stage.
+Use `rig build -j 4` for more concurrency or `rig build -j 1` for serial builds. Each build can itself
+compile for multiple CPU architectures, so choose a job count that fits the builder's memory.
+
+Normal output shows each build or mirror starting and finishing, elapsed time, and completed and
+remaining counts. Active steps report their status every 15 seconds. A portable build is complete
+only after Rig verifies its published images. Full output is saved under
+`var/build/<session>/`, with one log per step; failures show the last 40 lines and the full log path.
+Use `rig build --verbose` (or `-v`) to stream that output live, prefixed by step number so concurrent
+builds remain distinguishable. `--dry-run` prints the detailed plan without creating build logs.
+
 Runtime and CPU are separate choices:
 
 | Camera runtime | Image set | Architectures |
@@ -72,12 +84,30 @@ such as PATH and Docker connection settings. A workspace `vehicle.local.yaml` ma
 identity, paths and execution overrides for `rig up`; those values cannot choose a baked target or
 enter baked configs. Native run capture intentionally records the effective configuration that ran.
 
-`rig build` also ignores local `images.registry` and `images.tag` overrides. If the same registry is
-reachable as `localhost:5000` on the build machine and by a LAN address on vehicles, keep the LAN
-address in `vehicle.yaml` and run `rig build --registry localhost:5000`. This argument changes the
-build destination only; a later bake retains the address declared in `vehicle.yaml`. The registry
-must serve the same repositories and digests through both addresses. A local registry override in
-`vehicle.local.yaml` still applies to execution commands such as `rig up` and `rig pull`.
+`rig build` selects its registry in this order: `--registry`, the deployment directory's
+`vehicle.local.yaml`, the build machine's `/etc/rig/vehicle.local.yaml`, then `vehicle.yaml`.
+Set `images.registry` to a literal address such as `localhost:5000`; absent, null, or blank values
+fall through to the next source. Rig prints the selected registry and its source. Local image tags,
+base images, variables, and environment settings do not override deployment build inputs. Runtime
+and CPU selection still follow the requested scopes, including provisioned host settings for `host`.
+
+If the registry is reachable as `localhost:5000` on the build machine and by a LAN address on vehicles,
+keep the LAN address in `vehicle.yaml` and put this in the deployment's `vehicle.local.yaml`:
+
+```yaml
+images:
+  registry: localhost:5000
+```
+
+Alternatively, set the machine-wide default with `sudo rig provision --registry localhost:5000`.
+Then `rig build` uses that local endpoint, while `rig bake` uses `vehicle.yaml` (or an explicit
+`rig bake --registry`). Bake excludes local files and rewrites the artifact's image catalog and
+build-output references to the deployment registry, retaining the verified digests and replay
+companions. Templated artifacts carry logical image names until the registry resolves on the vehicle.
+The source workspace's build catalog keeps the actual build destination. The registry
+must serve the same repositories and digests through both addresses; the override does not copy
+images between separate registries. These local registry settings also apply to execution commands
+such as `rig up` and `rig pull`.
 
 Replay companions come from each service's `replay.platform` (falling back to the deployment runtime)
 and its supported architectures. `replay.start` and deployment `replay.services`/`replay.instances`

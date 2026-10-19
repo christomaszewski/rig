@@ -695,6 +695,9 @@ def bake(root: Path, manifest, catalog, descriptors, env, tag: str, *, registry:
     manifest = replace(manifest, platform=target.runtime, arch=target.arch)
     if registry:
         manifest = replace(manifest, image_registry=registry)
+    from .image_catalog import artifact_catalog
+    build_catalog, _ = artifact_catalog(manifest.build_catalog, manifest.image_registry)
+    manifest = replace(manifest, build_catalog=build_catalog)
     if manifest.context == "deployment":
         from .dispatch import fleet_env
         env = fleet_env(manifest, descriptors)
@@ -807,8 +810,8 @@ def bake(root: Path, manifest, catalog, descriptors, env, tag: str, *, registry:
     # ONE lockfile: merge bake's image digests into the deployment's package lock (if any), so the
     # artifact carries registries+packages+instances+images under a single rig.lock.
     from .lock import load_lock, save_lock
-    locked = load_lock(root)
-    locked.pop("replay_execution", None)  # execution-local selection is not a release input
+    from .image_catalog import artifact_lock
+    locked = artifact_lock(load_lock(root), manifest.image_registry)
     locked["images"] = {ref: dig for ref, dig in images.items() if dig}
     save_lock(staging, locked)
 
@@ -1018,8 +1021,9 @@ def bake_fleet(root: Path, tag: str, *, registry: str | None = None,
         shutil.copytree(root / "config", staging / "config")
     if (root / "rig.lock").is_file():
         from .lock import load_lock, save_lock
-        locked = load_lock(root)
-        locked.pop("replay_execution", None)
+        from .image_catalog import artifact_lock
+        # Registry selection is deferred with the template; carry portable logical identities.
+        locked = artifact_lock(load_lock(root), None)
         save_lock(staging, locked)
 
     # vendor every service the rows reference; route the staged catalog at the vendored copies

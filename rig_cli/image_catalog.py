@@ -14,6 +14,32 @@ def canonical_ref(ref):
     return ref
 
 
+def artifact_catalog(catalog, registry):
+    """Keep image identities while removing build-machine registry addresses from a bake."""
+    result, refs = {}, {}
+    prefix = f'{registry.rstrip("/")}/' if registry else ''
+    for original, row in catalog.items():
+        image = row.get('image')
+        if not image:
+            raise RigError(f'bake: build catalog entry {original} lacks its logical image name; rebuild it')
+        ref = f'{prefix}{image}:{original.rsplit(":", 1)[-1]}'
+        if ref in result and result[ref].get('digest') != row.get('digest'):
+            raise RigError(f'conflicting companion digests for {ref}; rebuild the matching release')
+        result[ref] = dict(row, ref=ref)
+        refs[original] = ref
+    return result, refs
+
+
+def artifact_lock(locked, registry):
+    catalog, refs = artifact_catalog(locked.get('build_catalog', {}), registry)
+    result = dict(locked, build_catalog=catalog)
+    result.pop('replay_execution', None)
+    if locked.get('last_build'):
+        result['last_build'] = dict(locked['last_build'], outputs=[
+            refs[ref] for ref in locked['last_build'].get('outputs', []) if ref in refs])
+    return result
+
+
 def pins(manifest):
     result = {}
     for original, row in manifest.build_catalog.items():

@@ -13,6 +13,7 @@ import yaml
 
 from . import RigError, docker_registry
 from .build_contract import variant_spec
+from .build_progress import BuildProgress
 from .common import eprint
 from .image_catalog import canonical_ref
 
@@ -220,7 +221,7 @@ def preflight(tasks, registry, *, access=None):
 
 
 def run(manifest, descriptors, *, registry, tag, dry_run, jobs=1, root=None,
-        platform=None, arch=None, no_cache=False, base_image=None, scopes=None):
+        platform=None, arch=None, no_cache=False, base_image=None, scopes=None, verbose=False):
     from .build import _build_cmd, _build_env, msgs_union
     from .lock import load_lock, save_lock
     reg = registry or manifest.image_registry
@@ -242,6 +243,8 @@ def run(manifest, descriptors, *, registry, tag, dry_run, jobs=1, root=None,
         if no_cache and task.desc.build_no_cache is not True:
             raise RigError(f'{task.service} ({task.cwd}): no declared no-cache capability; update its build contract '
                            'and run rig certify --repo <source>')
+        if not (dry_run or verbose):
+            continue
         eprint(f'build {task.service}/{task.variant or "generic"}: '
                f'{",".join(task.architectures)} -> {", ".join(task.images)}:{task.tag}'
                f'{" [no-cache]" if no_cache else ""} (cwd={task.cwd})')
@@ -256,6 +259,14 @@ def run(manifest, descriptors, *, registry, tag, dry_run, jobs=1, root=None,
         return 0
     mirrors = {image for name, d in descriptors.items() if selections is None or name in selections
                for image in d.mirror}
+    labels = [f'build {task.service}/{task.variant or "generic"} -> '
+              f'{", ".join(image + ":" + task.tag for image in task.images)} '
+              f'[{", ".join(task.architectures)}]' for task in tasks]
+    labels += [f'mirror {image}' for image in sorted(mirrors)]
+    if not labels:
+        eprint('rig build: nothing to build or mirror')
+        return 0
+    eprint(f'rig build: preparing {len(tasks)} builds and {len(mirrors)} mirrors')
     refs = [f'{reg}/{image}:{task.tag}' for task in tasks for image in task.images]
     refs += [task.base for task in tasks if task.base]
     refs += [ref for image in mirrors for ref in (image, f'{reg}/{image}')]
@@ -263,13 +274,18 @@ def run(manifest, descriptors, *, registry, tag, dry_run, jobs=1, root=None,
     preflight(tasks, reg, access=access)
     results = []
     completed_refs = {}
-    with tempfile.TemporaryDirectory(prefix='rig-build-') as tmp:
+    with BuildProgress(labels, root=root, verbose=verbose) as progress, \
+            tempfile.TemporaryDirectory(prefix='rig-build-') as tmp:
         temp = Path(tmp)
         msgs = temp / 'msgs.yaml'
         msgs.write_text(yaml.safe_dump(union or {}))
 
         def execute(index_task):
             index, task = index_task
+            with progress.step(index) as step:
+                return execute_task(index, task, step)
+
+        def execute_task(index, task, step):
             report = temp / f'{index}.jsonl'
             env = _build_env(manifest.ros.distro, task.desc, task.variant,
                              completed_refs.get(task.base, task.base), no_cache, manifest.ros.rmw,
@@ -279,14 +295,8 @@ def run(manifest, descriptors, *, registry, tag, dry_run, jobs=1, root=None,
             env['RIG_BUILD_RESULT'] = str(report)
             env['PUSH'] = '1'  # matrix builds publish indexes; never inherit a standalone --load path
             cmd, _ = _build_cmd(task.desc, task.cwd, reg, task.tag, command=task.command)
-            outcome = subprocess.run(cmd, cwd=task.cwd, env=env, text=True,
-                                     capture_output=True)
-            if outcome.stdout:
-                eprint(outcome.stdout.rstrip())
-            if outcome.stderr:
-                eprint(outcome.stderr.rstrip())
-            if outcome.returncode:
-                raise RigError(f'build failed: {task.service}/{task.variant or "generic"}')
+            step.run(cmd, cwd=task.cwd, env=env)
+            step.verifying()
             if not report.exists():
                 raise RigError(f'{task.service}: builder did not write RIG_BUILD_RESULT')
             try:
@@ -328,27 +338,26 @@ def run(manifest, descriptors, *, registry, tag, dry_run, jobs=1, root=None,
                     results.extend(rows)
             for row in results:
                 completed_refs[row['ref']] = row['ref'].rsplit(':', 1)[0] + '@' + row['digest']
-    for image in sorted(mirrors):
-        # Preserve all architectures, unlike pull/tag/push through a host-local image store.
-        proc = docker_registry.imagetools(['create', '-t', f'{reg}/{image}', image],
-                                         [image, f'{reg}/{image}'], access=access)
-        if proc.returncode:
-            raise RigError(f'failed to mirror {image}')
-    if root is not None:
-        lock = load_lock(root)
-        catalog = lock.setdefault('build_catalog', {})
-        for row in results:
-            # One logical image/version, even after publishing into a different registry.
-            for old in list(catalog):
-                if (catalog[old].get('image') == row['image']
-                        and old.rsplit(':', 1)[-1] == row['ref'].rsplit(':', 1)[-1]):
-                    del catalog[old]
-            catalog[row['ref']] = row
-        lock['last_build'] = dict(tag=tag or manifest.image_tag or 'latest',
-                                  complete=complete, scopes=scopes,
-                                  platform=platform, architecture=arch,
-                                  outputs=[r['ref'] for r in results])
-        save_lock(root, lock)
-    eprint(f'rig build: published and verified {len(results)} images; '
-           f'{"complete matrix" if complete else "targeted build"}')
+        for index, image in enumerate(sorted(mirrors), len(tasks)):
+            # Preserve all architectures, unlike pull/tag/push through a host-local image store.
+            with progress.step(index) as step:
+                docker_registry.imagetools(['create', '-t', f'{reg}/{image}', image],
+                                           [image, f'{reg}/{image}'], access=access, runner=step.run)
+        if root is not None:
+            lock = load_lock(root)
+            catalog = lock.setdefault('build_catalog', {})
+            for row in results:
+                # One logical image/version, even after publishing into a different registry.
+                for old in list(catalog):
+                    if (catalog[old].get('image') == row['image']
+                            and old.rsplit(':', 1)[-1] == row['ref'].rsplit(':', 1)[-1]):
+                        del catalog[old]
+                catalog[row['ref']] = row
+            lock['last_build'] = dict(tag=tag or manifest.image_tag or 'latest',
+                                      complete=complete, scopes=scopes,
+                                      platform=platform, architecture=arch,
+                                      outputs=[r['ref'] for r in results])
+            save_lock(root, lock)
+        eprint(f'rig build: published and verified {len(results)} images; '
+               f'{"complete matrix" if complete else "targeted build"}')
     return 0
