@@ -55,7 +55,8 @@ def _get_path(data: dict, path: str):
 
 
 def collect(
-    manifest: Manifest, catalog: dict[str, ServiceEntry], descriptors: dict[str, Descriptor]
+    manifest: Manifest, catalog: dict[str, ServiceEntry], descriptors: dict[str, Descriptor],
+    *, configs: dict | None = None,
 ) -> list[Issue]:
     issues: list[Issue] = []
     for service, desc in descriptors.items():
@@ -218,7 +219,7 @@ def collect(
         desc = descriptors.get(sensor.service)
         if not desc or not desc.host_ports:
             continue
-        cfg = load_yaml(sensor.config)
+        cfg = configs[sensor.name] if configs is not None else load_yaml(sensor.config)
         for path in desc.host_ports:
             value = _get_path(cfg, path)
             if isinstance(value, int):

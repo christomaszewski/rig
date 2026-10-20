@@ -39,7 +39,7 @@ RIG_OWNED_ENV = {"RIG_BUILD_PLATFORMS", "RIG_BUILD_RESULT", "RIG_BUILD_PULL", "R
                  "RIG_MSGS_MANIFEST",
                  # the SIL replay channel (replay.py sets them; every other verb POPS them — a
                  # leaked selector or sim-time token would silently corrupt a live session)
-                 "RIG_REPLAY_SOURCE", "RIG_REPLAY_TOPICS", "RIG_REPLAY_EXCLUDE", "RIG_SIM_TIME",
+                 "RIG_REPLAY_SOURCE", "RIG_REPLAY_PLAN", "RIG_REPLAY_TOPICS", "RIG_REPLAY_EXCLUDE", "RIG_SIM_TIME",
                  "RIG_REPLAY_SERVICES", "RIG_REPLAY_CALLS",
                  "RIG_REPLAY_FROM_S", "RIG_REPLAY_TO_S", "RIG_REPLAY_START_AT_UNIX_S",  # the window (seconds from bag start)
                  # the operational-state post (dispatch sets/pops it per verb; a manifest `env:`
@@ -60,6 +60,7 @@ class Sensor:
     #                             the pinned payload hash lives in rig.lock's `instances` section
     overlays: tuple = ()  # ORDERED overlay bindings (fully-qualified refs) — layer 2; payload copies
     #                       live under config/.overlays/ so the deployment stays self-contained
+    replay_start: bool | None = None  # None preserves automatic replay selection.
 
 
 @dataclass(frozen=True)
@@ -188,7 +189,8 @@ def _parse_replay_policy(raw, rows) -> dict:
     return raw
 
 
-def _parse_entries(entries, tier: str, root: Path, seen: dict[str, Path]) -> list[Sensor]:
+def _parse_entries(entries, tier: str, root: Path, seen: dict[str, Path],
+                   *, validate_configs: bool = True) -> list[Sensor]:
     out: list[Sensor] = []
     for index, entry in enumerate(entries or []):
         entry = entry or {}
@@ -198,12 +200,12 @@ def _parse_entries(entries, tier: str, root: Path, seen: dict[str, Path]) -> lis
 
         cfg_path = Path(cfg)
         cfg_path = (cfg_path if cfg_path.is_absolute() else (root / cfg_path)).resolve()
-        if not cfg_path.exists():
+        if validate_configs and not cfg_path.exists():
             raise RigError(f"{tier} '{name}': config not found: {cfg_path}")
 
         # The base config may be a complete named config OR a nameless profile the manifest completes;
         # if service/name ARE present they must match — catch drift.
-        cdata = load_yaml(cfg_path)
+        cdata = load_yaml(cfg_path) if validate_configs else {}
         if cdata.get("service") is not None and cdata.get("service") != service:
             raise RigError(f"{tier} '{name}': vehicle.yaml service '{service}' != config service "
                            f"'{cdata.get('service')}' in {cfg_path}")
@@ -216,6 +218,12 @@ def _parse_entries(entries, tier: str, root: Path, seen: dict[str, Path]) -> lis
         overlays = entry.get("overlays") or []
         if not isinstance(overlays, list) or not all(isinstance(o, str) for o in overlays):
             raise RigError(f"{tier} '{name}': `overlays` must be a list of overlay refs")
+        replay = entry.get("replay", {})
+        if (not isinstance(replay, dict) or set(replay) - {"start"}
+                or ("start" in replay and not isinstance(replay["start"], bool))):
+            raise RigError(f"{tier} '{name}': replay must contain start: true or false")
+        if service == PLAYER_SERVICE and replay.get("start") is False:
+            raise RigError("replay: cannot disable the bag player")
 
         if name in seen:  # THE top correctness check — unique across infra + sensors
             raise RigError(f"duplicate name '{name}' ({cfg_path} and {seen[name]}); names must be unique "
@@ -227,7 +235,7 @@ def _parse_entries(entries, tier: str, root: Path, seen: dict[str, Path]) -> lis
                           order=int(entry.get("order", (index + 1) * 10)),
                           overrides=overrides, tier=tier,
                           profile=(str(entry["profile"]) if entry.get("profile") else None),
-                          overlays=tuple(overlays)))
+                          overlays=tuple(overlays), replay_start=replay.get("start")))
     return out
 
 
@@ -380,7 +388,8 @@ def _derive_domain(vehicle_id, ros_raw: dict) -> int:
     return 0
 
 
-def load_manifest(root: Path, *, context: str = "execution", target_overrides: dict | None = None) -> Manifest:
+def load_manifest(root: Path, *, context: str = "execution", target_overrides: dict | None = None,
+                  validate_configs: bool = True) -> Manifest:
     if context not in ("execution", "deployment"):
         raise ValueError(f"unknown manifest context: {context}")
     data = load_yaml(root / "vehicle.yaml")
@@ -526,10 +535,17 @@ def load_manifest(root: Path, *, context: str = "execution", target_overrides: d
 
     # --- rows ---------------------------------------------------------------------------------
     seen: dict[str, Path] = {}
-    infra = _parse_entries(data.get("infra"), "infra", root, seen)
-    sensors = _parse_entries(data.get("sensors"), "sensor", root, seen)
-    autonomy = _parse_entries(data.get("autonomy"), "autonomy", root, seen)
+    infra = _parse_entries(data.get("infra"), "infra", root, seen, validate_configs=validate_configs)
+    sensors = _parse_entries(data.get("sensors"), "sensor", root, seen, validate_configs=validate_configs)
+    autonomy = _parse_entries(data.get("autonomy"), "autonomy", root, seen, validate_configs=validate_configs)
     replay_policy = {}
+    declared = _parse_replay_policy(data.get("replay"), infra + sensors + autonomy)
+    for row in infra + sensors + autonomy:
+        policy = declared.get("instances", {}).get(row.name, {}).get("start")
+        if row.replay_start is not None and policy is not None and policy != row.replay_start:
+            raise RigError(f"{row.name}: conflicting row replay.start and replay.instances policy")
+        if row.replay_start is not None:
+            replay_policy.setdefault("instances", {})[row.name] = {"start": row.replay_start}
     for source in [data, *reversed(sources)]:
         layer = _parse_replay_policy(source.get('replay'), infra + sensors + autonomy)
         for kind, entries in layer.items():

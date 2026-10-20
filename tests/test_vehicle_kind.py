@@ -49,6 +49,8 @@ def _capture_world():
 def test_capture_emits_template_and_plan_install_reproduces():
     with _env(RIG_HOME=tempfile.mkdtemp()):
         root, internal = _capture_world()
+        from rig_cli.overlay import edit_row
+        edit_row(root, "cam_rear", lambda r: r.update(replay={"start": True}))
         rc, _, err = _run("--root", str(root), "pkg", "promote", "--all", "--suite", "boat",
                           "--vehicle", "gideon", "--to", "internal")
         assert rc == 0, err
@@ -57,6 +59,7 @@ def test_capture_emits_template_and_plan_install_reproduces():
         assert vp["platform"] == "jp7"                       # fleet DEFAULT: literal allowed
         rows = {r["name"]: r for r in vp["sensors"]}
         assert rows["cam_rear"]["enabled"] is False and rows["cam_rear"]["order"] == 77
+        assert rows["cam_rear"]["replay"] == {"start": True}
         assert rows["acme_cam"]["profile"] == "testns/camish:acme-cam"      # UNVERSIONED
         assert rows["acme_cam"]["overlays"] == ["internal/acme-cam"]        # fresh delta folded in
         s = yaml.safe_load((internal / "suites" / "boat" / "manifest.yaml").read_text())
@@ -74,6 +77,7 @@ def test_capture_emits_template_and_plan_install_reproduces():
         assert got == {"acme_cam": (True, 10, ["internal/acme-cam@1.0.0"]),
                        "cam_rear": (False, 77, [])}          # names/order/enabled/bindings travel
         assert m2.platform == "jp7"
+        assert next(s for s in m2.sensors if s.name == "cam_rear").replay_start is True
         # Identity: the init'd target carried MARKERS (v0.2.20 default) and the plan carries markers,
         # so the fresh tree stays per-host/mandatory-from-local — fleet-style reproduction.
         assert m2.vehicle_id is None and "vehicle_id" in m2.missing_identity

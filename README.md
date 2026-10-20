@@ -163,9 +163,9 @@ python3 -m venv .venv && .venv/bin/pip install pyyaml
                           #   machine-wide: `provision --registry`); --enable-replay <path|ref>
                           #   wires the SIL player into a tree that flew without it (opt-in)
 ./rig replay <run> planner  # SIL: NEW provenance-linked run; the named instances come up LIVE and
-                          #   the ros2-bag-player (rig-infra ≥ v1.8.0) plays the topics they
-                          #   consumed in <run> (selected from its graph epochs — observed
-                          #   subscribes minus publishes; namespace fallback for pre-epoch runs).
+                          #   the current ros2-bag-player plays broad recorded data inputs;
+                          #   optional ownership evidence excludes regenerated outputs.
+                          #   --selection recorded retains recorded-subscription selection.
                           #   The bag-logger records the new outputs: source bag vs replay bag is
                           #   the A/B pair. Refuses while stacks run; teardown = down --end-run
                           #   --from S / --to S replay a SECTION (seconds from bag start — the
@@ -175,6 +175,9 @@ python3 -m venv .venv && .venv/bin/pip install pyyaml
                           # and its bag topics. Repeat --skip-service for other services.
                           # `rig replay` and `rig run replay` are equivalent; --dry-run previews.
 ./rig down                # tear down in reverse (autonomy FIRST); --purge also GCs external volumes
+./rig replay check <run>   # inspect a hand-built deployment's readiness, without writes
+./rig replay prepare <run> --recipe field-test
+./rig replay --recipe field-test
 ./rig swap <svc> <path|ref>  # re-point an INSTALLED service at different code — a local checkout
                           #   (routed live: edit, rebuild, re-up) or a registry ref (vendored +
                           #   pinned). Rows, working configs and overlays are KEPT; config-key
@@ -210,6 +213,9 @@ scp var/artifacts/v1.tar.gz vehicle:~/      # on the vehicle: `tar xzf v1.tar.gz
 
 [Portable builds and replay](docs/BUILD_AND_REPLAY.md) covers the build contract, Buildx setup,
 companion digests, reconstruction onto another host, replay startup policy, and migration of old runs.
+[Replay preparation](docs/REPLAY.md) covers instance `replay.start`, local recipes, check/prepare,
+renamed services, exact bag selection, and source-preserving legacy imports. No pub/sub declarations
+are required; packaging recipes with suites is deferred.
 Hardware runtimes use separate tags (`v1-jp6m`, `v1-dev`); multiarch indexes select the CPU within a
 runtime. `rig reconstruct RUN --platform dev` selects the software runtime; `--platform recorded`
 keeps the source runtime. Doodle's updated descriptor omits live radio startup during replay while

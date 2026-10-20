@@ -642,6 +642,11 @@ def _stage_tree(staging: Path, manifest, catalog, *, registry: str | None = None
         tier_rows[s.tier].append({"name": s.name, "service": s.service,
                                   "config": f"config/{sub}/{s.name}.yaml",
                                   "enabled": s.enabled, "order": s.order})
+        if s.replay_start is not None:
+            # Serialize effective policy, not a stale row value shadowed by a local file.
+            tier_rows[s.tier][-1]["replay"] = {
+                "start": manifest.replay_policy.get("instances", {}).get(s.name, {}).get(
+                    "start", s.replay_start)}
     veh: dict = {"vehicle": manifest.vehicle}
     if manifest.vehicle_id is not None:
         veh["vehicle_id"] = manifest.vehicle_id

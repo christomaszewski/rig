@@ -156,6 +156,14 @@ def _walk(words: list[str], cword: int, cur: str) -> list[tuple[str, str | None]
             command = flat
         # else: legacy `config <sensor…>` — fall through to the flat `config` parser
 
+    if command == "replay":
+        if cword == i + 1 and not cur.startswith("-"):
+            return [("check", "inspect replay readiness"), ("prepare", "prepare replay inputs")] + \
+                _positional_candidates(("replay",), "run", root_arg)
+        if words[i + 1:i + 2] in (["check"], ["prepare"]):
+            command = "replay-" + words[i + 1]
+            words = words[:i] + [command] + words[i + 2:]
+            cword -= 1
     action = _subparsers(parser)
     sub = action.choices.get(command) if action else None
     if sub is None:
@@ -266,6 +274,7 @@ def _command_menu(parser) -> list[tuple[str, str | None]]:
     action = _subparsers(parser)
     hidden = ({flat for verbs in _GROUP_VERBS.values() for flat in verbs.values()}
               - _CANONICAL_FLAT)
+    hidden.update(("replay-check", "replay-prepare"))
     helps = _helps(action)
     seen_parsers: set[int] = set()
     pairs: list[tuple[str, str | None]] = []
@@ -309,6 +318,8 @@ def _nested_menu(action) -> list[tuple[str, str | None]]:
 def _positional_candidates(ctx: tuple[str, ...], dest: str, root_arg: str | None,
                            positionals: list[str] | None = None,
                            words: list[str] | None = None) -> list[tuple[str, str | None]]:
+    if ctx in (("replay-check",), ("replay-prepare",)):
+        ctx = ("replay",)
     fn = _POSITIONAL_SOURCES.get((ctx, dest))
     return fn(root_arg, positionals or [], words or []) if fn else []
 
@@ -318,6 +329,11 @@ def _option_candidates(ctx: tuple[str, ...], act: argparse.Action, root_arg: str
     if act.choices:
         return [(str(c), None) for c in act.choices]
     opt = ([s for s in act.option_strings if s.startswith("--")] or act.option_strings)[0]
+    if ctx in (("replay-check",), ("replay-prepare",)):
+        ctx = ("replay",)
+    if ctx == ("replay",) and opt == "--recipe":
+        root = _deployment(root_arg)
+        return [(p.stem, None) for p in sorted((root / "replay").glob("*.yaml"))] if root else []
     fn = _OPTION_SOURCES.get((ctx, opt))
     return fn(root_arg, [], words or []) if fn else []
 

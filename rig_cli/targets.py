@@ -122,10 +122,9 @@ def build_selections(manifest, descriptors, scopes, *, platform=None, arch=None)
             replay_names = set()
             for sensor in manifest.sensors:
                 desc = descriptors[sensor.service]
-                start = desc.replay_start
-                for kind, key in (("services", sensor.service), ("instances", sensor.name)):
-                    start = manifest.replay_policy.get(kind, {}).get(key, {}).get("start", start)
-                if (sensor.enabled and start) or sensor.service == PLAYER_SERVICE:
+                from .replay_policy import setting
+                start, _, explicit = setting(manifest, sensor, desc)
+                if ((sensor.enabled or explicit or desc.replay_source) and start) or sensor.service == PLAYER_SERVICE:
                     replay_names.add(sensor.service)
             requirements = {}
             for name, desc in descriptors.items():

@@ -526,6 +526,8 @@ def _install_planned(root: Path, suite_ref: str, plan: dict, v_entry, v_pkg, v_p
                                   order=(int(row["order"]) if row.get("order") is not None
                                          else None))
             save_lock(root, lock)
+            if "replay" in row:
+                edit_row(root, name, lambda r, value=dict(row["replay"]): r.update(replay=value))
             if isinstance(row.get("overrides"), dict) and row["overrides"]:
                 edit_row(root, name, lambda r, o=dict(row["overrides"]): r.update(overrides=o))
             for oref in row.get("overlays") or []:

@@ -70,7 +70,7 @@ def fleet_env(manifest: Manifest, descriptors: dict[str, Descriptor] | None = No
                        # the replay channel: None here on EVERY verb (popped) — replay.py alone
                        # sets them on its env copy after this returns (per-invocation, never
                        # manifest state)
-                       ("RIG_REPLAY_SOURCE", None), ("RIG_REPLAY_TOPICS", None),
+                       ("RIG_REPLAY_SOURCE", None), ("RIG_REPLAY_PLAN", None), ("RIG_REPLAY_TOPICS", None),
                        ("RIG_REPLAY_EXCLUDE", None), ("RIG_SIM_TIME", None),
                        ("RIG_REPLAY_SERVICES", None), ("RIG_REPLAY_CALLS", None),
                        ("RIG_REPLAY_FROM_S", None), ("RIG_REPLAY_TO_S", None),
@@ -178,7 +178,7 @@ def run(
                    f"ROS_DOMAIN_ID={env['ROS_DOMAIN_ID']} RMW_IMPLEMENTATION={env['RMW_IMPLEMENTATION']}")
         for key in ("VEHICLE_ID", "RIG_IMAGE_REGISTRY", "RIG_IMAGE_TAG", "RIG_BASE_IMAGE",
                     "RIG_MSGS_IMAGE", "RIG_TARGET_PLATFORM", "RIG_DATA_DIR",
-                    "RIG_REPLAY_SOURCE", "RIG_REPLAY_TOPICS", "RIG_REPLAY_EXCLUDE",
+                    "RIG_REPLAY_SOURCE", "RIG_REPLAY_PLAN", "RIG_REPLAY_TOPICS", "RIG_REPLAY_EXCLUDE",
                     "RIG_SIM_TIME", "RIG_REPLAY_SERVICES", "RIG_REPLAY_CALLS",
                     "RIG_REPLAY_FROM_S", "RIG_REPLAY_TO_S",
                     "RIG_TARGET_STATE", desc.platform_override_env or ""):

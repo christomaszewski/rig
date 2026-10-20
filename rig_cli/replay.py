@@ -741,12 +741,8 @@ def startup_selection(manifest, descriptors, explicit: set[str], include_service
     for row in manifest.sensors:
         if row.service == PLAYER_SERVICE or row.name in explicit or row.service in include_services:
             continue
-        start = getattr(descriptors.get(row.service), "replay_start", True)
-        reason = "service default"
-        for kind, key in (("services", row.service), ("instances", row.name)):
-            if key in policy.get(kind, {}):
-                start = policy[kind][key]["start"]
-                reason = f"replay.{kind}.{key}"
+        from .replay_policy import setting
+        start, reason, _ = setting(manifest, row, descriptors.get(row.service))
         if not start:
             omitted[row.name] = reason
     return omitted
@@ -850,7 +846,13 @@ def cmd(manifest, catalog, descriptors, root: Path, *, run_ref: str, names: list
             raise RigError("replay --skip-service: no recorded inputs remain to replay")
         raise RigError(f"replay: {src_id} has no bags/ and no instance recordings — nothing to play")
     infra = [s.name for s in active_manifest.sensors if s.tier == "infra" and s.enabled]
-    infra = list(dict.fromkeys(infra + included + live_flags))
+    from .replay_policy import forced
+    positive = forced(active_manifest, active_descriptors)
+    for row in active_manifest.sensors:
+        if (row.name in positive and row.name not in source_names and row.name not in live_flags
+                and getattr(active_descriptors.get(row.service), "replay_source", None)):
+            raise RigError(f"{row.name}: replay.start requires recordings or explicit --live")
+    infra = list(dict.fromkeys(infra + included + live_flags + positive))
     # everything that PUBLISHES live in this session — infra regenerates its own topics, sources
     # re-deliver theirs, the with-set computes its outputs: the bag must not double-publish any
     live_names = list(dict.fromkeys(infra + source_names + with_names))

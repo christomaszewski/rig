@@ -706,6 +706,10 @@ def translate_argv(argv: list[str]) -> list[str] | None:
     if i >= len(argv):
         return argv
     noun = argv[i]
+    if noun == "run" and argv[i + 1:i + 2] == ["replay"]:
+        return translate_argv(argv[:i] + argv[i + 1:])
+    if noun == "replay" and argv[i + 1:i + 2] in (["check"], ["prepare"]):
+        return argv[:i] + ["replay-" + argv[i + 1]] + argv[i + 2:]
     # `ls` aliases `list` under every noun that has one — rewritten HERE so it covers both the
     # group-translated nouns and the real argparse subparsers (whose dispatch compares the
     # canonical string) without touching either. Alias doctrine: parses forever, menus never
@@ -812,12 +816,12 @@ def build_parser() -> argparse.ArgumentParser:
     rn = sub.add_parser("runs", help="list the run registry (OPEN / sealed / interrupted)")
     rn.add_argument("names", nargs="*", default=[], help=argparse.SUPPRESS)
 
-    rp = sub.add_parser("replay", help="play a sealed run back: instances whose rigging declares "
-                                       "replay.source come up fed from their OWN recordings in "
-                                       "the run (found, never named); the ros2-bag-player row "
-                                       "plays what the bag holds (rig-infra ≥ v1.8.0; selection "
-                                       "from the run's graph epochs). No names = reproduce the run")
-    rp.add_argument("run", help="SOURCE run id or run-dir path")
+    rp = sub.add_parser("replay", help="replay broad recorded inputs into this deployment; "
+                                       "check/prepare inspect and adapt runs without starting services")
+    rp.add_argument("run", nargs="?", help="SOURCE run id, run-dir or standalone ROS 2 bag path")
+    rp.add_argument("--recipe", help="local recipe name or YAML path")
+    rp.add_argument("--selection", choices=("broad", "recorded"), default="broad",
+                    help="broad bag inputs (default), or legacy recorded-graph input selection")
     rp.add_argument("names", nargs="*",
                     help="instance(s) under test — brought up live, their recorded inputs played "
                          "(a recording-capable instance named here is still fed from its "
@@ -871,6 +875,14 @@ def build_parser() -> argparse.ArgumentParser:
                          "the player config's loop: true (the bag never ends)")
     rp.add_argument("--dry-run", action="store_true",
                     help="print selection + the exact launcher invocations; open no run")
+    for verb in ("check", "prepare"):
+        check = sub.add_parser("replay-" + verb, parents=[rp], add_help=False,
+                               prog=f"{parser.prog} replay {verb}",
+                               help=f"{verb} a deployment for replay without starting its services")
+        check.add_argument("--json", action="store_true", help="machine-readable plan and diagnostics")
+        check.add_argument("--format", choices=("text", "json"), default="text", help="report format")
+        if verb == "prepare":
+            check.add_argument("--player", help="wire a missing player from a checkout or pinned registry ref")
 
     gr = sub.add_parser("graph", help="observed pub/sub/service topology from a run's graph "
                                       "epochs (the bag-logger's graph-snapshotter sidecar, "
@@ -1694,6 +1706,9 @@ def main(argv=None) -> int:
             return cmd_bake(args, root)
         if args.cmd == "certify":  # may run repo-standalone (--repo/--diff) — routes its own manifest load
             return cmd_certify(args, root)
+        if args.cmd in ("replay", "replay-check", "replay-prepare"):
+            from .replay_workflow import command
+            return command(args, root)
         args.rig_root = root  # handlers that touch the run registry need the deployment root (provenance)
         manifest, catalog, descriptors = _load(root)
         return _HANDLERS[args.cmd](args, manifest, catalog, descriptors)

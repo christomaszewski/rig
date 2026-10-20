@@ -277,11 +277,18 @@ replay:
     bench_radio: {start: true}
 ```
 
-Defaults come from each descriptor's `replay.start` (true when absent), then service policy, then
-instance policy. Local files merge over deployment entries. Explicit instance names, `--live NAME`,
+Descriptor `replay.start` controls automatic eligibility. Deployment service or instance
+`start: true` positively selects instances, including disabled consumers. Rows may carry
+`replay: {start: true|false}` as an alias of top-level instance policy. Local files merge over
+deployment entries. Explicit instance names, `--live NAME`,
 and `--include-service SERVICE` override startup defaults. The player cannot be disabled this way.
 Startup omission preserves the service's recorded bag topics. Use `--skip-service SERVICE` or
 `--skip-instance NAME` to omit startup **and** recorded data. Conflicting include/skip requests fail.
+
+Hand-built deployments can use `rig replay check RUN` and
+`rig replay prepare RUN --recipe NAME`. See [Replay preparation](REPLAY.md) for local recipes,
+broad playback defaults, exact-session timing, and source-preserving legacy adapters.
+Recipe packaging with suites remains deferred.
 
 Doodle's descriptor sets `replay.start: false`. When explicitly started, its launcher waits up to
 `DOODLE_CONNECT_TIMEOUT` (10 seconds by default) for reachability, then up to `DOODLE_SETTLE_TIMEOUT`

@@ -507,7 +507,7 @@ rig replay <stamp>_dock-test                               # REPRODUCE the run: 
                                                            #   their own recordings, the bag for the
                                                            #   rest; --start-delay S / --live NAME /
                                                            #   --session PREFIX
-rig replay <stamp>_dock-test planner                       # SIL: play planner's recorded inputs at
+rig replay <stamp>_dock-test planner                       # SIL: feed broad recorded inputs to
                                                            #   the CURRENT planner build/config —
                                                            #   new run links back via replay-of
 rig run replay <stamp>_dock-test --skip-service camera-service --auto-end
@@ -516,6 +516,10 @@ rig run replay <stamp>_dock-test --skip-service camera-service --auto-end
                                                            # --dry-run previews; source run unchanged
 rig replay <stamp>_dock-test planner --from 120 --to 300   # a SECTION of the run (seconds from
                                                            #   bag start; --auto-end for sweeps)
+rig replay check RUN --format json                         # read-only readiness and resolved selection
+rig replay prepare RUN --recipe demo                       # source-preserving local preparation
+rig replay --recipe demo                                   # replay using that recipe and local binding
+rig replay RUN planner --selection recorded                # previous recorded-subscription selector
 rig swap planner ../planner                                # in a reconstructed tree: same rows +
 rig swap planner public/planner@2.1.0                      #   configs, DIFFERENT code (drift named)
 ```
@@ -526,8 +530,8 @@ key in `vehicle.yaml`, across enabled and disabled instances. It excludes instan
 from bag playback and uses recorded graph epochs to exclude remapped topics published only by
 those instances. Shared topics such as `/tf` stay; without graph epochs, rig warns that only
 namespace filtering is possible. The new run records `replay.skipped` for provenance. A skipped
-instance cannot also be named under test or requested with `--live`; if no recorded inputs remain,
-rig refuses to start the replay.
+instance cannot also be named under test or requested with `--live`. With no data topics, an
+available bag can still drive a clock-only timeline. See [Replay preparation](REPLAY.md).
 
 ## 6 — iterate
 

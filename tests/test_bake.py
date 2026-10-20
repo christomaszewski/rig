@@ -871,13 +871,15 @@ def test_staged_tree_round_trips_env_and_run_capture():
     root, m, cat, descs = _deployment_fixture(_COMPOSE_LAUNCHER)
     (root / "vehicle.yaml").write_text(
         "vehicle: t\nrun_capture: false\nenv: {API_ENDPOINT: 'http://internal'}\n"
-        "sensors: [{name: a, service: demo, config: config/sensors/a.yaml}]\n")
+        "sensors: [{name: a, service: demo, config: config/sensors/a.yaml, replay: {start: true}}]\n")
     m = load_manifest(root)
     assert m.extra_env == {"API_ENDPOINT": "http://internal"} and m.run_capture is False
     artifact = _bake_quiet(root, m, cat, descs, {"PATH": os.environ["PATH"]}, "t")
     out = load_manifest(unbake(artifact, pathlib.Path(tempfile.mkdtemp())))
     assert out.extra_env == {"API_ENDPOINT": "http://internal"}
     assert out.run_capture is False
+    assert out.sensors[0].replay_start is True
+    assert out.replay_policy["instances"]["a"]["start"] is True
 
 
 def test_cli_round_trip_init_add_bake_starts_exactly_the_enabled_rows():
