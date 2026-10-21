@@ -172,7 +172,7 @@ def _entry(run_dir: Path, root: Path, *, open_id: str | None) -> Entry | None:
         doc = {"corrupt": True}
     if not isinstance(doc, dict) or "run" not in doc and "corrupt" not in doc:
         return None
-    from .runs import run_tags
+    from .runs import run_disk_kb, run_tags
     ended = str(doc.get("ended") or "")
     if doc.get("corrupt"):
         state = "corrupt"
@@ -192,7 +192,7 @@ def _entry(run_dir: Path, root: Path, *, open_id: str | None) -> Entry | None:
     return Entry(run=run_dir.name, label=str(doc.get("label") or "—"),
                  vehicle=str(doc.get("vehicle") or "?"), vehicle_id=str(doc.get("vehicle_id") or "?"),
                  state=state, started=str(doc.get("started") or "?"), ended=ended or "—",
-                 disk_kb=doc.get("disk_kb") if isinstance(doc.get("disk_kb"), int) else None,
+                 disk_kb=run_disk_kb(run_dir, doc),
                  tags=run_tags(doc), path=run_dir, root=root, kind=kind,
                  replay_of=str(replay["of"]) if isinstance(replay, dict) and replay.get("of") else None)
 

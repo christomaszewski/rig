@@ -4,13 +4,14 @@ from __future__ import annotations
 import dataclasses
 import json
 import re
+import shlex
 import time
 from pathlib import Path
 
 from . import RigError, dispatch, replay, resolve, runs
 from .common import eprint
 from . import replay_plan as planner, replay_prepare as prepare, replay_recipe as recipes
-from .replay_sources import source_path
+from .replay_sources import source_path, source_fingerprint, binding_variables, verify_binding
 
 
 def report(plan, *, as_json=False):
@@ -22,15 +23,30 @@ def report(plan, *, as_json=False):
         eprint(f"  start {name}: {role['role']} ({role['reason']})")
     for name, reason in plan["omitted"].items():
         eprint(f"  omit {name}: {reason}")
+    for name, namespace in plan.get("recorded_namespaces", {}).items():
+        source = plan.get("recorded_namespace_sources", {}).get(name, "recipe")
+        eprint(f"  recorded ROS namespace {name}: {namespace} ({source})")
     if plan["source"] and plan["source"]["bag"]:
         bag = plan["source"]["bag"]
         eprint(f"  bag: {bag['logger']}/{bag['session']}; "
                f"{len(plan['playback'].get('topics', []))} data topics")
         eprint("  topics: " + (", ".join(plan["playback"].get("topics", [])) or "(clock-only timeline)"))
+        eprint("  service calls: " + (plan["playback"].get("calls") or
+               ", ".join(plan["playback"].get("services", [])) or "(none selected)"))
+        regenerated = plan.get("excluded_regenerated", [])
+        if regenerated:
+            kept = set(plan.get("recipe", {}).get("playback", {}).get("keep", []))
+            excluded = [t for t in regenerated if t not in kept]
+            if excluded:
+                eprint("  omit regenerated outputs: " + ", ".join(excluded))
         for original, destination in plan["playback"].get("remap", {}).items():
             eprint(f"  remap {original} -> {destination}")
     for name, binding in plan["recordings"].items():
-        eprint(f"  recordings {name}: {binding['path']} ({', '.join(binding['sessions']) or 'all'})")
+        proxy = binding.get("proxy")
+        mode = (f"proxy {proxy['profile']} / {proxy['export_id']} "
+                f"({'lossy' if proxy.get('lossy', True) else 'lossless'})") if proxy else "original"
+        eprint(f"  recordings {name}: {mode}; {binding['path']} "
+               f"({', '.join(binding['sessions']) or 'all'})")
     for issue in plan["issues"]:
         eprint(f"  [{issue['status']}] {issue['message']}")
     eprint(f"  ready_to_prepare: {str(plan['ready_to_prepare']).lower()}; "
@@ -82,17 +98,24 @@ def _command(args, root):
         name += "-" + recipes.digest(str(origin))[:8]
         recipe_path, recipe = recipes.load(root, name, create=True)
         options["_recipe_path"] = str(recipe_path)
-    runtime = prepare.prepared(root, recipe_path, recipe, origin) if recipe_path else None
+    use_proxies = bool(options.get("use_proxies"))
+    if recipe_path and use_proxies:
+        options["_prepared_proxies"] = prepare.proxy_pins(root, recipe_path, recipe, origin)
+    runtime = prepare.prepared(root, recipe_path, recipe, origin, use_proxies=use_proxies) if recipe_path else None
     options["_prepared_source"] = str(runtime) if runtime else None
     plan = planner.build(manifest, catalog, descriptors, root, str(origin), recipe, options)
-    if runtime and prepare.location(root, recipe_path, origin).name != prepare.generation(plan):
+    if runtime and prepare.location(root, recipe_path, origin, use_proxies=use_proxies).name != prepare.generation(plan):
         runtime = None  # Changed bindings/selections require a new immutable generation.
+        # Rebuild without the old runtime: its repaired bag metadata and rendered root must
+        # not leak into an execution that is about to fall back to the untouched source.
+        options["_prepared_source"] = None
+        plan = planner.build(manifest, catalog, descriptors, root, str(origin), recipe, options)
         if plan["needs_preparation"]:
             plan["issues"].append(dict(status="not_checked", code="stale_preparation", phase="run",
                                        message="Source bindings changed; prepare this selection again"))
             planner.finish(plan)
     if runtime:
-        plan["preparation"] = str(prepare.location(root, recipe_path, origin))
+        plan["preparation"] = str(prepare.location(root, recipe_path, origin, use_proxies=use_proxies))
     if action != "prepare" or args.dry_run or not plan["ready_to_prepare"]:
         report(plan, as_json=getattr(args, "json", False))
     if action == "check":
@@ -101,7 +124,8 @@ def _command(args, root):
         if not plan["ready_to_prepare"]:
             return 1
         if args.dry_run:
-            eprint(f"Would prepare {recipe_path} and {prepare.location(root, recipe_path, origin)}")
+            eprint(f"Would prepare {recipe_path} and "
+                   f"{prepare.location(root, recipe_path, origin, key=prepare.generation(plan))}")
             if args.player:
                 eprint(f"Would add player from {args.player}")
             return 0
@@ -162,19 +186,29 @@ def perform_prepare(args, root, recipe_path, recipe, origin, manifest, catalog, 
             plan["recipe"] = recipe
         runtime = prepare.create(root, recipe_path, recipe, plan, manifest, descriptors)
         options["_prepared_source"] = str(runtime)
+        use_proxies = bool(options.get("use_proxies"))
+        if use_proxies:
+            options["_prepared_proxies"] = prepare.proxy_pins(root, recipe_path, recipe, origin)
         plan = planner.build(manifest, catalog, descriptors, root, str(origin), recipe, options)
         # Recovered bag timing can narrow automatic camera session selection. Publish that
         # selection now, so the first successful prepare is already reusable by check/run.
         if (plan["ready_to_prepare"] and
-                prepare.location(root, recipe_path, origin).name != prepare.generation(plan)):
+                prepare.location(root, recipe_path, origin, use_proxies=use_proxies).name != prepare.generation(plan)):
             runtime = prepare.create(root, recipe_path, recipe, plan, manifest, descriptors)
             options["_prepared_source"] = str(runtime)
             plan = planner.build(manifest, catalog, descriptors, root, str(origin), recipe, options)
-        plan["preparation"] = str(prepare.location(root, recipe_path, origin))
+        plan["preparation"] = str(prepare.location(root, recipe_path, origin, use_proxies=use_proxies))
         prepare.refresh(root, recipe_path, plan)
         report(plan, as_json=getattr(args, "json", False))
         eprint(f"Prepared recipe: {recipe_path}")
-        eprint(f"Replay with: rig replay --recipe {recipe_path}")
+        replay_command = ["rig", "replay", "--recipe", str(recipe_path)]
+        if use_proxies:
+            replay_command.append("--use-proxies")
+        for flag, values in (("--skip-service", args.skip_services),
+                             ("--skip-instance", args.skip_instances)):
+            for value in values:
+                replay_command.extend([flag, value])
+        eprint("Replay with: " + shlex.join(replay_command))
         return 0 if plan["ready_to_run"] else 1
     except BaseException:
         if saved:
@@ -248,7 +282,8 @@ def execute(args, root, manifest, descriptors, plan, runtime):
         env["RIG_REPLAY_PLAN"] = str(path)
     for name in plan["selected"]:
         row, desc = rows[name], descriptors[rows[name].service]
-        config = resolve._layered_dict(row, root, variables={**variables, "name": name},
+        config = resolve._layered_dict(row, root,
+                                     variables=binding_variables(variables, row, plan["recordings"].get(name)),
                                      extra_overrides=desc.replay_source.overrides
                                      if name in plan["recordings"] else None)
         path = session_root / "config" / (name + ".yaml")
@@ -259,12 +294,10 @@ def execute(args, root, manifest, descriptors, plan, runtime):
     by_name = {r.name: r for r in selected}
     execution_manifest = dataclasses.replace(manifest, sensors=[
         by_name.get(r.name, dataclasses.replace(r, enabled=False)) for r in manifest.sensors])
-    from .replay_sources import inventory_fingerprint
-    if inventory_fingerprint(source["path"]) != source["fingerprint"]:
+    if source_fingerprint(source["path"]) != source["fingerprint"]:
         raise RigError("Source changed since planning; check/prepare again")
     for binding in plan["recordings"].values():
-        if inventory_fingerprint(binding["path"]) != binding["fingerprint"]:
-            raise RigError("Recordings changed since planning; check/prepare again")
+        verify_binding(binding)
     if plan["playback"]["calls"] and replay.validate_calls(
             Path(plan["playback"]["calls"])) != plan["calls_sha"]:
         raise RigError("Call script changed since planning; check again")
@@ -282,6 +315,7 @@ def execute(args, root, manifest, descriptors, plan, runtime):
             r"[^A-Za-z0-9_-]", "-", "replay-" + source["id"]), force=True,
             replay=dict({"of": source["id"], "source": source["path"], "with": args.names},
                         recipe=plan["recipe"], fingerprint=plan["fingerprint"],
+                        use_proxies=bool(plan.get("use_proxies")),
                         source_fingerprint=source["fingerprint"], runtime_source=str(runtime), bag=bag,
                         execution=plan.get("execution"), epoch_unix_ns=(bag or {}).get("start_ns"),
                         skipped={"services": args.skip_services, "instances": args.skip_instances},

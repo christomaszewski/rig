@@ -3,7 +3,8 @@
 
 Loading enforces the single most important correctness invariant rig owns: **globally-unique instance
 `name`** across the whole vehicle (every identity a launcher derives — compose project, external volumes,
-ROS namespace — comes from `name`). It also cross-checks each entry's `service`/`name` against the config's
+default ROS namespace — comes from `name`; services can describe another ROS namespace in rigging.yaml).
+It also cross-checks each entry's `service`/`name` against the config's
 own (the launcher trusts the config), derives the ROS domain from the vehicle id, and orders the tiers:
 infra comes up first and tears down last; autonomy (planners, SLAM, perception — anything consuming the
 graph) comes up after ALL sensors and stops FIRST, so the decider dies before its eyes. Ordering is a

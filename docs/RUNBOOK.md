@@ -35,9 +35,10 @@ curl -s http://$REGISTRY/v2/_catalog       # -> {"repositories":[]}
 ```
 > **Trust the registry on the dev box too** — it's plain HTTP. Docker Desktop → Settings → Docker Engine →
 > add `"insecure-registries": ["192.168.x.x:5000"]` → Apply & Restart. Without it, `rig build`/`docker push`
-> fail with `server gave HTTP response to HTTPS client`. If a service's `build-images.sh` pushes via
-> `docker buildx build --push` and still errors, BuildKit needs its own insecure config:
-> `printf '[registry."'$REGISTRY'"]\n  http = true\n' > /tmp/bk.toml && docker buildx create --name rig --driver docker-container --config /tmp/bk.toml --use --bootstrap`
+> fail with `server gave HTTP response to HTTPS client`. Rig inherits the daemon's approved registry
+> policy for its inspections and supported local builders, creating a managed Buildx builder when
+> needed. Explicit remote/custom builders need their own registry access configuration. See
+> [Builder and publication](BUILD_AND_REPLAY.md#builder-and-publication).
 
 ## 2 — Workspace + clones
 ```bash
@@ -148,11 +149,14 @@ rig up --dry-run    # zenoh-router -> dashboard -> cam_usb -> cam_rtsp; VEHICLE_
 
 ## 5 — Build + push images
 ```bash
-rig build -j 3      # builds the camera images (cam-core, ros2-bridge, webrtc-bridge):$JETPACK + dashboard images; mirrors eclipse/zenoh
+rig image build -h # scope rules: full matrix, deployment, host, replay
+rig build -j 3      # all declared runtime variants and supported CPUs, including disabled rows
+rig build --scope deployment,replay --dry-run  # preview only the vehicle target and replay companions
 curl -s http://$REGISTRY/v2/_catalog       # expect: cam-core, ros2-bridge, webrtc-bridge, dashboard-zenoh, dashboard-web, eclipse/zenoh
 ```
-> Work is per unique *service*, so the two camera instances build `camera-service` **once**. `-j N` runs up
-> to N services concurrently (output grouped per service); omit it for sequential, live-streamed output.
+> Duplicate service/runtime builds are shared across instances. `-j N` runs up to N independent tasks
+> concurrently (default 2; use `-j 1` for serial). Logs live under `var/build/`; `--verbose` streams
+> full output. Runtime (`--platform`) and CPU (`--arch`) are separate build dimensions.
 
 ## 6 — Bake
 
@@ -212,10 +216,11 @@ docker rm -f registry                                      # stop the dev-box re
 
 ## Field day — collecting a dataset worth replaying
 
-What can't be retrofitted is decided at RECORD time: bags need the logger row up, replay's exact
-topic selection needs the graph sidecar's epochs, and replay-from-any-offset needs latched topics
-re-written into every split (`record.repeat_transient_local: true`). All three are wired in this
-tree's `config/infra/bag_logger.yaml`. The night before:
+Record the evidence needed later: bags need the logger row up; graph epochs support optional
+recorded-subscription selection and output ownership; repeated latched topics
+(`record.repeat_transient_local: true`) preserve state across splits. Broad replay works without
+epochs or declared pub/sub interfaces. These recording settings are wired in this tree's
+`config/infra/bag_logger.yaml`. The night before:
 
 ```bash
 # on the vehicle: data_dir + platform are MACHINE-local (/etc/rig/vehicle.local.yaml)
@@ -332,16 +337,50 @@ manifest records every rewrite (`rewrites:` — options, bytes before/after, los
 is also why a second `--in-place` with the same options is a no-op (`--force` redoes it). A
 multi-file session becomes one file unless the profile sets `split_duration_s` / `max_size_mb`.
 
-An export is a plain run dir (manifest, config snapshots, graph epochs, sidecars) plus
+A legacy whole-run export is a plain run dir (manifest, config snapshots, graph epochs, sidecars) plus
 `.rig/export.yaml` naming the profile, the source run, what was omitted and each exporter's
 outcome — `rig run import` adopts it like any run, `rig replay` plays what the slim bags hold.
 Transport is rsync (resumable; on a laptop without it, scp pulls once and cannot update). The
-camera services do not export yet: video is either omitted (`omit:`) or travels as recorded.
+camera service-only exports are a separate mode described below; these legacy profiles still
+either omit video (`omit:`) or retain its original bytes.
 After an in-place rewrite, use the ordinary full-transfer command above. The exporter lives in
 the logger's launcher/image: installing a newer rig alone does not upgrade an old vendored logger.
 An export that drops target inputs cannot reproduce their behavior. In particular, a profile
 that omits `.mkv` files but keeps camera sidecars still needs `--skip-service camera-service`
 when replaying without video; source discovery sees a nonempty recordings directory.
+
+**Offline camera proxies.** With an updated camera-service bundle and its native CPU image,
+create reusable H.264 proxies without copying bags or unchanged services:
+
+```sh
+rig run export RUN --service camera-service --dry-run
+rig run export RUN --service camera-service                # service-owned default h264 profile
+rig run export RUN --service camera-service --instance cam_front
+rig fleet sync --into fleet-runs --include-service-exports  # include committed generations
+rig replay check RUN --use-proxies
+rig replay prepare RUN --recipe field-test --use-proxies
+rig replay --recipe field-test --use-proxies
+```
+
+The artifacts live at `RUN/exports/services/camera-service/h264/<export-id>/`, containing only
+new recordings, sidecars, and `export.yaml`. Originals remain untouched. Matching generations
+are reused; `--force` creates again without removing previous exports. `--instance` refers to
+the original recorded name. Camera-service defines the profile; no vehicle-level `h264` or
+`laptop` export profile is required. Unsupported input formats fail preflight.
+
+H.264 changes pixel values while retaining geometry and capture timing. Proxies aim to reduce
+decode cost, while normal WebRTC encoding still runs. Each replay/check/prepare command needs
+`--use-proxies`; omitting it always selects originals, even with a saved proxy preparation.
+Missing or incompatible requested proxies fail rather than generating/falling back. Cameras bind
+directly to the selected read-only paths; bags use their existing original or legacy-repair path.
+Use recipe pins for multiple compatible generations and explicit `{use: original}` preferences
+for unsupported cameras. See [Offline camera proxies](REPLAY.md#offline-camera-proxies).
+
+Normal fleet sync keeps excluding exports. Its explicit `--include-service-exports` mode preserves
+nested paths and validates completed generations; it cannot be combined with legacy `--profile`.
+Whole-run import/archive also preserve service exports, which remain part of the original run in
+the catalog. A shared generation requires the original run and a compatible reader, not the
+exporter's deployment. Automatic pruning and suite packaging remain deferred.
 
 ## Reconstruct the deployment and restore its images
 
@@ -410,8 +449,11 @@ docker tag REGISTRY/IMAGE@sha256:DIGEST RENDERED_IMAGE_REF
 In the tag-based case, a later `pull` or launcher pull policy can replace the restored image;
 check the rendered compose and the launched container's image identity. Null/missing digests
 cannot prove the original bytes, and an unavailable digest requires an image archive or a
-rebuild. An arm64 run needs a compatible host, emulation where supported, or a platform rebuild;
-rebuilding at the same source pins is a new image, not restoration of the recorded bytes.
+rebuild. A release catalog with replay companions lets an arm64 run use published native amd64
+images on a bench. Reconstruction selects the destination runtime and Docker CPU; use
+`rig replay check RUN` to check readiness. Without suitable companions, the original arm64 bytes
+need compatible execution or supported emulation; rebuilding at the same source pins creates new
+images. See [Portable builds and replay](BUILD_AND_REPLAY.md).
 
 Runs recorded before capture can be retrofitted: `rig run retrofit <run…>` in the original
 deployment, with `var/artifacts/` populated, stamps them with the deploy artifact their manifest
@@ -514,11 +556,11 @@ the A/B pair aligns).
 its rigging (camera-service: `recordings/{name}`, its mkv + csv sessions) is a SOURCE whenever the
 source run holds its recordings: it comes up fed from them, its config rendered for the session
 with the descriptor's patch on top (`var/replay/sessions/<execution>/config/<name>.yaml`; the next plain `up`
-renders the live config again — nothing to undo). Sources are found, never named. With no names
-`rig replay <run>` REPRODUCES the run: infra (the dashboard shows what the operator saw), every
-source, and the player for what the bag holds — nothing under test; with names the names are
-under test as before and the sources ride along (a named source is still a source: the
-new-camera-service-against-this-run's-video case). Every source shares one timeline — the bag's
+renders the live config again — nothing to undo). With no names, `rig replay <run>` follows startup
+policy: enabled infrastructure, detected recording sources and the player, adjusted by `replay.start`.
+An instance row's `replay: {start: true}` includes even a normally disabled consumer; false leaves
+its process off while keeping recorded data eligible. Explicit names add consumers; named sources
+still use their recordings unless `--live` is supplied. Every source shares one timeline — the bag's
 zero (no bag: each starts on its own first recorded frame), one release instant (`--start-delay`,
 default 20 s: sources come up paused on their first frame and resume together), `--from/--to`,
 and the clock decision (recorded stamps under sim
@@ -541,8 +583,8 @@ source:
 
 Inspect `var/data/runs/RUN/bags/`, set `source.logger` to the recorded logger name, and set
 `source.session` to the desired UTC stamp to play an earlier session. Each session's split
-files play together; separate sessions require separate replay invocations. The player's
-warning lists skipped sessions. `rig replay --session PREFIX` selects per-source recordings
+files play together; separate sessions require separate replay invocations. `rig replay check RUN`
+reports the exact selected logger/session. `rig replay --session PREFIX` selects per-source recordings
 (such as camera sessions) and does not override this bag selection. `--export-calls` also
 uses the player's selected bag session, so keep the selection consistent with the replay.
 

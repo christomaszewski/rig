@@ -194,7 +194,7 @@ def _within(p: argparse.ArgumentParser, ctx: tuple[str, ...], words: list[str],
     if cur.startswith("--") and "=" in cur:  # --kind=pro<TAB>
         opt, _, _ = cur.partition("=")
         act = opts.get(opt)
-        vals = _option_candidates(ctx, act, root_arg) if act is not None and _takes_value(act) else []
+        vals = _option_candidates(ctx, act, root_arg, words) if act is not None and _takes_value(act) else []
         return [(f"{opt}={v}", h) for v, h in vals]
     if cur.startswith("-"):
         used = set(words[start:cword])
@@ -524,6 +524,17 @@ def _export_profiles(root_arg, positionals, words):
     root = _deployment(root_arg)
     if not root:
         return []
+    service = next((word.split("=", 1)[1] for word in words
+                    if word.startswith("--service=")), None)
+    if "--service" in words and words.index("--service") + 1 < len(words):
+        service = words[words.index("--service") + 1]
+    if service:
+        spec = (_read_yaml(root / "services.yaml").get("services") or {}).get(service, {})
+        repo = root / spec["path"]
+        from .descriptor import find_descriptor
+        descriptor = find_descriptor(repo)
+        export = _read_yaml(descriptor).get("export", {}) if descriptor else {}
+        return sorted(export.get("profiles", {})) if "service" in export.get("modes", []) else []
     profiles = _read_yaml(root / "vehicle.yaml").get("export_profiles")
     return sorted(str(k) for k in profiles) if isinstance(profiles, dict) else []
 
@@ -699,6 +710,7 @@ _OPTION_SOURCES: dict = {
     (("replay",), "--skip-service"): _services,
     (("replay",), "--include-service"): _services,
     (("run-export",), "--profile"): _export_profiles,
+    (("run-export",), "--service"): _services,
     (("catalog-search",), "--tag"): _catalog_tags,
     (("fleet", "sync"), "--profile"): _export_profiles,
 }

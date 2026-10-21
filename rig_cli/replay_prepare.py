@@ -13,7 +13,7 @@ import yaml
 from . import RigError, dispatch
 from .common import load_yaml
 from .replay_recipe import digest, workspace
-from .replay_sources import inventory_fingerprint, metadata
+from .replay_sources import inventory_fingerprint, metadata, source_fingerprint, verify_binding
 
 
 def write_yaml(path, value):
@@ -25,34 +25,42 @@ def write_yaml(path, value):
 
 def generation(plan):
     return digest(dict(source=plan["source"]["path"], fingerprint=plan["source"]["fingerprint"],
-                       recipe=plan["recipe"], recordings=plan["recordings"]))[:20]
+                       recipe=plan["recipe"], recordings=plan["recordings"],
+                       use_proxies=bool(plan.get("use_proxies"))))[:20]
 
 
-def location(root, recipe_path, source, *, key=None):
+def location(root, recipe_path, source, *, key=None, use_proxies=False):
     folder = workspace(root, recipe_path)
     binding = folder / "bindings.yaml"
     if key is None and binding.exists():
         doc = load_yaml(binding)
         if doc.get("source") == str(Path(source).resolve()):
-            key = doc.get("generation")
+            key = doc.get("generations", {}).get("proxies" if use_proxies else "original")
+            if key is None and not use_proxies and "generations" not in doc:
+                key = doc.get("generation")
     if key is not None and not re.fullmatch(r"[0-9a-f]{16,64}", str(key)):
         raise RigError(f"Invalid prepared generation in {binding}")
     return folder / (key or digest(str(Path(source).resolve()))[:16])
 
 
-def prepared(root, recipe_path, recipe, source):
+def prepared(root, recipe_path, recipe, source, *, use_proxies=False):
     """Return a verified generated source, or None; never consume stale host bindings."""
     source = Path(source).resolve()
-    dest = location(root, recipe_path, source)
+    dest = location(root, recipe_path, source, use_proxies=use_proxies)
     record = dest / "provenance.yaml"
     if not record.exists():
         return None
     doc = load_yaml(record)
-    if (doc.get("recipe_sha") != digest(recipe) or
-            doc.get("source_fingerprint") != inventory_fingerprint(source)):
+    if (bool(doc.get("use_proxies")) != use_proxies or doc.get("recipe_sha") != digest(recipe) or
+            doc.get("source_fingerprint") != source_fingerprint(source)):
         return None
     for path, fingerprint in doc.get("recordings", {}).items():
         if inventory_fingerprint(path) != fingerprint:
+            return None
+    for binding in doc.get("bindings", {}).values():
+        try:
+            verify_binding(binding)
+        except RigError:
             return None
     for name, fingerprint in doc.get("generated", {}).items():
         path = dest / name
@@ -68,6 +76,32 @@ def prepared(root, recipe_path, recipe, source):
     return runtime
 
 
+def proxy_pins(root, recipe_path, recipe, source):
+    """Remember selected identities even if an artifact was removed or became corrupt.
+
+    Replanning then reports a broken pin instead of silently selecting another generation.
+    Changed original evidence or recipe intent starts a fresh selection.
+    """
+    dest = location(root, recipe_path, source, use_proxies=True)
+    record = dest / "provenance.yaml"
+    if not record.is_file():
+        return {}
+    doc = load_yaml(record)
+    if (not doc.get("use_proxies") or doc.get("recipe_sha") != digest(recipe) or
+            doc.get("source_fingerprint") != source_fingerprint(source)):
+        return {}
+    return {name: binding for name, binding in doc.get("bindings", {}).items() if binding.get("proxy")}
+
+
+def save_binding(root, recipe_path, recipe, source, dest, use_proxies):
+    path = workspace(root, recipe_path) / "bindings.yaml"
+    saved = load_yaml(path) if path.is_file() else {}
+    generations = dict(saved.get("generations", {})) if saved.get("source") == source else {}
+    generations["proxies" if use_proxies else "original"] = dest.name
+    write_yaml(path, dict(version=1, recipe_source=recipe.get("source"), source=source,
+                          generation=dest.name, generations=generations))
+
+
 def copy_file(source, dest):
     """Independent copies only: reindexing can never mutate an inode shared with the source."""
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -76,9 +110,10 @@ def copy_file(source, dest):
 
 def create(root, recipe_path, recipe, plan, manifest, descriptors):
     source = plan["source"]
+    use_proxies = bool(plan.get("use_proxies"))
     dest = location(root, recipe_path, source["path"], key=generation(plan))
-    existing = prepared(root, recipe_path, recipe, source["path"])
-    if existing and location(root, recipe_path, source["path"]) == dest:
+    existing = prepared(root, recipe_path, recipe, source["path"], use_proxies=use_proxies)
+    if existing and location(root, recipe_path, source["path"], use_proxies=use_proxies) == dest:
         return existing
     # Refuse to replace modified generated files even when a recipe/source change invalidated it.
     if dest.exists():
@@ -91,22 +126,23 @@ def create(root, recipe_path, recipe, plan, manifest, descriptors):
         if old.get("derived_fingerprint") and inventory_fingerprint(runtime) != old["derived_fingerprint"]:
             raise RigError(f"Prepared source changed: {runtime}; preserve it and use a fresh recipe workspace")
         # Selecting a previous generation must not replace a source mounted by an ongoing replay.
-        write_yaml(workspace(root, recipe_path) / "bindings.yaml",
-                   dict(version=1, recipe_source=recipe.get("source"), source=source["path"],
-                        generation=dest.name))
+        save_binding(root, recipe_path, recipe, source["path"], dest, use_proxies)
         return runtime
     dest.parent.mkdir(parents=True, exist_ok=True)
     stage = Path(tempfile.mkdtemp(prefix=".preparing-", dir=dest.parent))
     bag = source["bag"]
-    adapted = (source["kind"] != "run" or (bag and (bag["repair"] or bag.get("requires_copy"))) or
-               any(b["adapted"] for b in plan["recordings"].values()))
+    adapted = (source["kind"] != "run" or (bag and (bag["repair"] or bag.get("requires_copy") or
+                                                  bag.get("prepared_index"))) or
+               any(b["adapted"] and not b.get("direct") for b in plan["recordings"].values()))
+    # Direct readers keep independent read-only mounts, even when a legacy bag needs repair.
+    copies = [b for b in plan["recordings"].values() if not b.get("direct")]
     runtime = dest / "source" if adapted else Path(source["root"])
     try:
         if adapted:
             derived = stage / "source"
             derived.mkdir()
             bytes_needed = sum(Path(p).stat().st_size for p in (bag or {}).get("files", []))
-            for binding in plan["recordings"].values():
+            for binding in copies:
                 files = binding["files"] or [p for p in Path(binding["path"]).rglob("*") if p.is_file()]
                 bytes_needed += sum(Path(p).stat().st_size for p in files)
             if shutil.disk_usage(stage).free < bytes_needed + 64 * 1024 * 1024:
@@ -135,7 +171,7 @@ def create(root, recipe_path, recipe, plan, manifest, descriptors):
                     if proc.returncode:
                         raise RigError("Bag reindex failed: " + proc.stderr.strip())
                     metadata(target)  # usable output is required before publishing the directory
-            for binding in plan["recordings"].values():
+            for binding in copies:
                 target = derived / binding["relative"]
                 original = Path(binding["path"])
                 files = [Path(p) for p in binding["files"]] if binding["files"] is not None else [
@@ -156,11 +192,10 @@ def create(root, recipe_path, recipe, plan, manifest, descriptors):
                     "schema": 1, "run": "import-" + generation(plan),
                     "imported_from": source["path"], "source_kind": source["kind"],
                     "historical_identity": "unknown"})
-        if inventory_fingerprint(source["path"]) != source["fingerprint"]:
+        if source_fingerprint(source["path"]) != source["fingerprint"]:
             raise RigError("Source changed during preparation; stop its writer and retry")
         for binding in plan["recordings"].values():
-            if inventory_fingerprint(binding["path"]) != binding["fingerprint"]:
-                raise RigError("Recordings changed during preparation; stop their writer and retry")
+            verify_binding(binding)
         write_yaml(stage / "resolved.yaml", plan)
         write_yaml(stage / "report.yaml", {k: plan[k] for k in
                                           ("issues", "ready_to_prepare", "ready_to_run")})
@@ -170,18 +205,17 @@ def create(root, recipe_path, recipe, plan, manifest, descriptors):
                      for p in stage.rglob("*") if p.is_file() and "source" not in p.relative_to(stage).parts}
         write_yaml(stage / "provenance.yaml", dict(
             version=1, recipe_sha=digest(recipe), source=source["path"],
+            use_proxies=use_proxies, bindings=plan["recordings"],
             source_fingerprint=source["fingerprint"], runtime_source=str(runtime),
             recordings={b["path"]: b["fingerprint"] for b in plan["recordings"].values()},
             generated=generated,
             operations=["copy-source", "reindex" if bag and bag["repair"] else "preserve-index"]
-                       if adapted else ["use-original"],
+                       if adapted else ["bind-inputs" if use_proxies else "use-original"],
             player_capabilities=plan.get("capabilities", {}),
             derived_fingerprint=inventory_fingerprint(stage / "source") if adapted else None))
         # New immutable source generation: publish only after copying and verification finish.
         os.rename(stage, dest)
-        write_yaml(workspace(root, recipe_path) / "bindings.yaml",
-                   dict(version=1, recipe_source=recipe.get("source"), source=source["path"],
-                        generation=dest.name))
+        save_binding(root, recipe_path, recipe, source["path"], dest, use_proxies)
         return runtime
     finally:
         if stage.exists():
@@ -197,7 +231,7 @@ def player_document(plan, runtime):
 
 def refresh(root, recipe_path, plan):
     """Publish the post-repair report and configs, then their integrity record."""
-    dest = location(root, recipe_path, plan["source"]["path"])
+    dest = location(root, recipe_path, plan["source"]["path"], use_proxies=bool(plan.get("use_proxies")))
     doc = load_yaml(dest / "provenance.yaml")
     write_yaml(dest / "resolved.yaml", plan)
     write_yaml(dest / "report.yaml", {k: plan[k] for k in

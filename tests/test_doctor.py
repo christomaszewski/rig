@@ -59,6 +59,10 @@ def test_warns_on_non_ros_safe_sensor_name():
     assert any(i.level == "WARN" and "cam-usb" in i.message and "ROS 2 name" in i.message for i in collect(m, cat, descs))
     m2, cat2, descs2 = manifest_with("cam_usb")  # underscore -> no such warning
     assert not any("ROS 2 name" in i.message for i in collect(m2, cat2, descs2))
+    descs["cam"].ros_namespace = "/robot/camera"
+    assert not any("ROS 2 name" in i.message for i in collect(m, cat, descs))
+    descs["cam"].ros_namespace = "/robot/{name}"
+    assert any(i.level == "ERROR" and "ros_namespace" in i.message for i in collect(m, cat, descs))
 
 
 def test_errors_on_vehicle_vs_service_distro_mismatch():

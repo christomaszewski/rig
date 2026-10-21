@@ -286,6 +286,9 @@ rig fleet sync --into fleet-runs      # harvest SEALED runs (ended: = safe) into
                                       #   fleet-runs/<label>/<vehicle>/<run-id> — the SAME tree
                                       #   the SIL view shows live. rsync: a dropped link resumes,
                                       #   a run already there is UPDATED (late files ride along)
+rig fleet sync --into fleet-runs --include-service-exports
+                                      # include verified sparse generations at exports/services/;
+                                      # default sync excludes them; incompatible with --profile
 rig fleet sync --profile review --export   # the SLIM version instead: each run's exports/review/
                                       #   (vehicle.yaml export_profiles — video omitted, bags
                                       #   re-written small by the logger), made ON the vehicle
@@ -327,8 +330,9 @@ Re-identifying a machine needs `--force` (compose projects rename → running co
 bring the vehicle down first). `certify --emit/--diff` output legitimately differs across vehicles
 for templated configs — that's the feature, not a bug.
 
-Naming rules: instance `name` is unique vehicle-wide and keys *everything* (compose project, volumes,
-ROS namespace). **Underscores, never hyphens** (`cam_usb`, not `cam-usb`). Two instances of one service:
+Naming rules: instance `name` is unique vehicle-wide and keys compose projects, volumes, and the default
+ROS namespace. Services using another namespace can declare `ros_namespace` in rigging.yaml for
+graph/replay ownership. **Underscores, never hyphens** (`cam_usb`, not `cam-usb`). Two instances of one service:
 unique names + unique host-facing ports (declare `host_ports` in the service's rigging.yaml → doctor checks).
 
 ## 2 — validate (before any docker work)
@@ -347,9 +351,12 @@ vehicle, then `rig certify --diff /tmp/dev.yaml /tmp/orin.yaml` — identical = 
 ## 3 — build + push images
 
 ```bash
-rig build -j 3                                # per unique service: build+push (build:) / mirror (mirror:)
-                                              #   registry comes from vehicle.yaml; --registry <ip:5000> overrides
+rig image build -h                            # runtime/CPU scope rules, publication and examples
+rig build -j 3                                # full declared runtime/CPU matrix, including disabled rows
+                                              #   registry: --registry, tree-local, machine-local, vehicle.yaml
                                               #   exports ROS_DISTRO from ros.distro (fleet-ros bakes YOUR distro)
+rig build --scope host --tag iteration-1       # this machine's runtime and Docker CPU
+rig build --scope deployment,replay --dry-run  # vehicle target plus replay companion build plan
 rig build --no-cache                          # FULL rebuild: RIG_BUILD_NO_CACHE=1 to every build command
                                               #   (scripts opt in: docker build ${RIG_BUILD_NO_CACHE:+--no-cache});
                                               #   the way to re-converge apt-level drift across images
@@ -360,14 +367,16 @@ rig image audit                               # inspect what the stacks will RUN
 curl -s http://<dev-box-ip>:5000/v2/_catalog  # expect every repo the composes will pull
 ```
 
-Tags: `rig build` tags with `images.tag` — COMPOSED to `<tag>-<platform>` for services declaring a
-`build.platforms` matrix (vehicle.yaml `platform:` or `--platform`; the build also gets
-RIG_TARGET_PLATFORM + the service's override env) — and certify's tag/platform checks guarantee the
-composes pull the same per matrix entry — build/pull agreement is enforced, not hoped.
+Tags: `rig build` uses `images.tag` (or `--tag`), composing `<tag>-<runtime>` for matrix services
+and `<tag>` for generic services. Without an image version, tags are the runtime name or `latest`.
+The default build covers all declared runtimes/CPUs; vehicle `platform`/`arch` select a deployment
+target, not release-build filters. `--platform`/`--arch` filter the full matrix, or override only
+the deployment part of narrower scopes. Use a fresh iteration tag for partial builds, and set
+`images.tag` to that version before running/baking it. See [Portable builds](BUILD_AND_REPLAY.md).
 
 Base image: a service whose rigging declares `build: {…, provides: base}` (rig-infra's fleet-ros)
-builds FIRST, and its composed ref (`<registry>/<images[0]>:<tag>`) is exported to every other build
-and launcher as **RIG_BASE_IMAGE** — build `FROM ${RIG_BASE_IMAGE}` and the fleet's distro+rmw
+builds FIRST, and its verified published digest is supplied to subsequent builds as **RIG_BASE_IMAGE**.
+Catalog-backed execution also uses pinned images. Build `FROM ${RIG_BASE_IMAGE}` and the fleet's distro+rmw
 packages come from ONE image by construction. `vehicle.yaml images.base` (or `--base-image REF`)
 overrides with an external ref. Providers of one base must AGREE on everything that decides the ref —
 a different image name, a different `build.platforms`, or a genuinely different build script is an
@@ -485,6 +494,12 @@ rig run export <run> --in-place [--dry-run]                # reclaim disk: bags 
                                                            #   run at zstd_small, verified, swapped
                                                            #   (lossless; `--profile p --lossy` to
                                                            #   drop topics for good). Old runs too
+rig run export RUN --service camera-service               # service-defined default h264 proxies,
+                                                           #   only transformed recordings under
+                                                           #   RUN/exports/services/camera-service/
+rig run export RUN --service camera-service --instance cam_front --dry-run
+                                                           # original recorded name; repeat --instance
+                                                           # --force regenerates, retains old exports
 rig run archive <id…> --to /Volumes/nas/runs               # bytes to a drive/NAS, a LINKED entry
                                                            #   stays (replay/TAB resolve it; rm unlinks)
 rig run tag <run> site:mojave event:demo-day               # tags ride in the run's manifest (untag
@@ -498,15 +513,14 @@ rig graph <stamp>_dock-test --check                        # topology + declared
 rig reconstruct <path-to-run> --into tree/                 # the run dir back into a runnable tree
                                                            #   (its .rig/artifact.tar.gz capture;
                                                            #   old runs: `rig run retrofit` first;
-                                                           #   pre-registry camera recordings:
-                                                           #   `run retrofit <run> --recordings cam=DIR`)
+                                                           #   hand-built tree + legacy inputs:
+                                                           #   use `replay prepare` without retrofit)
                                                            #   --registry HOST (bench mirror) ·
                                                            #   --enable-replay <path|ref> (old trees)
-rig replay <stamp>_dock-test                               # REPRODUCE the run: recording-capable
-                                                           #   instances (camera-service) fed from
-                                                           #   their own recordings, the bag for the
-                                                           #   rest; --start-delay S / --live NAME /
-                                                           #   --session PREFIX
+rig replay <stamp>_dock-test                               # startup policy: enabled infra, detected
+                                                           #   sources + player; replay.start overrides
+                                                           #   camera sources use their recordings;
+                                                           #   --session PREFIX selects camera sessions
 rig replay <stamp>_dock-test planner                       # SIL: feed broad recorded inputs to
                                                            #   the CURRENT planner build/config —
                                                            #   new run links back via replay-of
@@ -518,7 +532,12 @@ rig replay <stamp>_dock-test planner --from 120 --to 300   # a SECTION of the ru
                                                            #   bag start; --auto-end for sweeps)
 rig replay check RUN --format json                         # read-only readiness and resolved selection
 rig replay prepare RUN --recipe demo                       # source-preserving local preparation
+rig replay prepare RUN --recipe demo --player public/ros2-bag-player@1.17.0
+                                                           # add a missing player row, route and config
 rig replay --recipe demo                                   # replay using that recipe and local binding
+rig replay check RUN --use-proxies                          # require compatible camera proxies
+rig replay prepare RUN --recipe demo --use-proxies           # bind existing proxies, never transcode
+rig replay --recipe demo --use-proxies                      # explicit every time; originals by default
 rig replay RUN planner --selection recorded                # previous recorded-subscription selector
 rig swap planner ../planner                                # in a reconstructed tree: same rows +
 rig swap planner public/planner@2.1.0                      #   configs, DIFFERENT code (drift named)
@@ -562,5 +581,5 @@ it to images. Then the tree is safe to delete. Dev registry off:
   `platform:` is the deprecated legacy spelling.
 - The registry must keep its volume between `rig build` and the vehicle's first pull (digests die with it).
 - The baked tree runs the compose-only scripts, not the vendored launchers — those may carry `build:`.
-- ROS 2 names: no hyphens, no leading digits — the instance name becomes a ROS namespace.
+- ROS 2 names: no hyphens, no leading digits — the instance name normally becomes a ROS namespace.
 - Two cameras = two shm/NVENC budgets and two unique webrtc signalling ports (doctor flags clashes).

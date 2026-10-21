@@ -59,7 +59,7 @@ INTERFACE_KINDS = {"publishes": "topic", "subscribes": "topic",
 @dataclass(frozen=True)
 class InterfaceEdge:
     """One declared `interface:` entry. `name` without a leading `/` is instance-namespace-relative
-    (instance `name` is the ROS namespace); a leading `/` means shared-bus (`/tf`). `type` is
+    (`ros_namespace` when declared, otherwise instance `name`); a leading `/` means shared-bus (`/tf`). `type` is
     optional on hand-authored entries — `rig graph --contract` scaffolds always carry it."""
     name: str
     type: str | None
@@ -87,6 +87,8 @@ class ReplaySource:
     replay_session, name). rig never interprets the keys: the launcher owns the mechanics."""
     data: str
     overrides: dict
+    binding: str | None = None  # direct: consumes replay_input_path and replay_input_sessions
+    image_labels: dict[str, dict[str, str]] = field(default_factory=dict)
 
     def data_path(self, name: str) -> str:
         return self.data.replace("{name}", name)
@@ -102,6 +104,10 @@ class ExportSource:
     file: the profile's block for this instance, verbatim — rig never interprets its keys) and
     RIG_EXPORT_PROFILE (its name). The launcher owns the mechanics (what a slim bag is)."""
     data: str
+    modes: tuple[str, ...] = ("whole-run", "in-place")
+    command: tuple[str, ...] = ()
+    default_profile: str | None = None
+    profiles: dict[str, str] = field(default_factory=dict)
 
     def data_path(self, name: str) -> str:
         return self.data.replace("{name}", name)
@@ -173,6 +179,7 @@ class Descriptor:
     #                              "autonomy" = graph consumer, up-last / down-first (planners, SLAM)
     examples: list[str] = field(default_factory=list)  # optional repo-relative example configs — copied by
     #                                              `rig init --discover`; default --config for `certify --repo`
+    ros_namespace: str | None = None  # observed ROS ownership namespace; optional {name} template
 
     @property
     def launcher_path(self) -> Path:
@@ -196,6 +203,28 @@ class Descriptor:
         """All-three-or-none: only a complete trio counts (a partial declaration is a broken claim
         — certify ERRORs on it, doctor WARNs, and dispatch skips the service)."""
         return len(self.declared_state_verbs) == len(STATE_VERBS)
+
+
+def _validate_ros_namespace(value: str, context: str) -> None:
+    if not isinstance(value, str) or not re.fullmatch(r"(?:/[A-Za-z_][A-Za-z0-9_]*)+", value):
+        raise RigError(f"{context}: expected an absolute, non-root ROS namespace with valid "
+                       "ROS name tokens, e.g. /robot/controller; only {name} may be substituted")
+
+
+def resolve_ros_namespace(descriptor: Descriptor | None, name: str) -> str:
+    """Resolve ROS ownership independently of Rig instance/recording identity.
+
+    Undeclared descriptors retain the historical /<instance-name> convention, even for older
+    instance names that are not valid ROS tokens. A declaration describes the launcher's actual
+    namespace; it does not configure or remap that launcher.
+    """
+    template = getattr(descriptor, "ros_namespace", None)
+    if template is None:
+        return "/" + name
+    context = f"{getattr(descriptor, 'service', 'service')}: ros_namespace for instance {name!r}"
+    namespace = template.replace("{name}", name) if isinstance(template, str) else template
+    _validate_ros_namespace(namespace, context)
+    return namespace
 
 
 def load_descriptor(service: str, repo: Path) -> Descriptor:
@@ -224,6 +253,13 @@ def load_descriptor(service: str, repo: Path) -> Descriptor:
         raise RigError(
             f"{path}: declares service '{declared}' but the catalog routes it as '{service}'"
         )
+    ros_namespace = data.get("ros_namespace")
+    if "ros_namespace" in data:
+        # Substitute a valid token to validate the template now; validate the actual instance name
+        # when resolving it. Unknown/malformed placeholders retain braces and fail the ROS grammar.
+        probe = (ros_namespace.replace("{name}", "rig_instance")
+                 if isinstance(ros_namespace, str) else ros_namespace)
+        _validate_ros_namespace(probe, f"{path}: ros_namespace")
     verbs = dict(DEFAULT_VERBS)
     verbs.update(data.get("verbs") or {})
     if "images" in verbs and (not isinstance(verbs["images"], str) or not verbs["images"].strip()):
@@ -324,10 +360,10 @@ def load_descriptor(service: str, repo: Path) -> Descriptor:
         if not isinstance(export_raw, dict):
             raise RigError(f"{path}: `export` must be a mapping with `data` (the run-relative "
                            f"directory the instance writes, e.g. bags/{{name}})")
-        extra = set(export_raw) - {"data"}
+        extra = set(export_raw) - {"data", "modes", "command", "default_profile", "profiles"}
         if extra:
             raise RigError(f"{path}: export: unknown key(s) {', '.join(sorted(extra))} — it "
-                           f"carries only data")
+                           f"carries data, modes, command, default_profile, profiles")
         data_rel = export_raw.get("data")
         if not isinstance(data_rel, str) or not data_rel.strip():
             raise RigError(f"{path}: export.data must be a run-relative directory the instance "
@@ -335,7 +371,36 @@ def load_descriptor(service: str, repo: Path) -> Descriptor:
         data_rel = data_rel.strip().strip("/")
         if ".." in Path(data_rel).parts:
             raise RigError(f"{path}: export.data must stay inside the run ({data_rel!r})")
-        export_source = ExportSource(data=data_rel)
+        modes = export_raw.get("modes", ["whole-run", "in-place"])
+        if (not isinstance(modes, list) or not modes or
+                any(m not in ("whole-run", "in-place", "service") for m in modes) or
+                len(set(modes)) != len(modes)):
+            raise RigError(f"{path}: export.modes must list whole-run, in-place, and/or service")
+        command = export_raw.get("command", [])
+        profiles = export_raw.get("profiles", {})
+        default = export_raw.get("default_profile")
+        if (not isinstance(command, list) or
+                any(not isinstance(v, str) or not v for v in command)):
+            raise RigError(f"{path}: export.command must be an argument list")
+        if not isinstance(profiles, dict) or any(
+                not isinstance(k, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", k)
+                or not isinstance(v, str) or not v for k, v in profiles.items()):
+            raise RigError(f"{path}: export.profiles must map profile names to bundled files")
+        if "service" in modes:
+            if not command or not profiles or not isinstance(default, str) or default not in profiles:
+                raise RigError(f"{path}: service export needs command, profiles and default_profile")
+            if data_rel.count("{name}") != 1 or not data_rel.endswith("/{name}"):
+                raise RigError(f"{path}: service export.data must end with /{{name}}")
+            for rel in [command[0], *profiles.values()]:
+                p = Path(rel)
+                if (p.is_absolute() or ".." in p.parts or
+                        not (repo / p).resolve().is_relative_to(repo.resolve()) or
+                        not (repo / p).is_file()):
+                    raise RigError(f"{path}: export file must exist inside the service bundle: {rel}")
+        elif command or profiles or default is not None:
+            raise RigError(f"{path}: export command/profiles require modes: [service]")
+        export_source = ExportSource(data=data_rel, modes=tuple(modes), command=tuple(command),
+                                     default_profile=default, profiles=dict(profiles))
 
     replay_raw = data.get("replay")  # `replay: { sim_time: true, service_introspection: true }` —
     #                               the launcher's PROMISES: use_sim_time wired from RIG_SIM_TIME,
@@ -359,10 +424,10 @@ def load_descriptor(service: str, repo: Path) -> Descriptor:
             if not isinstance(src_raw, dict):
                 raise RigError(f"{path}: replay.source must be a mapping with `data` (a run-relative "
                                f"directory, e.g. recordings/{{name}}) and `overrides` (the config patch)")
-            extra = set(src_raw) - {"data", "overrides"}
+            extra = set(src_raw) - {"data", "overrides", "binding", "image_labels"}
             if extra:
                 raise RigError(f"{path}: replay.source: unknown key(s) {', '.join(sorted(extra))} — "
-                               f"it carries only data, overrides")
+                               f"it carries only data, overrides, binding, image_labels")
             data_rel = src_raw.get("data")
             if not isinstance(data_rel, str) or not data_rel.strip():
                 raise RigError(f"{path}: replay.source.data must be a run-relative directory the "
@@ -374,7 +439,20 @@ def load_descriptor(service: str, repo: Path) -> Descriptor:
             if not isinstance(ov, dict) or not ov:
                 raise RigError(f"{path}: replay.source.overrides must be a non-empty mapping — the "
                                f"config patch that flips the instance to replay its recordings")
-            replay_source = ReplaySource(data=data_rel, overrides=ov)
+            binding = src_raw.get("binding")
+            if binding is not None and binding != "direct":
+                raise RigError(f"{path}: replay.source.binding must be direct when declared")
+            image_labels = src_raw.get("image_labels", {})
+            if (not isinstance(image_labels, dict) or
+                    any(image not in build_images or not isinstance(labels, dict) or not labels or
+                        any(not isinstance(k, str) or not k or not isinstance(v, str) or not v
+                            for k, v in labels.items()) for image, labels in image_labels.items())):
+                raise RigError(f"{path}: replay.source.image_labels must map build image names "
+                               "to nonempty string label requirements")
+            if image_labels and binding != "direct":
+                raise RigError(f"{path}: replay.source.image_labels requires binding: direct")
+            replay_source = ReplaySource(data=data_rel, overrides=ov, binding=binding,
+                                         image_labels=image_labels)
         for key in ("sim_time", "service_introspection", "start"):
             if key in replay_raw and not isinstance(replay_raw[key], bool):
                 raise RigError(f"{path}: replay.{key} must be true or false (a declaration is a "
@@ -479,4 +557,5 @@ def load_descriptor(service: str, repo: Path) -> Descriptor:
         mirror=list(data.get("mirror") or []),
         tier=tier,
         examples=examples,
+        ros_namespace=ros_namespace,
     )

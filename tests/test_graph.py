@@ -91,9 +91,10 @@ def _sensor(name, service="svc", tier="sensor") -> Sensor:
                   order=0, tier=tier)
 
 
-class _Desc:  # the one attribute graph.check reads; a real Descriptor is file-loading overkill here
-    def __init__(self, interface):
+class _Desc:  # a real Descriptor is file-loading overkill for derived view tests
+    def __init__(self, interface, ros_namespace=None):
         self.interface = interface
+        self.ros_namespace = ros_namespace
 
 
 def test_load_normalizes_yaml_timestamp_stamps_to_strings():
@@ -139,6 +140,25 @@ def test_grouping_longest_prefix_and_unassigned():
     assert groups["gnss_primary"] == ["/gnss_primary", "/gnss_primary/novatel_node"]
     assert groups["gnss"] == ["/gnss/x"]  # NOT swallowed by a shorter/other instance
     assert groups[graph.UNASSIGNED] == ["/rosbag2_recorder"]
+
+
+def test_grouping_recorded_namespaces_use_namespace_specificity_and_boundaries():
+    groups = graph.group_nodes(
+        ["/robot/driver", "/robot/sensors", "/robot/sensors/imu", "/robot/sensors_extra/node",
+         "/sensor_instance/node", "/unmapped/node"],
+        ["long_parent_instance", "sensor_instance", "unmapped"],
+        namespaces={"long_parent_instance": "/robot", "sensor_instance": "/robot/sensors"})
+    assert groups["sensor_instance"] == ["/robot/sensors", "/robot/sensors/imu"]
+    assert groups["long_parent_instance"] == ["/robot/driver", "/robot/sensors_extra/node"]
+    assert groups["unmapped"] == ["/unmapped/node"]
+    assert groups[graph.UNASSIGNED] == ["/sensor_instance/node"]
+
+
+def test_grouping_ambiguous_namespaces_stay_unassigned():
+    groups = graph.group_nodes(
+        ["/shared/driver", "/shared/child/driver"], ["one", "two", "child"],
+        namespaces={"one": "/shared", "two": "/shared", "child": "/shared/child"})
+    assert groups == {graph.UNASSIGNED: ["/shared/driver"], "child": ["/shared/child/driver"]}
 
 
 def test_plumbing_filter():
@@ -206,6 +226,87 @@ def test_check_clean_when_declaration_matches():
                                      "provides": (),
                                      "requires": (InterfaceEdge("/gnss_primary/reset", None),)})}
     assert graph.check(u, manifest, descriptors) == []
+
+
+def test_declared_namespace_drives_render_contract_and_relative_interface_checks():
+    u = graph.union(graph.load_epochs(_run_dir(EPOCH_B)))
+    manifest = _manifest([_sensor("controller", "planner")])
+    descriptors = {"planner": _Desc({"publishes": (InterfaceEdge("cmd_vel", None),),
+                                     "subscribes": (InterfaceEdge("/gnss_primary/fix", None),),
+                                     "provides": (),
+                                     "requires": (InterfaceEdge("/gnss_primary/reset", None),)},
+                                    ros_namespace="/planner")}
+    namespaces = {"controller": "/planner"}
+    rendered = graph.render(u, "run1", ["controller"], namespaces=namespaces)
+    assert "  controller\n    /planner/planner_node" in rendered
+    scaffold = graph.contract(u, "controller", "planner", "run1", namespaces=namespaces)
+    assert "topic: cmd_vel" in scaffold
+    assert "topic: /gnss_primary/fix" in scaffold
+    assert "service: /gnss_primary/reset" in scaffold
+    assert graph.check(u, manifest, descriptors) == []
+
+
+def test_declared_namespace_template_applies_to_graph_check():
+    u = graph.union(graph.load_epochs(_run_dir(EPOCH_B.replace("/planner/", "/robot/controller/"))))
+    manifest = _manifest([_sensor("controller", "planner")])
+    descriptors = {"planner": _Desc({"publishes": (InterfaceEdge("cmd_vel", None),),
+                                     "subscribes": (InterfaceEdge("/gnss_primary/fix", None),),
+                                     "provides": (),
+                                     "requires": (InterfaceEdge("/gnss_primary/reset", None),)},
+                                    ros_namespace="/robot/{name}")}
+    assert graph.check(u, manifest, descriptors) == []
+
+
+def test_contract_and_check_do_not_claim_nested_disabled_instance_nodes():
+    from dataclasses import replace
+    u = graph.union(graph.load_epochs(_run_dir(
+        EPOCH_B.replace("/gnss_primary/", "/robot/gnss/").replace("/planner/", "/robot/"))))
+    parent = _sensor("controller", "planner")
+    child = replace(_sensor("receiver", "novatel"), enabled=False)
+    manifest = _manifest([parent, child])
+    descriptors = {
+        "planner": _Desc({"publishes": (InterfaceEdge("cmd_vel", None),),
+                           "subscribes": (InterfaceEdge("gnss/fix", None),),
+                           "provides": (),
+                           "requires": (InterfaceEdge("gnss/reset", None),)}, "/robot"),
+        "novatel": _Desc({"publishes": (InterfaceEdge("fix", None),)}, "/robot/gnss"),
+    }
+    assert graph.check(u, manifest, descriptors) == []
+    scaffold = graph.contract(u, "controller", "planner", "run1",
+                              instance_names=["controller", "receiver"],
+                              namespaces={"controller": "/robot", "receiver": "/robot/gnss"})
+    assert "publishes:\n    - {topic: cmd_vel" in scaffold
+    assert "- {topic: gnss/fix" in scaffold  # its subscription remains
+    assert "publishes:\n    - {topic: gnss/fix" not in scaffold
+    assert scaffold.count("topic: gnss/fix") == 1
+
+
+def test_contract_and_check_do_not_assign_ambiguous_namespace_owners():
+    u = graph.union(graph.load_epochs(_run_dir(EPOCH_B)))
+    manifest = _manifest([_sensor("one", "planner"), _sensor("two", "planner")])
+    descriptors = {"planner": _Desc({"publishes": (InterfaceEdge("cmd_vel", None),)}, "/planner")}
+    warns = graph.check(u, manifest, descriptors)
+    assert len(warns) == 2 and all("NO nodes observed under /planner" in w for w in warns)
+    scaffold = graph.contract(u, "one", "planner", "run1",
+                              namespaces={"one": "/planner", "two": "/planner"})
+    assert "publishes: []" in scaffold and "cmd_vel" not in scaffold
+
+
+def test_cmd_uses_declared_namespaces_for_render_and_contract():
+    import contextlib
+    import io
+    run = _run_dir(EPOCH_B)
+    manifest = _manifest([_sensor("controller", "planner")])
+    descriptors = {"planner": _Desc(None, "/planner")}
+    for instance in (None, "controller"):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            assert graph.cmd(manifest, descriptors, run_ref=str(run), do_check=False,
+                             contract_instance=instance, out=None) == 0
+        if instance:
+            assert "topic: cmd_vel" in output.getvalue()
+        else:
+            assert "  controller\n    /planner/planner_node" in output.getvalue()
 
 
 def test_check_exempts_the_sil_player_from_interface_declarations():

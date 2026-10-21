@@ -27,8 +27,25 @@ def names(value, where):
     return value
 
 
+def recorded_namespaces(doc):
+    """Recorded Rig identity -> explicitly bound ROS node namespace."""
+    result, owners = {}, {}
+    for name, entry in doc.get("instances", {}).items():
+        namespace = entry.get("recorded_namespace")
+        if namespace is None:
+            continue
+        identity = entry.get("recorded_as", name)
+        if identity in result and result[identity] != namespace:
+            raise RigError(f"recipe.instances: conflicting recorded_namespace for {identity}")
+        if namespace in owners and owners[namespace] != identity:
+            raise RigError(f"recipe.instances: recorded namespace {namespace} belongs to both "
+                           f"{owners[namespace]} and {identity}; use one recorded_as identity")
+        result[identity], owners[namespace] = namespace, identity
+    return result
+
+
 def validate(doc):
-    mapping(doc, {"version", "source", "bag", "instances", "recordings", "playback"}, "recipe")
+    mapping(doc, {"version", "source", "bag", "instances", "recordings", "playback", "proxies"}, "recipe")
     if type(doc.get("version")) is not int or doc["version"] != 1:
         raise RigError("recipe: unsupported version (expected version: 1)")
     if "source" in doc and (not isinstance(doc["source"], str) or not doc["source"]):
@@ -44,17 +61,42 @@ def validate(doc):
         for name, value in values.items():
             if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", name):
                 raise RigError(f"recipe.{kind}: invalid instance name {name!r}")
-            allowed = {"recorded_as"} if kind == "instances" else {"from", "sessions"}
+            allowed = {"recorded_as", "recorded_namespace"} if kind == "instances" else {"from", "sessions"}
             mapping(value, allowed, f"recipe.{kind}.{name}")
             key = "recorded_as" if kind == "instances" else "from"
-            if not isinstance(value.get(key), str) or not value[key]:
+            if not (kind == "instances" and key not in value and "recorded_namespace" in value) and (
+                    not isinstance(value.get(key), str) or not value[key]):
                 raise RigError(f"recipe.{kind}.{name}.{key}: required nonempty string")
-            if kind == "instances" and not re.fullmatch(r"[A-Za-z0-9_-]+", value[key]):
+            if kind == "instances" and key in value and not re.fullmatch(r"[A-Za-z0-9_-]+", value[key]):
                 raise RigError(f"recipe.instances.{name}: invalid recorded_as")
+            if "recorded_namespace" in value and (not isinstance(value["recorded_namespace"], str) or
+                    not re.fullmatch(r"(?:/[A-Za-z_][A-Za-z0-9_]*)+", value["recorded_namespace"])):
+                raise RigError(f"recipe.instances.{name}.recorded_namespace: expected an absolute, "
+                               "non-root ROS namespace, e.g. /robot/controller")
             if "sessions" in value:
                 for session in names(value["sessions"], f"recipe.recordings.{name}.sessions"):
                     if "/" in session or session in (".", ".."):
                         raise RigError(f"recipe.recordings.{name}: invalid session {session!r}")
+    recorded_namespaces(doc)
+    proxies = mapping(doc.get("proxies", {}), {"services", "instances"}, "recipe.proxies")
+    for kind, allowed in (("services", {"profile"}), ("instances", {"export", "use"})):
+        values = proxies.get(kind, {})
+        if not isinstance(values, dict):
+            raise RigError(f"recipe.proxies.{kind}: expected a name mapping")
+        for name, value in values.items():
+            where = f"recipe.proxies.{kind}.{name}"
+            if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", name):
+                raise RigError(f"recipe.proxies.{kind}: invalid name {name!r}")
+            mapping(value, allowed, where)
+            if kind == "services":
+                if not isinstance(value.get("profile"), str) or not re.fullmatch(
+                        r"[A-Za-z0-9][A-Za-z0-9_.-]*", value["profile"]):
+                    raise RigError(f"{where}.profile: required profile name")
+            elif set(value) == {"use"} and value["use"] == "original":
+                continue
+            elif set(value) != {"export"} or not isinstance(value["export"], str) or not re.fullmatch(
+                    r"[A-Za-z0-9][A-Za-z0-9_.-]*", value["export"]):
+                raise RigError(f"{where}: choose either export: ID or use: original")
     play = mapping(doc.get("playback", {}), {"topics", "exclude", "keep", "remap",
                                           "services", "calls"}, "recipe.playback")
     if play.get("topics", "all") != "all":

@@ -152,17 +152,28 @@ def discover_sources(manifest, descriptors, src_dir: Path, *, live: set[str] = f
     return out, notes
 
 
-def skipped_topic_pattern(src_dir: Path, skipped: list[str], known: set[str]) -> tuple[str, list[str]]:
+def _namespace_pattern(names: list[str], namespaces: dict[str, str] | None = None) -> str:
+    """An exact namespace-prefix pattern, retaining the default instance-name convention."""
+    scopes = [(namespaces or {}).get(name, "/" + name).strip("/") for name in names]
+    if not scopes:
+        return "^$"
+    if "" in scopes:
+        return "^/.*$"
+    return "^/(?:" + "|".join(re.escape(scope) for scope in scopes) + ")(?:/.*)?$"
+
+
+def skipped_topic_pattern(src_dir: Path, skipped: list[str], known: set[str], *,
+                          namespaces: dict[str, str] | None = None) -> tuple[str, list[str]]:
     """Exclude skipped namespaces plus their observed, exclusively published topics.
     Shared topics outside those namespaces stay: dropping /tf would also lose other sensors'
     transforms. Without graph epochs, only the namespace contract can identify ownership."""
-    pattern = "^/(?:" + "|".join(re.escape(n) for n in skipped) + ")(?:/.*)?$"
+    pattern = _namespace_pattern(skipped, namespaces)
     epochs = graph_mod.load_epochs(src_dir)
     if not epochs:
         return pattern, ["--skip-service: no graph epochs — excluding bag topics by instance "
                          "namespace only; remapped topics outside those namespaces cannot be identified"]
     u = graph_mod.union(epochs)
-    groups = graph_mod.group_nodes(u.nodes, sorted(known))
+    groups = graph_mod.group_nodes(u.nodes, sorted(known), namespaces=namespaces)
     skipped_nodes = {fqn for name in skipped for fqn in groups.get(name, ())}
     omitted, kept = set(), set()
     for fqn, edges in u.nodes.items():
@@ -308,7 +319,9 @@ def render_sources(manifest, descriptors, root: Path, sources: list[SourceSpec],
 
 
 def select_topics(source_dir: Path, with_names: list[str],
-                  live_names: list[str] | None = None) -> tuple[str, str, list[str]]:
+                  live_names: list[str] | None = None, *,
+                  namespaces: dict[str, str] | None = None,
+                  known_names: list[str] | set[str] | None = None) -> tuple[str, str, list[str]]:
     """(mode, value, notices): ('topics', space-joined allow-list) from the source run's graph
     epochs, or ('exclude', namespace regex) as the WARNed fallback. Graph mode requires EVERY
     named instance observed in the source epochs — a service the source run never saw has unknown
@@ -324,7 +337,10 @@ def select_topics(source_dir: Path, with_names: list[str],
     epochs = graph_mod.load_epochs(source_dir)
     if epochs:
         u = graph_mod.union(epochs)
-        groups = graph_mod.group_nodes(u.nodes, sorted(set(with_names) | set(live)))
+        # Inactive owners still delimit namespaces; their nodes must not be claimed by a
+        # selected parent namespace, or by an ambiguous explicit mapping.
+        groups = graph_mod.group_nodes(u.nodes, sorted(set(with_names) | set(live) | set(known_names or ())),
+                                      namespaces=namespaces)
         unobserved = [n for n in with_names if n not in groups]
         if unobserved:
             notices.append(f"fallback: {', '.join(unobserved)} not observed in the source run's "
@@ -358,11 +374,13 @@ def select_topics(source_dir: Path, with_names: list[str],
     else:
         notices.append("fallback: source run has no graph epochs — namespace heuristic (enable "
                        "the bag-logger's `graph:` block, rig-infra ≥ v1.7.0, for exact selection)")
-    pattern = "^/(?:" + "|".join(re.escape(n) for n in with_names) + ")(?:/.*)?$"
+    pattern = _namespace_pattern(with_names, namespaces)
     return "exclude", pattern, notices
 
 
-def select_services(source_dir: Path, with_names: list[str]) -> tuple[str | None, list[str]]:
+def select_services(source_dir: Path, with_names: list[str], *,
+                    namespaces: dict[str, str] | None = None,
+                    known_names: list[str] | set[str] | None = None) -> tuple[str | None, list[str]]:
     """(space-joined service allow-list | None, notices) — the topic rule's twin: the with-set's
     observed `provides` MINUS its observed `requires` (a with-set client re-issues its own calls
     live; replaying them double-calls), plumbing-filtered. EPOCHS-ONLY, no namespace fallback:
@@ -373,9 +391,15 @@ def select_services(source_dir: Path, with_names: list[str]) -> tuple[str | None
     if not epochs:
         return None, notices  # the topic selector already WARNed about missing epochs
     u = graph_mod.union(epochs)
-    groups = graph_mod.group_nodes(u.nodes, with_names)
-    if any(n not in groups for n in with_names):
-        return None, notices  # unobserved instance: the topic selector already fell back + WARNed
+    # Ownership is resolved against all known instances, not just the servers under test.
+    groups = graph_mod.group_nodes(u.nodes, sorted(set(with_names) | set(known_names or ())),
+                                  namespaces=namespaces)
+    unobserved = [n for n in with_names if n not in groups]
+    if unobserved:
+        missing = ", ".join(f"{name} ({(namespaces or {}).get(name, '/' + name)})" for name in unobserved)
+        notices.append(f"service replay: not armed — no unambiguous recorded nodes for {missing}; "
+                       "set recipe.instances.<instance>.recorded_namespace to the recorded ROS namespace")
+        return None, notices
     provides: set[str] = set()
     requires: set[str] = set()
     for name in with_names:

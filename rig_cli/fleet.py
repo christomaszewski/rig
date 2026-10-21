@@ -30,11 +30,15 @@ import concurrent.futures
 import datetime
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+
+import yaml
 
 from . import RigError
 from .common import eprint, load_yaml, print_table
@@ -497,7 +501,8 @@ _RSYNC_FLAGS = ("-a", "--partial")  # a dropped link resumes from the partial fi
 #                                     (the vehicles) and macOS openrsync (the laptop) take
 
 
-def _pull(vehicle: Vehicle, src: str, dest: Path, *, exclude: tuple[str, ...] = ()) -> str | None:
+def _pull(vehicle: Vehicle, src: str, dest: Path, *, exclude: tuple[str, ...] = (),
+          strict_exclude: bool = False) -> str | None:
     """Bring `src` (a dir on the vehicle) to `dest` (a local dir, created or UPDATED): rsync when
     both ends have it — resumable, and a re-sync only moves what changed — else scp (a first
     pull only; scp cannot update a dir in place). Returns an error line or None."""
@@ -528,9 +533,39 @@ def _pull(vehicle: Vehicle, src: str, dest: Path, *, exclude: tuple[str, ...] = 
     if existed:
         return "already pulled and rsync is unavailable — scp cannot update it in place"
     if vehicle.is_local:
-        shutil.copytree(Path(src).expanduser(), dest,
-                        ignore=shutil.ignore_patterns(*[e.strip("/") for e in exclude]) if exclude
-                        else None)
+        source = Path(src).expanduser()
+        ignored = shutil.ignore_patterns(*[e.strip("/") for e in exclude]) if exclude else None
+        if strict_exclude and exclude:
+            excluded = {entry.strip("/") for entry in exclude}
+            ignored = lambda directory, names: (excluded.intersection(names)
+                                                if Path(directory) == source else set())
+        shutil.copytree(source, dest, ignore=ignored)
+        return None
+    if strict_exclude and exclude:
+        # scp has no exclude. For service-export sync, never transfer uncommitted artifacts
+        # just to discard them afterward: pull each non-excluded run-root entry separately.
+        script = (f'root={_pathexpr(src)}; [ -d "$root" ] || exit 1; '
+                  'for p in "$root"/* "$root"/.[!.]* "$root"/..?*; do '
+                  '[ -e "$p" ] || [ -L "$p" ] || continue; '
+                  'printf \'%s\\0\' "${p##*/}"; done')
+        listing = _run_script(vehicle, script, timeout=60)
+        if not listing.reachable or listing.rc:
+            return "cannot enumerate run contents for excluded scp pull"
+        excluded = {entry.strip("/") for entry in exclude}
+        dest.mkdir()
+        for name in listing.out.split("\0"):
+            if not name or name in excluded:
+                continue
+            if name in (".", "..") or "/" in name:
+                return "invalid run entry from vehicle"
+            try:
+                copied = subprocess.run(["scp", "-r", "-q", *_SSH_OPTS,
+                                         f"{vehicle.host}:{src}/{name}", str(dest / name)],
+                                        capture_output=True, text=True, timeout=6 * 3600)
+            except subprocess.TimeoutExpired:
+                return "scp timed out"
+            if copied.returncode:
+                return f"scp failed — {(copied.stderr or '').strip()[:120]}"
         return None
     scp = subprocess.run(["scp", "-r", "-q", *_SSH_OPTS, f"{vehicle.host}:{src}", str(dest)],
                          capture_output=True, text=True, timeout=6 * 3600)
@@ -549,13 +584,105 @@ def _export_remote(fleet: Fleet, vehicle: Vehicle, run_id: str, profile: str) ->
                        timeout=6 * 3600)
 
 
+def _pull_service_exports(vehicle: Vehicle, src: str, dest: Path) -> tuple[int, list[str]]:
+    """Copy committed sparse generations separately, preserving their run-relative paths.
+
+    A manifest arriving before its media must never make a partial transfer consumable.
+    Transfer into a hidden sibling, verify all hashes, then atomically publish the directory.
+    This also gives scp its required fresh destination on repeated full-run syncs.
+    """
+    from .service_exports import load_artifact
+
+    script = (f'root={_pathexpr(src)}/exports/services; '
+              'for e in "$root"/*/*/*/export.yaml; do [ -f "$e" ] || continue; '
+              'rel=${e#"$root"/}; printf \'%s\\n\' "${rel%/export.yaml}"; done')
+    listing = _run_script(vehicle, script, timeout=60)
+    if not listing.reachable or listing.rc:
+        return 0, ["service export enumeration failed" +
+                   (f" — {listing.err.strip()[:120]}" if listing.err.strip() else "")]
+    count, errors = 0, []
+    component = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
+    for relative in sorted(set(listing.out.splitlines())):
+        parts = relative.split("/")
+        if len(parts) != 3 or not all(component.fullmatch(p) for p in parts[:2]) \
+                or not re.fullmatch(r"[0-9a-f]{64}", parts[2]):
+            # Hidden staging, locks, and legacy whole-run export layouts are not artifacts.
+            continue
+        remote = f"{src}/exports/services/{relative}"
+        # scp follows symlinks, unlike rsync -a. Artifacts must be self-contained with no
+        # links or special files, including links in their namespace ancestors.
+        inspect = (f'd={_pathexpr(remote)}; p="$d"; '
+                   'for level in 1 2 3 4 5; do '
+                   '[ ! -L "$p" ] || { echo "linked service export" >&2; exit 1; }; '
+                   'p=${p%/*}; done; '
+                   '[ -z "$(find "$d" ! -type f ! -type d -print)" ] || '
+                   '{ echo "service export contains links or special files" >&2; exit 1; }; '
+                   'cat "$d/export.yaml"')
+        header = _run_script(vehicle, inspect, timeout=60)
+        if not header.reachable or header.rc:
+            errors.append(f"{relative}: cannot inspect service export"
+                          + (f" — {header.err.strip()[:120]}" if header.err.strip() else ""))
+            continue
+        try:
+            document = yaml.safe_load(header.out)
+        except yaml.YAMLError:
+            document = None
+        if not isinstance(document, dict) or document.get("complete") is not True:
+            # A marker without completion is still an unfinished producer artifact.
+            continue
+        if document.get("kind") != "rig-service-export" or document.get("version") != 1 \
+                or document.get("export_id") != parts[2] or document.get("service") != parts[0] \
+                or not isinstance(document.get("profile"), dict) \
+                or document["profile"].get("id") != parts[1]:
+            errors.append(f"{relative}: invalid committed service export manifest")
+            continue
+        target = dest / "exports" / "services" / relative
+        try:
+            namespace = dest
+            for part in ("exports", "services", *parts):
+                namespace = namespace / part
+                if namespace.is_symlink():
+                    raise RigError(f"refusing linked service export destination: {namespace}")
+            if target.exists():
+                existing = load_artifact(target, verify=True)
+                if existing["export_id"] != parts[2] or existing["service"] != parts[0] \
+                        or existing["profile"]["id"] != parts[1]:
+                    raise RigError(f"service export identity mismatch: {target}")
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryDirectory(prefix=".sync-", dir=target.parent) as temporary:
+                stage = Path(temporary) / parts[2]
+                error = _pull(vehicle, remote, stage)
+                if error:
+                    raise RigError(error)
+                artifact = load_artifact(stage, verify=True)
+                if artifact["export_id"] != parts[2] or artifact["service"] != parts[0] \
+                        or artifact["profile"]["id"] != parts[1]:
+                    raise RigError("service export identity changed during transfer")
+                try:
+                    stage.rename(target)
+                except OSError:
+                    # Another sync may have committed the same immutable generation.
+                    if not target.is_dir() or target.is_symlink() \
+                            or load_artifact(target, verify=True)["export_id"] != parts[2]:
+                        raise
+                count += 1
+        except (OSError, RigError) as exc:
+            errors.append(f"{relative}: {exc}")
+    return count, errors
+
+
 def cmd_sync(fleet: Fleet, names: list[str], *, label: str | None, into: str, jobs: int,
-             profile: str | None = None, export: bool = False) -> int:
+             profile: str | None = None, export: bool = False,
+             include_service_exports: bool = False) -> int:
     """Harvest sealed runs. Whole runs by default (a run's own `exports/` stays on the vehicle);
     `--profile p` pulls each run's slim export instead — the SAME dest, so a slim pull today
     and a full pull later compose: rsync adds what the slim copy lacked (and the slim copy's
     export provenance goes, it is a full copy then). A dest already holding a FULL copy is never
-    downgraded by a profile pull."""
+    downgraded by a profile pull. --include-service-exports additionally transfers committed
+    sparse generations beneath the original run, never onto its root."""
+    if profile and include_service_exports:
+        raise RigError("fleet sync: --include-service-exports cannot be combined with --profile")
     vehicles = _select(fleet, names)
     dest_root = Path(into).expanduser()
     problems = 0
@@ -622,11 +749,20 @@ def cmd_sync(fleet: Fleet, names: list[str], *, label: str | None, into: str, jo
                 src = f"{src}/{EXPORTS_DIR}/{profile}"
             else:
                 exclude = (f"/{EXPORTS_DIR}/",)
-            err = _pull(v, src, dest, exclude=exclude)
+            err = _pull(v, src, dest, exclude=exclude, strict_exclude=include_service_exports)
             if err is not None:
                 eprint(f"  {v.name}/{run_id}: {err}")
                 if err.startswith("already pulled"):
                     skipped += 1
+                    # The original full-run copy cannot be updated by scp, but each sparse
+                    # generation has a fresh staging destination and can still be added.
+                    if include_service_exports and not (dest / ".rig" / "export.yaml").exists():
+                        artifact_count, artifact_errors = _pull_service_exports(v, src, dest)
+                        if artifact_count:
+                            eprint(f"  {v.name}/{run_id}: {artifact_count} service export(s) verified and copied")
+                        for error in artifact_errors:
+                            eprint(f"  {v.name}/{run_id}: {error}")
+                        problems += len(artifact_errors)
                 else:
                     problems += 1
                 continue
@@ -636,6 +772,13 @@ def cmd_sync(fleet: Fleet, names: list[str], *, label: str | None, into: str, jo
                     stale.unlink()
                     shutil.rmtree(dest / ".rig" / "export", ignore_errors=True)
                     eprint(f"  {v.name}/{run_id}: completed to a full copy (was a slim export)")
+            if include_service_exports:
+                artifact_count, artifact_errors = _pull_service_exports(v, src, dest)
+                if artifact_count:
+                    eprint(f"  {v.name}/{run_id}: {artifact_count} service export(s) verified and copied")
+                for error in artifact_errors:
+                    eprint(f"  {v.name}/{run_id}: {error}")
+                problems += len(artifact_errors)
             eprint(f"  {v.name}/{run_id}{' [' + profile + ']' if profile else ''} "
                    f"{'~>' if existed else '->'} {dest}")
             if existed:

@@ -7,7 +7,7 @@ from .common import load_yaml
 from .replay_recipe import digest
 
 
-def inventory_fingerprint(path):
+def inventory_fingerprint(path, *, exclude_exports=False):
     """Small metadata hashes + size/mtime inventory, not a media-content integrity claim."""
     import os
     path = Path(path)
@@ -18,6 +18,8 @@ def inventory_fingerprint(path):
     else:
         files, visited = [], set()
         for folder, directories, filenames in os.walk(path, followlinks=True):
+            if exclude_exports and Path(folder) == path:
+                directories[:] = [name for name in directories if name != "exports"]
             directories.sort()
             resolved = Path(folder).resolve()
             if resolved in visited:
@@ -36,6 +38,11 @@ def inventory_fingerprint(path):
         out.append([rel, st.st_size, st.st_mtime_ns, str(p.resolve()) if p.is_symlink() else None,
                     digest(p.read_text(errors="replace")) if small else None])
     return digest(out)
+
+
+def source_fingerprint(path):
+    """Derived exports are independent evidence, never part of the original run inventory."""
+    return inventory_fingerprint(path, exclude_exports=True)
 
 
 def source_path(manifest, ref):
@@ -145,10 +152,10 @@ def inspect_source(manifest, ref, bag_config=None):
     return dict(path=str(path), root=str(base), id=str(doc.get("run") or base.name),
                 kind="run" if native else "rosbag2", manifest=doc, bag=selected,
                 sessions=[{"logger": a, "session": b} for a, b, _ in candidates],
-                fingerprint=inventory_fingerprint(path))
+                fingerprint=source_fingerprint(path))
 
 
-def recording_binding(row, desc, source, recipe, *, camera_session=None):
+def recording_binding(row, desc, source, recipe, *, camera_session=None, window=None):
     rs = getattr(desc, "replay_source", None)
     spec = recipe.get("recordings", {}).get(row.name, {})
     old = recipe.get("instances", {}).get(row.name, {}).get("recorded_as", row.name)
@@ -164,6 +171,16 @@ def recording_binding(row, desc, source, recipe, *, camera_session=None):
         if not original.is_relative_to(Path(source["root"])):
             raise RigError(f"{row.name}: recording path escapes the source run")
     original = original.resolve()
+    managed = Path(source["root"]).resolve() / "exports" / "services"
+    managed_artifact = original.is_relative_to(managed)
+    for parent in (original, *original.parents):
+        artifact = parent / "export.yaml"
+        if artifact.is_file() and load_yaml(artifact).get("kind") == "rig-service-export":
+            managed_artifact = True
+            break
+    if managed_artifact:
+        raise RigError(f"{row.name}: bind the original recording and select its export with "
+                       "--use-proxies; recordings.from cannot point into a managed export")
     if not original.is_dir() or not any(original.iterdir()):
         if spec:
             raise RigError(f"{row.name}: no recordings at {original}")
@@ -181,6 +198,9 @@ def recording_binding(row, desc, source, recipe, *, camera_session=None):
         for prefix, header, files in observed:
             if sessions and prefix not in sessions:
                 continue
+            if isinstance(header.get("proxy"), dict) and header["proxy"].get("format") == "camera-recording-proxy/v1":
+                raise RigError(f"{row.name}: recording {prefix} is a derived proxy; bind the original "
+                               "recordings.from and select the export with --use-proxies")
             parts = [p for p in files if p.suffix == ".mkv"]
             indices = [int(p.stem.rsplit("-", 1)[1]) for p in parts]
             if indices != list(range(len(parts))) or any(p.stat().st_size == 0 for p in files):
@@ -196,10 +216,13 @@ def recording_binding(row, desc, source, recipe, *, camera_session=None):
                 if first is None or last is None:
                     raise RigError(f"{row.name}: session {prefix} has no usable time bounds; "
                                    "select recordings.sessions explicitly")
-                end = bag["start_ns"] + (bag.get("duration_ns") or 0)
+                start = bag["start_ns"] + int((window or {}).get("start", 0) * 1e9)
+                duration = (window or {}).get("end")
+                end = bag["start_ns"] + (int(duration * 1e9) if duration is not None else
+                                         (bag.get("duration_ns") or 0))
                 if first is not None and first > end:
                     continue
-                if last < bag["start_ns"]:
+                if last < start:
                     continue
             chosen.append((prefix, files))
         missing = set(sessions) - {p for p, _ in chosen}
@@ -213,9 +236,66 @@ def recording_binding(row, desc, source, recipe, *, camera_session=None):
     dest_rel = rs.data_path(row.name)
     return dict(path=str(original), relative=dest_rel, recorded_as=old, sessions=sessions,
                 files=selected_files, fingerprint=inventory_fingerprint(original),
+                direct=getattr(rs, "binding", None) == "direct",
                 adapted=original != Path(source["root"]) / dest_rel or bool(spec.get("sessions"))
                 or bool(camera_session) or (selected_files is not None and
                                             len(chosen) != len(observed)))
+
+
+def select_proxy(row, desc, source, binding, recipe, options):
+    """Apply explicit proxy intent only after original recording/session selection."""
+    if not options.get("use_proxies"):
+        return binding
+    preferences = recipe.get("proxies", {})
+    instance = preferences.get("instances", {}).get(row.name, {})
+    if instance.get("use") == "original":
+        return binding
+    exporter = getattr(desc, "export_source", None)
+    requested = preferences.get("services", {}).get(row.service, {})
+    eligible = exporter and "service" in getattr(exporter, "modes", ()) and getattr(exporter, "profiles", {})
+    if not eligible:
+        if requested or instance:
+            raise RigError(f"{row.name}: service {row.service} does not declare proxy profiles; upgrade it")
+        return binding
+    if not binding.get("direct"):
+        raise RigError(f"{row.name}: proxy playback requires replay.source.binding: direct; "
+                       f"upgrade {row.service}")
+    pin = instance.get("export")
+    saved = options.get("_prepared_proxies", {}).get(row.name, {})
+    if (not pin and saved and all(saved.get("original", {}).get(key) == binding.get(key)
+                                 for key in ("path", "recorded_as", "fingerprint")) and
+            set(binding.get("sessions", [])) <= set(saved.get("original", {}).get("sessions", []))):
+        pin = saved.get("proxy", {}).get("export_id")
+    from .service_exports import resolve_proxy_binding
+    resolved = resolve_proxy_binding(source["root"], binding, service=row.service,
+                                     profile=requested.get("profile"), export_id=pin, descriptor=desc)
+    resolved.setdefault("original", dict(binding))
+    resolved["direct"] = True
+    manifest = Path(resolved["proxy"]["manifest"])
+    resolved["proxy"]["manifest_fingerprint"] = digest(manifest.read_bytes().hex())
+    return resolved
+
+
+def binding_variables(variables, row, binding):
+    """The same resolved input contract feeds both preview and execution config rendering."""
+    values = {**variables, "name": row.name}
+    if binding and binding.get("direct"):
+        values.update(replay_input_path=binding["path"],
+                      replay_input_sessions=binding["sessions"],
+                      replay_input_proxy=binding.get("proxy"))
+    return values
+
+
+def verify_binding(binding):
+    """Revalidate precisely the evidence selected for this instance, including its lineage."""
+    for item in (binding, binding.get("original")):
+        if item and inventory_fingerprint(item["path"]) != item["fingerprint"]:
+            raise RigError("Recordings changed since planning; check/prepare again")
+    proxy = binding.get("proxy")
+    if proxy:
+        path = Path(proxy["manifest"])
+        if not path.is_file() or digest(path.read_bytes().hex()) != proxy["manifest_fingerprint"]:
+            raise RigError("Selected proxy manifest changed since planning; check/prepare again")
 
 
 def camera_bounds(csv_path, header):

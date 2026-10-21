@@ -11,9 +11,10 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import RigError
 from .catalog import ServiceEntry
 from .common import load_yaml
-from .descriptor import Descriptor
+from .descriptor import Descriptor, resolve_ros_namespace
 from .manifest import Manifest, stack_summary
 
 ERROR, WARN, INFO, OK = "ERROR", "WARN", "INFO", "OK"
@@ -203,11 +204,17 @@ def collect(
                                       f"three or none (standby/activate/state); rig skips this "
                                       f"service on standby/activate until the trio is complete"))
 
-    # ROS stacks (sensor AND autonomy tiers) namespace a node by the instance name, and ROS 2 names allow
-    # only [A-Za-z_][A-Za-z0-9_]* (no hyphens, no leading digit). Flag a name that would be an invalid namespace.
+    # A declared namespace describes the launcher's actual scope. Undeclared ROS stacks keep
+    # the instance-name convention and its existing warning for older invalid instance names.
     _ros_name = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
     for sensor in manifest.sensors:
         desc = descriptors.get(sensor.service)
+        if desc and getattr(desc, "ros_namespace", None) is not None:
+            try:
+                resolve_ros_namespace(desc, sensor.name)
+            except RigError as exc:
+                issues.append(Issue(ERROR, str(exc)))
+            continue
         if sensor.tier in ("sensor", "autonomy") and desc and desc.ros_distro and not _ros_name.match(sensor.name):
             issues.append(Issue(WARN, f"'{sensor.name}' ({sensor.service}) isn't a valid ROS 2 name (only "
                                        f"letters/digits/underscores, no hyphens) — the ROS node namespaced by "

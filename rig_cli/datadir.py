@@ -61,6 +61,18 @@ def verify_copy(src: Path, dest: Path) -> None:
     if (sf, sb) != (df, db):
         raise RigError(f"copy verification failed: {src} has {sf} files / {sb} bytes, {dest} has "
                        f"{df} / {db} — nothing removed; re-run to complete the copy")
+    # Service exports have their own content hashes. Verify those before an archive or
+    # migration removes the original tree; equal byte counts alone cannot detect corruption.
+    from .service_exports import committed_artifacts, load_artifact
+    roots = [src] if (src / "manifest.yaml").is_file() else sorted((src / "runs").glob("*"))
+    for run in roots:
+        if not run.is_dir() or run.is_symlink():
+            continue
+        for artifact, document in committed_artifacts(run):
+            copied = dest / artifact.relative_to(src)
+            verified = load_artifact(copied, verify=True)
+            if verified["export_id"] != document["export_id"]:
+                raise RigError(f"copy verification failed: service export identity changed at {copied}")
 
 
 def _fmt(n: int) -> str:

@@ -36,14 +36,15 @@ template — it adapts to each via `rigging.yaml`'s `verbs` map (e.g. cam-up tak
 
 ## What rig owns
 
-- **Instance-`name` uniqueness — the top correctness check.** Identity (compose project, external volumes,
-  ROS namespace, ports) all derive from `name`; rig rejects a manifest with duplicates before doing
-  anything. It also cross-checks each manifest entry against the config's own `service`/`name`.
+- **Instance-`name` uniqueness — the top correctness check.** Compose projects and external volumes
+  derive from `name`; rig rejects a manifest with duplicates before doing anything. It also
+  cross-checks each manifest entry against the config's own `service`/`name`. ROS ownership defaults
+  to `/<name>`; an optional `ros_namespace` in rigging.yaml describes services using another namespace.
 - **Bring-up order: producers → consumers.** Ascending `order` for `up`, reversed for `down`, so shm/topics
   exist before consumers attach. Consumers are best-effort/retry regardless (`restart: unless-stopped`).
 - **Fleet ROS env.** rig exports one `ROS_DOMAIN_ID` + `RMW_IMPLEMENTATION` before each launcher call; the
-  launchers pass them into their containers, so every stack shares one DDS graph. Topics are namespaced
-  `/<name>/…`.
+  launchers pass them into their containers, so every stack shares one DDS graph. Launchers choose their
+  ROS namespaces; the usual convention is `/<name>/…`.
 - **Platform targeting.** vehicle.yaml `platform:` (a HOST fact) → `RIG_TARGET_PLATFORM` + each service's
   declared `platform.override_env`; services with a `build.platforms` matrix pull the composed
   `<image>:<tag>-<platform>`. `images.tag` means VERSION only. (Full section below.)

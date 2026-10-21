@@ -14,9 +14,10 @@ from pathlib import Path
 
 from . import RigError, dispatch, graph, replay, resolve
 from .manifest import PLAYER_SERVICE
+from .descriptor import resolve_ros_namespace
 from .replay_policy import forced, setting
-from .replay_recipe import digest
-from .replay_sources import inspect_source, recording_binding, metadata
+from .replay_recipe import digest, recorded_namespaces
+from .replay_sources import inspect_source, recording_binding, metadata, select_proxy, binding_variables
 
 
 def capabilities(row, desc):
@@ -35,6 +36,62 @@ def capabilities(row, desc):
         raise RigError(f"player capability probe failed: {exc}") from exc
 
 
+def direct_image_capabilities(manifest, descriptors, rows, recordings):
+    """Verify the selected reader image understands direct paths and exact session lists.
+
+    A current host bundle can otherwise hand these fields to an older image that silently
+    ignores them. Inspect labels on the same image overrides/digests dispatch will use.
+    """
+    from .build import _service_tag
+    from .targets import variant_spec
+    fleet_env = dispatch.fleet_env(manifest, descriptors)
+    required = {}
+    for row in rows:
+        if not recordings.get(row.name, {}).get("direct"):
+            continue
+        desc = descriptors[row.service]
+        labels_by_image = getattr(desc.replay_source, "image_labels", {})
+        if not labels_by_image:
+            continue
+        env = dispatch.service_env(fleet_env, desc)
+        _, images = variant_spec(desc, manifest.platform)
+        tag = _service_tag(desc, manifest.image_tag, manifest.platform) or "latest"
+        prefix = f"{manifest.image_registry}/" if manifest.image_registry else ""
+        for image in images:
+            labels = labels_by_image.get(image)
+            if not labels:
+                continue
+            key = desc.image_env.get(image)
+            ref = env.get(key) if key and env.get(key) else f"{prefix}{image}:{tag}"
+            item = required.setdefault(ref, {"labels": {}, "instances": []})
+            item["instances"].append(row.name)
+            for label, value in labels.items():
+                if label in item["labels"] and item["labels"][label] != value:
+                    raise RigError(f"Replay readers disagree on required image label {label} for {ref}")
+                item["labels"][label] = value
+    verified = {}
+    for ref, item in sorted(required.items()):
+        instances = ", ".join(item["instances"])
+        try:
+            proc = subprocess.run(["docker", "image", "inspect", ref, "--format",
+                                   "{{json .Config.Labels}}"], capture_output=True, text=True, timeout=10)
+            if proc.returncode:
+                raise ValueError(proc.stderr.strip() or "image is unavailable locally")
+            observed = json.loads(proc.stdout) or {}
+            if not isinstance(observed, dict):
+                raise ValueError("image labels are not a mapping")
+        except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+            raise RigError(f"{instances}: cannot verify direct replay reader image {ref}: {exc}; "
+                           "build or pull the current service image before replay") from exc
+        missing = [f"{key}={value}" for key, value in item["labels"].items() if observed.get(key) != value]
+        if missing:
+            raise RigError(f"{instances}: image {ref} does not support this direct replay binding "
+                           f"(requires {', '.join(missing)}); upgrade/build/pull the current service "
+                           "image together with its bundle; older images can ignore replay.sessions")
+        verified[ref] = item["labels"]
+    return verified
+
+
 def build(manifest, catalog, descriptors, root, ref, recipe, options, *, host=True):
     issues = []
 
@@ -43,8 +100,29 @@ def build(manifest, catalog, descriptors, root, ref, recipe, options, *, host=Tr
 
     plan = dict(version=1, recipe=recipe, issues=issues, selected=[], roles={}, recordings={},
                 configs={}, omitted={}, player=None, playback={}, source=None,
-                window={}, sim_time=False)
+                window={}, sim_time=False, use_proxies=bool(options.get("use_proxies")))
     known = {r.name: r for r in manifest.sensors}
+    aliases = {n: recipe.get("instances", {}).get(n, {}).get("recorded_as", n) for n in known}
+    namespaces = recorded_namespaces(recipe)
+    explicit_namespaces = set(namespaces)
+    namespace_sources = {identity: "recipe" for identity in namespaces}
+    for row in manifest.sensors:
+        identity = aliases[row.name]
+        desc = descriptors.get(row.service)
+        if identity in explicit_namespaces or getattr(desc, "ros_namespace", None) is None:
+            continue
+        try:
+            namespace = resolve_ros_namespace(desc, identity)
+            if identity in namespaces and namespaces[identity] != namespace:
+                raise RigError(f"Recorded instance {identity} has conflicting service ros_namespace declarations; "
+                               "set instances.NAME.recorded_namespace in the recipe")
+            namespaces[identity] = namespace
+            namespace_sources[identity] = "rigging.yaml"
+        except RigError as exc:
+            issue("error", "namespace_mapping", str(exc))
+    plan["recorded_namespaces"] = {n: namespaces[alias] for n, alias in aliases.items() if alias in namespaces}
+    plan["recorded_namespace_sources"] = {n: namespace_sources[alias] for n, alias in aliases.items()
+                                           if alias in namespace_sources}
     service_names = {r.service for r in manifest.sensors}
     named = set(options.get("names") or [])
     live = set(options.get("live") or [])
@@ -54,7 +132,10 @@ def build(manifest, catalog, descriptors, root, ref, recipe, options, *, host=Tr
     for values, allowed, label in ((named | live | skip, known, "instances"),
                                    (include | skip_services, service_names, "services"),
                                    (set(recipe.get("instances", {})) |
-                                    set(recipe.get("recordings", {})), known, "recipe instances")):
+                                    set(recipe.get("recordings", {})) |
+                                    set(recipe.get("proxies", {}).get("instances", {})), known, "recipe instances"),
+                                   (set(recipe.get("proxies", {}).get("services", {})),
+                                    service_names, "recipe proxy services")):
         if values - set(allowed):
             issue("error", "selection", f"Unknown {label}: {', '.join(sorted(values - set(allowed)))}")
     skip |= {r.name for r in manifest.sensors if r.service in skip_services}
@@ -92,6 +173,7 @@ def build(manifest, catalog, descriptors, root, ref, recipe, options, *, host=Tr
                 selected = source["bag"]
                 selected.update(metadata(Path(runtime) / "bags" / selected["logger"] / selected["session"]))
                 selected["repair"] = False
+                selected["prepared_index"] = True
         if not source["manifest"].get("ended"):
             issue("warning", "unsealed", "Source is unsealed; stability is checked again before use")
         if not (Path(source["root"]) / ".rig").exists():
@@ -127,8 +209,9 @@ def build(manifest, catalog, descriptors, root, ref, recipe, options, *, host=Tr
         if source and row.name not in live:
             try:
                 binding = recording_binding(row, desc, source, recipe,
-                                            camera_session=options.get("session"))
+                                            camera_session=options.get("session"), window=plan["window"])
                 if binding:
+                    binding = select_proxy(row, desc, source, binding, recipe, options)
                     plan["recordings"][row.name] = binding
                     candidates.add(row.name)
                 elif getattr(desc, "replay_source", None) and row.name in candidates:
@@ -166,6 +249,16 @@ def build(manifest, catalog, descriptors, root, ref, recipe, options, *, host=Tr
                                       reason if explicit else "automatic " + role)
 
     playback = recipe.get("playback", {})
+    ownership_names = set(aliases.values()) | set(((source or {}).get("manifest") or {}).get("stacks") or [])
+    namespace_owners = {}
+    for identity in sorted(ownership_names):
+        namespace = namespaces.get(identity, "/" + identity)
+        namespace_owners.setdefault(namespace, []).append(identity)
+    for namespace, owners in namespace_owners.items():
+        if len(owners) > 1 and any(owner in namespaces for owner in owners):
+            issue("error", "namespace_mapping", f"ROS namespace {namespace} has multiple recorded owners: "
+                  f"{', '.join(owners)}. Use a distinct ros_namespace template per instance, "
+                  "or recipe recorded_as/recorded_namespace bindings to identify the historical owner")
     available = set((bag or {}).get("topics", {}))
     data_topics = {t for t in available if t not in ("/clock", "/rosout", "/parameter_events")
                    and not t.endswith("/_service_event")}
@@ -175,21 +268,22 @@ def build(manifest, catalog, descriptors, root, ref, recipe, options, *, host=Tr
     if missing and bag and not bag["repair"]:
         issue("error", "missing_topics", f"Topics absent from selected bag: {', '.join(sorted(missing))}")
     regenerated = set()
+    skipped_pattern = None
     if source and bag and not bag["repair"]:
-        aliases = {n: recipe.get("instances", {}).get(n, {}).get("recorded_as", n) for n in known}
         epochs = graph.load_epochs(Path(source["root"]))
         if options.get("selection", "broad") == "recorded":
             mode, value, notes = replay.select_topics(
                 Path(source["root"]), [aliases[n] for n in named if n in aliases],
-                live_names=[aliases[n] for n in candidates if n in aliases])
+                live_names=[aliases[n] for n in candidates if n in aliases and n != plan["player"]],
+                namespaces=namespaces, known_names=ownership_names)
             topics &= set(value.split()) if mode == "topics" else {
                 t for t in topics if not re.search(value, t)}
             for note in notes:
                 issue("warning", "recorded_selection", note)
-        elif epochs:
+        if epochs:
             union = graph.union(epochs)
-            groups = graph.group_nodes(union.nodes, sorted(set(aliases.values()) |
-                                                          set(source["manifest"].get("stacks") or [])))
+            groups = graph.group_nodes(union.nodes, sorted(ownership_names),
+                                       namespaces=namespaces)
             owners = {}
             for name, nodes in groups.items():
                 for node in nodes:
@@ -203,30 +297,41 @@ def build(manifest, catalog, descriptors, root, ref, recipe, options, *, host=Tr
                     for edge in edges:
                         if edge.kind == "pubs":
                             owners.setdefault(edge.name, set()).add("unassigned:" + node)
-            producers = {aliases[n] for n in candidates if n in aliases}
+            producers = {aliases[n] for n in candidates if n in aliases and n != plan["player"]}
             regenerated = {t for t, ns in owners.items() if ns and ns <= producers}
             regenerated -= {"/tf", "/tf_static", "/diagnostics"}
             observed = set(groups)
-            unknown = sorted(n for n in candidates if n in aliases and aliases[n] not in observed)
+            unknown = sorted(n for n in candidates if n in aliases and n != plan["player"]
+                             and aliases[n] not in observed)
             if unknown:
                 issue("warning", "unknown_outputs", "Output ownership unknown for " +
-                      ", ".join(unknown) + "; use playback.exclude for known live outputs")
+                      ", ".join(unknown) + "; declare ros_namespace in rigging.yaml or bind "
+                      "instances.NAME.recorded_namespace when the recorded ROS node namespace differs; "
+                      "use playback.exclude for known live outputs")
         else:
             # A source being re-delivered has a known historical namespace. A new consumer does not.
-            mapped_producers = set(plan["recordings"]) | (set(recipe.get("instances", {})) & candidates)
+            mapped_producers = set(plan["recordings"]) | ({n for n, entry in recipe.get("instances", {}).items()
+                                                         if "recorded_as" in entry} & candidates)
             for name in mapped_producers:
                 old = aliases[name]
+                if old in namespaces:
+                    continue  # A node namespace alone cannot distinguish its inputs from outputs.
                 regenerated.update(t for t in topics if t.startswith("/" + old + "/") or t == "/" + old)
             issue("warning", "unknown_outputs",
-                  "No recorded graph; mapped producers use a namespace heuristic. "
-                  "Other data topics remain eligible; exclude live outputs explicitly")
+                  "No recorded graph; legacy mapped producers use a namespace heuristic. "
+                  "Declared ROS namespace bindings identify nodes, not output topics; "
+                  "other data topics remain eligible. Exclude live outputs explicitly with playback.exclude")
         if skip:
-            pattern, notes = replay.skipped_topic_pattern(
-                Path(source["root"]), [aliases[n] for n in skip if n in aliases], set(aliases.values()))
-            topics = {t for t in topics if not re.search(pattern, t)}
+            skipped_pattern, notes = replay.skipped_topic_pattern(
+                Path(source["root"]), [aliases[n] for n in skip if n in aliases], ownership_names,
+                namespaces=namespaces)
             for note in notes:
                 issue("warning", "skip_topics", note)
     topics = ((topics - regenerated) | set(playback.get("keep", []))) - set(playback.get("exclude", []))
+    # Explicit CLI skips also apply to recipe keeps: keeping a regenerated topic
+    # must not silently re-enable a camera feed the operator disabled.
+    if skipped_pattern:
+        topics = {t for t in topics if not re.search(skipped_pattern, t)}
     topics &= data_topics
     remap = playback.get("remap", {})
     destinations = [remap.get(t, t) for t in topics]
@@ -238,7 +343,8 @@ def build(manifest, catalog, descriptors, root, ref, recipe, options, *, host=Tr
     if options.get("selection") == "recorded" and "services" not in playback and named and source:
         value, notes = replay.select_services(Path(source["root"]),
                                              [recipe.get("instances", {}).get(n, {}).get("recorded_as", n)
-                                              for n in sorted(named)])
+                                              for n in sorted(named)], namespaces=namespaces,
+                                             known_names=ownership_names)
         services = value.split() if value else []
         for note in notes:
             issue("warning", "recorded_services", note)
@@ -254,11 +360,21 @@ def build(manifest, catalog, descriptors, root, ref, recipe, options, *, host=Tr
         except RigError as exc:
             issue("error", "calls", str(exc))
         services = []
+    if bag and not bag["repair"] and not services and not calls and not options.get("export_calls"):
+        event_services = sorted(t.removesuffix("/_service_event") for t in available
+                                if t.endswith("/_service_event") and (bag["topics"][t].get("count") or 0))
+        if event_services:
+            issue("warning", "unselected_service_events",
+                  "Recorded service events are present but no calls are selected: " +
+                  ", ".join(event_services) + ". Broad replay requires explicit playback.services or "
+                  "playback.calls/--calls; --selection recorded with named instances can select "
+                  "observed servers. Declare ros_namespace or bind recorded_namespace if instance and "
+                  "ROS node names differ")
     plan["playback"] = dict(topics=sorted(topics), remap=remap, services=services, calls=calls,
                             clock_only=bool(bag and not topics and not services))
     plan["needs_preparation"] = bool(source and (source["kind"] != "run" or
-        (bag and (bag["repair"] or bag.get("requires_copy"))) or
-        any(b["adapted"] for b in plan["recordings"].values())))
+        (bag and (bag["repair"] or bag.get("requires_copy") or bag.get("prepared_index"))) or
+        any(b["adapted"] and not b.get("direct") for b in plan["recordings"].values())))
     if plan["needs_preparation"] and not options.get("_prepared_source"):
         issue("not_checked", "normalization", "Prepare the derived source layout before playback", "run")
     plan["excluded_regenerated"] = sorted(regenerated)
@@ -288,7 +404,7 @@ def build(manifest, catalog, descriptors, root, ref, recipe, options, *, host=Tr
                    for key, value in (("name", row.name), ("service", row.service))):
                 raise RigError("config name/service disagrees with the instance row")
             plan["configs"][row.name] = resolve._layered_dict(
-                row, root, variables={**variables, "name": row.name},
+                row, root, variables=binding_variables(variables, row, plan["recordings"].get(row.name)),
                 extra_overrides=desc.replay_source.overrides if row.name in plan["recordings"] else None)
         except (RigError, OSError) as exc:
             issue("error", "config", f"{row.name}: {exc}")
@@ -392,6 +508,11 @@ def build(manifest, catalog, descriptors, root, ref, recipe, options, *, host=Tr
                                        "build or pull it explicitly")
                 plan["images"] = sorted(refs)
                 issue("warning", "unpinned_images", "Local image tags checked; no companion digest catalog")
+            try:
+                plan["recording_image_capabilities"] = direct_image_capabilities(
+                    manifest, descriptors, rows, plan["recordings"])
+            except RigError as exc:
+                issue("error", "recording_image_capability", str(exc), "run")
             issue("ok", "runtime", "Docker architecture and replay image policy checked", "run")
         except (RigError, OSError, subprocess.TimeoutExpired) as exc:
             issue("not_checked", "runtime", str(exc), "run")
@@ -428,6 +549,8 @@ def build(manifest, catalog, descriptors, root, ref, recipe, options, *, host=Tr
     plan["control_files"] = {str(p): digest(p.read_bytes().hex()) if p.is_file() else None
                              for p in sorted(controls)}
     plan["fingerprint"] = digest(dict(recipe=recipe, source=(source or {}).get("fingerprint"),
+                                     use_proxies=plan["use_proxies"],
+                                     namespaces=namespaces,
                                      configs=plan["configs"], selected=plan["selected"],
                                      recordings=plan["recordings"], playback=plan["playback"],
                                      window=plan["window"], surfaces=surfaces, controls=plan["control_files"],

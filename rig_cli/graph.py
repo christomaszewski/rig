@@ -8,8 +8,9 @@ record who talked to what.
 
 This module is the READER half of the writer-dumb/reader-smart split: the sidecar records raw node
 FQNs (it knows ROS, not rig); every view — the union across epochs, namespace→instance grouping
-(instance `name` IS the ROS namespace), declared-vs-observed drift against a rigging `interface:`
-block, the contract scaffold — is derived here at read time, from plain YAML. No union is ever
+(using a service's declared `ros_namespace`, falling back to the instance `name`), declared-vs-observed
+drift against a rigging `interface:` block, the contract scaffold — is derived here at read time,
+from plain YAML. No union is ever
 materialized at seal: one read path serves sealed, unsealed, and crashed runs identically
 (`rig graph -o` materializes on demand). rig contains no ROS, before and after this feature.
 
@@ -28,6 +29,7 @@ from pathlib import Path
 from . import RigError
 from .manifest import PLAYER_SERVICE
 from .common import eprint, load_yaml
+from .descriptor import resolve_ros_namespace
 
 # Epoch-file edge kinds (the writer's spelling) -> the rigging `interface:` kinds (the declared
 # spelling). One mapping, used by scaffold and checks, so the two grammars can't drift apart.
@@ -149,26 +151,34 @@ def union(epochs: list[Epoch]) -> GraphUnion:
     return GraphUnion(epochs=len(epochs), first=first, last=last, nodes=nodes, windows=windows)
 
 
-def group_nodes(fqns, instance_names) -> dict[str, list[str]]:
-    """Node FQN -> owning instance, by longest instance-name prefix at a segment boundary
-    (instance `name` is the ROS namespace — manifest.py's identity doctrine). Leftovers group
-    under UNASSIGNED. Returns {instance|UNASSIGNED: [fqn, ...]} — only non-empty groups, instance
-    manifest order preserved by the caller iterating its own name list."""
+def group_nodes(fqns, instance_names, *, namespaces: dict[str, str] | None = None) -> dict[str, list[str]]:
+    """Group nodes by their longest namespace prefix at a ROS segment boundary.
+
+    Namespaces default to /<instance-name>; descriptors and replay recipes can supply a different
+    ROS namespace without changing the instance's identity. Unmatched nodes and equally specific
+    competing owners stay UNASSIGNED. Returns only non-empty groups; callers preserve manifest
+    order by iterating their own name list.
+    """
     groups: dict[str, list[str]] = {}
+    scopes = {name: (namespaces or {}).get(name, f"/{name}").rstrip("/") for name in instance_names}
     for fqn in sorted(fqns):
-        owners = [n for n in instance_names if fqn == f"/{n}" or fqn.startswith(f"/{n}/")]
-        owner = max(owners, key=len) if owners else UNASSIGNED
+        matches = [(len(scope), name) for name, scope in scopes.items()
+                   if fqn == scope or fqn.startswith(scope + "/")]
+        longest = max((length for length, _ in matches), default=-1)
+        owners = [name for length, name in matches if length == longest]
+        owner = owners[0] if len(owners) == 1 else UNASSIGNED
         groups.setdefault(owner, []).append(fqn)
     return groups
 
 
 # --- the derived views -------------------------------------------------------
 
-def render(u: GraphUnion, run_id: str, instance_names) -> str:
+def render(u: GraphUnion, run_id: str, instance_names, *,
+           namespaces: dict[str, str] | None = None) -> str:
     """The human view: nodes grouped by instance, edges tagged pub/sub/srv/cli, plumbing hidden
     (counted in the footer). Stdout is the report — machine consumers read the epochs themselves."""
     lines = [f"graph: {run_id} — {_n_epochs(u.epochs)}, {u.first} → {u.last}"]
-    groups = group_nodes(u.nodes, instance_names)
+    groups = group_nodes(u.nodes, instance_names, namespaces=namespaces)
     hidden = 0
     ordered = [n for n in instance_names if n in groups] \
         + ([UNASSIGNED] if UNASSIGNED in groups else [])
@@ -208,17 +218,22 @@ def union_yaml(u: GraphUnion, run_id: str) -> str:
         + yaml.safe_dump(doc, sort_keys=False, default_flow_style=None)
 
 
-def contract(u: GraphUnion, instance: str, service: str, run_id: str) -> str:
+def contract(u: GraphUnion, instance: str, service: str, run_id: str, *,
+             instance_names=None, namespaces: dict[str, str] | None = None) -> str:
     """The `interface:` scaffold for one instance, from its OBSERVED edges: names under the
     instance's own namespace stripped to relative form, shared-bus names kept absolute, plumbing
     dropped, deduped across the instance's nodes. Printed for pasting into the SERVICE repo's
     rigging.yaml — never auto-written (editing a vendored, registry-pinned copy manufactures
     drift), and an observed graph is per-config: prune conditional edges before publishing."""
-    prefix = f"/{instance}/"
+    prefix = (namespaces or {}).get(instance, f"/{instance}").rstrip("/") + "/"
+    # Compute ownership across every declared instance, including disabled rows. A nested
+    # namespace belongs to its most specific owner even when that owner is not being scaffolded.
+    owners = (list(instance_names) if instance_names is not None
+              else list(dict.fromkeys([instance, *(namespaces or {})])))
+    groups = group_nodes(u.nodes, owners, namespaces=namespaces)
     per_kind: dict[str, set[tuple[str, str]]] = {k: set() for k in KIND_TO_INTERFACE}
-    for fqn, edges in u.nodes.items():
-        if not (fqn == f"/{instance}" or fqn.startswith(prefix)):
-            continue
+    for fqn in groups.get(instance, ()):
+        edges = u.nodes[fqn]
         for e in edges:
             if is_plumbing(e):
                 continue
@@ -250,14 +265,16 @@ def check(u: GraphUnion, manifest, descriptors) -> list[str]:
     namespace); a declared type that contradicts every observed type on that name also WARNs."""
     warns: list[str] = []
     undeclared_instances = []
+    namespaces = {s.name: resolve_ros_namespace(descriptors.get(s.service), s.name)
+                  for s in manifest.sensors}
+    groups = group_nodes(u.nodes, namespaces, namespaces=namespaces)
     for sensor in manifest.sensors:
         desc = descriptors.get(sensor.service)
         iface = getattr(desc, "interface", None) if desc else None
-        prefix = f"/{sensor.name}/"
+        prefix = namespaces[sensor.name].rstrip("/") + "/"
         observed: dict[str, dict[str, set[str]]] = {k: {} for k in KIND_TO_INTERFACE}  # kind -> name -> types
-        for fqn, edges in u.nodes.items():
-            if not (fqn == f"/{sensor.name}" or fqn.startswith(prefix)):
-                continue
+        for fqn in groups.get(sensor.name, ()):
+            edges = u.nodes[fqn]
             for e in edges:
                 if not is_plumbing(e):
                     observed[e.kind].setdefault(e.name, set()).add(e.type)
@@ -272,10 +289,10 @@ def check(u: GraphUnion, manifest, descriptors) -> list[str]:
             continue
         if not seen_any:
             warns.append(f"{sensor.name}: interface declared but NO nodes observed under "
-                         f"/{sensor.name} — instance down for the whole run, or renamed?")
+                         f"{namespaces[sensor.name]} — instance down for the whole run, or renamed?")
             continue
         for kind, declared_kind in KIND_TO_INTERFACE.items():
-            declared = {(e.name if e.name.startswith("/") else f"/{sensor.name}/{e.name}"): e.type
+            declared = {(e.name if e.name.startswith("/") else f"{prefix}{e.name}"): e.type
                         for e in iface.get(declared_kind, ())}
             tag = _KIND_TAG[kind]
             for name in sorted(set(observed[kind]) - set(declared)):
@@ -324,12 +341,15 @@ def cmd(manifest, descriptors, *, run_ref: str | None, do_check: bool,
                f"`graph:` block (rig-infra ≥ v1.7.0) to capture topology into future runs")
         return 1
     u = union(epochs)
+    namespaces = {s.name: resolve_ros_namespace(descriptors.get(s.service), s.name)
+                  for s in manifest.sensors}
     if contract_instance is not None:
         row = next((s for s in manifest.sensors if s.name == contract_instance), None)
         if row is None:
             raise RigError(f"graph --contract: unknown instance '{contract_instance}' "
                            f"(vehicle.yaml names: {', '.join(s.name for s in manifest.sensors)})")
-        print(contract(u, row.name, row.service, run_id))
+        print(contract(u, row.name, row.service, run_id,
+                       instance_names=namespaces, namespaces=namespaces))
         return 0
     if out:
         Path(out).write_text(union_yaml(u, run_id))
@@ -337,7 +357,7 @@ def cmd(manifest, descriptors, *, run_ref: str | None, do_check: bool,
         if not do_check:
             return 0
     else:
-        print(render(u, run_id, [s.name for s in manifest.sensors]))
+        print(render(u, run_id, list(namespaces), namespaces=namespaces))
     if do_check:
         warns = check(u, manifest, descriptors)
         for w in warns:

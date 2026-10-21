@@ -140,6 +140,25 @@ def test_select_topics_no_epochs_falls_back():
     assert not re.match(value, "/planner_b/x") and not re.match(value, "/gnss/fix")
 
 
+def test_select_topics_recorded_namespace_and_fallback():
+    import re
+    namespaces = {"renamed": "/planner"}
+    mode, value, notices = replay.select_topics(_source_run(), ["renamed"], namespaces=namespaces)
+    assert mode == "topics" and value == "/gnss_primary/fix"
+    assert any("self-echo" in notice for notice in notices)
+    mode, value, _ = replay.select_topics(
+        _source_run(), ["renamed"], live_names=["renamed", "gnss_primary"], namespaces=namespaces)
+    assert mode == "exclude"  # the live sensor regenerates the last external input
+    assert re.search(value, "/planner/debug") and not re.search(value, "/renamed/debug")
+    for src in (_source_run(epochs=()), _source_run()):
+        mode, value, notices = replay.select_topics(
+            src, ["renamed"], namespaces={"renamed": "/different/nested"})
+        assert mode == "exclude" and notices
+        assert re.search(value, "/different/nested/input")
+        assert not re.search(value, "/different/nested_extra/input")
+        assert not re.search(value, "/renamed/input")
+
+
 def test_player_row_detection():
     assert replay._player_row(_manifest([_row("a"), PLAYER])).name == "bag_player"
     try:
@@ -361,7 +380,61 @@ def test_select_services_provides_minus_requires_and_plumbing():
 
 def test_select_services_epochs_only_no_fallback():
     assert replay.select_services(_source_run(epochs=()), ["planner"])[0] is None
-    assert replay.select_services(_source_run(epochs=(EPOCH_SVC,)), ["planner", "ghost"])[0] is None
+    services, notices = replay.select_services(_source_run(epochs=(EPOCH_SVC,)), ["planner", "ghost"])
+    assert services is None
+    assert any("ghost (/ghost)" in note and "recorded_namespace" in note for note in notices)
+
+
+def test_select_services_recorded_namespace_maps_nodes_without_remapping_calls():
+    src = _source_run(epochs=(EPOCH_SVC,))
+    services, _ = replay.select_services(src, ["renamed"], namespaces={"renamed": "/planner"})
+    assert services == "/planner/set_mode"
+    services, notices = replay.select_services(
+        src, ["renamed", "sensor"], namespaces={"renamed": "/planner", "sensor": "/gnss_primary"})
+    assert services == "/planner/set_mode"
+    assert any("self-echo" in note for note in notices)
+    services, notices = replay.select_services(
+        src, ["renamed"], namespaces={"renamed": "/wrong/namespace"})
+    assert services is None
+    assert any("renamed (/wrong/namespace)" in note and "recorded_namespace" in note for note in notices)
+    services, notices = replay.select_services(
+        src, ["one", "two"], namespaces={"one": "/planner", "two": "/planner"})
+    assert services is None and any("unambiguous" in note for note in notices)
+
+
+def test_recorded_selection_respects_inactive_nested_namespace_owners():
+    epoch = """schema: 1
+nodes:
+  /robot/server:
+    subs:
+      - {topic: /parent/input, type: std_msgs/msg/String}
+    provides:
+      - {service: /parent/control, type: std_srvs/srv/Trigger}
+  /robot/child/server:
+    subs:
+      - {topic: /child/input, type: std_msgs/msg/String}
+    provides:
+      - {service: /child/control, type: std_srvs/srv/Trigger}
+"""
+    src = _source_run(epochs=(epoch,))
+    namespaces = {"parent": "/robot", "inactive": "/robot/child"}
+    mode, value, _ = replay.select_topics(src, ["parent"], namespaces=namespaces,
+                                         known_names={"parent", "inactive"})
+    assert mode == "topics" and value == "/parent/input"
+    services, _ = replay.select_services(src, ["parent"], namespaces=namespaces,
+                                        known_names={"parent", "inactive"})
+    assert services == "/parent/control"
+
+
+def test_recorded_selection_does_not_claim_an_implicit_namespace_owner():
+    src = _source_run(epochs=(EPOCH_SVC,))
+    namespaces = {"renamed": "/planner"}
+    mode, _, notices = replay.select_topics(src, ["renamed"], namespaces=namespaces,
+                                           known_names={"renamed", "planner"})
+    assert mode == "exclude" and any("renamed" in note for note in notices)
+    services, notices = replay.select_services(src, ["renamed"], namespaces=namespaces,
+                                               known_names={"renamed", "planner"})
+    assert services is None and any("unambiguous" in note for note in notices)
 
 
 def test_service_event_topics_stay_out_of_the_topic_selector():
@@ -1306,6 +1379,32 @@ nodes:
                                                    {"front_cam"})
     assert re.search(pattern, "/front_cam/image") and notices
     assert "namespace only" in notices[0]
+
+
+def test_skip_service_uses_recorded_namespace_and_preserves_shared_publishers():
+    import re
+    epoch = """schema: 1
+nodes:
+  /sensors/front/bridge:
+    pubs:
+      - {topic: /custom/status, type: std_msgs/msg/String}
+      - {topic: /shared/status, type: std_msgs/msg/String}
+  /other/node:
+    pubs:
+      - {topic: /shared/status, type: std_msgs/msg/String}
+"""
+    namespaces = {"front_cam": "/sensors/front"}
+    pattern, notices = replay.skipped_topic_pattern(
+        _source_run(epochs=(epoch,)), ["front_cam"], {"front_cam", "other"}, namespaces=namespaces)
+    assert not notices
+    for topic in ("/sensors/front", "/sensors/front/video", "/custom/status"):
+        assert re.search(pattern, topic), topic
+    for topic in ("/front_cam/video", "/sensors/front_extra/video", "/shared/status"):
+        assert not re.search(pattern, topic), topic
+    pattern, notices = replay.skipped_topic_pattern(
+        _source_run(epochs=()), ["front_cam"], {"front_cam"}, namespaces=namespaces)
+    assert notices and re.search(pattern, "/sensors/front/video")
+    assert not re.search(pattern, "/front_cam/video")
 
 
 def test_skip_service_omits_camera_launches_and_bag_topics_and_records_provenance():

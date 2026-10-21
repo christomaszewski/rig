@@ -253,6 +253,15 @@ def cmd_run_import(args, manifest, catalog, descriptors) -> int:
 def cmd_run_export(args, manifest, catalog, descriptors) -> int:
     from . import export as export_mod
     profile = args.profile
+    if args.service:
+        from . import service_exports
+        if args.in_place or args.lossy:
+            raise RigError("service export cannot use --in-place or --lossy; originals are preserved")
+        return service_exports.cmd(manifest, catalog, descriptors, run_ref=args.run,
+                                   service=args.service, profile=profile, instances=args.instance,
+                                   force=args.force, dry_run=args.dry_run)
+    if args.instance:
+        raise RigError("run export: --instance requires --service")
     if args.in_place:  # no profile = the exporters' lossless defaults; a named one applies as-is
         return export_mod.cmd(manifest, catalog, descriptors, args.rig_root, run_ref=args.run,
                               profile=profile, force=args.force, dry_run=args.dry_run,
@@ -723,7 +732,8 @@ def translate_argv(argv: list[str]) -> list[str] | None:
     if noun == "catalog" and (not rest or rest[0] not in verbs):
         return argv[:i] + ["catalog-search"] + rest  # `rig catalog site:mojave --since 2026-08`
     if noun != "config" and (not rest or rest[0] in ("-h", "--help")):
-        print(f"usage: rig {noun} <verb> …\nverbs: {', '.join(sorted(verbs))}")
+        from .help_text import group_help
+        print(group_help(noun, verbs, build_parser()))
         return None
     if not rest:
         return argv  # bare `config` = legacy show-all
@@ -741,19 +751,32 @@ def build_parser() -> argparse.ArgumentParser:
         prog="rig", description="vehicle-level stack orchestrator (infra · sensors · autonomy)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="noun groups (canonical forms; the flat spellings above stay as permanent aliases):\n"
-               "  rig config   show | render          rig run      new | end | list | rm | "
-               "import | export | tag | untag | archive | retrofit | replay\n"
-               "  rig catalog  [query] [--tag --label --vehicle --since] | add | remove | roots"
-               "   (every run rig knows about)\n"
-               "  rig registry init | add | remove | list | sync | validate | index\n"
-               "  rig pkg      search | info | list | outdated | add | remove | upgrade | lock | "
-               "save | promote | repin | rebase | yank\n"
-               "  rig overlay  apply | remove | reorder | list     rig setup (first-run host setup)\n"
-               "  rig completion bash|zsh (TAB completion — deb/brew ship it; `rig setup --shell` wires it)\n"
+               "  rig config   show | render | diff\n"
+               "  rig run      new | end | list | rm | import | export | tag | untag |\n"
+               "               archive | retrofit | replay\n"
+               "  rig catalog  [query] [filters] | add | remove | roots\n"
+               "  rig registry init | add | remove | list | sync | validate | index |\n"
+               "               pending | push | discard\n"
+               "  rig pkg      search | info | list | outdated | add | remove | upgrade |\n"
+               "               lock | save | promote | repin | rebase | yank\n"
+               "  rig overlay  apply | remove | reorder | list\n"
+               "  rig setup    first-run host setup; --shell wires PATH and completion\n"
+               "  rig completion bash|zsh (print TAB-completion script)\n"
                "  rig service  rigify | vendor | certify\n"
-               "  rig artifact bake | unbake | list | show | rm | prune   rig image build | pull | audit\n"
+               "  rig artifact bake | unbake | list | show | rm | prune\n"
+               "  rig image    build | pull | audit\n"
                "  rig fleet    list | status | sync | up | down    (GCS-side fan-out; fleet.yaml)\n"
-               "  (`ls` aliases `list` under every noun above)")
+               "  (`ls` aliases `list` under every noun above)\n\n"
+               "replay and portable builds:\n"
+               "  rig replay check RUN                inspect inputs and destination readiness\n"
+               "  rig replay prepare RUN --recipe NAME [--player PATH|PINNED_REF]\n"
+               "                                      adapt legacy inputs; optionally add a player\n"
+               "  rig replay --recipe NAME            run with local recipe and source binding\n"
+               "  rig image build --scope deployment,replay --dry-run\n"
+               "                                      preview deployment + replay companion builds\n"
+               "  --platform = runtime (jp6m/dev); --arch = Linux CPU (arm64/amd64).\n"
+               "  Build defaults to the full matrix. Use each command's -h for scope rules,\n"
+               "  replay.start policy, recipe locations, legacy support and examples.")
     parser.add_argument("--version", action="version", version=f"rig {__version__}")
     parser.add_argument("--root", type=Path, default=None,
                         help="deployment root holding vehicle.yaml (default: detected from the cwd, "
@@ -818,28 +841,33 @@ def build_parser() -> argparse.ArgumentParser:
 
     rp = sub.add_parser("replay", help="replay broad recorded inputs into this deployment; "
                                        "check/prepare inspect and adapt runs without starting services")
-    rp.add_argument("run", nargs="?", help="SOURCE run id, run-dir or standalone ROS 2 bag path")
-    rp.add_argument("--recipe", help="local recipe name or YAML path")
+    rp.add_argument("run", nargs="?", metavar="RUN",
+                    help="source run ID/label, run directory, ROS 2 bag directory or single bag file; "
+                         "required unless --recipe provides a source")
+    rp.add_argument("--recipe", metavar="NAME|YAML", help="replay/NAME.yaml or explicit YAML path; "
+                    "reuses the prepared local source binding unless RUN overrides it")
+    rp.add_argument("--use-proxies", action="store_true",
+                    help="explicitly bind compatible service exports instead of original recordings; "
+                         "missing/stale proxies are errors; never generates proxies")
     rp.add_argument("--selection", choices=("broad", "recorded"), default="broad",
                     help="broad bag inputs (default), or legacy recorded-graph input selection")
-    rp.add_argument("names", nargs="*",
-                    help="instance(s) under test — brought up live, their recorded inputs played "
-                         "(a recording-capable instance named here is still fed from its "
-                         "recordings: the new-code-against-this-run's-data case). Omit to "
-                         "REPRODUCE the run: infra + every source + the player, nothing under test")
+    rp.add_argument("names", nargs="*", metavar="NAME",
+                    help="additional destination instances to start despite replay.start policy; "
+                         "recording-capable instances still use recordings unless --live. "
+                         "Omit to use startup policy (see below)")
     rp.add_argument("--live", action="append", default=[], metavar="NAME",
                     help="force an instance LIVE although the run holds its recordings (HIL: "
                          "replay the rest, run the real device); repeatable")
     rp.add_argument("--skip-service", action="append", default=[], dest="skip_services", metavar="SERVICE",
                     help="omit every instance of a service and its recorded bag topics; repeatable. "
                          "Use --skip-service camera-service to replay without cameras/video")
-    rp.add_argument("--include-service", action="append", default=[], dest="include_services",
-                    help="start a service despite its replay startup policy; repeatable")
-    rp.add_argument("--skip-instance", action="append", default=[], dest="skip_instances",
+    rp.add_argument("--include-service", action="append", default=[], dest="include_services", metavar="SERVICE",
+                    help="start every instance of a service despite its replay startup policy; repeatable")
+    rp.add_argument("--skip-instance", action="append", default=[], dest="skip_instances", metavar="NAME",
                     help="omit one instance and its recorded topics; repeatable")
     rp.add_argument("--session", default=None, metavar="PREFIX",
-                    help="pin ONE recorded session (its <prefix>) for every source instead of "
-                         "playing all of them in order")
+                    help="select a camera/source recording session prefix; does not select the "
+                         "bag session (use recipe bag.logger/session or player config)")
     rp.add_argument("--start-delay", dest="start_delay", type=float, default=20.0, metavar="S",
                     help="the release gate: sources come up paused and resume together S seconds "
                          "after the up starts (default 20; 0 = no gate, each plays as it comes up)")
@@ -848,24 +876,25 @@ def build_parser() -> argparse.ArgumentParser:
     rp.add_argument("--export-calls", action="store_true", dest="export_calls",
                     help="print the source run's recorded service calls as a schema-1 call "
                          "script on stdout (redirect to a file, edit, replay with --calls). "
-                         "No session: one one-shot player container; takes no instance names")
+                         "Opens no replay run; uses one player container; takes no instance names")
     rp.add_argument("--calls", default=None, metavar="FILE",
                     help="call-script YAML (schema 1): inject/retime service calls on the sim "
                          "clock — SUPPRESSES verbatim service replay (script XOR verbatim); "
                          "bootstrap one with --export-calls")
     rp.add_argument("--from", dest="window_from", default=None, metavar="S",
                     help="start the replay S seconds into the recording (from BAG START — the "
-                         "same zero as call-script t). The player (rig-infra ≥ v1.12.0) seeks "
+                         "same zero as call-script t). The plan-v1 player seeks "
                          "there AND restores the latched topics (/tf_static…) the seek would skip")
     rp.add_argument("--to", dest="window_to", default=None, metavar="S",
                     help="stop the replay at S seconds from bag start (exclusive; past the bag "
                          "end clamps). The player exits there, so --auto-end composes: "
                          "sweeps are a shell loop over windows")
     rp.add_argument("--wall-clock", action="store_true", dest="wall_clock",
-                    help="no /clock, no use_sim_time (default: RIG_SIM_TIME=1 — player publishes "
-                         "/clock, adopted services pace to it)")
+                    help="no /clock or use_sim_time; bag replay defaults to sim time, while "
+                         "source-only replay without bags always uses wall time")
     rp.add_argument("--force", action="store_true",
-                    help="proceed past preflight errors and the clean-host guard")
+                    help="override ordinary deployment preflight and the clean-host guard; "
+                         "does not bypass recipe, input, image or player-capability errors")
     rp.add_argument("--auto-end", nargs="?", type=int, const=10, default=None, metavar="GRACE_S",
                     dest="auto_end",
                     help="wait for the player to finish the bag, breathe GRACE_S seconds "
@@ -874,7 +903,8 @@ def build_parser() -> argparse.ArgumentParser:
                          "down on uncertainty; Ctrl+C leaves the session up. Incompatible with "
                          "the player config's loop: true (the bag never ends)")
     rp.add_argument("--dry-run", action="store_true",
-                    help="print selection + the exact launcher invocations; open no run")
+                    help="preview selection without writes or containers; playback also prints "
+                         "launcher commands once required source preparation is available")
     for verb in ("check", "prepare"):
         check = sub.add_parser("replay-" + verb, parents=[rp], add_help=False,
                                prog=f"{parser.prog} replay {verb}",
@@ -882,7 +912,10 @@ def build_parser() -> argparse.ArgumentParser:
         check.add_argument("--json", action="store_true", help="machine-readable plan and diagnostics")
         check.add_argument("--format", choices=("text", "json"), default="text", help="report format")
         if verb == "prepare":
-            check.add_argument("--player", help="wire a missing player from a checkout or pinned registry ref")
+            check.add_argument("--player", metavar="PATH|PINNED_REF",
+                               help="add a missing bag_player row to vehicle.yaml (enabled: false, "
+                                    "order: 999), route and config; use a player/rig-infra checkout "
+                                    "or registry ref pinned with @VERSION. Existing rows are kept")
 
     gr = sub.add_parser("graph", help="observed pub/sub/service topology from a run's graph "
                                       "epochs (the bag-logger's graph-snapshotter sidecar, "
@@ -890,7 +923,8 @@ def build_parser() -> argparse.ArgumentParser:
     gr.add_argument("run", nargs="?", default=None,
                     help="run id or run-dir path (default: the open run, else the newest)")
     gr.add_argument("--check", action="store_true",
-                    help="compare observed vs the riggings' declared interface: blocks (WARN-only)")
+                    help="compare observed vs optional interface: declarations (WARN-only; "
+                         "not required for broad replay)")
     gr.add_argument("--contract", metavar="INSTANCE", default=None,
                     help="print an interface: scaffold from the instance's observed edges "
                          "(paste into the service repo's rigging.yaml)")
@@ -920,9 +954,8 @@ def build_parser() -> argparse.ArgumentParser:
                           "registry HOST[:port][/ns] this bench pulls from — the run's tag/base pins "
                           "stay, only the host swaps (machine-wide instead: provision --registry)")
     rec.add_argument("--enable-replay", dest="enable_replay", default=None, metavar="PATH|REF",
-                     help="wire the SIL player into a tree that predates it (OPT-IN: the tree is "
-                          "otherwise exactly what ran): the ros2-bag-player dir or a rig-infra "
-                          "checkout, or a registry ref (public/ros2-bag-player@1.10.0) — adds the "
+                     help="wire a missing SIL player: the ros2-bag-player dir or a rig-infra "
+                          "checkout, or a registry ref (public/ros2-bag-player@1.17.0) — adds the "
                           "route, config/autonomy/bag_player.yaml and the enabled: false, order: 999 "
                           "row; no-op when the tree already carries the player")
 
@@ -949,8 +982,13 @@ def build_parser() -> argparse.ArgumentParser:
                                             "`rig fleet sync --profile` pulls it")
     rex.add_argument("run", help="run id, label (newest), or run-dir path — sealed; never the OPEN run")
     rex.add_argument("--profile", default=None, metavar="NAME",
-                     help="an `export_profiles:` entry of vehicle.yaml (optional when exactly "
-                          "one is declared)")
+                     help="with --service: a service-defined profile (default: service's default); "
+                          "otherwise a vehicle.yaml export_profiles entry")
+    rex.add_argument("--service", metavar="SERVICE",
+                     help="create reusable service-only exports under RUN/exports/services/; "
+                          "originals and existing generations are preserved")
+    rex.add_argument("--instance", action="append", default=[], metavar="RECORDED_NAME",
+                     help="with --service: limit to this original recorded name (repeatable)")
     rex.add_argument("--in-place", action="store_true", dest="in_place",
                      help="REWRITE the data inside the run instead of making a copy — reclaims "
                           "disk: the bag logger re-writes each session at the preset (default "
@@ -962,7 +1000,8 @@ def build_parser() -> argparse.ArgumentParser:
                      help="with --in-place: allow profile options that DROP data for good "
                           "(excluded topics, an allow-list, a time window)")
     rex.add_argument("--force", action="store_true",
-                     help="redo an export that already exists (removed first); in place: "
+                     help="with --service: regenerate, retaining old generations; otherwise "
+                          "replace an existing whole-run export; in place: "
                           "rewrite again although the run manifest records these options")
     rex.add_argument("--dry-run", action="store_true", dest="dry_run",
                      help="print what would be kept/omitted and which exporters would run")
@@ -1055,14 +1094,15 @@ def build_parser() -> argparse.ArgumentParser:
                        "(canonical: config diff)")
 
     add("pull", "pre-pull each stack's images (no container changes)").add_argument(
-        "--dry-run", action="store_true"
+        "--dry-run", action="store_true", help="print pull commands without fetching images"
     )
 
     add("image-audit", "inspect every image the deployment runs for ROS distro/rmw/package-version "
                        "consistency (canonical: image audit; run after build/pull)")
 
     add("doctor", "read-only preflight checks").add_argument(
-        "--deep", action="store_true", help="also certify each service's launcher (runs `config` per service)"
+        "--deep", action="store_true", help="also certify launchers and available isolated build "
+                                             "contracts (requires local build context for build probes)"
     )
 
     crt = sub.add_parser("certify", help="launcher-contract conformance checks (poison-env)")
@@ -1147,24 +1187,29 @@ def build_parser() -> argparse.ArgumentParser:
     bld = sub.add_parser("build", help="build/push or mirror each service's images into the registry")
     bld.add_argument("--registry", default=None,
                      help="build registry (default: deployment-local, machine-local, then vehicle.yaml images.registry)")
-    bld.add_argument("--tag", default=None, help="tag to pass to each service's build command")
+    bld.add_argument("--tag", default=None, help="image version (default: images.tag); matrix outputs "
+                     "append -<runtime>. Use a fresh tag for partial iterations")
     bld.add_argument("--platform", default=None,
-                     help="build only this runtime variant (default: all declared variants)")
+                     help="runtime filter for all, or override for deployment scope; cannot "
+                          "override host/replay (default: scope-derived)")
     bld.add_argument("--arch", choices=("arm64", "amd64"), default=None,
-                     help="build only this CPU architecture (default: all supported architectures)")
-    bld.add_argument("--scope", action="append", default=None,
-                     help="all (default), deployment, host, replay; combine with commas or repeat")
+                     help="CPU filter for all, or override for deployment scope; cannot "
+                          "override host/replay (default: scope-derived)")
+    bld.add_argument("--scope", action="append", default=None, metavar="SCOPE[,SCOPE...]",
+                     help="all (default), deployment, host, replay; combine narrower scopes with "
+                          "commas or repeat (selection rules below)")
     bld.add_argument("-j", "--jobs", type=int, default=2, metavar="N",
                      help="build up to N independent service/runtime tasks concurrently (default: 2; 1 for serial)")
     bld.add_argument("-v", "--verbose", action="store_true",
                      help="stream full build output (default: progress with per-step log files)")
     bld.add_argument("--no-cache", action="store_true", dest="no_cache",
                      help="disable image-build instruction cache; requires declared service support "
-                          "(verify with rig certify --require-build-check)")
+                          "(verify with rig service certify --require-build-check)")
     bld.add_argument("--base-image", default=None, metavar="REF", dest="base_image",
                      help="deployment base image ref (overrides vehicle.yaml images.base and any "
                           "`provides: base` service) — exported to builds as RIG_BASE_IMAGE")
-    bld.add_argument("--dry-run", action="store_true")
+    bld.add_argument("--dry-run", action="store_true",
+                     help="print selected targets, outputs and build order without building/publishing")
 
     bk = sub.add_parser("bake", help="freeze the deployment into a tagged, content-addressed artifact")
     bk.add_argument("--tag", default=None,
@@ -1188,7 +1233,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("artifact-list", help="list baked artifacts with provenance (canonical: artifact list)")
     ash = sub.add_parser("artifact-show", help="inspect artifact target, images and provenance")
     ash.add_argument("tag", help="artifact tag in this deployment")
-    ash.add_argument("--format", choices=("yaml", "json"), default="yaml")
+    ash.add_argument("--format", choices=("yaml", "json"), default="yaml",
+                     help="metadata report format (default: yaml)")
     arm = sub.add_parser("artifact-rm", help="remove named artifact archives and generated staging trees")
     arm.add_argument("tags", nargs="+", help="artifact tags to remove")
     apr = sub.add_parser("artifact-prune", help="remove older artifacts, keeping the newest archives")
@@ -1457,6 +1503,9 @@ def build_parser() -> argparse.ArgumentParser:
     fly.add_argument("--export", action="store_true",
                      help="with --profile: produce the export ON the vehicle first "
                           "(`rig run export`) where it is missing")
+    fly.add_argument("--include-service-exports", action="store_true",
+                     help="with normal run sync: also transfer verified exports/services artifacts; "
+                          "cannot be combined with --profile")
 
     ov = sub.add_parser("overlay", help="overlay BINDINGS on instances (apply/remove/reorder/list) "
                                         "— authoring/publishing is `pkg promote`")
@@ -1541,6 +1590,8 @@ def build_parser() -> argparse.ArgumentParser:
                     help="with --migrate: copy, leave the old tree in place (no symlink)")
     st.add_argument("--skip-data-dir", action="store_true", dest="skip_data_dir",
                     help="don't ask about a run registry (scripts; vehicles use provision)")
+    from .help_text import configure
+    configure(parser)
     return parser
 
 
@@ -1589,7 +1640,8 @@ def main(argv=None) -> int:
                                "export)")
             return fleet_mod.cmd_sync(fleet, args.names, label=args.label, into=args.into,
                                       jobs=args.jobs, profile=args.profile,
-                                      export=args.export)
+                                      export=args.export,
+                                      include_service_exports=args.include_service_exports)
         if args.cmd == "pkg":
             if args.pkg_cmd in ("add", "install", "remove", "rm", "upgrade", "lock", "promote",
                                 "list", "save"):
@@ -1710,7 +1762,8 @@ def main(argv=None) -> int:
             from .replay_workflow import command
             return command(args, root)
         args.rig_root = root  # handlers that touch the run registry need the deployment root (provenance)
-        manifest, catalog, descriptors = _load(root)
+        manifest, catalog, descriptors = _load(root, render=not (
+            args.cmd == "run-export" and args.service))
         return _HANDLERS[args.cmd](args, manifest, catalog, descriptors)
     except RigError as exc:
         eprint(f"rig: {exc}")

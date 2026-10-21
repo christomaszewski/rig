@@ -148,6 +148,10 @@ python3 -m venv .venv && .venv/bin/pip install pyyaml
                           #   (video), services whose rigging declares `export:` re-write their
                           #   own data smaller (the bag logger: zstd_small, topics dropped), the
                           #   rest is hardlinked. `rig fleet sync --profile review` pulls it
+./rig run export <run> --service camera-service  # camera-owned default h264 profile: service-only
+                          #   proxies under RUN/exports/services/camera-service/h264/<export-id>/;
+                          #   originals/bags stay intact; --instance selects recorded names,
+                          #   --force regenerates without deleting previous generations
 ./rig run export <run> --in-place        # RECLAIM disk instead: the same exporters REWRITE their data
                           #   inside the run (bags re-written at zstd_small, per-topic counts
                           #   verified against the original, then swapped in). Lossless with no
@@ -177,7 +181,14 @@ python3 -m venv .venv && .venv/bin/pip install pyyaml
 ./rig down                # tear down in reverse (autonomy FIRST); --purge also GCs external volumes
 ./rig replay check <run>   # inspect a hand-built deployment's readiness, without writes
 ./rig replay prepare <run> --recipe field-test
+                          # --player public/ros2-bag-player@1.17.0 adds a missing player row,
+                          # route and config; kept disabled for ordinary up, selected by replay
 ./rig replay --recipe field-test
+./rig replay --recipe field-test --use-proxies  # explicit opt-in, also on check/prepare; originals
+                          #   remain the default. Missing/incompatible proxies are errors
+./rig fleet sync --into fleet-runs --include-service-exports
+                          #   include committed proxy generations at their nested paths; default
+                          #   sync excludes exports. Cannot combine with legacy --profile
 ./rig swap <svc> <path|ref>  # re-point an INSTALLED service at different code — a local checkout
                           #   (routed live: edit, rebuild, re-up) or a registry ref (vendored +
                           #   pinned). Rows, working configs and overlays are KEPT; config-key
@@ -425,6 +436,8 @@ service: novatel
 launcher: novatel-up                 # default: <service>-up
 verbs: { status: ps }                # adapt logical verbs -> launcher args (defaults shown in descriptor.py)
 ros_distro: lyrical
+# ros_namespace: "/robot/{name}"     # optional: actual ROS NODE namespace; fixed /control/relay also works
+#                                    #   identifies graph ownership; does not launch/remap nodes
 tier: sensor                         # optional: "infra" = shared, up-first (routers, loggers, dashboards);
                                      #   "autonomy" = graph consumer, up-last / down-first (planners, SLAM)
 examples: [sensors/novatel.example.yaml]     # optional: example configs — init/add/fetch copy them;
@@ -480,5 +493,17 @@ launch_surface:                              # the minimal file set `rig vendor`
 external_volumes: ["novatel_{name}_data"]    # optional: GC'd by `rig down --purge` (final teardown only)
 host_ports: ["plugins[name=webrtc-bridge,enabled=true].params.port"]  # optional: rig validates these don't clash
 ```
+
+The optional top-level `ros_namespace` declares the service's actual ROS **node** namespace,
+without a publisher/subscriber inventory. Use an absolute, non-root namespace such as
+`/control/relay`, or a quoted template such as `"/robot/{name}"`; `{name}` is the only supported
+placeholder. This is association metadata, not a launcher setting or a ROS remap.
+`rig graph` expands `{name}` with the current instance name. Replay uses the recorded identity
+(`instances.NAME.recorded_as`, otherwise the destination name), and associates observed topics
+and service servers using that namespace. A recipe's `instances.NAME.recorded_namespace` takes
+precedence for historical namespace changes; undeclared services keep the `/instance` fallback.
+Distinct instances sharing a fixed namespace have ambiguous ownership: use a per-instance
+template or explicit recipe namespaces. Graph evidence is still required to identify regenerated
+outputs such as status topics; broad replay still requires explicit service-call selection.
 
 `cam-up`, `novatel-up`, and `sbg-up` all satisfy this. See `docs/DESIGN.md` for the full rationale.

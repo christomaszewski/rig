@@ -610,6 +610,26 @@ def list_runs(manifest: Manifest, *, host: bool = False) -> list[RunRow]:
     return registry_rows(data)
 
 
+def run_disk_kb(run_dir: Path, doc: dict) -> int | None:
+    """Account for exports added after sealing without rewriting capture provenance.
+
+    The seal-time value remains cheap for ordinary runs. A run with service exports needs
+    a current measurement of the full tree: adding export bytes to the cached value would
+    double-count exports already present when that value was captured or when re-imported.
+    """
+    saved = doc.get("disk_kb")
+    saved = saved if isinstance(saved, int) and not isinstance(saved, bool) else None
+    if (run_dir / "exports" / "services").is_dir():
+        try:
+            result = subprocess.run(["du", "-sk", str(run_dir.resolve())], capture_output=True,
+                                    text=True, timeout=120)
+            if result.returncode == 0:
+                return int(result.stdout.split()[0])
+        except (OSError, ValueError, IndexError, subprocess.TimeoutExpired):
+            pass
+    return saved
+
+
 def registry_rows(data: Path) -> list[RunRow]:
     try:
         open_id = (current_run(data) or (None,))[0]
@@ -635,7 +655,7 @@ def registry_rows(data: Path) -> list[RunRow]:
         replay = doc.get("replay")
         rows.append(RunRow(run=d.name, label=str(doc.get("label") or "—"), state=state,
                            started=str(doc.get("started") or "?"), ended=ended or "—",
-                           disk_kb=doc.get("disk_kb"), linked=d.is_symlink(),
+                           disk_kb=run_disk_kb(d, doc), linked=d.is_symlink(),
                            replay_of=str(replay["of"]) if isinstance(replay, dict)
                            and replay.get("of") else None, tags=run_tags(doc)))
     return rows

@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -16,7 +17,7 @@ from rig_cli import RigError, cli, dispatch
 from rig_cli.manifest import load_manifest
 from rig_cli.replay_workflow import load_context, command
 from rig_cli import replay_plan as planner, replay_prepare as prepare, replay_recipe as recipe
-from rig_cli.replay_sources import inspect_source, inventory_fingerprint
+from rig_cli.replay_sources import inspect_source, inventory_fingerprint, source_fingerprint
 from rig_cli.targets import build_selections
 
 
@@ -142,6 +143,74 @@ class Preparation(unittest.TestCase):
         selections, _ = build_selections(m, d, ["replay"])
         self.assertIn("app", selections)
 
+    def test_camera_skips_override_recipe_keeps_and_follow_recorded_aliases(self):
+        self.rows["sensors"][0]["replay"] = {"start": True}
+        self.vehicle()
+        self.bag(self.source / "bags/logger/session-1", topic="/old_cam/image")
+        doc = {"version": 1, "instances": {"cam": {"recorded_as": "old_cam"}},
+               "playback": {"keep": ["/old_cam/image", "/result", "/tf"]}}
+        for graph_present in (False, True):
+            if graph_present:
+                self.write_source("graph/logger/epoch_20260101T000000Z.yaml", {
+                    "schema": 1, "nodes": {
+                        "/old_cam/bridge": {"pubs": [
+                            {"topic": "/old_cam/image", "type": "sensor_msgs/msg/Image"},
+                            {"topic": "/result", "type": "sensor_msgs/msg/Image"},
+                            {"topic": "/tf", "type": "tf2_msgs/msg/TFMessage"}]},
+                        "/other/node": {"pubs": [{"topic": "/tf", "type": "tf2_msgs/msg/TFMessage"}]}}})
+            for selection in ({"skip_services": ["camera"]}, {"skip_instances": ["cam"]}):
+                with self.subTest(graph=graph_present, selection=selection):
+                    plan = self.plan(doc, opts=selection)
+                    self.assertTrue(plan["ready_to_prepare"], plan["issues"])
+                    self.assertNotIn("cam", plan["selected"])
+                    self.assertNotIn("/old_cam/image", plan["playback"]["topics"])
+                    self.assertIn("/tf", plan["playback"]["topics"])
+                    self.assertEqual("/result" in plan["playback"]["topics"], not graph_present)
+
+    def test_skip_camera_service_check_prepare_and_execution_with_missing_proxies(self):
+        self.reader_label_camera()
+        self.rows["sensors"][0]["replay"] = {"start": True}
+        self.rows["sensors"].append(dict(name="cam_second", service="camera", config="cam_second.yaml",
+                                         replay={"start": True}))
+        self.write("cam_second.yaml", {"name": "cam_second", "service": "camera"})
+        self.vehicle(platform="dev", images={"registry": "example.test", "tag": "v1"})
+        # Skipping must bypass corrupt originals as well as missing proxies/images.
+        (self.source / "recordings/cam/overlap.json").write_text("corrupt recording")
+        self.write("replay/no-video.yaml", {"version": 1, "source": str(self.source)})
+        flags = [str(self.source), "--recipe", "no-video", "--skip-service", "camera",
+                 "--skip-instance", "idle", "--use-proxies"]
+        with self.image_label_runtime({}) as inspected, \
+                patch("rig_cli.service_exports.resolve_proxy_binding") as proxy, \
+                patch("rig_cli.dispatch.run_verb", return_value=[]) as launch:
+            for verb in ("check", "prepare"):
+                with contextlib.redirect_stdout(io.StringIO()) as out, \
+                        contextlib.redirect_stderr(io.StringIO()) as err:
+                    rc = command(self.args(verb, *flags, "--json"), self.root)
+                plan = json.loads(out.getvalue())
+                self.assertEqual(rc, 0, plan["issues"])
+                self.assertEqual(plan["selected"], ["router", "new", "player"])
+                self.assertEqual(plan["recordings"], {})
+                launch.assert_not_called()
+                if verb == "prepare":
+                    hint = next(line for line in err.getvalue().splitlines() if line.startswith("Replay with:"))
+                    self.assertIn("--skip-service camera", hint)
+                    self.assertIn("--skip-instance idle", hint)
+                    self.assertIn("--use-proxies", hint)
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(command(self.args(*flags, "--dry-run"), self.root), 0)
+            self.assertEqual([row.name for row, _ in launch.call_args.args[0]], ["router", "new", "player"])
+            proxy.assert_not_called()
+            self.assertEqual(inspected, [])
+
+    def test_camera_skip_flags_work_on_replay_aliases(self):
+        for prefix in (["replay"], ["replay", "check"], ["replay", "prepare"],
+                       ["run", "replay"], ["run", "replay", "check"], ["run", "replay", "prepare"],
+                       ["replay-check"], ["replay-prepare"]):
+            args = cli.build_parser().parse_args(cli.translate_argv(
+                [*prefix, str(self.source), "--skip-service", "camera", "--skip-instance", "idle"]))
+            self.assertEqual(args.skip_services, ["camera"])
+            self.assertEqual(args.skip_instances, ["idle"])
+
     def test_exact_bag_session_and_ambiguous_logger(self):
         self.bag(self.source / "bags" / "logger" / "session-2", start=200_000_000_000, topic="/later")
         plan = self.plan({"version": 1, "bag": {"session": "session-1"}})
@@ -183,6 +252,227 @@ class Preparation(unittest.TestCase):
         self.assertIn("/tf", plan["playback"]["topics"])
         doc["playback"] = {"keep": ["/result"]}
         self.assertIn("/result", self.plan(doc)["playback"]["topics"])
+
+    def namespace_graph(self, *, subscribes=True):
+        self.bag(self.source / "bags/logger/session-1", topic="/robot/controller/input")
+        return self.write_source("graph/logger/epoch_20260101T000000Z.yaml", {
+            "schema": 1, "nodes": {
+                "/robot/controller/server": {
+                    "pubs": [{"topic": "/result", "type": "std_msgs/msg/String"},
+                             {"topic": "/tf", "type": "tf2_msgs/msg/TFMessage"}],
+                    "subs": [{"topic": "/robot/controller/input", "type": "std_msgs/msg/String"}]
+                            if subscribes else [],
+                    "provides": [{"service": "/control", "type": "std_srvs/srv/Trigger"}]},
+                "/other/node": {"pubs": [{"topic": "/tf", "type": "tf2_msgs/msg/TFMessage"}]}}})
+
+    def declare_app_namespace(self, namespace, *, keep_idle=False):
+        path = self.root / "services/app/rigging.yaml"
+        doc = yaml.safe_load(path.read_text())
+        doc["ros_namespace"] = namespace
+        path.write_text(yaml.safe_dump(doc))
+        if not keep_idle:
+            self.rows["autonomy"] = [r for r in self.rows["autonomy"] if r["name"] != "idle"]
+            self.vehicle()
+
+    def test_descriptor_namespace_associates_outputs_and_services_without_recipe(self):
+        self.namespace_graph()
+        self.declare_app_namespace("/robot/controller")
+        before = inventory_fingerprint(self.root)
+        plan = self.plan()
+        self.assertTrue(plan["ready_to_prepare"], plan["issues"])
+        self.assertEqual(plan["recorded_namespaces"], {"new": "/robot/controller"})
+        self.assertEqual(plan["recorded_namespace_sources"], {"new": "rigging.yaml"})
+        self.assertNotIn("/result", plan["playback"]["topics"])
+        self.assertIn("/robot/controller/input", plan["playback"]["topics"])
+        self.assertIn("/tf", plan["playback"]["topics"])
+        self.assertEqual(plan["playback"]["services"], [])  # Association does not enable calls.
+        recorded = self.plan(opts={"names": ["new"], "selection": "recorded"})
+        self.assertEqual(recorded["playback"]["services"], ["/control"])
+        self.assertEqual(before, inventory_fingerprint(self.root))
+
+    def test_recipe_namespace_overrides_current_service_for_historical_run(self):
+        self.namespace_graph()
+        self.declare_app_namespace("/changed/controller")
+        unmapped = self.plan()
+        self.assertIn("/result", unmapped["playback"]["topics"])
+        doc = {"version": 1, "instances": {"new": {"recorded_namespace": "/robot/controller"}}}
+        plan = self.plan(doc, opts={"names": ["new"], "selection": "recorded"})
+        self.assertTrue(plan["ready_to_prepare"], plan["issues"])
+        self.assertNotIn("/result", plan["playback"]["topics"])
+        self.assertEqual(plan["playback"]["services"], ["/control"])
+        self.assertEqual(plan["recorded_namespace_sources"], {"new": "recipe"})
+
+    def test_descriptor_namespace_template_uses_recorded_instance_identity(self):
+        self.namespace_graph()
+        self.declare_app_namespace("/robot/{name}", keep_idle=True)
+        doc = {"version": 1, "instances": {"new": {"recorded_as": "controller"}}}
+        plan = self.plan(doc, opts={"names": ["new"], "selection": "recorded"})
+        self.assertTrue(plan["ready_to_prepare"], plan["issues"])
+        self.assertEqual(plan["recorded_namespaces"], {"new": "/robot/controller", "idle": "/robot/idle"})
+        self.assertEqual(plan["playback"]["services"], ["/control"])
+        self.assertNotIn("/result", plan["playback"]["topics"])
+
+    def test_descriptor_namespace_skips_and_no_graph_input_preservation(self):
+        graph_path = self.namespace_graph()
+        self.declare_app_namespace("/robot/controller")
+        plan = self.plan(opts={"skip_services": ["app"]})
+        self.assertTrue(plan["ready_to_prepare"], plan["issues"])
+        self.assertNotIn("/result", plan["playback"]["topics"])
+        self.assertNotIn("/robot/controller/input", plan["playback"]["topics"])
+        self.assertIn("/tf", plan["playback"]["topics"])
+        graph_path.unlink()
+        plan = self.plan()
+        self.assertTrue(plan["ready_to_prepare"], plan["issues"])
+        self.assertIn("/robot/controller/input", plan["playback"]["topics"])
+        self.assertIn("/result", plan["playback"]["topics"])
+        self.assertEqual(plan["playback"]["services"], [])
+
+    def test_descriptor_fixed_namespace_cannot_claim_two_instances(self):
+        self.namespace_graph()
+        self.declare_app_namespace("/robot/controller", keep_idle=True)
+        plan = self.plan(opts={"names": ["new"], "selection": "recorded"})
+        self.assertFalse(plan["ready_to_prepare"])
+        self.assertEqual(plan["playback"]["services"], [])
+        self.assertTrue(any(i["code"] == "namespace_mapping" and "multiple recorded owners" in i["message"]
+                            for i in plan["issues"]))
+        doc = {"version": 1, "instances": {"idle": {"recorded_namespace": "/robot/idle"}}}
+        self.assertTrue(self.plan(doc)["ready_to_prepare"])
+
+    def test_descriptor_namespace_expansion_error_is_reported_by_check(self):
+        self.declare_app_namespace("/robot/{name}")
+        doc = {"version": 1, "instances": {"new": {"recorded_as": "legacy-name"}}}
+        plan = self.plan(doc)
+        self.assertFalse(plan["ready_to_prepare"])
+        self.assertTrue(any(i["code"] == "namespace_mapping" for i in plan["issues"]))
+        doc["instances"]["new"]["recorded_namespace"] = "/robot/valid_name"
+        self.assertTrue(self.plan(doc)["ready_to_prepare"])
+
+    def test_descriptor_namespace_survives_prepare_and_recipe_reuse(self):
+        self.namespace_graph()
+        self.declare_app_namespace("/robot/controller")
+        with self.image_label_runtime({}):
+            for verb in ("prepare", "check"):
+                with contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()):
+                    rc = command(self.args(verb, str(self.source), "new", "--recipe", "declared-namespace",
+                                           "--selection", "recorded", "--json"), self.root)
+                plan = json.loads(out.getvalue())
+                self.assertEqual(rc, 0, plan["issues"])
+                self.assertEqual(plan["playback"]["services"], ["/control"])
+                self.assertNotIn("/result", plan["playback"]["topics"])
+                self.assertEqual(plan["recorded_namespace_sources"], {"new": "rigging.yaml"})
+        saved = yaml.safe_load((self.root / "replay/declared-namespace.yaml").read_text())
+        self.assertNotIn("instances", saved)
+
+    def test_recorded_namespace_fixes_output_ownership_and_explicit_calls(self):
+        self.namespace_graph()
+        unmapped = self.plan()
+        self.assertIn("/result", unmapped["playback"]["topics"])
+        self.assertTrue(any(i["code"] == "unselected_service_events" for i in unmapped["issues"]))
+        doc = {"version": 1, "instances": {"new": {"recorded_namespace": "/robot/controller"}},
+               "playback": {"services": ["/control"]}}
+        recipe.validate(doc)
+        plan = self.plan(doc)
+        self.assertTrue(plan["ready_to_prepare"], plan["issues"])
+        self.assertEqual(plan["recorded_namespaces"], {"new": "/robot/controller"})
+        self.assertNotIn("/result", plan["playback"]["topics"])
+        self.assertIn("/robot/controller/input", plan["playback"]["topics"])
+        self.assertIn("/tf", plan["playback"]["topics"])
+        self.assertEqual(plan["playback"]["services"], ["/control"])
+        self.assertFalse(any(i["code"] == "unselected_service_events" for i in plan["issues"]))
+        from rig_cli.replay_workflow import report
+        with contextlib.redirect_stderr(io.StringIO()) as out:
+            report(plan)
+        self.assertIn("recorded ROS namespace new: /robot/controller", out.getvalue())
+        self.assertIn("service calls: /control", out.getvalue())
+        self.assertIn("omit regenerated outputs: /result", out.getvalue())
+        doc["playback"]["keep"] = ["/result"]
+        self.assertIn("/result", self.plan(doc)["playback"]["topics"])
+
+    def test_recorded_namespace_applies_to_recorded_selection_and_fallback(self):
+        doc = {"version": 1, "instances": {"new": {
+            "recorded_as": "old_driver", "recorded_namespace": "/robot/controller"}}}
+        for subscribes in (True, False):
+            with self.subTest(subscribes=subscribes):
+                self.namespace_graph(subscribes=subscribes)
+                plan = self.plan(doc, opts={"names": ["new"], "selection": "recorded"})
+                self.assertTrue(plan["ready_to_prepare"], plan["issues"])
+                self.assertEqual(plan["playback"]["services"], ["/control"])
+                # Status is remapped outside the node namespace. Graph ownership must
+                # suppress it even when recorded input selection falls back to a regex.
+                self.assertNotIn("/result", plan["playback"]["topics"])
+
+    def test_namespace_only_does_not_guess_outputs_or_enable_service_calls(self):
+        self.bag(self.source / "bags/logger/session-1", topic="/robot/controller/input")
+        for identity in ({}, {"recorded_as": "old_driver"}):
+            doc = {"version": 1, "instances": {"new": {
+                **identity, "recorded_namespace": "/robot/controller"}}}
+            plan = self.plan(doc)
+            self.assertIn("/robot/controller/input", plan["playback"]["topics"])
+            self.assertIn("/result", plan["playback"]["topics"])
+            self.assertEqual(plan["playback"]["services"], [])
+            self.assertTrue(any(i["code"] == "unselected_service_events" for i in plan["issues"]))
+            doc["playback"] = {"exclude": ["/result"], "services": ["/control"]}
+            explicit = self.plan(doc)
+            self.assertNotIn("/result", explicit["playback"]["topics"])
+            self.assertEqual(explicit["playback"]["services"], ["/control"])
+
+    def test_namespace_ambiguity_does_not_claim_an_inactive_instances_calls(self):
+        self.write_source("graph/logger/epoch_20260101T000000Z.yaml", {
+            "schema": 1, "nodes": {"/idle/server": {
+                "pubs": [{"topic": "/result", "type": "std_msgs/msg/String"}],
+                "provides": [{"service": "/control", "type": "std_srvs/srv/Trigger"}]}}})
+        doc = {"version": 1, "instances": {"new": {"recorded_namespace": "/idle"}}}
+        plan = self.plan(doc, opts={"names": ["new"], "selection": "recorded"})
+        self.assertEqual(plan["playback"]["services"], [])
+        self.assertIn("/result", plan["playback"]["topics"])
+        self.assertTrue(any("unambiguous" in i["message"] for i in plan["issues"]))
+
+    def test_namespace_parent_does_not_own_an_inactive_nested_instance(self):
+        path = self.namespace_graph()
+        graph_doc = yaml.safe_load(path.read_text())
+        graph_doc["nodes"]["/robot/root"] = {
+            "subs": [{"topic": "/result", "type": "std_msgs/msg/String"}]}
+        path.write_text(yaml.safe_dump(graph_doc))
+        doc = {"version": 1, "instances": {
+            "new": {"recorded_namespace": "/robot"},
+            "idle": {"recorded_namespace": "/robot/controller"}}}
+        plan = self.plan(doc, opts={"names": ["new"], "selection": "recorded"})
+        self.assertEqual(plan["playback"]["services"], [])
+        self.assertIn("/result", plan["playback"]["topics"])
+
+    def test_skips_use_recorded_namespace_and_preserve_shared_data(self):
+        self.namespace_graph()
+        doc = {"version": 1, "instances": {"new": {
+            "recorded_as": "old_driver", "recorded_namespace": "/robot/controller"}},
+            "playback": {"keep": ["/result", "/robot/controller/input", "/tf"]}}
+        for opts in ({"skip_services": ["app"]}, {"skip_instances": ["new"]}):
+            plan = self.plan(doc, opts=opts)
+            self.assertTrue(plan["ready_to_prepare"], plan["issues"])
+            self.assertNotIn("/result", plan["playback"]["topics"])
+            self.assertNotIn("/robot/controller/input", plan["playback"]["topics"])
+            self.assertIn("/tf", plan["playback"]["topics"])
+
+    def test_recorded_namespace_does_not_change_recording_identity(self):
+        self.proxy_camera()
+        self.recording("old_cam")
+        doc = {"version": 1, "instances": {"cam": {
+            "recorded_as": "old_cam", "recorded_namespace": "/robot/front_camera"}}}
+        plan = self.plan(doc, opts={"names": ["cam"]})
+        self.assertTrue(plan["ready_to_prepare"], plan["issues"])
+        self.assertEqual(plan["recordings"]["cam"]["path"], str((self.source / "recordings/old_cam").resolve()))
+
+    def test_recorded_namespace_validation_and_ambiguous_ownership(self):
+        for namespace in (None, "", "/", "relative", "/trailing/", "/double//slash", "/wild/*", "/bad-name", 3):
+            with self.subTest(namespace=namespace), self.assertRaises(RigError):
+                recipe.validate({"version": 1, "instances": {"new": {"recorded_namespace": namespace}}})
+        for instances in (
+                {"new": {"recorded_namespace": "/same"}, "idle": {"recorded_namespace": "/same"}},
+                {"new": {"recorded_as": "old", "recorded_namespace": "/one"},
+                 "idle": {"recorded_as": "old", "recorded_namespace": "/two"}}):
+            with self.assertRaises(RigError):
+                recipe.validate({"version": 1, "instances": instances})
+        recipe.validate({"version": 1, "instances": {
+            "new": {"recorded_namespace": "/parent"}, "idle": {"recorded_namespace": "/parent/child"}}})
 
     def test_standalone_prepare_idempotence_and_edit_protection(self):
         raw = Path(self.tmp.name) / "raw"
@@ -450,6 +740,489 @@ class Preparation(unittest.TestCase):
             self.assertIn("prepare", result)
         words = prefix + ["run", "replay", "check", "--recipe", ""]
         self.assertIn("demo", candidates(words, len(words) - 1))
+
+    def proxy_camera(self):
+        path = self.root / "services/camera/rigging.yaml"
+        doc = yaml.safe_load(path.read_text())
+        doc["replay"]["source"].update(binding="direct", overrides={"replay": {
+            "path": "{{replay_input_path}}", "sessions": "{{replay_input_sessions}}",
+            "run": None, "proxy": "{{replay_input_proxy}}"}})
+        doc["export"] = dict(data="recordings/{name}", modes=["service"],
+                             command=["tools/export-recordings"], default_profile="h264",
+                             profiles={"h264": "export-profiles/h264.yaml"})
+        helper = self.root / "services/camera/tools/export-recordings"
+        helper.parent.mkdir(parents=True, exist_ok=True)
+        helper.write_text("#!/bin/sh\nexit 0\n")
+        helper.chmod(0o755)
+        self.write("services/camera/export-profiles/h264.yaml", {
+            "version": 1, "id": "h264", "revision": 1, "format": "camera-recording-proxy/v1", "lossy": True})
+        path.write_text(yaml.safe_dump(doc))
+
+    def recording(self, name="cam", session="overlap", start=101):
+        rec = self.source / "recordings" / name
+        rec.mkdir(parents=True, exist_ok=True)
+        (rec / (session + ".json")).write_text(json.dumps(dict(pixel_format="Mono8", width=2, height=2)))
+        (rec / (session + ".csv")).write_text(f"timestamp_ns,system_ns\n{start*10**9},{start*10**9}\n")
+        (rec / (session + "-00000.mkv")).write_bytes(b"video")
+        return rec
+
+    @contextlib.contextmanager
+    def proxy_resolver(self):
+        """Isolate replay's selection contract; service-export tests validate actual artifacts."""
+        import shutil
+        from unittest.mock import Mock
+        def resolve(root, binding, *, service, profile=None, export_id=None, descriptor=None):
+            export = Path(root) / "exports/services" / service / (profile or "h264") / (export_id or "generation-a")
+            rec = export / "recordings" / binding["recorded_as"]
+            if not rec.is_dir():
+                raise RigError("Missing proxy; run rig run export RUN --service camera")
+            return {**binding, "path": str(rec), "original": dict(binding),
+                    "files": [str(rec / Path(p).name) for p in binding["files"]],
+                    "fingerprint": inventory_fingerprint(rec), "proxy": {
+                        "export_id": export.name, "profile": profile or "h264", "profile_hash": "profile-a",
+                        "manifest": str(export / "export.yaml"), "lossy": True}}
+        def make(name="cam", export_id="generation-a"):
+            export = self.source / "exports/services/camera/h264" / export_id
+            rec = export / "recordings" / name
+            rec.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(self.source / "recordings" / name, rec)
+            (export / "export.yaml").write_text("version: 1\ncomplete: true\n")
+            return export
+        resolver = Mock(side_effect=resolve)
+        with patch.dict(sys.modules, {"rig_cli.service_exports": SimpleNamespace(resolve_proxy_binding=resolver)}):
+            yield make, resolver
+
+    def test_direct_binding_alias_and_exact_sessions_do_not_copy_bag(self):
+        self.proxy_camera()
+        rec = self.recording("old_cam")
+        self.recording("old_cam", "early", 1)
+        self.write("cam.yaml", dict(name="cam", service="camera", replay={
+            "run": "standalone-selector", "sessions": ["old-session"],
+            "proxy": {"export_id": "stale-export"}}))
+        doc = {"version": 1, "instances": {"cam": {"recorded_as": "old_cam"}}}
+        plan = self.plan(doc, opts={"names": ["cam"]})
+        self.assertEqual(plan["configs"]["cam"]["replay"]["path"], str(rec.resolve()))
+        self.assertEqual(plan["configs"]["cam"]["replay"]["sessions"], ["overlap"])
+        self.assertNotIn("run", plan["configs"]["cam"]["replay"])
+        self.assertNotIn("proxy", plan["configs"]["cam"]["replay"])
+        self.assertFalse(plan["needs_preparation"])
+        path = self.write("replay/direct.yaml", doc)
+        m, _, d = load_context(self.root)
+        self.assertEqual(prepare.create(self.root, path, doc, plan, m, d), self.source.resolve())
+        self.assertFalse((prepare.location(self.root, path, self.source) / "source").exists())
+
+    def test_proxy_opt_in_preferences_and_explicit_original(self):
+        self.proxy_camera()
+        self.recording()
+        doc = {"version": 1, "proxies": {"services": {"camera": {"profile": "h264"}},
+                                       "instances": {"cam": {"export": "generation-a"}}}}
+        with self.proxy_resolver() as (make, resolver):
+            artifact = make()
+            original = self.plan(doc, opts={"names": ["cam"]})
+            resolver.assert_not_called()
+            self.assertNotIn("proxy", original["recordings"]["cam"])
+            proxy = self.plan(doc, opts={"names": ["cam"], "use_proxies": True})
+            self.assertTrue(proxy["ready_to_prepare"], proxy["issues"])
+            self.assertEqual(proxy["configs"]["cam"]["replay"]["path"], str((artifact / "recordings/cam").resolve()))
+            self.assertEqual(proxy["recordings"]["cam"]["proxy"]["export_id"], "generation-a")
+            doc["proxies"]["instances"]["cam"] = {"use": "original"}
+            resolver.reset_mock()
+            original = self.plan(doc, opts={"names": ["cam"], "use_proxies": True})
+            resolver.assert_not_called()
+            self.assertNotIn("proxy", original["recordings"]["cam"])
+
+    def test_missing_proxies_error_but_live_and_skipped_instances_ignore_them(self):
+        self.proxy_camera()
+        self.recording()
+        with self.proxy_resolver() as (_, resolver):
+            plan = self.plan(opts={"names": ["cam"], "use_proxies": True})
+            self.assertFalse(plan["ready_to_prepare"])
+            self.assertTrue(any("rig run export" in i["message"] for i in plan["issues"]))
+            resolver.reset_mock()
+            self.assertTrue(self.plan(opts={"live": ["cam"], "use_proxies": True})["ready_to_prepare"])
+            self.assertTrue(self.plan(opts={"use_proxies": True})["ready_to_prepare"])
+            resolver.assert_not_called()
+
+    def test_old_reader_cannot_use_proxy_even_with_profile_declared(self):
+        self.proxy_camera()
+        self.recording()
+        path = self.root / "services/camera/rigging.yaml"
+        doc = yaml.safe_load(path.read_text())
+        del doc["replay"]["source"]["binding"]
+        path.write_text(yaml.safe_dump(doc))
+        plan = self.plan(opts={"names": ["cam"], "use_proxies": True})
+        self.assertFalse(plan["ready_to_prepare"])
+        self.assertTrue(any("binding: direct" in i["message"] for i in plan["issues"]))
+
+    def test_original_preparation_ignores_root_exports_but_not_nested_data(self):
+        doc = {"version": 1}
+        path = self.write("replay/original.yaml", doc)
+        plan = self.plan(doc)
+        m, _, d = load_context(self.root)
+        prepare.create(self.root, path, doc, plan, m, d)
+        before = source_fingerprint(self.source)
+        self.write_source("exports/services/camera/h264/unused/export.yaml", {"version": 1})
+        self.assertEqual(source_fingerprint(self.source), before)
+        self.assertEqual(prepare.prepared(self.root, path, doc, self.source), self.source.resolve())
+        self.write_source("recordings/exports/capture.yaml", {"source": "real data"})
+        self.assertNotEqual(source_fingerprint(self.source), before)
+        self.assertIsNone(prepare.prepared(self.root, path, doc, self.source))
+
+    def test_proxy_prepare_isolated_from_originals_and_preserves_exact_pin(self):
+        self.proxy_camera()
+        self.recording()
+        doc = {"version": 1, "source": str(self.source)}
+        path = self.write("replay/proxy.yaml", doc)
+        m, _, d = load_context(self.root)
+        with self.proxy_resolver() as (make, resolver):
+            artifact = make()
+            plan = self.plan(doc, opts={"names": ["cam"], "use_proxies": True})
+            self.assertFalse(plan["needs_preparation"])
+            self.assertEqual(prepare.create(self.root, path, doc, plan, m, d), self.source.resolve())
+            proxy_location = prepare.location(self.root, path, self.source, use_proxies=True)
+            self.assertFalse((proxy_location / "source").exists())
+            self.assertIsNone(prepare.prepared(self.root, path, doc, self.source))
+            originals = self.plan(doc, opts={"names": ["cam"]})
+            prepare.create(self.root, path, doc, originals, m, d)
+            self.assertNotEqual(prepare.location(self.root, path, self.source), proxy_location)
+            self.assertEqual(prepare.prepared(self.root, path, doc, self.source), self.source.resolve())
+            self.assertEqual(prepare.prepared(self.root, path, doc, self.source, use_proxies=True), self.source.resolve())
+            make(export_id="generation-b")
+            pins = prepare.proxy_pins(self.root, path, doc, self.source)
+            checked = self.plan(doc, opts={"names": ["cam"], "use_proxies": True, "_prepared_proxies": pins})
+            self.assertEqual(checked["recordings"]["cam"]["proxy"]["export_id"], "generation-a")
+            __import__("shutil").rmtree(artifact)
+            checked = self.plan(doc, opts={"names": ["cam"], "use_proxies": True,
+                                           "_prepared_proxies": prepare.proxy_pins(self.root, path, doc, self.source)})
+            self.assertFalse(checked["ready_to_prepare"])
+            self.assertEqual(resolver.call_args.kwargs["export_id"], "generation-a")
+
+    def test_selected_proxy_manifest_change_invalidates_preparation(self):
+        self.proxy_camera()
+        self.recording()
+        doc = {"version": 1}
+        path = self.write("replay/proxy.yaml", doc)
+        m, _, d = load_context(self.root)
+        with self.proxy_resolver() as (make, _):
+            artifact = make()
+            plan = self.plan(doc, opts={"names": ["cam"], "use_proxies": True})
+            prepare.create(self.root, path, doc, plan, m, d)
+            (artifact / "export.yaml").write_text("version: 1\ncomplete: false\n")
+            self.assertIsNone(prepare.prepared(self.root, path, doc, self.source, use_proxies=True))
+            from rig_cli.replay_sources import verify_binding
+            with self.assertRaisesRegex(RigError, "proxy manifest changed"):
+                verify_binding(plan["recordings"]["cam"])
+
+    def test_proxy_recipe_validation_and_prevent_opt_in_bypass(self):
+        good = {"version": 1, "proxies": {"services": {"camera": {"profile": "h264"}},
+                                        "instances": {"cam": {"use": "original"}}}}
+        self.assertEqual(recipe.validate(good), good)
+        for bad in ({"instances": {"cam": {"use": "proxy"}}},
+                    {"instances": {"cam": {"use": "original", "export": "x"}}},
+                    {"instances": {"cam": {"export": "../x"}}},
+                    {"services": {"camera": {"profile": ""}}}, {"enabled": True}):
+            with self.assertRaises(RigError):
+                recipe.validate({"version": 1, "proxies": bad})
+        self.assertFalse(self.plan({"version": 1, "proxies": {
+            "instances": {"missing": {"use": "original"}}}})["ready_to_prepare"])
+        self.proxy_camera()
+        self.recording()
+        with self.proxy_resolver() as (make, _):
+            artifact = make()
+            for enabled in (False, True):
+                plan = self.plan({"version": 1, "recordings": {"cam": {
+                    "from": str(artifact / "recordings/cam")}}}, opts={"names": ["cam"], "use_proxies": enabled})
+                self.assertFalse(plan["ready_to_prepare"])
+                self.assertTrue(any("recordings.from" in i["message"] for i in plan["issues"]))
+
+    def test_direct_camera_mounts_stay_independent_of_legacy_bag_repair(self):
+        self.proxy_camera()
+        self.recording()
+        (self.source / "bags/logger/session-1/metadata.yaml").unlink()
+        doc = {"version": 1}
+        path = self.write("replay/legacy-proxy.yaml", doc)
+        m, _, d = load_context(self.root)
+        with self.proxy_resolver() as (make, _):
+            make()
+            plan = self.plan(doc, opts={"names": ["cam"], "use_proxies": True})
+            def reindex(argv, **kwargs):
+                self.bag(Path(argv[-1]))
+                return __import__("subprocess").CompletedProcess(argv, 0, "", "")
+            with patch("rig_cli.replay_prepare.subprocess.run", side_effect=reindex):
+                runtime = prepare.create(self.root, path, doc, plan, m, d)
+            self.assertTrue((runtime / "bags/logger/session-1/metadata.yaml").is_file())
+            self.assertFalse((runtime / "recordings").exists())
+            checked = self.plan(doc, opts={"names": ["cam"], "use_proxies": True, "_prepared_source": str(runtime)})
+            self.assertEqual(checked["configs"]["cam"]["replay"]["path"], plan["recordings"]["cam"]["path"])
+
+    def test_execution_uses_same_direct_bindings_and_records_proxy_mode(self):
+        from rig_cli.replay_workflow import execute
+        self.proxy_camera()
+        self.recording()
+        m, _, d = load_context(self.root)
+        m.data_dir = str(self.root / "data")
+        with self.proxy_resolver() as (make, _):
+            make()
+            plan = self.plan(opts={"names": ["cam"], "use_proxies": True})
+            def launch(pairs, env, verb, **kwargs):
+                camera = next(row for row, _ in pairs if row.name == "cam")
+                config = yaml.safe_load(camera.config.read_text())
+                self.assertEqual(config["replay"], plan["configs"]["cam"]["replay"])
+                self.assertEqual(json.loads(Path(env["RIG_REPLAY_PLAN"]).read_text())["source"], str(self.source))
+                return []
+            with patch("rig_cli.replay._guard_clean_host"), patch("rig_cli.runs.new_run", return_value="proxy-run") as new_run, \
+                    patch("rig_cli.runs.snapshot"), patch("rig_cli.dispatch.run_verb", side_effect=launch):
+                self.assertEqual(execute(self.args(str(self.source), "cam"), self.root, m, d, plan, self.source), 0)
+                provenance = new_run.call_args.kwargs["replay"]
+                self.assertTrue(provenance["use_proxies"])
+                self.assertEqual(provenance["sources"]["cam"]["proxy"]["export_id"], "generation-a")
+
+    def proxy_artifact(self, name="cam", *, variation="default"):
+        """Publish a genuine service-export contract fixture without running a converter."""
+        from rig_cli import service_exports
+        import shutil
+        _, _, descriptors = load_context(self.root)
+        profile = service_exports.profile_for(descriptors["camera"])
+        source = self.source / "recordings" / name
+        base = self.source / "exports/services/camera/h264"
+        stage = base / (".fixture-" + variation)
+        recording = stage / "recordings" / name
+        recording.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(source, recording)
+        sessions = []
+        for header in sorted(source.glob("*.json")):
+            prefix = header.stem
+            produced = recording / header.name
+            value = json.loads(produced.read_text())
+            value["proxy"] = {"version": 1, "format": "camera-recording-proxy/v1", "lossy": True}
+            produced.write_text(json.dumps(value))
+            (recording / (prefix + "-00000.mkv")).write_bytes(("h264-" + variation).encode())
+            paths = [header.name, prefix + ".csv", prefix + "-00000.mkv"]
+            def entries(root):
+                return [dict(path=f"recordings/{name}/{p}", size=(root / p).stat().st_size,
+                             sha256=service_exports.file_sha256(root / p)) for p in paths]
+            sessions.append(dict(id=prefix, source_files=entries(source), files=entries(recording)))
+        manifest = dict(version=1, kind="rig-service-export", complete=True, service="camera",
+                        profile=profile, validation={"ok": True},
+                        recordings=[dict(name=name, source_path=f"recordings/{name}",
+                                         path=f"recordings/{name}", sessions=sessions)])
+        manifest["export_id"] = service_exports.digest(manifest)
+        (stage / "export.yaml").write_text(yaml.safe_dump(manifest))
+        final = base / manifest["export_id"]
+        stage.rename(final)
+        return final
+
+    def test_real_artifact_alias_window_selection_and_relocated_run(self):
+        import shutil
+        self.proxy_camera()
+        self.recording("old_cam", "early", 101)
+        self.recording("old_cam", "late", 109)
+        artifact = self.proxy_artifact("old_cam")
+        doc = {"version": 1, "instances": {"cam": {"recorded_as": "old_cam"}}}
+        opts = {"names": ["cam"], "use_proxies": True, "window_from": 5}
+        plan = self.plan(doc, opts=opts)
+        self.assertTrue(plan["ready_to_prepare"], plan["issues"])
+        self.assertEqual(plan["recordings"]["cam"]["sessions"], ["late"])
+        self.assertEqual(plan["configs"]["cam"]["replay"]["path"], str((artifact / "recordings/old_cam").resolve()))
+        moved = Path(self.tmp.name) / "copied-run"
+        shutil.copytree(self.source, moved)
+        relocated = self.plan(doc, opts=opts, ref=moved)
+        self.assertTrue(relocated["ready_to_prepare"], relocated["issues"])
+        self.assertEqual(relocated["recordings"]["cam"]["proxy"]["export_id"], artifact.name)
+        self.assertTrue(Path(relocated["configs"]["cam"]["replay"]["path"]).is_relative_to(moved.resolve()))
+
+    def test_real_artifacts_require_pin_when_ambiguous_and_reject_corruption(self):
+        self.proxy_camera()
+        self.recording()
+        first = self.proxy_artifact()
+        second = self.proxy_artifact(variation="second")
+        opts = {"names": ["cam"], "use_proxies": True}
+        ambiguous = self.plan(opts=opts)
+        self.assertFalse(ambiguous["ready_to_prepare"])
+        self.assertTrue(any("multiple compatible" in i["message"] for i in ambiguous["issues"]))
+        doc = {"version": 1, "proxies": {"instances": {"cam": {"export": first.name}}}}
+        selected = self.plan(doc, opts=opts)
+        self.assertTrue(selected["ready_to_prepare"], selected["issues"])
+        self.assertEqual(selected["recordings"]["cam"]["proxy"]["export_id"], first.name)
+        (first / "recordings/cam/overlap-00000.mkv").write_bytes(b"corrupted media")
+        broken = self.plan(doc, opts=opts)
+        self.assertFalse(broken["ready_to_prepare"])
+        self.assertTrue(any(first.name in i["message"] for i in broken["issues"]))
+        # Another valid export never overrides the requested pin.
+        self.assertTrue(second.is_dir())
+        doc["proxies"]["instances"]["cam"]["export"] = second.name
+        self.assertTrue(self.plan(doc, opts=opts)["ready_to_prepare"])
+        (self.source / "recordings/cam/overlap-00000.mkv").write_bytes(b"changed source")
+        self.assertFalse(self.plan(doc, opts=opts)["ready_to_prepare"])
+
+    def test_proxy_sidecars_outside_artifact_cannot_bypass_opt_in(self):
+        self.proxy_camera()
+        rec = self.recording()
+        header = rec / "overlap.json"
+        value = json.loads(header.read_text())
+        value["proxy"] = {"version": 1, "format": "camera-recording-proxy/v1", "lossy": True}
+        header.write_text(json.dumps(value))
+        plan = self.plan(opts={"names": ["cam"]})
+        self.assertFalse(plan["ready_to_prepare"])
+        self.assertTrue(any("derived proxy" in i["message"] for i in plan["issues"]))
+
+    def test_command_opt_in_never_leaks_from_proxy_preparation(self):
+        self.proxy_camera()
+        self.recording()
+        artifact = self.proxy_artifact()
+        self.write("replay/cli-proxy.yaml", {"version": 1, "source": str(self.source)})
+        with patch("rig_cli.image_catalog.docker_arch", side_effect=RigError("offline")), \
+                patch("rig_cli.replay._guard_clean_host"):
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                command(self.args("prepare", str(self.source), "cam", "--recipe", "cli-proxy",
+                                  "--use-proxies", "--json"), self.root)
+            prepared_plan = json.loads(out.getvalue())
+            self.assertTrue(prepared_plan["use_proxies"])
+            self.assertEqual(prepared_plan["recordings"]["cam"]["proxy"]["export_id"], artifact.name)
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                command(self.args("check", str(self.source), "cam", "--recipe", "cli-proxy", "--json"), self.root)
+            original_plan = json.loads(out.getvalue())
+            self.assertFalse(original_plan["use_proxies"])
+            self.assertNotIn("proxy", original_plan["recordings"]["cam"])
+            self.assertEqual(original_plan["configs"]["cam"]["replay"]["path"],
+                             str((self.source / "recordings/cam").resolve()))
+            # A later export does not change the generation selected by preparation.
+            self.proxy_artifact(variation="newer")
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                command(self.args("check", str(self.source), "cam", "--recipe", "cli-proxy",
+                                  "--use-proxies", "--json"), self.root)
+            checked = json.loads(out.getvalue())
+            self.assertTrue(checked["ready_to_prepare"], checked["issues"])
+            self.assertEqual(checked["recordings"]["cam"]["proxy"]["export_id"], artifact.name)
+
+    def test_recovered_index_survives_direct_proxy_session_narrowing(self):
+        self.proxy_camera()
+        self.recording("cam", "outside", 1)
+        self.recording("cam", "first", 101)
+        self.recording("cam", "last", 109)
+        artifact = self.proxy_artifact()
+        (self.source / "bags/logger/session-1/metadata.yaml").unlink()
+        doc = {"version": 1, "source": str(self.source)}
+        path = self.write("replay/legacy-direct.yaml", doc)
+        original_run = __import__("subprocess").run
+        def process(argv, **kwargs):
+            if "replay-reindex" in argv:
+                self.bag(Path(argv[-1]))
+                return __import__("subprocess").CompletedProcess(argv, 0, "", "")
+            return original_run(argv, **kwargs)
+        base = [str(self.source), "cam", "--recipe", "legacy-direct", "--use-proxies", "--json"]
+        with patch("rig_cli.image_catalog.docker_arch", side_effect=RigError("offline")), \
+                patch("rig_cli.replay._guard_clean_host"), \
+                patch("rig_cli.replay_prepare.subprocess.run", side_effect=process):
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                command(self.args("prepare", *base), self.root)
+            plan = json.loads(out.getvalue())
+            self.assertTrue(plan["ready_to_prepare"], plan["issues"])
+            self.assertEqual(plan["recordings"]["cam"]["sessions"], ["first", "last"])
+            runtime = prepare.prepared(self.root, path, doc, self.source, use_proxies=True)
+            self.assertNotEqual(runtime, self.source.resolve())
+            self.assertTrue((runtime / "bags/logger/session-1/metadata.yaml").exists())
+            self.assertFalse((runtime / "recordings").exists())
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                command(self.args("check", *base, "--from", "5"), self.root)
+            changed = json.loads(out.getvalue())
+            self.assertTrue(changed["source"]["bag"]["repair"])
+            self.assertTrue(changed["needs_preparation"])
+            self.assertNotIn("runtime_root", changed["source"])
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                command(self.args("prepare", *base, "--from", "5"), self.root)
+            narrowed = json.loads(out.getvalue())
+            self.assertTrue(narrowed["ready_to_prepare"], narrowed["issues"])
+            self.assertEqual(narrowed["recordings"]["cam"]["sessions"], ["last"])
+            self.assertEqual(narrowed["recordings"]["cam"]["proxy"]["export_id"], artifact.name)
+            runtime = prepare.prepared(self.root, path, doc, self.source, use_proxies=True)
+            self.assertTrue((runtime / "bags/logger/session-1/metadata.yaml").exists())
+            self.assertFalse((self.source / "bags/logger/session-1/metadata.yaml").exists())
+
+    def reader_label_camera(self):
+        self.proxy_camera()
+        self.recording()
+        path = self.root / "services/camera/rigging.yaml"
+        desc = yaml.safe_load(path.read_text())
+        desc["build"].update(platforms=["dev", "hardware"], images=["cam-core", "cam-dev"],
+                             variants={"dev": {"images": ["cam-dev"], "architectures": ["arm64", "amd64"]},
+                                       "hardware": {"images": ["cam-core"], "architectures": ["arm64"]}})
+        desc["images"] = {"override_env": {"cam-dev": "CAM_DEV_IMAGE", "cam-core": "CAM_CORE_IMAGE"}}
+        desc["replay"]["source"]["image_labels"] = {
+            image: {"io.rig.camera.replay-bindings": "1"} for image in ("cam-core", "cam-dev")}
+        path.write_text(yaml.safe_dump(desc))
+        self.vehicle(platform="dev", images={"registry": "example.test", "tag": "v1"})
+
+    @contextlib.contextmanager
+    def image_label_runtime(self, labels):
+        original = __import__("subprocess").run
+        inspected = []
+        def process(argv, **kwargs):
+            if argv[:3] == ["docker", "image", "inspect"]:
+                if argv[-1] == "{{json .Config.Labels}}":
+                    inspected.append(argv[3])
+                    output = json.dumps(labels)
+                else:
+                    output = "linux/arm64"
+                return __import__("subprocess").CompletedProcess(argv, 0, output, "")
+            return original(argv, **kwargs)
+        with patch("rig_cli.image_catalog.docker_arch", return_value="arm64"), \
+                patch("rig_cli.replay._guard_clean_host"), \
+                patch("rig_cli.replay_plan.subprocess.run", side_effect=process):
+            yield inspected
+
+    def test_direct_reader_requires_runtime_label_for_originals_and_proxies(self):
+        self.reader_label_camera()
+        self.proxy_artifact()
+        m, c, d = load_context(self.root)
+        for proxies in (False, True):
+            opts = {"names": ["cam"], "use_proxies": proxies, "force": True}
+            with self.image_label_runtime({}) as inspected:
+                plan = planner.build(m, c, d, self.root, str(self.source), {"version": 1}, opts)
+            self.assertFalse(plan["ready_to_run"])
+            errors = [i for i in plan["issues"] if i["code"] == "recording_image_capability"]
+            self.assertEqual(len(errors), 1, plan["issues"])
+            self.assertEqual(errors[0]["status"], "error")
+            self.assertIn("upgrade/build/pull", errors[0]["message"])
+            self.assertEqual(inspected, ["example.test/cam-dev:v1-dev"])
+            with self.image_label_runtime({"io.rig.camera.replay-bindings": "1"}) as inspected:
+                plan = planner.build(m, c, d, self.root, str(self.source), {"version": 1}, opts)
+            self.assertTrue(plan["ready_to_run"], plan["issues"])
+            self.assertEqual(inspected, ["example.test/cam-dev:v1-dev"])
+
+    def test_direct_reader_label_checks_dispatch_override_and_catalog_pin(self):
+        self.reader_label_camera()
+        m, c, d = load_context(self.root)
+        m.extra_env["CAM_DEV_IMAGE"] = "other.test/custom-camera:old"
+        with self.image_label_runtime({}) as inspected:
+            plan = planner.build(m, c, d, self.root, str(self.source), {"version": 1}, {"names": ["cam"]})
+        self.assertFalse(plan["ready_to_run"])
+        self.assertEqual(inspected, ["other.test/custom-camera:old"])
+        m.extra_env.clear()
+        m.build_catalog = {"example.test/cam-dev:v1-dev": {
+            "image": "cam-dev", "digest": "sha256:" + "a" * 64, "architectures": ["arm64"]}}
+        pinned = "example.test/cam-dev@sha256:" + "a" * 64
+        with self.image_label_runtime({}) as inspected:
+            plan = planner.build(m, c, d, self.root, str(self.source), {"version": 1}, {"names": ["cam"]})
+        self.assertFalse(plan["ready_to_run"])
+        self.assertEqual(inspected, [pinned])
+        with self.image_label_runtime({"io.rig.camera.replay-bindings": "1"}) as inspected:
+            plan = planner.build(m, c, d, self.root, str(self.source), {"version": 1}, {"names": ["cam"]})
+        self.assertTrue(plan["ready_to_run"], plan["issues"])
+        self.assertEqual(inspected, [pinned])
+
+    def test_direct_reader_labels_ignore_live_skipped_and_legacy_bindings(self):
+        self.reader_label_camera()
+        m, c, d = load_context(self.root)
+        for opts in ({"live": ["cam"]}, {}):
+            with self.image_label_runtime({}) as inspected:
+                plan = planner.build(m, c, d, self.root, str(self.source), {"version": 1}, opts)
+            self.assertTrue(plan["ready_to_run"], plan["issues"])
+            self.assertEqual(inspected, [])
+        with self.image_label_runtime({}) as inspected:
+            result = planner.direct_image_capabilities(m, d, m.sensors, {"cam": {"direct": False}})
+        self.assertEqual(inspected, [])
+        self.assertEqual(result, {})
 
 
 if __name__ == "__main__":

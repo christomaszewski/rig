@@ -1,5 +1,9 @@
 # Portable builds and replay
 
+Command help includes target rules and examples: `rig image build -h`, `rig artifact bake -h`,
+`rig reconstruct -h`, and `rig provision -h`. `--platform` means a runtime variant; `--arch`
+means a Linux CPU architecture. Replay input preparation is documented by `rig replay prepare -h`.
+
 `rig build` builds every declared runtime variant and supported CPU architecture for the deployment's
 services, regardless of the build machine's provisioned platform. `platform: jp6m` and optional
 `arch: arm64` choose the deployment target. They do not narrow a release build. Services with only the legacy build contract
@@ -70,7 +74,10 @@ without architecture declarations can still bake without a CPU constraint.
 Combine scopes with commas or repeated `--scope`; Rig unions their image requirements and deduplicates
 shared builds. `--platform` and `--arch` still narrow the default full matrix. With explicit narrower
 scopes, they override only the `deployment` scope; host and replay resolve independently. `--dry-run`
-prints selected targets and build outputs. Full-matrix builds remain the release default.
+prints selected targets and build outputs. Using either override with narrower scopes requires
+including `deployment`; `all` cannot be combined with narrower scopes. The `replay` scope is a
+conservative build superset and does not inspect a particular run or recipe. Full-matrix builds
+remain the release default.
 
 Provision a developer machine once with `sudo rig provision --platform dev`. An optional
 `--arch amd64` asserts the expected Docker engine architecture; it does not enable cross compilation.
@@ -289,6 +296,18 @@ Hand-built deployments can use `rig replay check RUN` and
 `rig replay prepare RUN --recipe NAME`. See [Replay preparation](REPLAY.md) for local recipes,
 broad playback defaults, exact-session timing, and source-preserving legacy adapters.
 Recipe packaging with suites remains deferred.
+
+Camera-service defines a default `h264` profile for `rig run export RUN --service camera-service`.
+Its dedicated offline helper uses the service's native CPU image; install the updated launch
+surface and explicitly build/pull that image first. Outputs live under
+`RUN/exports/services/camera-service/h264/<export-id>/`, with only transformed recordings and
+their manifest. Existing originals and bags are preserved; no vehicle export profile is needed.
+Replay/check/prepare use these generations only with `--use-proxies` on that invocation. Exact
+camera paths and session lists bind directly, including renamed instances, while the bag retains
+its original or independently repaired path. A compatible current reader can reuse another
+machine's generation without the producer's deployment. See [Offline camera proxies](REPLAY.md#offline-camera-proxies)
+for lossiness, regeneration, pinning, and transfer semantics. H.264 still decodes to normal camera
+frames; this does not add hardware decoding or encoded WebRTC passthrough.
 
 Doodle's descriptor sets `replay.start: false`. When explicitly started, its launcher waits up to
 `DOODLE_CONNECT_TIMEOUT` (10 seconds by default) for reachability, then up to `DOODLE_SETTLE_TIMEOUT`

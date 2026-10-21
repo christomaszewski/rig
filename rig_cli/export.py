@@ -94,7 +94,7 @@ class Exporter:
     #                   renamed) the service's row exports on its behalf (RIG_EXPORT_NAME)
 
 
-def discover_exporters(manifest, descriptors, run_dir: Path) -> tuple[list[Exporter], list[str]]:
+def discover_exporters(manifest, descriptors, run_dir: Path, *, mode="whole-run") -> tuple[list[Exporter], list[str]]:
     """(exporters, notices). Data presence is the evidence, never the run's age or origin: a row
     whose rigging declares `export` claims its own data dir; any OTHER dir matching the service's
     pattern (`bags/{name}` -> bags/*) is exported by that service's first row under the dir's
@@ -108,7 +108,7 @@ def discover_exporters(manifest, descriptors, run_dir: Path) -> tuple[list[Expor
     by_service: dict[str, tuple[object, list]] = {}
     for row in manifest.sensors:
         es = getattr(descriptors.get(row.service), "export_source", None)
-        if es is not None:
+        if es is not None and mode in es.modes:
             by_service.setdefault(row.service, (es, []))[1].append(row)
     for service, (es, rows) in by_service.items():
         for row in rows:
@@ -259,7 +259,7 @@ def in_place(manifest, descriptors, run_id: str, run_dir: Path, *, profile: str 
     is the one that refuses without it (rig stays opaque about what a lossy option is). The run
     manifest records every rewrite (`rewrites:`), which is also the idempotency check."""
     run_dir = run_dir.resolve()  # an archived (linked) run rewrites where its bytes are
-    exporters, notices = discover_exporters(manifest, descriptors, run_dir)
+    exporters, notices = discover_exporters(manifest, descriptors, run_dir, mode="in-place")
     for n in notices:
         eprint(f"rig run export: {n}")
     if recipe.get("omit"):
@@ -347,6 +347,8 @@ def cmd(manifest, catalog, descriptors, root: Path, *, run_ref: str, profile: st
     if lossy:
         raise RigError("run export: --lossy only means something with --in-place (an export "
                        "copy never touches the run)")
+    if profile == "services":
+        raise RigError("run export: profile 'services' is reserved for service-only artifacts")
     recipe = profile_for(manifest, profile)
     omit = list(recipe.get("omit") or [])
     exporters, notices = discover_exporters(manifest, descriptors, run_dir)
