@@ -349,7 +349,7 @@ An export that drops target inputs cannot reproduce their behavior. In particula
 that omits `.mkv` files but keeps camera sidecars still needs `--skip-service camera-service`
 when replaying without video; source discovery sees a nonempty recordings directory.
 
-**Offline camera proxies.** With an updated camera-service bundle and its native CPU image,
+**Offline camera proxies.** With an updated camera-service bundle and a published native CPU image,
 create reusable H.264 proxies without copying bags or unchanged services:
 
 ```sh
@@ -367,6 +367,9 @@ new recordings, sidecars, and `export.yaml`. Originals remain untouched. Matchin
 are reused; `--force` creates again without removing previous exports. `--instance` refers to
 the original recorded name. Camera-service defines the profile; no vehicle-level `h264` or
 `laptop` export profile is required. Unsupported input formats fail preflight.
+For a new conversion, missing native images are pulled automatically using the selected
+reference/digest and host architecture. Dry runs and reuse never pull images. Registry access
+uses Docker's normal credentials; local-only images still need an explicit build.
 
 H.264 changes pixel values while retaining geometry and capture timing. Proxies aim to reduce
 decode cost, while normal WebRTC encoding still runs. Each replay/check/prepare command needs

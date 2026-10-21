@@ -123,6 +123,10 @@ _EPILOGS = {
   the run. --force regenerates without deleting older generations. Multiple
   compatible generations require an explicit export pin in the replay recipe.
   Profiles declare lossiness and supported inputs; unsupported inputs are errors.
+  For a new conversion, missing native images declared by an updated service
+  helper are pulled automatically at their exact reference/digest, then checked
+  again. Docker credentials apply. No builds or cached-image replacements occur.
+  --dry-run reports planned pulls without downloading; reuse needs no image pull.
   --in-place/--lossy cannot be combined with --service.
 
 Legacy whole-run exports:

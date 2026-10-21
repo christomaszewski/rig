@@ -169,8 +169,12 @@ rig replay --recipe field-test --use-proxies
 
 The service must be installed in `services.yaml`; its recorded instances need not be enabled or
 present in this deployment. The helper uses a local native CPU image, without starting the
-ordinary camera/ROS stack. Missing images require the usual explicit build/pull workflow.
-`--dry-run` reports inputs, reuse, destination, and missing dependencies. A writable source run
+ordinary camera/ROS stack. When conversion is needed, Rig pulls missing native images reported
+by an updated service helper, preserving the exact image reference or digest and selecting the
+host architecture. It rechecks dependencies before converting; it does not build or replace
+incompatible cached images. Registry authentication uses the usual Docker configuration.
+`--dry-run` reports inputs, reuse, destination, missing dependencies, and planned pulls without
+downloading images. Reusing an existing export also needs no pull. A writable source run
 and space for the conversion are required for generation. Source recordings and bags stay intact.
 
 H.264 proxies are lossy. They preserve frame count/order/IDs, capture timestamps, session gaps,

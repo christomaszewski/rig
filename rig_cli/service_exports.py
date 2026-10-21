@@ -5,6 +5,7 @@ Services own their conversion and profile definitions. Rig never interprets code
 from __future__ import annotations
 
 import copy
+from collections import deque
 import hashlib
 import json
 import os
@@ -293,6 +294,54 @@ def _result_records(result, request, root):
     return records
 
 
+def _missing_images(report, architecture):
+    """Structured, native image dependencies; never infer pull targets from error prose."""
+    images = report.get("missing_images", [])
+    if not isinstance(images, list):
+        raise RigError("service export: missing_images must be a list")
+    selected = []
+    for image in images:
+        if (not isinstance(image, dict) or set(image) != {"image", "platform"}
+                or not isinstance(image["image"], str)
+                or not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._/:@-]*", image["image"])
+                or architecture not in ("arm64", "amd64")
+                or image["platform"] != f"linux/{architecture}"):
+            raise RigError("service export: invalid native image dependency")
+        target = (image["image"], image["platform"])
+        if target not in selected:
+            selected.append(target)
+    return selected
+
+
+def _pull_images(images, env):
+    for image, platform in images:
+        eprint(f"rig run export: pulling {image} ({platform})")
+        command = ["docker", "pull", "--platform", platform, image]
+        lines = deque(maxlen=20)
+        try:
+            with subprocess.Popen(command, env=env, stdout=subprocess.PIPE,
+                                  stderr=subprocess.STDOUT, text=True) as process:
+                try:
+                    for line in process.stdout:
+                        eprint(line.rstrip())
+                        lines.append(line.rstrip())
+                    code = process.wait()
+                except KeyboardInterrupt:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait()
+                    raise
+        except OSError as exc:
+            raise RigError(f"service export: cannot pull {image} ({platform}): {exc}") from exc
+        if code:
+            detail = "\n".join(lines).strip()
+            raise RigError(f"service export: pull failed for {image} ({platform}, exit {code})"
+                           + (f":\n{detail}" if detail else ""))
+
+
 def cmd(manifest, catalog, descriptors, **options):
     try:
         return _cmd(manifest, catalog, descriptors, **options)
@@ -349,11 +398,33 @@ def _cmd(manifest, catalog, descriptors, *, run_ref, service, profile=None, inst
                 return 0
     destination = _inside(run_root, f"exports/services/{service}/{chosen['id']}")
     dependencies = report.get("missing_dependencies", [])
+    images = _missing_images(report, env["RIG_TARGET_ARCH"])
     if dry_run:
         eprint(f"rig run export: would create {destination}/<export-id>/")
+        for image, platform in images:
+            eprint(f"rig run export: would pull {image} ({platform})")
         for dependency in dependencies:
             eprint(f"rig run export: missing dependency: {dependency}")
         return 0
+    if images:
+        _pull_images(images, env)
+        refreshed = _helper(descriptor, request, env, preflight=True)
+        if _result_records(refreshed, request, run_root) != inspected:
+            raise RigError("service export: recording selection changed while pulling images; retry export")
+        _verify_files(run_root, inputs)
+        if (refreshed.get("producer", {}).get("implementation_sha256") !=
+                report.get("producer", {}).get("implementation_sha256")):
+            raise RigError("service export: converter changed while pulling images; retry export")
+        report = refreshed
+        dependencies = report.get("missing_dependencies", [])
+        remaining = _missing_images(report, env["RIG_TARGET_ARCH"])
+        if remaining:
+            raise RigError("service export: native images still unavailable after pull: "
+                           + ", ".join(image for image, _ in remaining))
+        # Include the inspected image ID in generation identity and the conversion lock.
+        request_hash = digest(dict(service=service, profile=chosen, inputs=inputs,
+                                   producer=report.get("producer", {}),
+                                   helper=file_sha256(descriptor.repo / descriptor.export_source.command[0])))
     if dependencies:
         raise RigError("service export: missing dependencies: " + "; ".join(map(str, dependencies)))
     destination.mkdir(parents=True, exist_ok=True)
