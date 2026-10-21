@@ -174,11 +174,22 @@ ordinary camera/ROS stack. Missing images require the usual explicit build/pull 
 and space for the conversion are required for generation. Source recordings and bags stay intact.
 
 H.264 proxies are lossy. They preserve frame count/order/IDs, capture timestamps, session gaps,
-geometry, and the logical camera format; pixel values change. The initial profile supports the
-viable 8-bit mono, Bayer, and color paths. Unsupported high-bit-depth data and invalid geometry
-fail preflight rather than being silently truncated or falling back to a different codec.
+and geometry; pixel values change. Camera-service's profile revision 2 keeps the existing
+8-bit mono, Bayer, and color conversions and adds `GRAY16_LE`, `GRAY16_BE`, and `Mono16`.
+These 16-bit mono inputs use WebRTC's auto normalization: a 1st–99th percentile contrast
+stretch with exponential smoothing (previous range weight 0.9), reset per recording session.
+Their proxy headers describe the actual `GRAY8` output, stored as I420 H.264, and provenance
+retains the original pixel format and bit depth. These are visual intensity previews, not
+thermal/radiometric counts; use originals for measurements or consumers requiring 16-bit data.
+Packed/high-bit-depth Bayer, other unsupported high-bit-depth formats, and invalid geometry
+still fail preflight. The supported 8-bit paths retain their logical camera format.
 Proxies target lower decoding cost; the normal consumer/WebRTC conversion and encoding still run.
 Measure representative footage before assuming a particular CPU or storage improvement.
+
+Update the installed camera-service checkout/bundle and its native images together before
+generating revision 2 proxies. The usual export command uses the new profile hash to create a
+new export identity; `--force` is not needed. Revision 1 generations remain on disk and can
+still be selected with an explicit recipe generation pin.
 
 Only transformed camera data and provenance are written:
 
