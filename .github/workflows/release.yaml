@@ -55,13 +55,17 @@ jobs:
         # backoff, and if an earlier attempt created the release but died mid-upload, fall through
         # to an idempotent asset (re)upload instead of failing on "already exists".
         run: |
+          notes=(--generate-notes)
+          if [ -f "docs/releases/${GITHUB_REF_NAME}.md" ]; then
+            notes=(--notes-file "docs/releases/${GITHUB_REF_NAME}.md")
+          fi
           for i in 1 2 3; do
             if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
               gh release upload "$GITHUB_REF_NAME" dist/*.whl dist/*.tar.gz build/deb/*.deb \
                 --clobber && exit 0
             else
               gh release create "$GITHUB_REF_NAME" --title "rig $GITHUB_REF_NAME" \
-                --generate-notes dist/*.whl dist/*.tar.gz build/deb/*.deb && exit 0
+                "${notes[@]}" dist/*.whl dist/*.tar.gz build/deb/*.deb && exit 0
             fi
             echo "release attempt $i failed — retrying in $((i * 20))s"
             sleep $((i * 20))

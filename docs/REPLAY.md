@@ -421,8 +421,8 @@ Compose model with pulling disabled. A tag changing after validation cannot chan
 that starts. Reports and `.rig/replay/resolved.yaml` retain the inventory and validated IDs.
 
 This requires updated launch surfaces: `verbs.runtime-images` must advertise the version-1
-inventory and enforce `RIG_RUNTIME_IMAGE_PINS` on launch. Camera-service, dashboard, and the infra
-player/logger/router implement this contract. Upgrade other replay-selected services before
+inventory and enforce `RIG_RUNTIME_IMAGE_PINS` on launch. Camera-service, dashboard, the infra
+player/logger/router, SBG, Ouster, Doodle, and NovAtel implement this contract. Upgrade selected services before
 using this Rig version; there is no fallback to guessed `build.images`. Updating Rig alone
 does not update a deployment's vendored service bundles.
 
@@ -438,6 +438,9 @@ rig swap ros2-bag-logger public/ros2-bag-logger@1.18.0
 rig swap zenoh-router public/zenoh-router@1.18.0
 rig swap camera-service public/camera-service@1.11.0
 # If installed: rig swap ros1-bag-logger public/ros1-bag-logger@1.18.0
+# If explicitly started during replay:
+# rig swap sbg public/sbg@0.9.1
+# rig swap ouster public/ouster@0.5.2
 # For locally routed dashboard code, point at its updated checkout:
 rig swap dashboard /path/to/dashboard
 ```
@@ -445,6 +448,10 @@ rig swap dashboard /path/to/dashboard
 Swap only installed services; names above are service keys, not instance names. Check local
 routes in `services.yaml` and registry pins in `rig.lock` before rebuilding. The dashboard
 launcher must include `runtime-images` support even if its Docker images were already built.
+For locally routed services, the first compatible commits are dashboard `c88b07f`,
+Doodle `45dae9d`, and NovAtel `8bc8172`; update the routed checkout or swap to a checkout
+containing that commit. Supporting image pins does not make a hardware driver a recording
+source: explicit live-start rules still apply.
 MAVLink router is outside this release's supported replay set; deployments using it must omit
 it from replay with `replay: {start: false}` or `--skip-service mavlink-router`.
 

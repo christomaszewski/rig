@@ -65,8 +65,12 @@ Local validation for this checkpoint: all 76 Rig test scripts passed; the isolat
 acquisition test passed; the wheel and sdist built and the installed wheel imports the new
 replay modules outside the source checkout. A replay-only base build and its apt message overlay
 each passed all seven native arm64 ROS tests, the capability checker, and the moved-tag launch
-check. The dashboard contract passed 16 cases. Native amd64 CI and final companion publication
-are release gates, not implied by these local results. MAVLink router is outside this checkpoint's
+check. The dashboard contract passed 16 cases. Native amd64/arm64 acquisition and infra replay
+CI have also passed. The installed Rig 0.2.71 wheel, released infra 1.18.0 archive, and published
+full messages overlay passed an isolated end-to-end replay: exactly two automatic service calls,
+recorded-output suppression, exclusive window cutoff, run capture/sealing, cleanup, unchanged
+source hashes, and a warm readiness check. Final companion publication remains a release gate.
+MAVLink router is outside this checkpoint's
 supported replay set; omit it explicitly in deployments that normally select it.
 
 ## 1 Agreed behavior
