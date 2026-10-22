@@ -7,6 +7,13 @@ runs:
       run: |
         sudo apt-get update
         sudo apt-get install -y bubblewrap libseccomp2
+        # Newer Ubuntu runners ship a working bwrap AppArmor attachment. Do not
+        # add another profile for the same executable: competing attachments can
+        # leave it under the restricted unprivileged-userns profile instead.
+        probe=(bwrap --die-with-parent --unshare-all --ro-bind / / --dev /dev --proc /proc -- /bin/true)
+        if "${probe[@]}"; then
+          exit 0
+        fi
         # Ubuntu 24.04 restricts unprivileged namespace capabilities unless
         # the executable has a userns profile. Keep the host-wide policy on.
         if [[ -f /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]] &&
@@ -20,3 +27,6 @@ runs:
         PROFILE
           sudo apparmor_parser -r /etc/apparmor.d/rig-ci-bwrap
         fi
+        # Fail at setup if namespace creation still does not work. The test suite
+        # separately verifies socket denial and read-only filesystem containment.
+        "${probe[@]}"
