@@ -5,13 +5,19 @@ import dataclasses
 import json
 import re
 import shlex
+import subprocess
 import time
 from pathlib import Path
 
 from . import RigError, dispatch, replay, resolve, runs
-from .common import eprint
+from .common import eprint, load_yaml
+from .manifest import project_name
 from . import replay_plan as planner, replay_prepare as prepare, replay_recipe as recipes
 from .replay_sources import source_path, source_fingerprint, binding_variables, verify_binding
+
+
+class _PreparationNotReady(Exception):
+    """Roll back unpublished preparation changes before reporting the detailed plan."""
 
 
 def report(plan, *, as_json=False):
@@ -31,8 +37,13 @@ def report(plan, *, as_json=False):
         eprint(f"  bag: {bag['logger']}/{bag['session']}; "
                f"{len(plan['playback'].get('topics', []))} data topics")
         eprint("  topics: " + (", ".join(plan["playback"].get("topics", [])) or "(clock-only timeline)"))
-        eprint("  service calls: " + (plan["playback"].get("calls") or
+        mode = plan.get("service_selection", {}).get("mode", "manual")
+        eprint(f"  service calls ({mode}, {plan['playback'].get('services_source', 'service')} origin): " + (plan["playback"].get("calls") or
                ", ".join(plan["playback"].get("services", [])) or "(none selected)"))
+        if mode == "auto":
+            for record in plan["service_selection"]["records"]:
+                if record["decision"] == "exclude":
+                    eprint(f"  omit recorded calls {record['service']}: {record['reason']}")
         regenerated = plan.get("excluded_regenerated", [])
         if regenerated:
             kept = set(plan.get("recipe", {}).get("playback", {}).get("keep", []))
@@ -83,6 +94,8 @@ def command(args, root):
 
 
 def _command(args, root):
+    from .service_exports import VerificationContext
+    verification = VerificationContext()
     action = args.cmd.removeprefix("replay-") if args.cmd != "replay" else "run"
     options = vars(args).copy()
     recipe_path, recipe = recipes.load(root, args.recipe, create=action == "prepare")
@@ -91,6 +104,7 @@ def _command(args, root):
         calls = Path(recipe["playback"]["calls"]).expanduser()
         options["calls"] = str(calls if calls.is_absolute() else recipe_path.parent / calls)
     manifest, catalog, descriptors = load_context(root)
+    eprint("rig replay: planning selection and verifying recorded inputs")
     ref = recipes.bound_source(root, recipe_path, recipe, args.run)
     origin = source_path(manifest, ref)
     if action == "prepare" and recipe_path is None:
@@ -103,19 +117,48 @@ def _command(args, root):
         options["_prepared_proxies"] = prepare.proxy_pins(root, recipe_path, recipe, origin)
     runtime = prepare.prepared(root, recipe_path, recipe, origin, use_proxies=use_proxies) if recipe_path else None
     options["_prepared_source"] = str(runtime) if runtime else None
-    plan = planner.build(manifest, catalog, descriptors, root, str(origin), recipe, options)
+    plan = planner.build(manifest, catalog, descriptors, root, str(origin), recipe, options,
+                         verification=verification)
     if runtime and prepare.location(root, recipe_path, origin, use_proxies=use_proxies).name != prepare.generation(plan):
         runtime = None  # Changed bindings/selections require a new immutable generation.
         # Rebuild without the old runtime: its repaired bag metadata and rendered root must
         # not leak into an execution that is about to fall back to the untouched source.
         options["_prepared_source"] = None
-        plan = planner.build(manifest, catalog, descriptors, root, str(origin), recipe, options)
+        plan = planner.build(manifest, catalog, descriptors, root, str(origin), recipe, options,
+                             verification=verification)
         if plan["needs_preparation"]:
             plan["issues"].append(dict(status="not_checked", code="stale_preparation", phase="run",
                                        message="Source bindings changed; prepare this selection again"))
             planner.finish(plan)
     if runtime:
         plan["preparation"] = str(prepare.location(root, recipe_path, origin, use_proxies=use_proxies))
+    # Planning never pulls. Execution acquires only this frozen inventory, then
+    # updates image evidence without re-reading large bags/proxies or re-querying tags.
+    if (action == "run" and not args.dry_run and plan.get("image_inventory") and plan.get("image_inspection")
+            and not any(i["status"] == "error" for i in plan["issues"])
+            and not any(i["status"] == "not_checked" and i["code"] not in
+                        ("runtime_images", "normalization", "stale_preparation", "recorded_calls") for i in plan["issues"])):
+        from . import runtime_images
+        _verify_launch_inputs(plan)
+        started = time.monotonic()
+        eprint("rig replay: acquiring and verifying runtime images")
+        inspected = runtime_images.acquire_images(plan["image_inventory"],
+                        policy=plan["pull_policy"], inspection=plan["image_inspection"])
+        planner.apply_image_report(plan, inspected)
+        plan["image_acquisition_s"] = time.monotonic() - started
+        plan["fingerprint"] = recipes.digest(dict(planned=plan["fingerprint"],
+                                                   images=plan["execution"]["images"]))
+    if (action == "run" and not args.dry_run and
+            not any(i["status"] == "error" or
+                    (i["status"] == "not_checked" and i["code"] != "recorded_calls")
+                    for i in plan["issues"])):
+        _verify_launch_inputs(plan)
+        started = time.monotonic()
+        planner.inspect_recorded_calls(plan, manifest, descriptors, root, execute=True,
+                                       verification=verification)
+        plan["call_inspection_s"] = time.monotonic() - started
+        plan["fingerprint"] = recipes.digest(dict(planned=plan["fingerprint"],
+            playback=plan["playback"], call_inspection=plan.get("call_inspection")))
     if action != "prepare" or args.dry_run or not plan["ready_to_prepare"]:
         report(plan, as_json=getattr(args, "json", False))
     if action == "check":
@@ -130,7 +173,7 @@ def _command(args, root):
                 eprint(f"Would add player from {args.player}")
             return 0
         return perform_prepare(args, root, recipe_path, recipe, origin, manifest,
-                               catalog, descriptors, plan, options)
+                               catalog, descriptors, plan, options, verification=verification)
     if not plan["ready_to_prepare"] or any(
             i["status"] == "error" for i in plan["issues"]):
         return 1
@@ -145,7 +188,8 @@ def _command(args, root):
     return execute(args, root, manifest, descriptors, plan, runtime)
 
 
-def perform_prepare(args, root, recipe_path, recipe, origin, manifest, catalog, descriptors, plan, options):
+def perform_prepare(args, root, recipe_path, recipe, origin, manifest, catalog, descriptors, plan, options,
+                    *, verification=None):
     import fcntl
     folder = recipes.workspace(root, recipe_path)
     folder.mkdir(parents=True, exist_ok=True)
@@ -178,7 +222,15 @@ def perform_prepare(args, root, recipe_path, recipe, origin, manifest, catalog, 
                     shutil.copy2(p, backup / name)
             wire_player(root, target)
             manifest, catalog, descriptors = load_context(root)
-            plan = planner.build(manifest, catalog, descriptors, root, str(origin), recipe, options)
+            plan = planner.build(manifest, catalog, descriptors, root, str(origin), recipe, options,
+                                 verification=verification)
+        if ((plan["source"].get("bag") or {}).get("repair")
+                and not plan.get("image_pins", {}).get(plan["player"])):
+            plan["issues"].append(dict(status="error", code="repair_image", phase="prepare",
+                message="Metadata repair needs a locally verified player image; prepare never pulls. "
+                        "Acquire the reported player image before preparing this source"))
+            planner.finish(plan)
+            raise _PreparationNotReady
         if not recipe_path.exists():
             recipe = {**recipe, "source": plan["source"]["id"]}
             prepare.write_yaml(recipe_path, recipe)
@@ -189,15 +241,23 @@ def perform_prepare(args, root, recipe_path, recipe, origin, manifest, catalog, 
         use_proxies = bool(options.get("use_proxies"))
         if use_proxies:
             options["_prepared_proxies"] = prepare.proxy_pins(root, recipe_path, recipe, origin)
-        plan = planner.build(manifest, catalog, descriptors, root, str(origin), recipe, options)
+        plan = planner.build(manifest, catalog, descriptors, root, str(origin), recipe, options,
+                             verification=verification)
         # Recovered bag timing can narrow automatic camera session selection. Publish that
         # selection now, so the first successful prepare is already reusable by check/run.
         if (plan["ready_to_prepare"] and
                 prepare.location(root, recipe_path, origin, use_proxies=use_proxies).name != prepare.generation(plan)):
             runtime = prepare.create(root, recipe_path, recipe, plan, manifest, descriptors)
             options["_prepared_source"] = str(runtime)
-            plan = planner.build(manifest, catalog, descriptors, root, str(origin), recipe, options)
+            plan = planner.build(manifest, catalog, descriptors, root, str(origin), recipe, options,
+                                 verification=verification)
         plan["preparation"] = str(prepare.location(root, recipe_path, origin, use_proxies=use_proxies))
+        if plan["ready_to_prepare"]:
+            _verify_launch_inputs(plan)
+            planner.inspect_recorded_calls(plan, manifest, descriptors, root, execute=True,
+                                           verification=verification)
+            plan["fingerprint"] = recipes.digest(dict(planned=plan["fingerprint"],
+                playback=plan["playback"], call_inspection=plan.get("call_inspection")))
         prepare.refresh(root, recipe_path, plan)
         report(plan, as_json=getattr(args, "json", False))
         eprint(f"Prepared recipe: {recipe_path}")
@@ -210,7 +270,7 @@ def perform_prepare(args, root, recipe_path, recipe, origin, manifest, catalog, 
                 replay_command.extend([flag, value])
         eprint("Replay with: " + shlex.join(replay_command))
         return 0 if plan["ready_to_run"] else 1
-    except BaseException:
+    except BaseException as exc:
         if saved:
             for name, existed in saved.items():
                 p = root / name
@@ -226,6 +286,9 @@ def perform_prepare(args, root, recipe_path, recipe, origin, manifest, catalog, 
                         shutil.copy2(backup / name, p)
         if created_recipe:
             recipe_path.unlink(missing_ok=True)
+        if isinstance(exc, _PreparationNotReady):
+            report(plan, as_json=getattr(args, "json", False))
+            return 1
         raise
     finally:
         if saved:
@@ -233,7 +296,88 @@ def perform_prepare(args, root, recipe_path, recipe, origin, manifest, catalog, 
         lock.close()
 
 
-def execute(args, root, manifest, descriptors, plan, runtime):
+def _project_container_ids(manifest, row):
+    project = project_name(row.name, manifest.vehicle_id)
+    try:
+        result = subprocess.run(
+            ["docker", "ps", "-aq", "--no-trunc", "--filter", f"label=com.docker.compose.project={project}"],
+            capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RigError(f"Cannot inspect replay project {project}: {exc}") from exc
+    ids = (result.stdout or "").split()
+    if result.returncode or any(not re.fullmatch(r"[0-9a-f]{64}", value) for value in ids):
+        raise RigError(f"Cannot inspect replay project {project}: "
+                       f"{(result.stderr or '').strip() or 'invalid Docker inventory'}")
+    return ids
+
+
+def _empty_projects(manifest, pairs):
+    """Only an initially empty project can be cleaned up as this invocation's resource."""
+    return {row.name for row, _ in pairs if not _project_container_ids(manifest, row)}
+
+
+def _quiesce_projects(manifest, pairs):
+    """Stop without removing containers before potentially slow log capture."""
+    try:
+        ids = list(dict.fromkeys(cid for row, _ in pairs for cid in _project_container_ids(manifest, row)))
+        if ids:
+            result = subprocess.run(["docker", "stop", "--time", "1", *ids],
+                                    capture_output=True, text=True, timeout=30)
+            if result.returncode:
+                raise RigError((result.stderr or "docker stop failed").strip())
+        return True
+    except (RigError, OSError, subprocess.TimeoutExpired) as exc:
+        eprint(f"rig replay: could not stop new containers before cleanup: {exc}; skipping log capture")
+        return False
+
+
+def _save_execution(session_root, run_dir, state, *, required=True):
+    """Persist to this invocation's run, never whichever run is current later."""
+    try:
+        prepare.write_yaml(session_root / "execution.yaml", state)
+        if run_dir is not None:
+            prepare.write_yaml(run_dir / ".rig" / "replay" / "execution.yaml", state)
+            path = run_dir / "manifest.yaml"
+            if path.is_file():
+                document = load_yaml(path)
+                metadata = document.setdefault("replay", {})
+                if not isinstance(metadata, dict):
+                    raise RigError(f"Replay metadata is malformed in {path}")
+                metadata["start_at_unix_s"] = state.get("start_at_unix_s")
+                metadata["startup"] = state
+                prepare.write_yaml(path, document)
+    except (RigError, OSError) as exc:
+        if required:
+            raise
+        eprint(f"rig replay: could not save startup outcome: {exc}")
+
+
+def _abort_start(manifest, attempted, empty, env):
+    """Stop newly created projects after launch failure, keeping preexisting projects intact."""
+    owned = [(row, desc) for row, desc in attempted if row.name in empty]
+    retained = [row.name for row, _ in attempted if row.name not in empty]
+    quiesced = _quiesce_projects(manifest, owned) if owned else True
+    if quiesced and owned and manifest.data_dir:
+        owned_manifest = dataclasses.replace(manifest, sensors=[row for row, _ in owned])
+        runs.capture_docker_logs(owned_manifest, also={row.name for row, _ in owned})
+    failed = []
+    for row, desc in reversed(owned):
+        try:
+            outcomes = dispatch.run_verb([(row, desc)], env, "down")
+            if any(o.returncode for o in outcomes):
+                failed.append(row.name)
+        except (RigError, OSError) as exc:
+            eprint(f"rig replay: cleanup failed for {row.name}: {exc}")
+            failed.append(row.name)
+    if retained:
+        eprint("rig replay: retaining preexisting projects: " + ", ".join(retained))
+    if failed:
+        eprint("rig replay: cleanup incomplete for " + ", ".join(failed) + "; inspect before retrying")
+    return dict(stopped=[row.name for row, _ in owned if row.name not in failed],
+                retained=retained, failed=failed, quiesced=quiesced)
+
+
+def _verify_launch_inputs(plan):
     for path, fingerprint in plan.get("control_files", {}).items():
         p = Path(path)
         current = recipes.digest(p.read_bytes().hex()) if p.is_file() else None
@@ -243,11 +387,29 @@ def execute(args, root, manifest, descriptors, plan, runtime):
         for path, fingerprint in files.items():
             if not Path(path).is_file() or recipes.digest(Path(path).read_bytes().hex()) != fingerprint:
                 raise RigError(f"Launcher changed since planning: {path}; check again")
+
+
+def execute(args, root, manifest, descriptors, plan, runtime):
+    timings = {"images_s": plan.get("image_acquisition_s", 0),
+               "call_inspection_s": plan.get("call_inspection_s", 0)}
+    phase_started = time.monotonic()
+    eprint("rig replay: verifying source and launch inputs")
+    _verify_launch_inputs(plan)
     if not args.dry_run and not args.export_calls:
         replay._guard_clean_host(manifest, args.force)
     source = plan["source"]
     bag = source["bag"]
-    gate = time.time() + args.start_delay if args.start_delay else None
+    if source_fingerprint(source["path"]) != source["fingerprint"]:
+        raise RigError("Source changed since planning; check/prepare again")
+    for binding in plan["recordings"].values():
+        verify_binding(binding)
+    if not args.dry_run:
+        planner.verify_recorded_call_evidence(plan, manifest, descriptors, root)
+    if plan["playback"]["calls"] and replay.validate_calls(
+            Path(plan["playback"]["calls"])) != plan["calls_sha"]:
+        raise RigError("Call script changed since planning; check again")
+    timings["verify_s"] = time.monotonic() - phase_started
+    gate = None
     variables = dict(manifest.vars or {})
     variables.update(replay_source=str(runtime), replay_session=args.session,
                      replay_retime="original" if plan["sim_time"] else "wall",
@@ -258,14 +420,17 @@ def execute(args, root, manifest, descriptors, plan, runtime):
     # Each execution gets immutable config paths; subsequent prepare/check cannot alter a live mount.
     session_root = root / "var" / "replay" / "sessions" / f"{time.time_ns()}"
     env = dispatch.fleet_env(manifest, descriptors)
+    if plan.get("execution", {}).get("architecture"):
+        env["RIG_TARGET_ARCH"] = plan["execution"]["architecture"]
+    if plan.get("image_pins") and set(plan["selected"]) <= set(plan["image_pins"]):
+        env["RIG_RUNTIME_IMAGE_MAP"] = json.dumps(plan["image_pins"])
+    elif not args.dry_run:
+        raise RigError("Replay runtime images were not validated; check the image inventory before launch")
     env["RIG_REPLAY_SOURCE"] = str(runtime)
     if plan["sim_time"]:
         env["RIG_SIM_TIME"] = "1"
-    if gate:
-        env["RIG_REPLAY_START_AT_UNIX_S"] = f"{gate:.3f}"
     env["RIG_REPLAY_FROM_S"] = str(plan["window"]["start"])
-    if plan["window"]["end"] is not None:
-        env["RIG_REPLAY_TO_S"] = str(plan["window"]["end"])
+    env["RIG_REPLAY_TO_S"] = str(plan["window"]["end"] if plan["window"]["end"] is not None else 0)
     if plan["player"]:
         path = session_root / "player.json"
         if not args.dry_run:
@@ -294,13 +459,6 @@ def execute(args, root, manifest, descriptors, plan, runtime):
     by_name = {r.name: r for r in selected}
     execution_manifest = dataclasses.replace(manifest, sensors=[
         by_name.get(r.name, dataclasses.replace(r, enabled=False)) for r in manifest.sensors])
-    if source_fingerprint(source["path"]) != source["fingerprint"]:
-        raise RigError("Source changed since planning; check/prepare again")
-    for binding in plan["recordings"].values():
-        verify_binding(binding)
-    if plan["playback"]["calls"] and replay.validate_calls(
-            Path(plan["playback"]["calls"])) != plan["calls_sha"]:
-        raise RigError("Call script changed since planning; check again")
     if args.export_calls:
         if args.names:
             raise RigError("--export-calls takes no instance names")
@@ -310,7 +468,11 @@ def execute(args, root, manifest, descriptors, plan, runtime):
         outcomes = dispatch.run_verb([(player, descriptors[player.service])], env, "export-calls",
                                     dry_run=args.dry_run)
         return int(any(o.returncode for o in outcomes))
+    empty = set()
+    run_id, output_run = None, None
+    phase_started = time.monotonic()
     if not args.dry_run and manifest.data_dir:
+        eprint("rig replay: capturing replay run")
         run_id = runs.new_run(manifest, root, args.label or re.sub(
             r"[^A-Za-z0-9_-]", "-", "replay-" + source["id"]), force=True,
             replay=dict({"of": source["id"], "source": source["path"], "with": args.names},
@@ -325,7 +487,8 @@ def execute(args, root, manifest, descriptors, plan, runtime):
                         clock="sim" if plan["sim_time"] else "wall",
                         start_at_unix_s=gate, calls_sha=plan.get("calls_sha")))
         import shutil
-        run_dir = Path(manifest.data_dir) / "runs" / run_id / ".rig" / "replay"
+        output_run = Path(manifest.data_dir) / "runs" / run_id
+        run_dir = output_run / ".rig" / "replay"
         run_dir.mkdir(parents=True, exist_ok=True)
         prepare.write_yaml(run_dir / "resolved.yaml", plan)
         prepare.write_yaml(run_dir / "recipe.yaml", plan["recipe"])
@@ -333,14 +496,78 @@ def execute(args, root, manifest, descriptors, plan, runtime):
             shutil.copy2(Path(plan["preparation"]) / "provenance.yaml", run_dir / "provenance.yaml")
         if plan["playback"]["calls"]:
             shutil.copy2(plan["playback"]["calls"], run_dir / "calls.yaml")
-        runs.snapshot(execution_manifest, root, stacks=plan["selected"])
-    outcomes = dispatch.run_verb(pairs, env, "up", dry_run=args.dry_run)
-    if any(o.returncode for o in outcomes):
-        return 1
-    if gate and not args.dry_run and time.time() > gate:
-        eprint("rig replay: warning: startup outlasted the release gate; increase --start-delay "
-               "to avoid losing early inputs")
+    timings["capture_s"] = time.monotonic() - phase_started
+    _verify_launch_inputs(plan)
+    if not args.dry_run:
+        planner.verify_recorded_call_evidence(plan, manifest, descriptors, root)
+    # Capture and source verification can take minutes. Only final rendering/snapshotting
+    # remains after the legacy deadline is chosen. Zero delay still releases paused sources.
+    gate = round(time.time() + args.start_delay, 3)
+    variables["replay_start_at_unix_s"] = gate
+    env["RIG_REPLAY_START_AT_UNIX_S"] = f"{gate:.3f}"
+    if not args.dry_run:
+        for row, desc in pairs:
+            config = resolve._layered_dict(rows[row.name], root,
+                variables=binding_variables(variables, rows[row.name], plan["recordings"].get(row.name)),
+                extra_overrides=desc.replay_source.overrides if row.name in plan["recordings"] else None)
+            prepare.write_yaml(row.config, config)
+        _verify_launch_inputs(plan)
+        if manifest.data_dir:
+            runs.snapshot(execution_manifest, root, stacks=plan["selected"])
+    state = dict(session=session_root.name, run_id=run_id, status="starting",
+                 start_at_unix_s=gate, timings=timings, attempted=[])
+    attempted = []
+    def started(row, desc):
+        # Check immediately before this launcher, after potentially lengthy run capture
+        # and preceding launchers. Never clean up a project reused by --force.
+        if not args.dry_run:
+            empty.update(_empty_projects(manifest, [(row, desc)]))
+            if not attempted and args.start_delay > 0 and time.time() >= gate:
+                raise RigError("Startup inspection outlasted the release deadline; no services started; "
+                               "retry with a larger --start-delay")
+        attempted.append((row, desc))
+        state["attempted"].append(row.name)
+    launch_started = time.time()
+    state["launch_started_at_unix_s"] = launch_started
+    if not args.dry_run:
+        _save_execution(session_root, output_run, state)
+        if args.start_delay > 0 and time.time() >= gate:
+            state["status"] = "failed"
+            state["error"] = "Final configuration capture outlasted the release deadline; no services started"
+            _save_execution(session_root, output_run, state)
+            raise RigError(state["error"] + "; retry with a larger --start-delay")
+    phase_started = time.monotonic()
+    eprint(f"rig replay: starting instances; legacy release at {gate:.3f} "
+           f"({args.start_delay:g}s delay)")
+    try:
+        outcomes = dispatch.run_verb(pairs, env, "up", dry_run=args.dry_run,
+                                    stop_on_failure=True, on_start=started)
+        failed = [o.sensor.name for o in outcomes if o.returncode]
+        if failed:
+            state["status"], state["error"] = "failed", "Startup failed for " + ", ".join(failed)
+        else:
+            state["status"] = "started"
+    except (RigError, OSError, KeyboardInterrupt) as exc:
+        state["status"] = "cancelled" if isinstance(exc, KeyboardInterrupt) else "failed"
+        state["error"] = str(exc) or "Startup interrupted"
+    timings["startup_s"] = time.monotonic() - phase_started
+    if not args.dry_run:
+        state["release_lateness_s"] = max(0.0, time.time() - gate)
+        if state["status"] != "started":
+            eprint("rig replay: " + state["error"])
+            _save_execution(session_root, output_run, state, required=False)
+            state["cleanup"] = _abort_start(execution_manifest, attempted, empty, env)
+            _save_execution(session_root, output_run, state, required=False)
+            return 130 if state["status"] == "cancelled" else 1
+        _save_execution(session_root, output_run, state, required=False)
+        if args.start_delay > 0 and state["release_lateness_s"] > 0:
+            eprint(f"rig replay: warning: startup outlasted the release gate by "
+                   f"{state['release_lateness_s']:.1f}s; increase --start-delay to avoid losing early inputs")
+        eprint("rig replay: startup complete; " + ", ".join(f"{k.removesuffix('_s')} {v:.1f}s"
+                                                         for k, v in timings.items()))
     if args.auto_end is not None and not args.dry_run:
         player = next(r for r in selected if r.name == plan["player"])
-        return replay.auto_end(execution_manifest, descriptors, root, pairs, env, player, args.auto_end)
-    return 0
+        return replay.auto_end(execution_manifest, descriptors, root, pairs, env, player, args.auto_end,
+                               required_calls=bool(plan["playback"]["calls"]),
+                               started_after=launch_started, run_id=run_id)
+    return 0 if state["status"] == "started" else 1

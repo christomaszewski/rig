@@ -34,6 +34,7 @@ LOCAL_KEYS = {"vehicle", "vehicle_id", "vars", "env", "data_dir", "images", "pla
 PLAYER_SERVICE = "ros2-bag-player"
 # Env keys rig owns end-to-end (fleet_env sets them; an `env:` map may not shadow them).
 RIG_OWNED_ENV = {"RIG_BUILD_PLATFORMS", "RIG_BUILD_RESULT", "RIG_BUILD_PULL", "RIG_IMAGE_PINS",
+                 "RIG_RUNTIME_IMAGE_MAP", "RIG_RUNTIME_IMAGE_PINS",
                  "VEHICLE_ID", "ROS_DOMAIN_ID", "RMW_IMPLEMENTATION", "RIG_IMAGE_REGISTRY",
                  "RIG_IMAGE_TAG", "RIG_TARGET_PLATFORM", "RIG_TARGET_ARCH", "RIG_DATA_DIR", "COMPOSE_PROJECT_NAME",
                  "RIG_BASE_IMAGE", "RIG_BUILD_NO_CACHE", "RIG_ROS_RMW", "RIG_MSGS_IMAGE",

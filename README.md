@@ -181,7 +181,7 @@ python3 -m venv .venv && .venv/bin/pip install pyyaml
 ./rig down                # tear down in reverse (autonomy FIRST); --purge also GCs external volumes
 ./rig replay check <run>   # inspect a hand-built deployment's readiness, without writes
 ./rig replay prepare <run> --recipe field-test
-                          # --player public/ros2-bag-player@1.17.0 adds a missing player row,
+                          # --player public/ros2-bag-player@1.18.0 adds a missing player row,
                           # route and config; kept disabled for ordinary up, selected by replay
 ./rig replay --recipe field-test
 ./rig replay --recipe field-test --use-proxies  # explicit opt-in, also on check/prepare; originals
@@ -504,6 +504,8 @@ and service servers using that namespace. A recipe's `instances.NAME.recorded_na
 precedence for historical namespace changes; undeclared services keep the `/instance` fallback.
 Distinct instances sharing a fixed namespace have ambiguous ownership: use a per-instance
 template or explicit recipe namespaces. Graph evidence is still required to identify regenerated
-outputs such as status topics; broad replay still requires explicit service-call selection.
+outputs such as status topics. Recorded calls default to unambiguous servers started by replay,
+excluding targets with a known selected client, after request-content inspection. Use recipe
+`playback.services: []` to disable recorded calls or a nonempty list to select targets manually.
 
 `cam-up`, `novatel-up`, and `sbg-up` all satisfy this. See `docs/DESIGN.md` for the full rationale.

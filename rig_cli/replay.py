@@ -684,73 +684,253 @@ def _guard_clean_host(manifest, force: bool) -> None:
                        f"--force")
 
 
-def _player_finished(manifest, player) -> bool | None:
-    """True = the player's compose project is no longer running, False = still running, None =
-    docker couldn't answer (the caller must FAIL SAFE: never auto-tear-down on uncertainty).
-    Direct project check — `running_projects` covers enabled rows only, and the player row is
-    disabled by doctrine."""
+@dataclasses.dataclass(frozen=True)
+class ReplayCompletion:
+    state: str  # active | succeeded | failed | unknown | interrupted
+    reason: str
+    containers: dict = dataclasses.field(default_factory=dict)
+
+
+def _player_completion(manifest, player, *, required_calls=False, expected=None,
+                       started_after=None) -> ReplayCompletion:
+    """Observe exact replay participants, never infer completion from project-status prose.
+
+    Bind IDs on the first observation; a removed/replaced participant is uncertainty, not a
+    completed replay. StartedAt/Created reject leftovers from an earlier invocation when the
+    workflow supplies its launch timestamp. No inspection failure authorizes teardown.
+    """
+    import datetime
     import json
     import subprocess
-
     from .manifest import project_name
-    expected = project_name(player.name, manifest.vehicle_id)
+
+    project = project_name(player.name, manifest.vehicle_id)
+    required = ["bag-player"] + (["call-injector"] if required_calls else [])
+    observed = {}
     try:
-        proc = subprocess.run(["docker", "compose", "ls", "-a", "--format", "json"],
+        proc = subprocess.run(["docker", "ps", "-a", "--no-trunc", "--filter",
+                               "label=com.docker.compose.project=" + project,
+                               "--format", "{{.ID}}"], capture_output=True, text=True, timeout=15)
+        if proc.returncode:
+            raise ValueError("Docker container inventory failed: " + (proc.stderr or "").strip()[:300])
+        ids = proc.stdout.split()
+        if not ids:
+            raise ValueError("replay participant containers are missing")
+        if len(set(ids)) != len(ids) or any(not re.fullmatch(r"[a-f0-9]{64}", cid) for cid in ids):
+            raise ValueError("Docker returned malformed container inventory")
+        proc = subprocess.run(["docker", "inspect", "--type", "container", *ids],
                               capture_output=True, text=True, timeout=15)
-        if proc.returncode != 0:
-            return None
-        rows = json.loads(proc.stdout or "[]")
-    except Exception:  # noqa: BLE001 — timeout/parse/missing docker: cannot tell
-        return None
-    for row in rows if isinstance(rows, list) else []:
-        if isinstance(row, dict) and row.get("Name") == expected:
-            return "running" not in str(row.get("Status", "")).lower()
-    return True  # project gone entirely = finished
+        if proc.returncode:
+            raise ValueError("Docker container inspection failed: " + (proc.stderr or "").strip()[:300])
+        docs = json.loads(proc.stdout)
+        if (not isinstance(docs, list) or len(docs) != len(ids) or
+                any(not isinstance(d, dict) for d in docs) or
+                {d.get("Id") for d in docs} != set(ids)):
+            raise ValueError("Docker returned malformed container inspection")
+        selected = {service: [] for service in required}
+        for doc in docs:
+            labels = (doc.get("Config") or {}).get("Labels")
+            if not isinstance(labels, dict) or labels.get("com.docker.compose.project") != project:
+                raise ValueError("container project identity does not match replay")
+            service = labels.get("com.docker.compose.service")
+            # `compose run` helpers from export/reindex are not replay participants.
+            if str(labels.get("com.docker.compose.oneoff", "False")).lower() == "true":
+                continue
+            if service in selected:
+                selected[service].append(doc)
+        states = []
+        for service, matches in selected.items():
+            if len(matches) != 1:
+                raise ValueError(f"expected one {service} container, found {len(matches)}")
+            doc = matches[0]
+            cid = doc["Id"]
+            if (expected or {}).get(service, cid) != cid:
+                raise ValueError(f"{service} container was replaced during replay")
+            state = doc.get("State")
+            if not isinstance(state, dict) or not isinstance(state.get("Status"), str):
+                raise ValueError(f"{service} has malformed Docker state")
+            status, code = state["Status"], state.get("ExitCode")
+            if type(code) is not int:
+                raise ValueError(f"{service} has an invalid exit code")
+            if status not in ("created", "running", "paused", "restarting", "exited", "dead"):
+                raise ValueError(f"{service} state is unsettled: {status}")
+            if status in ("exited", "dead") and any(state.get(key) is not False for key in
+                                                        ("Running", "Paused", "Restarting")):
+                raise ValueError(f"{service} has inconsistent terminal Docker state")
+            if started_after is not None and status != "created":
+                def stamp(value):
+                    parsed = datetime.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+                    if parsed.tzinfo is None:
+                        raise ValueError("Docker timestamp lacks timezone")
+                    return parsed.timestamp()
+                times = [stamp(value) for value in (state.get("StartedAt"), doc.get("Created")) if value]
+                if not times or max(times) < started_after:
+                    raise ValueError(f"{service} belongs to an earlier replay invocation")
+            result = ("active" if status in ("created", "running", "paused", "restarting") else
+                      "succeeded" if status == "exited" and code == 0 and not state.get("OOMKilled")
+                      and not state.get("Error") else "failed")
+            observed[service] = dict(id=cid, image=doc.get("Image"), state=status, exit_code=code,
+                                     started_at=state.get("StartedAt"), finished_at=state.get("FinishedAt"),
+                                     oom_killed=bool(state.get("OOMKilled")), error=state.get("Error") or "")
+            states.append(result)
+        if "failed" in states:
+            failed = [f"{name} ({item['state']}, exit {item['exit_code']})" for name, item in observed.items()
+                      if item["state"] in ("exited", "dead") and
+                      (item["state"] == "dead" or item["exit_code"] or item["oom_killed"] or item["error"])]
+            return ReplayCompletion("failed", "; ".join(failed), observed)
+        if "active" in states:
+            return ReplayCompletion("active", "waiting for replay participants", observed)
+        return ReplayCompletion("succeeded", "bag and required call injection completed", observed)
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError, AttributeError) as exc:
+        return ReplayCompletion("unknown", str(exc), observed)
 
 
-def auto_end(manifest, descriptors, root: Path, pairs, env, player, grace_s: int) -> int:
-    """`--auto-end`: wait for the player to finish the bag, breathe `grace_s` (the last message
-    PUBLISHES when the player exits — consumers are still draining callbacks and the B-side bag
-    is still being written), then run cmd_down's exact end-run sequence over the session's own
-    up-set: capture docker logs BEFORE down (compose removes the containers), down in reverse
-    (player first — it already exited), seal only on a clean full down. Ctrl+C and every
-    cannot-tell docker failure LEAVE THE STACK UP with the manual command named — an unattended
-    teardown must never fire on uncertainty."""
-    import time
-    eprint(f"rig replay: waiting for {player.name} to finish the bag "
-           f"(Ctrl+C leaves the session running)…")
+def _save_completion(manifest, run_id, completion) -> bool:
+    """Persist evidence against the opened run, independent of a subsequently moved `current`."""
+    import json
+    import tempfile
+    from .common import safe_component
+
+    if not manifest.data_dir or run_id is None:
+        return True
+    tmp = None
+    try:
+        safe_component(run_id, what="replay run id")
+        run = Path(manifest.data_dir) / "runs" / run_id
+        if not (run / "manifest.yaml").is_file():
+            raise RigError(f"replay run {run_id} no longer has its manifest")
+        target = run / ".rig" / "replay" / "completion.json"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=target.parent,
+                                         prefix=".completion-", delete=False) as fh:
+            tmp = Path(fh.name)
+            json.dump(dict(version=1, run=run_id, observed_at_unix_s=time.time(),
+                           **dataclasses.asdict(completion)), fh, indent=2)
+            fh.write("\n")
+        tmp.replace(target)
+        return True
+    except (OSError, RigError) as exc:
+        eprint(f"rig replay: cannot preserve completion evidence: {exc}")
+        return False
+    finally:
+        if tmp is not None:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def auto_end(manifest, descriptors, root: Path, pairs, env, player, grace_s: int, *,
+             required_calls=None, started_after=None, run_id=None) -> int:
+    """Monitor completion; success requires positive exit-zero evidence for every participant.
+
+    Unknown/failed/interrupted sessions stay up for inspection. Only confirmed success runs
+    the existing log-capture/down/seal sequence, after preserving exact container evidence.
+    The ordinary detached replay path does not call this monitor or promise completion.
+    """
+    required_calls = bool(env.get("RIG_REPLAY_CALLS")) if required_calls is None else required_calls
+    if manifest.data_dir and run_id is None:
+        current = runs_mod.current_run(Path(manifest.data_dir))
+        run_id = current[0] if current else None
+    eprint(f"rig replay: waiting for {player.name} and required calls to complete "
+           "(Ctrl+C leaves the session running)…")
+    expected = {}
+    started = {}
+    def observe():
+        result = _player_completion(manifest, player, required_calls=required_calls,
+                                    expected=expected, started_after=started_after)
+        for service, item in result.containers.items():
+            expected.setdefault(service, item["id"])
+            if item.get("state") != "created" and item.get("started_at"):
+                previous = started.setdefault(service, item["started_at"])
+                if previous != item["started_at"]:
+                    return ReplayCompletion("unknown", f"{service} restarted during replay",
+                                            result.containers)
+        return result
+
+    def check_open_run(result):
+        if result.state == "succeeded" and manifest.data_dir:
+            try:
+                current = runs_mod.current_run(Path(manifest.data_dir))
+                if run_id is None or current is None or current[0] != run_id:
+                    return ReplayCompletion("unknown", "the open run changed during replay",
+                                            result.containers)
+            except (RigError, OSError) as exc:
+                return ReplayCompletion("unknown", str(exc), result.containers)
+        return result
+
+    def incomplete(result, saved):
+        if result.state == "succeeded" and saved:
+            return False
+        reason = f"{result.state}: {result.reason}" if saved else "completion evidence could not be saved"
+        eprint(f"rig replay: {reason}; leaving the session UP; "
+               "inspect the failure, then `rig down --end-run` when ready")
+        return True
+
+    completion = ReplayCompletion("unknown", "participants have not been observed")
     misses = 0
     try:
         while True:
-            state = _player_finished(manifest, player)
-            if state is True:
+            completion = observe()
+            if completion.state in ("succeeded", "failed"):
                 break
-            if state is None:
+            if completion.state == "unknown":
                 misses += 1
                 if misses >= 5:
-                    eprint("rig replay: docker cannot answer — leaving the session UP "
-                           "(auto-end never tears down on uncertainty); "
-                           "`rig down --end-run` when ready")
-                    return 1
+                    break
             else:
                 misses = 0
             time.sleep(3)
+        if completion.state == "succeeded":
+            eprint(f"rig replay: bag and required calls finished — {grace_s}s grace, then sealing")
+            time.sleep(grace_s)
+            # A participant may have disappeared or restarted during grace; the last observation
+            # is not permission to remove a replacement or a newly running container.
+            completion = observe()
+            if completion.state == "active":
+                completion = ReplayCompletion("unknown", "a replay participant restarted during grace",
+                                              completion.containers)
     except KeyboardInterrupt:
-        eprint("rig replay: interrupted — session left running; `rig down --end-run` when ready")
-        return 130
-    eprint(f"rig replay: bag finished — {grace_s}s grace for consumers to drain, then sealing")
-    time.sleep(grace_s)
+        completion = ReplayCompletion("interrupted", "operator interrupted completion monitoring",
+                                      completion.containers)
+    completion = check_open_run(completion)
+    saved = _save_completion(manifest, run_id, completion)
+    if incomplete(completion, saved):
+        return 130 if completion.state == "interrupted" else 1
     if manifest.data_dir:
-        # Replay explicitly launches disabled rows, including the player and source instances.
-        runs_mod.capture_docker_logs(manifest, also={s.name for s, _ in pairs})
-    outcomes = dispatch.run_verb(list(reversed(pairs)), env, "down")
-    failed = [o for o in outcomes if o.returncode != 0]
-    if failed:
-        eprint(f"rig: down failed for {', '.join(o.sensor.name for o in failed)} — leaving the "
-               f"run open (cannot seal with stacks possibly live)")
-        return 1
-    if manifest.data_dir:
-        runs_mod.end_run(manifest, root)
+        try:
+            runs_mod.capture_docker_logs(manifest, also={s.name for s, _ in pairs})
+            # Capturing logs can take time. Reconfirm identity and the open run immediately
+            # before teardown so a run rotation or container restart does not authorize it.
+            completion = check_open_run(observe())
+            if completion.state == "active":
+                completion = ReplayCompletion("unknown", "a replay participant restarted during log capture",
+                                              completion.containers)
+        except (RigError, OSError, KeyboardInterrupt) as exc:
+            completion = ReplayCompletion("interrupted" if isinstance(exc, KeyboardInterrupt) else "unknown",
+                                          str(exc) or "log capture interrupted", completion.containers)
+        if incomplete(completion, _save_completion(manifest, run_id, completion)):
+            return 130 if completion.state == "interrupted" else 1
+    try:
+        outcomes = dispatch.run_verb(list(reversed(pairs)), env, "down")
+        failed = [o for o in outcomes if o.returncode != 0]
+        if failed:
+            raise RigError("down failed for " + ", ".join(o.sensor.name for o in failed))
+        # Down may be slow too; do not seal whichever different run became current meanwhile.
+        completion = check_open_run(completion)
+        if completion.state != "succeeded":
+            _save_completion(manifest, run_id, completion)
+            eprint(f"rig replay: {completion.reason}; leaving the run unsealed")
+            return 1
+        if manifest.data_dir:
+            runs_mod.end_run(manifest, root)
+    except (RigError, OSError, KeyboardInterrupt) as exc:
+        completion = ReplayCompletion("interrupted" if isinstance(exc, KeyboardInterrupt) else "failed",
+                                      "cleanup incomplete: " + (str(exc) or "operator interrupted"),
+                                      completion.containers)
+        _save_completion(manifest, run_id, completion)
+        eprint(f"rig replay: {completion.reason}; inspect the session before sealing the run")
+        return 130 if completion.state == "interrupted" else 1
     return 0
 
 
@@ -1087,5 +1267,7 @@ def cmd(manifest, catalog, descriptors, root: Path, *, run_ref: str, names: list
     if auto_end_grace is not None and not dry_run:
         # NOTE: incompatible with the player config's `loop: true` (the player never exits —
         # rig can't see that knob, schema-opaque; the wait just runs until Ctrl+C).
-        return auto_end(manifest, descriptors, root, pairs, env, player, auto_end_grace)
+        return auto_end(manifest, descriptors, root, pairs, env, player, auto_end_grace,
+                        required_calls=calls_path is not None, started_after=up_started,
+                        run_id=run_id if manifest.data_dir else None)
     return 0

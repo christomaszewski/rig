@@ -120,6 +120,15 @@ Replay companions come from each service's `replay.platform` (falling back to th
 and its supported architectures. `replay.start` and deployment `replay.services`/`replay.instances`
 select the default replay services. Use `all` to include every optional live/replay service in a release.
 
+Replay acquires the **active runtime images**, independently of the build-output inventory.
+`rig replay RUN` defaults to `--pull missing`, including for a replay-only disabled player;
+`--pull always` refreshes selected references and `--pull never` requires a local cache.
+Check, prepare, and dry-run only report proposed pulls. Catalog-backed replay pulls recorded
+native child digests from the selected registry, then pins launch to inspected image IDs.
+A custom player image must be covered by the catalog when one exists. Bundled replay remains
+offline and requires its recorded image identities. See [runtime images](REPLAY.md#runtime-images)
+for service launcher compatibility and offline preparation details.
+
 ## Builder and publication
 
 Use a Buildx builder that can **push** multiarch indexes to the deployment registry. Check
@@ -290,7 +299,30 @@ Descriptor `replay.start` controls automatic eligibility. Deployment service or 
 deployment entries. Explicit instance names, `--live NAME`,
 and `--include-service SERVICE` override startup defaults. The player cannot be disabled this way.
 Startup omission preserves the service's recorded bag topics. Use `--skip-service SERVICE` or
-`--skip-instance NAME` to omit startup **and** recorded data. Conflicting include/skip requests fail.
+`--skip-instance NAME` to omit startup, source recordings, and bag topics whose recorded publishers
+belong exclusively to the skipped instances. Conflicting include/skip requests fail. Broad replay
+never infers topic ownership from a topic namespace alone; shared or unknown publishers remain
+eligible, and exact `playback.exclude` entries remove known outputs when graph evidence is absent.
+Automatic suppression and skips preserve eligibility for `/tf`, `/tf_static`, and `/diagnostics`;
+explicit topic lists, recorded subscriber selection, or `playback.exclude` can still omit them.
+
+Recorded ROS requests now default to automatic selection, independently of broad/recorded topic
+mode. Rig selects unambiguous historical servers mapped to the entire effective started set and
+excludes targets with a known selected live client. Omitted, unmapped, or ambiguous servers are
+excluded. In a recipe, `playback.services: []` disables recorded calls; an explicit nonempty list
+manually selects targets, with ownership/duplicate-call warnings when appropriate. A call script
+replaces recorded calls before request-event validation. Existing recipes that omit `services`
+adopt the automatic policy; preparation preserves a user-written empty list.
+
+An event topic alone does not prove that request contents were recorded. Prepare and execute
+inspect the selected window through a bounded read-only helper in the verified native player
+image. Check and dry-run only reuse valid cached evidence, otherwise reporting `not_checked`.
+The resolved player `play.services_source` chooses server-origin requests by default (`service`)
+or client-origin requests (`client`), and the same value is frozen for inspection and playback.
+Metadata-only, response-only, wrong-origin, unsupported, missing, or out-of-window events do not
+qualify. Repeated request events in the chosen origin remain repeated calls, as in native rosbag2;
+the report exposes duplicates rather than silently deduplicating. See the JSON selection and
+inspection evidence before relying on automatic calls.
 
 Hand-built deployments can use `rig replay check RUN` and
 `rig replay prepare RUN --recipe NAME`. See [Replay preparation](REPLAY.md) for local recipes,
@@ -333,4 +365,4 @@ Local tests cover orchestration, command boundaries, compose packaging, catalog 
 readiness deadlines. Native image execution on both architectures, registry publication, Jetson
 capture, and software replay of actual Jetson recordings remain release acceptance checks. Camera
 CI includes native modern-runtime jobs on both CPUs. Shared producer readiness/release synchronization
-remains a separate follow-up; `--start-delay` is still needed for unusually slow selected services.
+remains a separate follow-up; `--start-delay` is a timer and does not prove that consumers are ready.

@@ -508,7 +508,7 @@ cannot replay. Replace that service, then build/pull its playback-capable images
 The swap affects every camera-service instance, including `cam_front`; `swap cam_front` is not
 valid unless that is itself a service key. Some older replay diagnostics suggest an instance
 in the swap command; use the service key instead. For a bag-only experiment, pass
-`--skip-service camera-service` to omit all camera instances and their bag topics. Do not skip
+`--skip-service camera-service` to omit all camera instances and proven exclusive bag outputs. Do not skip
 cameras when the target needs their inputs.
 
 ## SIL replay — test a service change against a recorded run (rig ≥ v0.2.33)
@@ -522,9 +522,9 @@ own files as described below. Rig starts enabled infra (including the logger), d
 targets, and the player last; it does not start every enabled hardware driver.
 
 Broad playback feeds recorded data topics to new and existing consumers without subscription
-declarations. Optional graph evidence excludes exclusively regenerated outputs; mapped producers
-without epochs use a labeled namespace heuristic. Unknown outputs need explicit recipe exclusions.
-`--selection recorded` retains the previous recorded-subscription selector.
+declarations. Optional graph evidence excludes exclusively regenerated outputs. Without epochs,
+broad replay retains unknown outputs; use explicit recipe exclusions. `--selection recorded`
+uses recorded subscriptions, with a labeled namespace fallback when ownership is unknown.
 See [Replay preparation](REPLAY.md) for aliases, legacy imports, and persistent `replay.start`.
 
 ```bash
@@ -604,7 +604,7 @@ topics. For a run whose video was omitted:
 ./rig replay RUN --skip-service camera-service --auto-end
 ```
 
-This excludes camera instances and their bag topics; it cannot supply missing video to a
+This excludes camera instances and bag topics proven to be their exclusive outputs; it cannot supply missing video to a
 target that needs it.
 
 **Windows** (rig ≥ v0.2.46 + rig-infra ≥ v1.12.0): `--from S` / `--to S` replay a SECTION of the
@@ -619,16 +619,20 @@ for w in 0:120 120:240 240:360; do
 done
 ```
 
-The window is recorded as `replay.window` in the new run's manifest. Scripted calls outside it
+The window includes `--from` and excludes `--to`, including fractional boundaries. It is
+recorded as `replay.window` in the new run's manifest. Scripted calls outside it
 are skipped by the injector (rig says how many up front; `t == from` fires at window start).
 A window cuts service STATE — a mode set at 119.5 s is gone at `--from 120`; pick quiescent
 starts, or script the state-setting calls at `t: 120`.
 
-**Service calls** (rig ≥ v0.2.37 + rig-infra ≥ v1.10.0, sources recorded with `record.services`
-and CONTENTS-level introspection adopted): broad playback requires an explicit recipe
-`playback.services` list or a call script. It never reissues every recorded request.
-`--selection recorded` retains graph-derived `provides` minus `requires` selection. A run
-recorded before introspection was enabled holds no calls to replay. To RETIME
+**Service calls** require recorded request contents and an updated player with request-inspection
+support. Both topic modes automatically select unambiguous historical servers mapped to started
+instances, excluding targets with a known selected client. Recipe `playback.services: []` disables
+recorded calls; a nonempty list manually selects exact targets. Prepare/run inspect actual request
+contents in the selected window, using the player's `play.services_source` origin (default `service`).
+Check/dry-run reuse valid cached evidence or report `not_checked`. Missing or unusable requests are
+excluded with reasons in automatic mode and are errors for manual targets. A run recorded before
+CONTENTS-level introspection was enabled may contain no usable requests. To RETIME
 or INJECT calls instead, pass a call script (script XOR verbatim — never both):
 
 ```bash
@@ -653,8 +657,8 @@ stack's transforms when selected, and frames the service under test re-publishes
 servers as above; replies are not routed back to original callers, and this workflow does not
 reconstruct a complete service/action interaction. Missing service events cannot be recovered
 after recording, though a call script can inject new requests. Reconstructed launch surfaces
-and configs do not enforce recorded image digests or guarantee a deterministic rerun; restore
-and verify images separately, and treat code/config changes as the experiment.
+and configs do not guarantee a deterministic rerun. Rig validates and pins the selected runtime
+image IDs for this execution; code/config/image changes remain part of the experiment.
 
 ## Optional run registry and archive management
 

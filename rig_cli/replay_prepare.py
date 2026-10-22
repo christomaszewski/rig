@@ -1,6 +1,7 @@
 """Transactional, source-preserving local preparation artifacts."""
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -24,7 +25,9 @@ def write_yaml(path, value):
 
 
 def generation(plan):
+    from .replay_plan import SELECTION_VERSION
     return digest(dict(source=plan["source"]["path"], fingerprint=plan["source"]["fingerprint"],
+                       selection_version=SELECTION_VERSION,
                        recipe=plan["recipe"], recordings=plan["recordings"],
                        use_proxies=bool(plan.get("use_proxies"))))[:20]
 
@@ -51,7 +54,9 @@ def prepared(root, recipe_path, recipe, source, *, use_proxies=False):
     if not record.exists():
         return None
     doc = load_yaml(record)
-    if (bool(doc.get("use_proxies")) != use_proxies or doc.get("recipe_sha") != digest(recipe) or
+    from .replay_plan import SELECTION_VERSION
+    if (doc.get("selection_version") != SELECTION_VERSION or
+            bool(doc.get("use_proxies")) != use_proxies or doc.get("recipe_sha") != digest(recipe) or
             doc.get("source_fingerprint") != source_fingerprint(source)):
         return None
     for path, fingerprint in doc.get("recordings", {}).items():
@@ -164,7 +169,15 @@ def create(root, recipe_path, recipe, plan, manifest, descriptors):
                     if player is None or not plan.get("capabilities", {}).get("reindex"):
                         raise RigError("Prepare needs a current player with replay-reindex support")
                     desc = descriptors[player.service]
-                    env = dispatch.instance_env(dispatch.fleet_env(manifest, descriptors), player, desc)
+                    pins = plan.get("image_pins", {}).get(player.name)
+                    if not pins:
+                        raise RigError("Metadata repair requires a locally verified player image; "
+                                       "prepare never pulls images. Acquire the reported image first")
+                    fleet_env = dispatch.fleet_env(manifest, descriptors)
+                    if plan.get("execution", {}).get("architecture"):
+                        fleet_env["RIG_TARGET_ARCH"] = plan["execution"]["architecture"]
+                    fleet_env["RIG_RUNTIME_IMAGE_MAP"] = json.dumps({player.name: pins})
+                    env = dispatch.instance_env(fleet_env, player, desc)
                     proc = subprocess.run([str(desc.repo / desc.launcher), str(player.config),
                                            *desc.verb_args("replay-reindex"), str(target)], cwd=desc.repo, env=env,
                                           capture_output=True, text=True, timeout=600)
@@ -205,6 +218,7 @@ def create(root, recipe_path, recipe, plan, manifest, descriptors):
                      for p in stage.rglob("*") if p.is_file() and "source" not in p.relative_to(stage).parts}
         write_yaml(stage / "provenance.yaml", dict(
             version=1, recipe_sha=digest(recipe), source=source["path"],
+            selection_version=plan["selection_version"],
             use_proxies=use_proxies, bindings=plan["recordings"],
             source_fingerprint=source["fingerprint"], runtime_source=str(runtime),
             recordings={b["path"]: b["fingerprint"] for b in plan["recordings"].values()},

@@ -707,7 +707,7 @@ def test_auto_end_saves_disabled_session_logs_before_teardown():
             containers.clear()  # compose down removes the containers and their Docker logs
             return []
 
-        with patch.object(replay, "_player_finished", return_value=True), \
+        with patch.object(replay, "_player_completion", return_value=replay.ReplayCompletion("succeeded", "test completed")), \
                 patch.object(subprocess, "run", side_effect=_docker), \
                 patch.object(replay.dispatch, "run_verb", side_effect=_down):
             assert replay.auto_end(m, {}, data, pairs, {}, PLAYER, 0) == 0
@@ -726,11 +726,12 @@ def test_auto_end_waits_then_downs_reversed_and_seals():
     m = _manifest(rows, data_dir=str(data))
     descriptors = {s.service: object() for s in rows}
     events = []
-    finished = iter([False, False, None, True])  # a transient cannot-tell mid-wait is tolerated
+    finished = iter([replay.ReplayCompletion(state, "test observation") for state in
+                     ("active", "active", "unknown", "succeeded", "succeeded", "succeeded")])  # a transient cannot-tell mid-wait is tolerated
     orig = (replay.doctor_mod.collect, replay.dispatch.fleet_env, replay.dispatch.run_verb,
-            replay._player_finished, replay.runs_mod.capture_docker_logs,
+            replay._player_completion, replay.runs_mod.capture_docker_logs,
             replay.runs_mod.end_run, replay.runs_mod.new_run, replay.runs_mod.snapshot,
-            replay._guard_clean_host)
+            replay._guard_clean_host, replay._save_completion, replay.runs_mod.current_run)
     import time as _time
     orig_sleep = _time.sleep
     try:
@@ -743,12 +744,14 @@ def test_auto_end_waits_then_downs_reversed_and_seals():
                 sensor = pairs[0][0]
             return [O()]
         replay.dispatch.run_verb = _run_verb
-        replay._player_finished = lambda *_a: next(finished)
+        replay._player_completion = lambda *_a, **_k: next(finished)
         replay.runs_mod.capture_docker_logs = lambda *_a, **_k: events.append(("logs", []))
         replay.runs_mod.end_run = lambda *a, **k: events.append(("seal", []))
         replay.runs_mod.new_run = lambda *a, **k: "rid"
         replay.runs_mod.snapshot = lambda *a, **k: None
         replay._guard_clean_host = lambda *a, **k: None
+        replay._save_completion = lambda *a, **k: True
+        replay.runs_mod.current_run = lambda *a: ("rid", data / "runs/rid")
         _time.sleep = lambda *_a: None
         rc = replay.cmd(m, {}, descriptors, pathlib.Path("."), run_ref=str(src),
                         names=["planner"], label=None, wall_clock=False, force=False,
@@ -760,7 +763,7 @@ def test_auto_end_waits_then_downs_reversed_and_seals():
 
         # cannot-tell forever -> gives up WITHOUT tearing down (fail-safe)
         events.clear()
-        replay._player_finished = lambda *_a: None
+        replay._player_completion = lambda *_a, **_k: replay.ReplayCompletion("unknown", "cannot inspect")
         rc = replay.cmd(m, {}, descriptors, pathlib.Path("."), run_ref=str(src),
                         names=["planner"], label=None, wall_clock=False, force=False,
                         dry_run=False, auto_end_grace=0)
@@ -768,9 +771,9 @@ def test_auto_end_waits_then_downs_reversed_and_seals():
         assert [e[0] for e in events] == ["up"]  # no logs, no down, no seal
     finally:
         (replay.doctor_mod.collect, replay.dispatch.fleet_env, replay.dispatch.run_verb,
-         replay._player_finished, replay.runs_mod.capture_docker_logs,
+         replay._player_completion, replay.runs_mod.capture_docker_logs,
          replay.runs_mod.end_run, replay.runs_mod.new_run, replay.runs_mod.snapshot,
-         replay._guard_clean_host) = orig
+         replay._guard_clean_host, replay._save_completion, replay.runs_mod.current_run) = orig
         _time.sleep = orig_sleep
 
 

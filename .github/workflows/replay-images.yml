@@ -1,0 +1,31 @@
+name: replay image acquisition
+on:
+  push: {branches: [main]}
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  docker:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with: {python-version: "3.12"}
+      - run: python -m pip install pyyaml
+      - name: Cache disposable test registry
+        run: docker pull registry:2
+      - name: Cold pull, warm cache, and offline identity
+        env:
+          RIG_TEST_DOCKER: "1"
+        # The cross-repository Compose pin test runs in rig-infra against its own
+        # launcher helper and freshly built image. This test has no sibling checkout.
+        run: python tests/test_runtime_images_docker.py NativeImageAcquisition.test_cold_pull_warm_cache_and_offline_identity -v

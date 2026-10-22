@@ -14,14 +14,14 @@ _REPLAY_POLICY = """Startup policy (vehicle.yaml instance rows):
   Descriptor start: true permits selection; only an explicit instance/service
   true forces a normally disabled consumer to start. The player is managed by Rig.
   Explicit names, --live and --include-service override startup policy.
-  --skip-instance/--skip-service also remove recorded topics and cannot conflict
+  --skip-instance/--skip-service also remove proven exclusive recorded outputs and cannot conflict
   with explicit inclusions. Recording-capable instances need recordings or --live.
   Skip all camera feeds with --skip-service camera-service, or one destination
   camera with --skip-instance NAME. Skipped cameras need no recordings/proxies.
   Repeat skips on every check/prepare/replay invocation; recipes do not save them.
-  Topic skips use recorded namespaces and exclusive graph ownership. Without a
-  graph, exclude remapped topics explicitly. Shared topics outside skipped
-  namespaces remain; keep cannot override a skip.
+  Topic skips require exclusive recorded publisher ownership. A namespace alone
+  proves no outputs; without graph evidence use exact playback.exclude entries.
+  Shared/unknown outputs remain; keep cannot override a proven skip.
 
 Inputs and recipes:
   Broad playback is the default; graph epochs and pub/sub declarations are
@@ -52,9 +52,26 @@ Inputs and recipes:
   including custom status topics. Shared outputs remain eligible. Without graph
   evidence, a namespace cannot distinguish inputs from outputs: exclude known
   live outputs explicitly, e.g. playback.exclude: [/control/relay/status].
-  Broad mode needs playback.services: [/control/relay/set_mode] or a calls script
-  to replay requests. --selection recorded uses named instances' graph servers
-  and their resolved namespace bindings. Selecting calls does not start servers.
+  /tf, /tf_static and /diagnostics stay eligible under automatic suppression and
+  skips; explicit lists, recorded subscriber selection or exclude may omit them.
+  Broad mode never suppresses data solely by namespace, even for skipped sources.
+  Both topic modes automatically select recorded calls to unambiguous servers in
+  the entire started set, except targets with a known selected live client.
+  Omitted/unassigned/ambiguous servers are excluded; no graph means no automatic
+  ownership. playback.services: [] disables recorded calls. A nonempty list
+  manually selects exact targets with warnings for uncertain ownership/overlap.
+  This is a default change: an absent services field now means automatic calls.
+  A manual list does not start servers. --calls overrides recipe call selection;
+  scripts replace recorded requests before event-content validation.
+  Prepare/execute inspect actual request contents in the selected bag/window
+  with a bounded read-only helper in the pinned native player image. Check and
+  dry-run only read cached evidence; a cache miss reports not_checked. Prepare
+  never pulls images. Metadata-only, response-only, wrong-origin, unsupported,
+  missing and empty-window requests are excluded in auto mode, errors if manual.
+  Player play.services_source chooses service (default) or client origin and is
+  frozen for inspection/playback. Only that origin plays; repeated events within
+  it remain repeated calls. Inspection reports duplicates without deduplicating.
+  JSON reports retain topic decisions, service ownership and request evidence.
   Broad playback does not discover the new deployment's subscriptions.
   Recipes remain local files; registry/suite packaging is deferred.
 
@@ -144,8 +161,8 @@ Sharing:
 Execution:
   Bag playback requires a plan-v1 player (rig-infra >= 1.17.0) and local images
   compatible with this machine's Docker CPU. Check/prepare do not build or pull.
-  Broad mode reissues no service requests unless the recipe selects services
-  or a call script is supplied. Source-only replay uses wall time; bag replay
+  Recorded calls default to automatic selected-server policy; explicitly set
+  playback.services: [] to disable them. Source-only replay uses wall time; bag replay
   publishes /clock by default, including when no data topics remain selected.
   Use --auto-end with a non-looping bag, or stop with rig down --end-run.
 
@@ -157,6 +174,8 @@ Execution:
   --json and --format json expose the resolved plan and diagnostics.
   Review recorded namespace bindings, service call targets, skipped service
   events and regenerated output exclusions before execution.
+  Request inspection uses valid cached evidence only; a cache miss is not_checked.
+  Use prepare or execute with local native images to inspect request contents.
   Execution flags are assessed only; no run is opened and no calls are sent.
   This checks available evidence, not compatibility with every new subscriber.
 

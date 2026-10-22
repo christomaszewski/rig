@@ -35,6 +35,24 @@ def file_sha256(path):
     return h.hexdigest()
 
 
+def _file_identity(path):
+    info = path.stat()
+    return (str(path.resolve()), info.st_dev, info.st_ino, info.st_size,
+            info.st_mtime_ns, info.st_ctime_ns)
+
+
+class VerificationContext:
+    """Hashes shared only within one replay invocation, with fresh stat checks on reuse.
+
+    This is not an artifact-validation cache: callers still validate manifests, expected
+    hashes, path containment and the complete inventory each time.
+    """
+
+    def __init__(self, *, progress=eprint):
+        self._checksums = {}
+        self._progress = progress
+
+
 def _relative(value):
     if (not isinstance(value, str) or not value or "\\" in value or "\0" in value or
             Path(value).is_absolute() or any(p in (".", "..") for p in value.split("/")) or
@@ -51,28 +69,40 @@ def _inside(root, relative):
     return path
 
 
-def _inventory(root, paths):
+def _inventory(root, paths, *, verification=None):
     result = []
     for relative in sorted(paths):
         p = _inside(root, relative)
         if not p.is_file():
             raise RigError(f"service export: missing file {p}")
-        before = p.stat()
-        checksum = file_sha256(p)
-        after = p.stat()
-        if (before.st_size, before.st_mtime_ns, before.st_ino) != (
-                after.st_size, after.st_mtime_ns, after.st_ino):
+        before = _file_identity(p)
+        key = before[0]
+        cached = verification._checksums.get(key) if verification is not None else None
+        if cached is not None and cached[0] == before:
+            checksum = cached[1]
+        else:
+            if verification is not None:
+                verification._checksums.pop(key, None)
+                if verification._progress is not None:
+                    verification._progress(f"rig replay: verifying {p} ({before[3]} bytes)")
+            checksum = file_sha256(p)
+        after = _file_identity(_inside(root, relative))
+        if before != after:
+            if verification is not None:
+                verification._checksums.pop(key, None)
             raise RigError(f"service export: source changed while hashing: {p}")
-        result.append(dict(path=relative, size=after.st_size, sha256=checksum))
+        if verification is not None:
+            verification._checksums[key] = (after, checksum)
+        result.append(dict(path=relative, size=after[3], sha256=checksum))
     return result
 
 
-def _verify_files(root, entries):
+def _verify_files(root, entries, *, verification=None):
     for entry in entries:
         p = _inside(root, entry["path"])
         if not p.is_file() or p.stat().st_size != entry["size"]:
             raise RigError(f"service export: missing or changed file: {p}")
-        if _inventory(root, [entry["path"]])[0] != entry:
+        if _inventory(root, [entry["path"]], verification=verification)[0] != entry:
             raise RigError(f"service export: missing or changed file: {p}")
 
 
@@ -162,7 +192,7 @@ def _validate_artifact(doc, folder):
     return outputs
 
 
-def load_artifact(path, *, verify=True, source_root=None):
+def load_artifact(path, *, verify=True, source_root=None, verification=None):
     """Read/validate an artifact, optionally hash media and its original source evidence.
 
 The directory name is deliberately independent so staged transfers can be verified.
@@ -170,17 +200,20 @@ The directory name is deliberately independent so staged transfers can be verifi
     path = Path(path)
     folder = path.parent if path.name == "export.yaml" else path
     try:
+        manifest_before = _file_identity(folder / "export.yaml")
         doc = load_yaml(folder / "export.yaml")
         expected = _validate_artifact(doc, folder)
         if verify:
             for record in doc["recordings"]:
                 for session in record["sessions"]:
-                    _verify_files(folder, session["files"])
+                    _verify_files(folder, session["files"], verification=verification)
                     if source_root is not None:
-                        _verify_files(source_root, session["source_files"])
+                        _verify_files(source_root, session["source_files"], verification=verification)
             actual = {str(p.relative_to(folder)) for p in folder.rglob("*") if p.is_file()}
             if actual != expected | {"export.yaml"}:
                 raise RigError(f"service export: unexpected or missing artifact files: {folder}")
+        if _file_identity(folder / "export.yaml") != manifest_before:
+            raise RigError(f"service export: manifest changed during verification: {folder}")
         return doc
     except (OSError, TypeError, ValueError, KeyError, AttributeError) as exc:
         raise RigError(f"service export: invalid artifact at {folder}: {exc}") from exc
@@ -490,7 +523,7 @@ def _cmd(manifest, catalog, descriptors, *, run_ref, service, profile=None, inst
 
 
 def resolve_proxy_binding(source_root, binding, *, service, profile=None, export_id=None,
-                          descriptor=None):
+                          descriptor=None, verification=None):
     """Select exact source-compatible recordings; never silently fall back to originals."""
     if descriptor is None or getattr(descriptor.replay_source, "binding", None) != "direct":
         raise RigError(f"{service}: proxy replay requires direct source binding; update the service bundle")
@@ -521,12 +554,15 @@ def resolve_proxy_binding(source_root, binding, *, service, profile=None, export
             if not sessions or (selected_sessions and {s["id"] for s in sessions} != selected_sessions):
                 continue
             try:
-                load_artifact(folder, verify=True)
+                verified = load_artifact(folder, verify=True, verification=verification)
+                if verified["export_id"] != doc["export_id"]:
+                    raise RigError("service export: manifest changed during proxy selection")
                 actual_inputs = set()
                 for session in sessions:
                     for entry in session["source_files"]:
                         relative = str(Path(entry["path"]).relative_to(record["source_path"]))
-                        _verify_files(binding["path"], [{**entry, "path": relative}])
+                        _verify_files(binding["path"], [{**entry, "path": relative}],
+                                      verification=verification)
                         actual_inputs.add(str(_inside(binding["path"], relative)))
                 if binding.get("files") and actual_inputs != {str(Path(p).resolve()) for p in binding["files"]}:
                     raise RigError("source recording file selection changed")
@@ -551,6 +587,7 @@ def resolve_proxy_binding(source_root, binding, *, service, profile=None, export
             "sessions": [s["id"] for s in sessions], "fingerprint": inventory_fingerprint(path),
             "adapted": False, "proxy": dict(export_id=doc["export_id"],
                 profile=doc["profile"]["id"], profile_hash=doc["profile"]["sha256"],
-                manifest=str(folder / "export.yaml"), manifest_sha256=file_sha256(folder / "export.yaml"),
+                manifest=str(folder / "export.yaml"), manifest_sha256=_inventory(
+                    folder, ["export.yaml"], verification=verification)[0]["sha256"],
                 lossy=doc["profile"]["definition"].get("lossy", True),
                 source_files=[f for s in sessions for f in s["source_files"]])}

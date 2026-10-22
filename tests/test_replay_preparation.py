@@ -73,19 +73,28 @@ class Preparation(unittest.TestCase):
 
     def service(self, name, *, tier="autonomy", source=False, player=False):
         desc = dict(service=name, launcher="up", tier=tier,
-                    build={"architectures": ["amd64", "arm64"]})
+                    verbs={"runtime-images": "runtime-images"}, build={"architectures": ["amd64", "arm64"]})
         if source:
             desc["replay"] = {"source": {"data": "recordings/{name}",
                                          "overrides": {"replay": {"path": "{{replay_source}}/recordings/{{name}}",
                                                                   "epoch": "{{replay_epoch_unix_ns}}"}}}}
         if player:
-            desc["verbs"] = {"replay-capabilities": "replay-capabilities", "replay-reindex": "replay-reindex"}
+            desc["verbs"].update({"replay-capabilities": "replay-capabilities", "replay-reindex": "replay-reindex",
+                                  "replay-inspect-calls": "replay-inspect-calls"})
         self.write("services/" + name + "/rigging.yaml", desc)
         launcher = self.root / "services" / name / "up"
         launcher.write_text("#!/bin/sh\n"
                             "if [ \"$2\" = replay-capabilities ]; then\n"
-                            "echo '{\"plan\":1,\"remap\":true,\"clock_only\":true,\"reindex\":true}'\n"
-                            "else exit 42; fi\n")
+                            "echo '{\"plan\":1,\"remap\":true,\"clock_only\":true,\"reindex\":true,\"inspect_calls\":1,\"image_labels\":{\"bag-player\":{\"io.rig.rosbag2.replay\":\"1\"}}}'\n"
+                            "elif [ \"$2\" = replay-inspect-calls ]; then\n"
+                            'echo \'{"version":1,"source_mode":"service","services":{"/control":{"status":"usable","request_count":1,"other_origin_request_count":0,"duplicate_count":0,"type":"std_srvs/srv/Trigger","reason":"Fixture request"}}}\'\n'
+                            "elif [ \"$2\" = runtime-images ]; then\n"
+                            "ref=${RIG_BASE_IMAGE:-fixture/runtime:latest}\n"
+                            + ("ref=${CAM_DEV_IMAGE:-${RIG_IMAGE_REGISTRY:+$RIG_IMAGE_REGISTRY/}cam-dev:${RIG_IMAGE_TAG:-latest}}\n"
+                               "printf '{\"version\":1,\"images\":[\"%s\"],\"roles\":{\"cam-dev\":\"%s\"}}\\n' \"$ref\" \"$ref\"\n"
+                               if name == "camera" else
+                               "printf '{\"version\":1,\"images\":[\"%s\"],\"roles\":{\"bag-player\":\"%s\"}}\\n' \"$ref\" \"$ref\"\n")
+                            + "else exit 42; fi\n")
         launcher.chmod(0o755)
 
     def bag(self, folder, *, start=100_000_000_000, topic="/input"):
@@ -101,8 +110,13 @@ class Preparation(unittest.TestCase):
 
     def plan(self, doc=None, opts=None, ref=None):
         m, c, d = load_context(self.root)
-        return planner.build(m, c, d, self.root, str(ref or self.source),
+        plan = planner.build(m, c, d, self.root, str(ref or self.source),
                              doc or {"version": 1}, opts or {}, host=False)
+        # These tests isolate source preparation/startup from Docker image acquisition.
+        # Workflow image tests exercise the real inventory and readiness gate separately.
+        plan["image_pins"] = {name: {"version": 1, "images": {
+            "fixture/runtime:latest": "sha256:" + "1" * 64}} for name in plan["selected"]}
+        return plan
 
     def args(self, *args):
         return cli.build_parser().parse_args(cli.translate_argv(["replay", *args]))
@@ -127,6 +141,23 @@ class Preparation(unittest.TestCase):
         self.assertIn("cam", plan["selected"])
         self.assertFalse(any(i["code"] == "missing_recording" for i in plan["issues"]))
         self.assertNotIn("new", self.plan(opts={"skip_instances": ["new"]})["selected"])
+
+    def test_prepared_generation_rejects_the_previous_selection_policy(self):
+        recipe_path = self.write("replay/policy.yaml", {"version": 1, "source": str(self.source)})
+        doc = yaml.safe_load(recipe_path.read_text())
+        plan = self.plan(doc)
+        manifest, _, descriptors = load_context(self.root)
+        runtime = prepare.create(self.root, recipe_path, doc, plan, manifest, descriptors)
+        self.assertEqual(prepare.prepared(self.root, recipe_path, doc, self.source), runtime)
+        key = prepare.generation(plan)
+        with patch("rig_cli.replay_plan.SELECTION_VERSION", 1):
+            self.assertNotEqual(prepare.generation(plan), key)
+        provenance = prepare.location(self.root, recipe_path, self.source) / "provenance.yaml"
+        saved = yaml.safe_load(provenance.read_text())
+        saved.pop("selection_version")
+        provenance.write_text(yaml.safe_dump(saved))
+        self.assertIsNone(prepare.prepared(self.root, recipe_path, doc, self.source))
+        self.assertNotIn("playback", yaml.safe_load(recipe_path.read_text()))
 
     def test_policy_conflict_local_override_and_build_scope(self):
         self.vehicle(replay={"instances": {"new": {"start": False}}})
@@ -163,7 +194,7 @@ class Preparation(unittest.TestCase):
                     plan = self.plan(doc, opts=selection)
                     self.assertTrue(plan["ready_to_prepare"], plan["issues"])
                     self.assertNotIn("cam", plan["selected"])
-                    self.assertNotIn("/old_cam/image", plan["playback"]["topics"])
+                    self.assertEqual("/old_cam/image" in plan["playback"]["topics"], not graph_present)
                     self.assertIn("/tf", plan["playback"]["topics"])
                     self.assertEqual("/result" in plan["playback"]["topics"], not graph_present)
 
@@ -285,7 +316,8 @@ class Preparation(unittest.TestCase):
         self.assertNotIn("/result", plan["playback"]["topics"])
         self.assertIn("/robot/controller/input", plan["playback"]["topics"])
         self.assertIn("/tf", plan["playback"]["topics"])
-        self.assertEqual(plan["playback"]["services"], [])  # Association does not enable calls.
+        self.assertEqual(plan["playback"]["services"], ["/control"])  # Pending payload inspection.
+        self.assertEqual(plan["service_selection"]["mode"], "auto")
         recorded = self.plan(opts={"names": ["new"], "selection": "recorded"})
         self.assertEqual(recorded["playback"]["services"], ["/control"])
         self.assertEqual(before, inventory_fingerprint(self.root))
@@ -318,7 +350,7 @@ class Preparation(unittest.TestCase):
         plan = self.plan(opts={"skip_services": ["app"]})
         self.assertTrue(plan["ready_to_prepare"], plan["issues"])
         self.assertNotIn("/result", plan["playback"]["topics"])
-        self.assertNotIn("/robot/controller/input", plan["playback"]["topics"])
+        self.assertIn("/robot/controller/input", plan["playback"]["topics"])
         self.assertIn("/tf", plan["playback"]["topics"])
         graph_path.unlink()
         plan = self.plan()
@@ -383,12 +415,12 @@ class Preparation(unittest.TestCase):
         with contextlib.redirect_stderr(io.StringIO()) as out:
             report(plan)
         self.assertIn("recorded ROS namespace new: /robot/controller", out.getvalue())
-        self.assertIn("service calls: /control", out.getvalue())
+        self.assertIn("service calls (manual, service origin): /control", out.getvalue())
         self.assertIn("omit regenerated outputs: /result", out.getvalue())
         doc["playback"]["keep"] = ["/result"]
         self.assertIn("/result", self.plan(doc)["playback"]["topics"])
 
-    def test_recorded_namespace_applies_to_recorded_selection_and_fallback(self):
+    def test_recorded_namespace_applies_to_recorded_selection_and_empty_inputs(self):
         doc = {"version": 1, "instances": {"new": {
             "recorded_as": "old_driver", "recorded_namespace": "/robot/controller"}}}
         for subscribes in (True, False):
@@ -397,8 +429,9 @@ class Preparation(unittest.TestCase):
                 plan = self.plan(doc, opts={"names": ["new"], "selection": "recorded"})
                 self.assertTrue(plan["ready_to_prepare"], plan["issues"])
                 self.assertEqual(plan["playback"]["services"], ["/control"])
-                # Status is remapped outside the node namespace. Graph ownership must
-                # suppress it even when recorded input selection falls back to a regex.
+                if not subscribes:
+                    self.assertEqual(plan["playback"]["topics"], [])
+                # Status is outside the node namespace but has observed publisher evidence.
                 self.assertNotIn("/result", plan["playback"]["topics"])
 
     def test_namespace_only_does_not_guess_outputs_or_enable_service_calls(self):
@@ -449,7 +482,7 @@ class Preparation(unittest.TestCase):
             plan = self.plan(doc, opts=opts)
             self.assertTrue(plan["ready_to_prepare"], plan["issues"])
             self.assertNotIn("/result", plan["playback"]["topics"])
-            self.assertNotIn("/robot/controller/input", plan["playback"]["topics"])
+            self.assertIn("/robot/controller/input", plan["playback"]["topics"])
             self.assertIn("/tf", plan["playback"]["topics"])
 
     def test_recorded_namespace_does_not_change_recording_identity(self):
@@ -548,8 +581,12 @@ class Preparation(unittest.TestCase):
             if "replay-reindex" in argv:
                 self.bag(Path(argv[-1]), topic="/repaired")
                 return __import__("subprocess").CompletedProcess(argv, 0, "", "")
+            if argv[:3] == ["docker", "image", "inspect"]:
+                return __import__("subprocess").CompletedProcess(argv, 0, json.dumps({
+                    "Id": "sha256:" + "1" * 64, "Os": "linux", "Architecture": "arm64",
+                    "Config": {"Labels": {"io.rig.rosbag2.replay": "1"}}}), "")
             return original_run(argv, **kwargs)
-        with patch("rig_cli.image_catalog.docker_arch", side_effect=RigError("offline")), \
+        with patch("rig_cli.image_catalog.docker_arch", return_value="arm64"), \
                 patch("rig_cli.replay._guard_clean_host"), \
                 patch("rig_cli.replay_prepare.subprocess.run", side_effect=process):
             with contextlib.redirect_stdout(io.StringIO()) as out:
@@ -627,7 +664,7 @@ class Preparation(unittest.TestCase):
                 patch("rig_cli.replay._guard_clean_host"), \
                 patch("rig_cli.replay_plan.subprocess.run", wraps=__import__("subprocess").run) as process:
             process.side_effect = lambda argv, **kw: (
-                __import__("subprocess").CompletedProcess(argv, 0, "linux/amd64\n", "")
+                __import__("subprocess").CompletedProcess(argv, 0, json.dumps({"Id": "sha256:" + "1" * 64, "Os": "linux", "Architecture": "amd64", "Config": {"Labels": {"io.rig.rosbag2.replay": "1"}}}), "")
                 if argv[:3] == ["docker", "image", "inspect"] else original_run(argv, **kw))
             with contextlib.redirect_stdout(io.StringIO()) as out:
                 result = command(self.args("prepare", "--recipe", "demo", "--json"), self.root)
@@ -650,8 +687,8 @@ class Preparation(unittest.TestCase):
         inspected = []
         def process(argv, **kwargs):
             if argv[:3] == ["docker", "image", "inspect"]:
-                inspected.append(argv[3])
-                return __import__("subprocess").CompletedProcess(argv, 0, "linux/arm64\n", "")
+                inspected.append(argv[-1] if argv[3] == "--format" else argv[3])
+                return __import__("subprocess").CompletedProcess(argv, 0, json.dumps({"Id": "sha256:" + "1" * 64, "Os": "linux", "Architecture": "arm64", "Config": {"Labels": {"io.rig.rosbag2.replay": "1"}}}), "")
             return original_run(argv, **kwargs)
         with patch("rig_cli.image_catalog.docker_arch", return_value="arm64"), \
                 patch("rig_cli.replay._guard_clean_host"), \
@@ -676,12 +713,227 @@ class Preparation(unittest.TestCase):
             self.assertNotIn("RIG_REPLAY_SERVICES", env)
             return []
         with patch("rig_cli.replay._guard_clean_host"), patch("rig_cli.runs.new_run", return_value="new_run"), \
+                patch("rig_cli.replay_workflow._empty_projects", return_value=set(plan["selected"])), \
                 patch("rig_cli.runs.snapshot") as snapshot, patch("rig_cli.dispatch.run_verb", side_effect=run_verb):
             self.assertEqual(execute(args, self.root, m, d, plan, self.source), 0)
         self.assertEqual([r.name for r, _ in captured["pairs"]], plan["selected"])
         snap = snapshot.call_args.args[0]
         self.assertTrue(next(r for r in snap.sensors if r.name == "new").enabled)
         self.assertTrue((self.root / "data/runs/new_run/.rig/replay/resolved.yaml").is_file())
+
+    def test_capture_finishes_before_release_deadline_and_snapshot_matches_launch(self):
+        from rig_cli import runs
+        from rig_cli.replay_workflow import execute
+        self.write("new.yaml", {"name": "new", "release": "{{replay_start_at_unix_s}}"})
+        plan = self.plan()
+        m, _, d = load_context(self.root)
+        m.data_dir, m.run_capture = str(self.root / "data"), False
+        clock = [1000.0]
+        original_open = runs.new_run
+        def capture(*args, **kwargs):
+            clock[0] += 45
+            return original_open(*args, **kwargs)
+        launched = []
+        def launch(row, desc, env, cmd, **kwargs):
+            launched.append(row.name)
+            self.assertEqual(float(env["RIG_REPLAY_START_AT_UNIX_S"]), 1065.0)
+            if row.name == "new":
+                self.assertEqual(yaml.safe_load(row.config.read_text())["release"], 1065.0)
+            return __import__("subprocess").CompletedProcess(cmd, 0)
+        with patch("rig_cli.replay._guard_clean_host"), \
+                patch("rig_cli.replay_workflow._empty_projects", return_value=set(plan["selected"])), \
+                patch("rig_cli.replay_workflow.time.time", side_effect=lambda: clock[0]), \
+                patch("rig_cli.runs.new_run", side_effect=capture), \
+                patch("rig_cli.dispatch.run", side_effect=launch):
+            self.assertEqual(execute(self.args(str(self.source)), self.root, m, d, plan, self.source), 0)
+        self.assertEqual(launched, plan["selected"])
+        _, run_dir, metadata = runs.current_run(Path(m.data_dir))
+        self.assertEqual(metadata["replay"]["start_at_unix_s"], 1065.0)
+        self.assertEqual(metadata["replay"]["startup"]["status"], "started")
+        snap = run_dir / ".rig/config" / metadata["config"] / "rendered/new.yaml"
+        self.assertEqual(yaml.safe_load(snap.read_text())["release"], 1065.0)
+
+    def test_startup_failure_stops_dependents_and_cleans_only_new_attempted_projects(self):
+        from rig_cli.replay_workflow import execute
+        plan = self.plan()
+        m, _, d = load_context(self.root)
+        for problem in (1, OSError("launcher failed"), KeyboardInterrupt()):
+            events = []
+            def launch(row, desc, env, cmd, **kwargs):
+                verb = cmd[2]
+                events.append((verb, row.name))
+                if verb == "up" and row.name == "new":
+                    if isinstance(problem, BaseException):
+                        raise problem
+                    return __import__("subprocess").CompletedProcess(cmd, problem)
+                return __import__("subprocess").CompletedProcess(cmd, 0)
+            with self.subTest(problem=repr(problem)), patch("rig_cli.replay._guard_clean_host"), \
+                    patch("rig_cli.replay_workflow._empty_projects", return_value={"new", "player"}), \
+                    patch("rig_cli.replay_workflow._quiesce_projects", return_value=True), \
+                    patch("rig_cli.dispatch.run", side_effect=launch):
+                expected = 130 if isinstance(problem, KeyboardInterrupt) else 1
+                self.assertEqual(execute(self.args(str(self.source)), self.root, m, d, plan, self.source), expected)
+            self.assertEqual(events, [("up", "router"), ("up", "new"), ("down", "new")])
+
+    def test_ordinary_dispatch_keeps_continue_on_failure_behavior(self):
+        m, _, d = load_context(self.root)
+        pairs = [(row, d[row.service]) for row in m.sensors]
+        with patch("rig_cli.dispatch.run", return_value=__import__("subprocess").CompletedProcess([], 1)) as run:
+            result = dispatch.run_verb(pairs, {}, "up")
+        self.assertEqual(len(result), len(pairs))
+        self.assertEqual(run.call_count, len(pairs))
+
+    def test_failed_outcome_write_does_not_prevent_startup_cleanup(self):
+        from rig_cli.replay_workflow import execute
+        plan = self.plan()
+        m, _, d = load_context(self.root)
+        failed = [False]
+        events = []
+        write = prepare.write_yaml
+        def save(path, value):
+            if failed[0]:
+                raise OSError("disk full")
+            return write(path, value)
+        def launch(row, desc, env, cmd, **kwargs):
+            events.append((cmd[2], row.name))
+            failed[0] = True
+            return __import__("subprocess").CompletedProcess(cmd, 1 if cmd[2] == "up" else 0)
+        with patch("rig_cli.replay._guard_clean_host"), \
+                patch("rig_cli.replay_workflow._empty_projects", return_value={"router"}), \
+                patch("rig_cli.replay_workflow._quiesce_projects", return_value=True), \
+                patch("rig_cli.replay_prepare.write_yaml", side_effect=save), \
+                patch("rig_cli.dispatch.run", side_effect=launch):
+            self.assertEqual(execute(self.args(str(self.source)), self.root, m, d, plan, self.source), 1)
+        self.assertEqual(events, [("up", "router"), ("down", "router")])
+
+    def test_project_inventory_is_required_and_preexisting_stopped_projects_are_not_owned(self):
+        from rig_cli.replay_workflow import _empty_projects
+        m, _, d = load_context(self.root)
+        pairs = [(row, d[row.service]) for row in m.sensors][:2]
+        def inspect(argv, **kwargs):
+            self.assertEqual(argv[:3], ["docker", "ps", "-aq"])
+            self.assertIn("com.docker.compose.project=", argv[-1])
+            return __import__("subprocess").CompletedProcess(argv, 0, "a" * 64 if pairs[0][0].name in argv[-1] else "", "")
+        with patch("rig_cli.replay_workflow.subprocess.run", side_effect=inspect):
+            self.assertEqual(_empty_projects(m, pairs), {pairs[1][0].name})
+        for output, rc in (("{}", 0), ("", 1)):
+            with patch("rig_cli.replay_workflow.subprocess.run", return_value=
+                       __import__("subprocess").CompletedProcess([], rc, output, "")):
+                with self.assertRaisesRegex(RigError, "Cannot inspect replay project"):
+                    _empty_projects(m, pairs)
+
+    def test_zero_delay_still_has_release_gate_and_expired_positive_gate_starts_nothing(self):
+        from rig_cli.replay_workflow import execute
+        plan = self.plan()
+        m, _, d = load_context(self.root)
+        clock = [1000.0]
+        with patch("rig_cli.replay._guard_clean_host"), \
+                patch("rig_cli.replay_workflow._empty_projects", return_value=set(plan["selected"])), \
+                patch("rig_cli.replay_workflow.time.time", side_effect=lambda: clock[0]), \
+                patch("rig_cli.dispatch.run_verb", return_value=[]) as launch:
+            self.assertEqual(execute(self.args(str(self.source), "--start-delay", "0"),
+                                     self.root, m, d, plan, self.source), 0)
+            self.assertEqual(launch.call_args.args[1]["RIG_REPLAY_START_AT_UNIX_S"], "1000.000")
+            m.data_dir = str(self.root / "data")
+            def slow_snapshot(*args, **kwargs):
+                clock[0] += 30
+            launch.reset_mock()
+            with patch("rig_cli.runs.new_run", return_value="slow"), \
+                    patch("rig_cli.runs.snapshot", side_effect=slow_snapshot):
+                with self.assertRaisesRegex(RigError, "no services started"):
+                    execute(self.args(str(self.source)), self.root, m, d, plan, self.source)
+            launch.assert_not_called()
+
+    def test_first_project_inspection_cannot_consume_the_release_delay(self):
+        from rig_cli.replay_workflow import execute
+        plan = self.plan()
+        m, _, d = load_context(self.root)
+        clock = [1000.0]
+        def inspect(manifest, pairs):
+            clock[0] += 25
+            return {row.name for row, _ in pairs}
+        with patch("rig_cli.replay._guard_clean_host"), \
+                patch("rig_cli.replay_workflow._empty_projects", side_effect=inspect), \
+                patch("rig_cli.replay_workflow.time.time", side_effect=lambda: clock[0]), \
+                patch("rig_cli.dispatch.run") as launch:
+            self.assertEqual(execute(self.args(str(self.source)), self.root, m, d, plan, self.source), 1)
+        launch.assert_not_called()
+
+    def test_capture_cannot_change_validated_launch_configuration(self):
+        from rig_cli.replay_workflow import execute
+        self.write("new.yaml", {"name": "new", "mode": "validated"})
+        plan = self.plan()
+        m, _, d = load_context(self.root)
+        m.data_dir = str(self.root / "data")
+        def capture(*args, **kwargs):
+            self.write("new.yaml", {"name": "new", "mode": "changed"})
+            return "changed"
+        with patch("rig_cli.replay._guard_clean_host"), \
+                patch("rig_cli.runs.new_run", side_effect=capture), \
+                patch("rig_cli.dispatch.run") as launch:
+            with self.assertRaisesRegex(RigError, "Deployment changed since planning"):
+                execute(self.args(str(self.source)), self.root, m, d, plan, self.source)
+        launch.assert_not_called()
+
+    def test_failure_stops_waiting_sources_before_slow_log_capture(self):
+        from rig_cli.replay_workflow import execute
+        self.recording()
+        plan = self.plan(opts={"names": ["cam"]})
+        m, _, d = load_context(self.root)
+        m.data_dir = str(self.root / "data")
+        clock, events, stopped = [1000.0], [], [False]
+        def launch(row, desc, env, cmd, **kwargs):
+            events.append((cmd[2], row.name))
+            return __import__("subprocess").CompletedProcess(cmd, int(cmd[2] == "up" and row.name == "new"))
+        def stop(argv, **kwargs):
+            self.assertEqual(argv[:4], ["docker", "stop", "--time", "1"])
+            stopped[0] = True
+            events.append(("stop", "containers"))
+            return __import__("subprocess").CompletedProcess(argv, 0, "", "")
+        def logs(*args, **kwargs):
+            self.assertTrue(stopped[0], "a held source could release during log capture")
+            clock[0] += 30
+            events.append(("logs", "containers"))
+        with patch("rig_cli.replay._guard_clean_host"), \
+                patch("rig_cli.replay_workflow._empty_projects", return_value=set(plan["selected"])), \
+                patch("rig_cli.replay_workflow._project_container_ids", return_value=["a" * 64]), \
+                patch("rig_cli.replay_workflow.subprocess.run", side_effect=stop), \
+                patch("rig_cli.replay_workflow.time.time", side_effect=lambda: clock[0]), \
+                patch("rig_cli.runs.new_run", return_value="failed"), patch("rig_cli.runs.snapshot"), \
+                patch("rig_cli.runs.capture_docker_logs", side_effect=logs), \
+                patch("rig_cli.dispatch.run", side_effect=launch):
+            self.assertEqual(execute(self.args(str(self.source), "cam"), self.root, m, d, plan, self.source), 1)
+        self.assertIn(("up", "cam"), events)
+        self.assertNotIn(("up", "player"), events)
+        self.assertLess(events.index(("stop", "containers")), events.index(("logs", "containers")))
+        self.assertLess(events.index(("logs", "containers")), events.index(("down", "cam")))
+
+    def test_capture_cannot_change_or_create_an_overlay_base_pin(self):
+        from rig_cli.replay_workflow import execute
+        self.rows["autonomy"][0]["overlays"] = ["test/tune@1.0.0"]
+        self.vehicle()
+        self.write("new.yaml", {"name": "new", "mode": 1})
+        self.write("config/.overlays/test--tune--1.0.0.yaml", {"mode": 2})
+        pin = self.root / "config/.pins/new.yaml"
+        for initially_present in (True, False):
+            if initially_present:
+                self.write("config/.pins/new.yaml", {"mode": 1})
+            else:
+                pin.unlink(missing_ok=True)
+            plan = self.plan()
+            self.assertEqual(plan["configs"]["new"]["mode"], 2)
+            m, _, d = load_context(self.root)
+            m.data_dir = str(self.root / "data")
+            def capture(*args, **kwargs):
+                self.write("config/.pins/new.yaml", {"mode": 2})
+                return "pin-change"
+            with self.subTest(initially_present=initially_present), \
+                    patch("rig_cli.replay._guard_clean_host"), \
+                    patch("rig_cli.runs.new_run", side_effect=capture), \
+                    patch("rig_cli.dispatch.run") as launch:
+                with self.assertRaisesRegex(RigError, "Deployment changed since planning"):
+                    execute(self.args(str(self.source)), self.root, m, d, plan, self.source)
+            launch.assert_not_called()
 
     def test_failed_preparation_rolls_back_player_wiring(self):
         self.rows["autonomy"] = [r for r in self.rows["autonomy"] if r["name"] != "player"]
@@ -771,7 +1023,7 @@ class Preparation(unittest.TestCase):
         """Isolate replay's selection contract; service-export tests validate actual artifacts."""
         import shutil
         from unittest.mock import Mock
-        def resolve(root, binding, *, service, profile=None, export_id=None, descriptor=None):
+        def resolve(root, binding, *, service, profile=None, export_id=None, descriptor=None, verification=None):
             export = Path(root) / "exports/services" / service / (profile or "h264") / (export_id or "generation-a")
             rec = export / "recordings" / binding["recorded_as"]
             if not rec.is_dir():
@@ -789,7 +1041,7 @@ class Preparation(unittest.TestCase):
             (export / "export.yaml").write_text("version: 1\ncomplete: true\n")
             return export
         resolver = Mock(side_effect=resolve)
-        with patch.dict(sys.modules, {"rig_cli.service_exports": SimpleNamespace(resolve_proxy_binding=resolver)}):
+        with patch("rig_cli.service_exports.resolve_proxy_binding", resolver):
             yield make, resolver
 
     def test_direct_binding_alias_and_exact_sessions_do_not_copy_bag(self):
@@ -971,6 +1223,7 @@ class Preparation(unittest.TestCase):
                 self.assertEqual(json.loads(Path(env["RIG_REPLAY_PLAN"]).read_text())["source"], str(self.source))
                 return []
             with patch("rig_cli.replay._guard_clean_host"), patch("rig_cli.runs.new_run", return_value="proxy-run") as new_run, \
+                    patch("rig_cli.replay_workflow._empty_projects", return_value=set(plan["selected"])), \
                     patch("rig_cli.runs.snapshot"), patch("rig_cli.dispatch.run_verb", side_effect=launch):
                 self.assertEqual(execute(self.args(str(self.source), "cam"), self.root, m, d, plan, self.source), 0)
                 provenance = new_run.call_args.kwargs["replay"]
@@ -1109,9 +1362,13 @@ class Preparation(unittest.TestCase):
             if "replay-reindex" in argv:
                 self.bag(Path(argv[-1]))
                 return __import__("subprocess").CompletedProcess(argv, 0, "", "")
+            if argv[:3] == ["docker", "image", "inspect"]:
+                return __import__("subprocess").CompletedProcess(argv, 0, json.dumps({
+                    "Id": "sha256:" + "1" * 64, "Os": "linux", "Architecture": "arm64",
+                    "Config": {"Labels": {"io.rig.rosbag2.replay": "1"}}}), "")
             return original_run(argv, **kwargs)
         base = [str(self.source), "cam", "--recipe", "legacy-direct", "--use-proxies", "--json"]
-        with patch("rig_cli.image_catalog.docker_arch", side_effect=RigError("offline")), \
+        with patch("rig_cli.image_catalog.docker_arch", return_value="arm64"), \
                 patch("rig_cli.replay._guard_clean_host"), \
                 patch("rig_cli.replay_prepare.subprocess.run", side_effect=process):
             with contextlib.redirect_stdout(io.StringIO()) as out:
@@ -1159,11 +1416,12 @@ class Preparation(unittest.TestCase):
         inspected = []
         def process(argv, **kwargs):
             if argv[:3] == ["docker", "image", "inspect"]:
-                if argv[-1] == "{{json .Config.Labels}}":
-                    inspected.append(argv[3])
-                    output = json.dumps(labels)
-                else:
-                    output = "linux/arm64"
+                ref = argv[-1] if argv[3] == "--format" else argv[3]
+                if ref != "fixture/runtime:latest" and not ref.startswith("example.test/runtime") :
+                    inspected.append(ref)
+                output = json.dumps({"Id": "sha256:" + "1" * 64, "Os": "linux", "Architecture": "arm64",
+                                     "RepoDigests": [ref] if "@sha256:" in ref else [],
+                                     "Config": {"Labels": {"io.rig.rosbag2.replay": "1", **labels}}})
                 return __import__("subprocess").CompletedProcess(argv, 0, output, "")
             return original(argv, **kwargs)
         with patch("rig_cli.image_catalog.docker_arch", return_value="arm64"), \
@@ -1180,10 +1438,10 @@ class Preparation(unittest.TestCase):
             with self.image_label_runtime({}) as inspected:
                 plan = planner.build(m, c, d, self.root, str(self.source), {"version": 1}, opts)
             self.assertFalse(plan["ready_to_run"])
-            errors = [i for i in plan["issues"] if i["code"] == "recording_image_capability"]
+            errors = [i for i in plan["issues"] if i["code"] == "runtime_images" and i["status"] == "error"]
             self.assertEqual(len(errors), 1, plan["issues"])
             self.assertEqual(errors[0]["status"], "error")
-            self.assertIn("upgrade/build/pull", errors[0]["message"])
+            self.assertIn("io.rig.camera.replay-bindings", errors[0]["message"])
             self.assertEqual(inspected, ["example.test/cam-dev:v1-dev"])
             with self.image_label_runtime({"io.rig.camera.replay-bindings": "1"}) as inspected:
                 plan = planner.build(m, c, d, self.root, str(self.source), {"version": 1}, opts)
@@ -1200,8 +1458,12 @@ class Preparation(unittest.TestCase):
         self.assertEqual(inspected, ["other.test/custom-camera:old"])
         m.extra_env.clear()
         m.build_catalog = {"example.test/cam-dev:v1-dev": {
-            "image": "cam-dev", "digest": "sha256:" + "a" * 64, "architectures": ["arm64"]}}
-        pinned = "example.test/cam-dev@sha256:" + "a" * 64
+            "image": "cam-dev", "digest": "sha256:" + "a" * 64, "architectures": ["arm64"],
+            "children": {"arm64": "sha256:" + "b" * 64}},
+            "fixture/runtime:latest": {"image": "runtime", "digest": "sha256:" + "c" * 64,
+                "architectures": ["arm64"], "children": {"arm64": "sha256:" + "d" * 64}}}
+        m.image_base = "example.test/runtime:latest"
+        pinned = "example.test/cam-dev@sha256:" + "b" * 64
         with self.image_label_runtime({}) as inspected:
             plan = planner.build(m, c, d, self.root, str(self.source), {"version": 1}, {"names": ["cam"]})
         self.assertFalse(plan["ready_to_run"])
@@ -1218,9 +1480,11 @@ class Preparation(unittest.TestCase):
             with self.image_label_runtime({}) as inspected:
                 plan = planner.build(m, c, d, self.root, str(self.source), {"version": 1}, opts)
             self.assertTrue(plan["ready_to_run"], plan["issues"])
-            self.assertEqual(inspected, [])
+            self.assertEqual(inspected, ["example.test/cam-dev:v1-dev"] if opts else [])
+            self.assertFalse(any("io.rig.camera.replay-bindings" in item["required_labels"]
+                                 for item in plan["image_inventory"]["images"].values()))
         with self.image_label_runtime({}) as inspected:
-            result = planner.direct_image_capabilities(m, d, m.sensors, {"cam": {"direct": False}})
+            result = planner.required_image_labels(d, m.sensors, {"cam": {"direct": False}})
         self.assertEqual(inspected, [])
         self.assertEqual(result, {})
 

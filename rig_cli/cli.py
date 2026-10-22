@@ -852,7 +852,8 @@ def build_parser() -> argparse.ArgumentParser:
                     help="explicitly bind compatible service exports instead of original recordings; "
                          "missing/stale proxies are errors; never generates proxies")
     rp.add_argument("--selection", choices=("broad", "recorded"), default="broad",
-                    help="broad bag inputs (default), or legacy recorded-graph input selection")
+                    help="broad bag topics (default), or recorded-graph subscription selection; "
+                         "both use automatic recorded-call selection unless the recipe overrides it")
     rp.add_argument("names", nargs="*", metavar="NAME",
                     help="additional destination instances to start despite replay.start policy; "
                          "recording-capable instances still use recordings unless --live. "
@@ -861,18 +862,21 @@ def build_parser() -> argparse.ArgumentParser:
                     help="force an instance LIVE although the run holds its recordings (HIL: "
                          "replay the rest, run the real device); repeatable")
     rp.add_argument("--skip-service", action="append", default=[], dest="skip_services", metavar="SERVICE",
-                    help="omit every instance of a service and its recorded bag topics; repeatable. "
+                    help="omit every instance of a service, its source recordings and bag topics "
+                         "with proven exclusive ownership; repeatable. "
                          "Use --skip-service camera-service to replay without cameras/video")
     rp.add_argument("--include-service", action="append", default=[], dest="include_services", metavar="SERVICE",
                     help="start every instance of a service despite its replay startup policy; repeatable")
     rp.add_argument("--skip-instance", action="append", default=[], dest="skip_instances", metavar="NAME",
-                    help="omit one instance and its recorded topics; repeatable")
+                    help="omit one instance, its source recordings and bag topics with proven "
+                         "exclusive ownership; repeatable")
     rp.add_argument("--session", default=None, metavar="PREFIX",
                     help="select a camera/source recording session prefix; does not select the "
                          "bag session (use recipe bag.logger/session or player config)")
     rp.add_argument("--start-delay", dest="start_delay", type=float, default=20.0, metavar="S",
-                    help="the release gate: sources come up paused and resume together S seconds "
-                         "after the up starts (default 20; 0 = no gate, each plays as it comes up)")
+                    help="release sources at a shared deadline set after source verification and run "
+                         "capture, just before startup (default 20 seconds; 0 releases each as it "
+                         "comes up). This timer does not guarantee consumer readiness")
     rp.add_argument("--label", default=None,
                     help="label for the NEW replay run (default: replay-<source-run>)")
     rp.add_argument("--export-calls", action="store_true", dest="export_calls",
@@ -880,8 +884,8 @@ def build_parser() -> argparse.ArgumentParser:
                          "script on stdout (redirect to a file, edit, replay with --calls). "
                          "Opens no replay run; uses one player container; takes no instance names")
     rp.add_argument("--calls", default=None, metavar="FILE",
-                    help="call-script YAML (schema 1): inject/retime service calls on the sim "
-                         "clock — SUPPRESSES verbatim service replay (script XOR verbatim); "
+                    help="call-script YAML (schema 1): inject/retime service calls; overrides "
+                         "recipe calls and recorded requests before event-content validation; "
                          "bootstrap one with --export-calls")
     rp.add_argument("--from", dest="window_from", default=None, metavar="S",
                     help="start the replay S seconds into the recording (from BAG START — the "
@@ -907,6 +911,10 @@ def build_parser() -> argparse.ArgumentParser:
     rp.add_argument("--dry-run", action="store_true",
                     help="preview selection without writes or containers; playback also prints "
                          "launcher commands once required source preparation is available")
+    rp.add_argument("--pull", choices=("missing", "always", "never"), default="missing",
+                    help="runtime image policy: fetch missing native images (default), refresh "
+                         "selected references, or require cached images. Check, prepare and "
+                         "dry-run only report proposed pulls")
     for verb in ("check", "prepare"):
         check = sub.add_parser("replay-" + verb, parents=[rp], add_help=False,
                                prog=f"{parser.prog} replay {verb}",

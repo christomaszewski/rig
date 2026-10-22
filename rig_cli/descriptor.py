@@ -262,8 +262,9 @@ def load_descriptor(service: str, repo: Path) -> Descriptor:
         _validate_ros_namespace(probe, f"{path}: ros_namespace")
     verbs = dict(DEFAULT_VERBS)
     verbs.update(data.get("verbs") or {})
-    if "images" in verbs and (not isinstance(verbs["images"], str) or not verbs["images"].strip()):
-        raise RigError(f"{path}: verbs.images must be a nonempty launcher argument string")
+    for key in ("images", "runtime-images"):
+        if key in verbs and (not isinstance(verbs[key], str) or not verbs[key].strip()):
+            raise RigError(f"{path}: verbs.{key} must be a nonempty launcher argument string")
 
     examples_raw = data.get("examples")  # a single path or a list of them
     examples = [examples_raw] if isinstance(examples_raw, str) else list(examples_raw or [])

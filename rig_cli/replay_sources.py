@@ -242,7 +242,7 @@ def recording_binding(row, desc, source, recipe, *, camera_session=None, window=
                                             len(chosen) != len(observed)))
 
 
-def select_proxy(row, desc, source, binding, recipe, options):
+def select_proxy(row, desc, source, binding, recipe, options, *, verification=None):
     """Apply explicit proxy intent only after original recording/session selection."""
     if not options.get("use_proxies"):
         return binding
@@ -268,7 +268,8 @@ def select_proxy(row, desc, source, binding, recipe, options):
         pin = saved.get("proxy", {}).get("export_id")
     from .service_exports import resolve_proxy_binding
     resolved = resolve_proxy_binding(source["root"], binding, service=row.service,
-                                     profile=requested.get("profile"), export_id=pin, descriptor=desc)
+                                     profile=requested.get("profile"), export_id=pin, descriptor=desc,
+                                     verification=verification)
     resolved.setdefault("original", dict(binding))
     resolved["direct"] = True
     manifest = Path(resolved["proxy"]["manifest"])

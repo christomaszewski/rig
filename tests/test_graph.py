@@ -121,6 +121,81 @@ def test_load_skips_unparseable_file_but_keeps_the_rest():
     assert len(epochs) == 1
 
 
+def test_load_skips_structurally_invalid_epoch_with_filename_and_reason():
+    import contextlib
+    import io
+    import yaml
+
+    bad_nodes = [
+        ([], "nodes:"),
+        (["/bad/node"], "nodes:"),
+        (None, "nodes:"),
+        ({17: {}}, "node name"),
+        ({"relative/node": {}}, "node name"),
+        ({"/bad/node": None}, "nodes./bad/node:"),
+        ({"/bad/node": "bad"}, "nodes./bad/node:"),
+        ({"/bad/node": {"pubs": {}}}, "pubs:"),
+        ({"/bad/node": {"subs": "bad"}}, "subs:"),
+        ({"/bad/node": {"provides": None}}, "provides:"),
+        ({"/bad/node": {"requires": ["bad"]}}, "requires[0]:"),
+        ({"/bad/node": {"pubs": [{}]}}, "pubs[0].topic:"),
+        ({"/bad/node": {"pubs": [{"topic": ["/result"]}]}}, "pubs[0].topic:"),
+        ({"/bad/node": {"provides": [{"service": 17}]}}, "provides[0].service:"),
+        ({"/bad/node": {"pubs": [{"topic": "/result", "type": []}]}}, "pubs[0].type:"),
+        ({"/bad/node": {"pubs": [{"topic": "/result", "type": ""}]}}, "pubs[0].type:"),
+    ]
+    for nodes, reason in bad_nodes:
+        if isinstance(nodes, dict):
+            # Even a plausible node in a malformed epoch cannot establish ownership.
+            nodes["/untrusted/node"] = {"pubs": [{"topic": "/untrusted/output"}]}
+        doc = yaml.safe_dump({"schema": 1, "nodes": nodes})
+        output = io.StringIO()
+        with contextlib.redirect_stderr(output):
+            epochs = graph.load_epochs(_run_dir(doc, EPOCH_B))
+        assert len(epochs) == 1, (nodes, output.getvalue())
+        assert "/planner/planner_node" in epochs[0].nodes
+        assert "/untrusted/node" not in graph.union(epochs).nodes
+        assert "epoch_20260827T100000Z.yaml" in output.getvalue()
+        assert reason in output.getvalue(), output.getvalue()
+
+
+def test_load_requires_an_integer_schema_and_scalar_timestamps():
+    for field, value in (("schema", "true"), ("schema", "1.0"), ("first", "[]"),
+                         ("last", "{unexpected: mapping}")):
+        doc = "schema: 1\nnodes: {}\n"
+        if field == "schema":
+            doc = doc.replace("schema: 1", "schema: " + value)
+        else:
+            doc += field + ": " + value + "\n"
+        epochs = graph.load_epochs(_run_dir(doc, EPOCH_B))
+        assert len(epochs) == 1 and "/planner/planner_node" in epochs[0].nodes
+
+
+def test_load_accepts_missing_optional_edge_kinds_and_types():
+    epochs = graph.load_epochs(_run_dir(
+        "schema: 1\nnodes: {/node: {pubs: [{topic: /output}]}}\n"))
+    assert epochs[0].nodes == {"/node": (graph.Edge("pubs", "/output", "?"),)}
+    assert epochs[0].first == epochs[0].last == "?"
+
+
+def test_load_skips_unreadable_epoch_but_keeps_other_epochs():
+    import contextlib
+    import io
+    from unittest.mock import patch
+
+    run = _run_dir(EPOCH_A, EPOCH_B)
+    load = graph.load_yaml
+    def read(path):
+        if path.name == "epoch_20260827T100000Z.yaml":
+            raise PermissionError("permission denied")
+        return load(path)
+    output = io.StringIO()
+    with patch.object(graph, "load_yaml", side_effect=read), contextlib.redirect_stderr(output):
+        epochs = graph.load_epochs(run)
+    assert len(epochs) == 1 and "/planner/planner_node" in epochs[0].nodes
+    assert "epoch_20260827T100000Z.yaml: permission denied" in output.getvalue()
+
+
 def test_union_windows_and_dedup():
     u = graph.union(graph.load_epochs(_run_dir(EPOCH_A, EPOCH_A, EPOCH_B)))  # A duplicated: restart
     assert u.epochs == 3

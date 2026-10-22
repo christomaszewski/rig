@@ -137,6 +137,37 @@ def rewrite_compose(staging, entries, refs):
         path.write_text(yaml.safe_dump(compose, sort_keys=False))
 
 
+def run_image_query(sensor, desc, env, *, repo=None, verb="images", timeout=15):
+    """Bounded, declared launcher query shared by bundle and replay image planning."""
+    if verb not in desc.verbs:
+        raise RigError(f"{sensor.name}: service must declare verbs.{verb} before querying images")
+    repo = Path(repo) if repo is not None else desc.repo
+    try:
+        result = subprocess.run([str(repo / desc.launcher), str(sensor.config), *desc.verb_args(verb)],
+                                cwd=repo, env=env, capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RigError(f"{sensor.name}: {verb} query failed: {exc}") from exc
+    if result.returncode:
+        raise RigError(f"{sensor.name}: {verb} query failed: "
+                       f"{(result.stderr or '').strip()[:500] or 'exit ' + str(result.returncode)}")
+    return result.stdout
+
+
+def parse_image_refs(output, *, instance):
+    """The original verbs.images YAML-list contract used by templated artifacts."""
+    from .interpolate import referenced_vars
+    try:
+        images = yaml.safe_load(output)
+    except yaml.YAMLError as exc:
+        raise RigError(f"{instance}: invalid image-plan output: {exc}") from exc
+    if (not isinstance(images, list) or not images
+            or any(not isinstance(ref, str) or not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._/:@-]*", ref)
+                   for ref in images) or referenced_vars(images)):
+        raise RigError(f"{instance}: image planner must return a nonempty YAML list of resolved image refs; "
+                       "unresolved image selectors need deployment defaults")
+    return images
+
+
 def fleet_image_refs(root, staging, manifest, descriptors):
     """Optional `verbs.images`: YAML list of refs, from raw layered config + target, no identity.
 
@@ -144,7 +175,7 @@ def fleet_image_refs(root, staging, manifest, descriptors):
     used as a guess at runtime requirements. Existing resolved artifacts use compose capture.
     """
     from .dispatch import fleet_env, service_env
-    from .interpolate import referenced_vars, substitute_scalar
+    from .interpolate import substitute_scalar
     from .resolve import _layered_dict
     refs = set()
     env = fleet_env(replace(manifest, missing_identity=(), vehicle_id=None), descriptors)
@@ -168,16 +199,6 @@ def fleet_image_refs(root, staging, manifest, descriptors):
             return value
         config.write_text(yaml.safe_dump(known_values(_layered_dict(sensor, root)), sort_keys=False))
         repo = staging / "services" / sensor.service
-        proc = subprocess.run([str(repo / desc.launcher), str(config), *desc.verb_args("images")],
-                              cwd=repo, env=service_env(env, desc), capture_output=True, text=True)
-        try:
-            images = yaml.safe_load(proc.stdout)
-        except yaml.YAMLError as exc:
-            raise RigError(f"{sensor.name}: invalid image-plan output: {exc}") from exc
-        if (proc.returncode or not isinstance(images, list) or not images
-                or any(not isinstance(r, str) or not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._/:@-]*", r)
-                       for r in images) or referenced_vars(images)):
-            raise RigError(f"{sensor.name}: image planner must return a nonempty YAML list of resolved image refs; "
-                           f"unresolved image selectors need deployment defaults: {proc.stderr.strip()[:200]}")
-        refs.update(images)
+        output = run_image_query(replace(sensor, config=config), desc, service_env(env, desc), repo=repo)
+        refs.update(parse_image_refs(output, instance=sensor.name))
     return sorted(refs)

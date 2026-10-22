@@ -12,12 +12,16 @@ import re
 import subprocess
 from pathlib import Path
 
-from . import RigError, dispatch, graph, replay, resolve
+from . import RigError, dispatch, graph, replay, resolve, replay_selection
 from .manifest import PLAYER_SERVICE
+from .common import eprint
 from .descriptor import resolve_ros_namespace
 from .replay_policy import forced, setting
 from .replay_recipe import digest, recorded_namespaces
 from .replay_sources import inspect_source, recording_binding, metadata, select_proxy, binding_variables
+
+
+SELECTION_VERSION = 2
 
 
 def capabilities(row, desc):
@@ -36,69 +40,71 @@ def capabilities(row, desc):
         raise RigError(f"player capability probe failed: {exc}") from exc
 
 
-def direct_image_capabilities(manifest, descriptors, rows, recordings):
-    """Verify the selected reader image understands direct paths and exact session lists.
-
-    A current host bundle can otherwise hand these fields to an older image that silently
-    ignores them. Inspect labels on the same image overrides/digests dispatch will use.
-    """
-    from .build import _service_tag
-    from .targets import variant_spec
-    fleet_env = dispatch.fleet_env(manifest, descriptors)
-    required = {}
-    for row in rows:
-        if not recordings.get(row.name, {}).get("direct"):
-            continue
-        desc = descriptors[row.service]
-        labels_by_image = getattr(desc.replay_source, "image_labels", {})
-        if not labels_by_image:
-            continue
-        env = dispatch.service_env(fleet_env, desc)
-        _, images = variant_spec(desc, manifest.platform)
-        tag = _service_tag(desc, manifest.image_tag, manifest.platform) or "latest"
-        prefix = f"{manifest.image_registry}/" if manifest.image_registry else ""
-        for image in images:
-            labels = labels_by_image.get(image)
-            if not labels:
-                continue
-            key = desc.image_env.get(image)
-            ref = env.get(key) if key and env.get(key) else f"{prefix}{image}:{tag}"
-            item = required.setdefault(ref, {"labels": {}, "instances": []})
-            item["instances"].append(row.name)
-            for label, value in labels.items():
-                if label in item["labels"] and item["labels"][label] != value:
-                    raise RigError(f"Replay readers disagree on required image label {label} for {ref}")
-                item["labels"][label] = value
-    verified = {}
-    for ref, item in sorted(required.items()):
-        instances = ", ".join(item["instances"])
-        try:
-            proc = subprocess.run(["docker", "image", "inspect", ref, "--format",
-                                   "{{json .Config.Labels}}"], capture_output=True, text=True, timeout=10)
-            if proc.returncode:
-                raise ValueError(proc.stderr.strip() or "image is unavailable locally")
-            observed = json.loads(proc.stdout) or {}
-            if not isinstance(observed, dict):
-                raise ValueError("image labels are not a mapping")
-        except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
-            raise RigError(f"{instances}: cannot verify direct replay reader image {ref}: {exc}; "
-                           "build or pull the current service image before replay") from exc
-        missing = [f"{key}={value}" for key, value in item["labels"].items() if observed.get(key) != value]
-        if missing:
-            raise RigError(f"{instances}: image {ref} does not support this direct replay binding "
-                           f"(requires {', '.join(missing)}); upgrade/build/pull the current service "
-                           "image together with its bundle; older images can ignore replay.sessions")
-        verified[ref] = item["labels"]
-    return verified
+def required_image_labels(descriptors, rows, recordings, plan=None):
+    """Capabilities belong to the actual role selected by the launcher, including overrides."""
+    required = {row.name: descriptors[row.service].replay_source.image_labels
+            for row in rows if recordings.get(row.name, {}).get("direct")
+            and descriptors[row.service].replay_source.image_labels}
+    if plan and plan.get("player"):
+        required[plan["player"]] = plan.get("capabilities", {}).get("image_labels", {})
+    return required
 
 
-def build(manifest, catalog, descriptors, root, ref, recipe, options, *, host=True):
+def image_inventory(plan, manifest, descriptors, rows, root, architecture):
+    import tempfile
+    from . import runtime_images
+    from .common import load_yaml
+    from .replay_prepare import player_document
+    env = dispatch.fleet_env(manifest, descriptors)
+    env["RIG_TARGET_ARCH"] = architecture
+    source = plan["source"] or {}
+    runtime = source.get("runtime_root", source.get("root"))
+    if runtime:
+        env["RIG_REPLAY_SOURCE"] = str(runtime)
+    if plan["sim_time"]:
+        env["RIG_SIM_TIME"] = "1"
+    env["RIG_REPLAY_FROM_S"] = str(plan["window"]["start"])
+    env["RIG_REPLAY_TO_S"] = str(plan["window"]["end"] if plan["window"]["end"] is not None else 0)
+    meta = load_yaml(root / "metadata.yaml") if (root / "metadata.yaml").is_file() else {}
+    with tempfile.TemporaryDirectory(prefix="rig-replay-image-plan-") as temporary:
+        if plan["player"] and source.get("bag"):
+            path = Path(temporary) / "player.json"
+            path.write_text(json.dumps(player_document(plan, runtime)))
+            env["RIG_REPLAY_PLAN"] = str(path)
+        return runtime_images.inventory(
+            manifest, descriptors, rows, plan["configs"], architecture=architecture, env=env,
+            required_labels=required_image_labels(descriptors, rows, plan["recordings"], plan),
+            bundle=meta.get("bundle"))
+
+
+def apply_image_report(plan, inspection):
+    """Replace only image readiness evidence after acquisition; retain source/selection checks."""
+    plan["image_inspection"] = inspection
+    plan["issues"][:] = [i for i in plan["issues"] if i["code"] != "runtime_images"]
+    def issue(status, message):
+        plan["issues"].append(dict(status=status, code="runtime_images", message=message, phase="run"))
+    for message in inspection["errors"]:
+        issue("error", message)
+    for ref in inspection["proposed_pulls"]:
+        issue("not_checked", f"Runtime image acquisition required: {ref} (--pull {plan['pull_policy']})")
+    if inspection["ready"]:
+        issue("ok", "Selected runtime images and capabilities verified; launch uses immutable image IDs")
+    elif not inspection["errors"] and not inspection["proposed_pulls"]:
+        issue("not_checked", "Runtime images could not be verified")
+    plan["image_pins"] = inspection["pins"]
+    plan["execution"]["images"] = {
+        ref: {"source": item["source"], "image_id": item["image_id"]}
+        for ref, item in inspection["images"].items()}
+    return finish(plan)
+
+
+def build(manifest, catalog, descriptors, root, ref, recipe, options, *, host=True, verification=None):
     issues = []
 
     def issue(status, code, message, phase="prepare"):
         issues.append(dict(status=status, code=code, message=message, phase=phase))
 
-    plan = dict(version=1, recipe=recipe, issues=issues, selected=[], roles={}, recordings={},
+    plan = dict(version=1, selection_version=SELECTION_VERSION, recipe=recipe, issues=issues, selected=[], roles={}, recordings={},
                 configs={}, omitted={}, player=None, playback={}, source=None,
                 window={}, sim_time=False, use_proxies=bool(options.get("use_proxies")))
     known = {r.name: r for r in manifest.sensors}
@@ -189,15 +195,25 @@ def build(manifest, catalog, descriptors, root, ref, recipe, options, *, host=Tr
             if plan["window"].get("end") is not None and plan["window"]["end"] > duration:
                 plan["window"]["end"] = duration
                 issue("warning", "window_clamped", "Window end clamped to the selected bag duration")
+            end = plan["window"].get("end")
+            if end is not None and plan["window"].get("start", 0) < end:
+                end_ns = int(end * 1e9)
+                if end_ns <= int(plan["window"].get("start", 0) * 1e9):
+                    issue("error", "window", "Replay window is empty at nanosecond precision")
+                elif bag["start_ns"] + end_ns - 1 <= 0:
+                    issue("error", "window", "ROS cannot represent this exclusive replay stop timestamp")
     except (RigError, OSError, ValueError) as exc:
         issue("error", "source", str(exc))
         source, bag = None, None
 
-    candidates = requested | set(forced(manifest, descriptors))
+    candidates = set() if options.get("export_calls") else requested | set(forced(manifest, descriptors))
     for row in manifest.sensors:
         if row.service == PLAYER_SERVICE:
             if row.name in requested | skip:
                 issue("error", "player_selection", "The bag player is managed automatically")
+            continue
+        if options.get("export_calls"):
+            plan["omitted"][row.name] = "call export uses only the player helper"
             continue
         desc = descriptors.get(row.service)
         start, reason, _ = setting(manifest, row, desc)
@@ -211,7 +227,8 @@ def build(manifest, catalog, descriptors, root, ref, recipe, options, *, host=Tr
                 binding = recording_binding(row, desc, source, recipe,
                                             camera_session=options.get("session"), window=plan["window"])
                 if binding:
-                    binding = select_proxy(row, desc, source, binding, recipe, options)
+                    binding = select_proxy(row, desc, source, binding, recipe, options,
+                                           verification=verification)
                     plan["recordings"][row.name] = binding
                     candidates.add(row.name)
                 elif getattr(desc, "replay_source", None) and row.name in candidates:
@@ -267,111 +284,108 @@ def build(manifest, catalog, descriptors, root, ref, recipe, options, *, host=Tr
                set(playback.get("remap", {}))) - available
     if missing and bag and not bag["repair"]:
         issue("error", "missing_topics", f"Topics absent from selected bag: {', '.join(sorted(missing))}")
-    regenerated = set()
-    skipped_pattern = None
+    epochs = graph.load_epochs(Path(source["root"])) if source else []
+    model = replay_selection.ownership(epochs, ownership_names, namespaces=namespaces,
+                    aliases=aliases, selected=[n for n in plan["selected"] if n != plan["player"]])
+    plan["ownership"] = model
+    evidence = replay_selection.topic_selection(model, data_topics | set(model["topics"]))
+    regenerated = set(evidence["suppressed"])
+    initially_selected = set(topics)
     if source and bag and not bag["repair"]:
-        epochs = graph.load_epochs(Path(source["root"]))
         if options.get("selection", "broad") == "recorded":
-            mode, value, notes = replay.select_topics(
-                Path(source["root"]), [aliases[n] for n in named if n in aliases],
-                live_names=[aliases[n] for n in candidates if n in aliases and n != plan["player"]],
-                namespaces=namespaces, known_names=ownership_names)
-            topics &= set(value.split()) if mode == "topics" else {
-                t for t in topics if not re.search(value, t)}
-            for note in notes:
-                issue("warning", "recorded_selection", note)
-        if epochs:
-            union = graph.union(epochs)
-            groups = graph.group_nodes(union.nodes, sorted(ownership_names),
-                                       namespaces=namespaces)
-            owners = {}
-            for name, nodes in groups.items():
-                for node in nodes:
-                    for edge in union.nodes[node]:
-                        if edge.kind == "pubs" and not graph.is_plumbing(edge):
-                            owners.setdefault(edge.name, set()).add(name)
-            # Unassigned publishers also count, preventing an accidental exclusive-owner claim.
-            assigned = {n for ns in groups.values() for n in ns}
-            for node, edges in union.nodes.items():
-                if node not in assigned:
-                    for edge in edges:
-                        if edge.kind == "pubs":
-                            owners.setdefault(edge.name, set()).add("unassigned:" + node)
-            producers = {aliases[n] for n in candidates if n in aliases and n != plan["player"]}
-            regenerated = {t for t, ns in owners.items() if ns and ns <= producers}
-            regenerated -= {"/tf", "/tf_static", "/diagnostics"}
-            observed = set(groups)
-            unknown = sorted(n for n in candidates if n in aliases and n != plan["player"]
-                             and aliases[n] not in observed)
-            if unknown:
-                issue("warning", "unknown_outputs", "Output ownership unknown for " +
-                      ", ".join(unknown) + "; declare ros_namespace in rigging.yaml or bind "
-                      "instances.NAME.recorded_namespace when the recorded ROS node namespace differs; "
-                      "use playback.exclude for known live outputs")
-        else:
-            # A source being re-delivered has a known historical namespace. A new consumer does not.
-            mapped_producers = set(plan["recordings"]) | ({n for n, entry in recipe.get("instances", {}).items()
-                                                         if "recorded_as" in entry} & candidates)
-            for name in mapped_producers:
-                old = aliases[name]
-                if old in namespaces:
-                    continue  # A node namespace alone cannot distinguish its inputs from outputs.
-                regenerated.update(t for t in topics if t.startswith("/" + old + "/") or t == "/" + old)
-            issue("warning", "unknown_outputs",
-                  "No recorded graph; legacy mapped producers use a namespace heuristic. "
-                  "Declared ROS namespace bindings identify nodes, not output topics; "
-                  "other data topics remain eligible. Exclude live outputs explicitly with playback.exclude")
-        if skip:
-            skipped_pattern, notes = replay.skipped_topic_pattern(
-                Path(source["root"]), [aliases[n] for n in skip if n in aliases], ownership_names,
-                namespaces=namespaces)
-            for note in notes:
-                issue("warning", "skip_topics", note)
-    topics = ((topics - regenerated) | set(playback.get("keep", []))) - set(playback.get("exclude", []))
-    # Explicit CLI skips also apply to recipe keeps: keeping a regenerated topic
-    # must not silently re-enable a camera feed the operator disabled.
-    if skipped_pattern:
-        topics = {t for t in topics if not re.search(skipped_pattern, t)}
-    topics &= data_topics
+            selected_aliases = {aliases[n] for n in named if n in aliases}
+            if selected_aliases and model["graph_available"] and all(
+                    model["owners"][n]["nodes"] for n in selected_aliases):
+                # Use the legacy subscriber scope with the same conservative output policy.
+                # An empty observed input set stays empty; it is not a reason to guess.
+                topics &= {t for t, entry in model["topics"].items()
+                           if any(node["owner"] in selected_aliases for node in entry["subscribers"])}
+            else:
+                mode, value, notes = replay.select_topics(
+                    Path(source["root"]), sorted(selected_aliases),
+                    live_names=[aliases[n] for n in model["selected"]],
+                    namespaces=namespaces, known_names=ownership_names)
+                topics &= set(value.split()) if mode == "topics" else {
+                    t for t in topics if not re.search(value, t)}
+                for note in notes:
+                    issue("warning", "recorded_selection", note)
+        if model["selected_without_nodes"]:
+            issue("warning", "unknown_outputs", "Output ownership unknown for " +
+                  ", ".join(model["selected_without_nodes"]) +
+                  "; bind recorded_namespace for observed nodes or use playback.exclude for known outputs")
+        if not model["graph_available"]:
+            issue("warning", "unknown_outputs", "No valid recorded graph; broad replay retains data topics. "
+                  "Namespace bindings alone do not prove outputs; use playback.exclude explicitly")
+    subscriber_selected = set(topics)
+    skipped_model = replay_selection.ownership(epochs, ownership_names, namespaces=namespaces,
+                                               aliases=aliases, selected=skip)
+    skipped_topics = set(replay_selection.topic_selection(skipped_model, data_topics)["suppressed"])
+    if skip and not model["graph_available"]:
+        issue("warning", "skip_topics", "Skipped instances have no recorded publisher evidence; "
+              "their bag topics remain eligible. Use playback.exclude to remove known topics")
+    keeps, excludes = set(playback.get("keep", [])), set(playback.get("exclude", []))
+    topics = (((topics - regenerated) | keeps) - excludes - skipped_topics) & data_topics
     remap = playback.get("remap", {})
     destinations = [remap.get(t, t) for t in topics]
     if len(set(destinations)) != len(destinations):
         issue("error", "topic_collision", "Remapping collides with another selected topic")
-    if set(destinations) & regenerated - set(playback.get("keep", [])):
-        issue("error", "live_destination", "A selected topic maps into a known regenerated output")
-    services = playback.get("services", [])
-    if options.get("selection") == "recorded" and "services" not in playback and named and source:
-        value, notes = replay.select_services(Path(source["root"]),
-                                             [recipe.get("instances", {}).get(n, {}).get("recorded_as", n)
-                                              for n in sorted(named)], namespaces=namespaces,
-                                             known_names=ownership_names)
-        services = value.split() if value else []
-        for note in notes:
-            issue("warning", "recorded_services", note)
-    if bag and not bag["repair"]:
-        for name in services:
-            if name + "/_service_event" not in available:
-                issue("error", "service_events", f"No recorded service events for {name}")
+    collisions = [t for t in topics if remap.get(t, t) in regenerated and t not in keeps]
+    if collisions:
+        issue("error", "live_destination", "Selected topics map into known regenerated outputs: " +
+              ", ".join(f"{t} -> {remap.get(t, t)}" for t in sorted(collisions)) +
+              "; explicitly keep the source topic to override")
+    plan["topic_selection"] = []
+    for record in evidence["records"]:
+        name = record["topic"]
+        if name not in data_topics:
+            continue
+        reason = ("skipped_instance" if name in skipped_topics else "explicit_exclude" if name in excludes
+                  else "explicit_keep" if name in keeps else "not_requested" if name not in initially_selected
+                  else "recorded_subscriber_selection" if name not in subscriber_selected else record["reason"])
+        plan["topic_selection"].append(dict(record, original=name, destination=remap.get(name, name),
+            decision="keep" if name in topics else "exclude", reason=reason,
+            ownership_reason=record["reason"], keep_override=name in keeps))
+    # A script replaces recorded requests, before graph or event-content checks.
+    services = []
     calls = options.get("calls") or playback.get("calls")
     if calls:
         calls = str(Path(calls).expanduser().resolve())
+        plan["service_selection"] = dict(mode="script", candidates=[], records=[])
         try:
             plan["calls_sha"] = replay.validate_calls(Path(calls))
         except RigError as exc:
             issue("error", "calls", str(exc))
-        services = []
-    if bag and not bag["repair"] and not services and not calls and not options.get("export_calls"):
-        event_services = sorted(t.removesuffix("/_service_event") for t in available
-                                if t.endswith("/_service_event") and (bag["topics"][t].get("count") or 0))
-        if event_services:
+    elif options.get("export_calls"):
+        plan["service_selection"] = dict(mode="export", candidates=[], records=[])
+    else:
+        manual = playback.get("services") if "services" in playback else None
+        selection = replay_selection.service_selection(model,
+            {t.removesuffix("/_service_event") for t in available if t.endswith("/_service_event")}
+            | set(model["services"]), mode="manual" if manual is not None else "auto", manual=manual)
+        if manual == []:
+            selection["mode"] = "off"
+        plan["service_selection"] = selection
+        for record in selection["records"]:
+            name = record["service"]
+            if record["decision"] != "candidate":
+                continue
+            for warning in record["warnings"]:
+                issue("warning", "service_selection", f"{name}: {warning}")
+            if not bag or (not bag["repair"] and name + "/_service_event" not in available):
+                record.update(decision="exclude", reason="missing_events")
+                issue("error" if manual is not None else "warning", "service_events",
+                      f"No recorded service events for {name}")
+            else:
+                services.append(name)
+        selection["candidates"] = services[:]
+        if selection["mode"] == "auto" and not services and any(
+                t.endswith("/_service_event") for t in available):
             issue("warning", "unselected_service_events",
-                  "Recorded service events are present but no calls are selected: " +
-                  ", ".join(event_services) + ". Broad replay requires explicit playback.services or "
-                  "playback.calls/--calls; --selection recorded with named instances can select "
-                  "observed servers. Declare ros_namespace or bind recorded_namespace if instance and "
-                  "ROS node names differ")
+                  "No recorded calls selected automatically: no unambiguous started server without "
+                  "a selected client has usable event topics. See service_selection for ownership reasons; "
+                  "bind recorded_namespace or choose playback.services explicitly when needed")
     plan["playback"] = dict(topics=sorted(topics), remap=remap, services=services, calls=calls,
-                            clock_only=bool(bag and not topics and not services))
+                            services_source="service", clock_only=bool(bag and not topics and not services))
     plan["needs_preparation"] = bool(source and (source["kind"] != "run" or
         (bag and (bag["repair"] or bag.get("requires_copy") or bag.get("prepared_index"))) or
         any(b["adapted"] and not b.get("direct") for b in plan["recordings"].values())))
@@ -379,7 +393,8 @@ def build(manifest, catalog, descriptors, root, ref, recipe, options, *, host=Tr
         issue("not_checked", "normalization", "Prepare the derived source layout before playback", "run")
     plan["excluded_regenerated"] = sorted(regenerated)
     plan["excluded"] = dict(plumbing=sorted(available - data_topics), regenerated=sorted(regenerated),
-                           explicit=playback.get("exclude", []), skipped_instances=sorted(skip))
+                           explicit=playback.get("exclude", []), skipped_instances=sorted(skip),
+                           skipped_topics=sorted(skipped_topics))
     issue("warning", "compatibility_scope",
           "Bag metadata cannot prove new subscriber compatibility or current output ownership; "
           "no service interface declarations are required")
@@ -421,7 +436,7 @@ def build(manifest, catalog, descriptors, root, ref, recipe, options, *, host=Tr
     elif not manifest.data_dir:
         issue("warning", "output_storage", "No data_dir: playback will not capture a new run", "run")
     active = dataclasses.replace(manifest, sensors=[dataclasses.replace(r, enabled=True) for r in rows])
-    if (rows and manifest.ros.rmw in ("rmw_zenoh", "rmw_zenoh_cpp") and
+    if (rows and not options.get("export_calls") and manifest.ros.rmw in ("rmw_zenoh", "rmw_zenoh_cpp") and
             not any(r.tier == "infra" and "zenoh" in r.service for r in rows)):
         issue("error", "router", "Replay needs a selected zenoh router for this deployment's RMW", "run")
     if len(plan["configs"]) == len(rows) and all(r.service in descriptors for r in rows):
@@ -440,6 +455,24 @@ def build(manifest, catalog, descriptors, root, ref, recipe, options, *, host=Tr
     if plan["player"] and plan["player"] in plan["configs"]:
         player = known[plan["player"]]
         player_cfg = plan["configs"][player.name].get("play") or {}
+        origin = player_cfg.get("services_source", "service")
+        if origin not in ("service", "client"):
+            issue("error", "service_origin", "Player play.services_source must be service or client")
+        else:
+            plan["playback"]["services_source"] = origin
+        for field, equivalent in (("topics", "playback.topics"), ("exclude", "playback.exclude"),
+                                  ("services", "playback.services"), ("calls", "playback.calls or --calls")):
+            if field in player_cfg:
+                issue("warning", "shadowed_player_selection",
+                      f"Player play.{field} is overridden by the replay plan; use {equivalent}" +
+                      (": [] to disable recorded calls" if field == "services" and player_cfg[field] == [] else ""))
+        if "calls" in plan["configs"][player.name]:
+            issue("warning", "shadowed_player_selection",
+                  "Player calls is overridden by the replay plan; use playback.calls or --calls")
+        for field, flag in (("start_offset_s", "--from"), ("end_offset_s", "--to")):
+            if player_cfg.get(field) not in (None, "", 0, "0"):
+                issue("warning", "shadowed_player_selection",
+                      f"Player play.{field} is overridden by the replay window; use {flag}")
         if options.get("auto_end") is not None and player_cfg.get("loop"):
             issue("error", "auto_end", "--auto-end requires play.loop: false")
         try:
@@ -453,6 +486,14 @@ def build(manifest, catalog, descriptors, root, ref, recipe, options, *, host=Tr
             plan["capabilities"] = caps
             if caps.get("plan") != 1:
                 issue("error", "player_capability", "Update the player: replay plan v1 is required", "run")
+            labels = caps.get("image_labels")
+            if (not isinstance(labels, dict) or not labels or any(
+                    not isinstance(role, str) or not role or not isinstance(values, dict) or not values
+                    or any(not isinstance(k, str) or not isinstance(v, str) for k, v in values.items())
+                    for role, values in labels.items())):
+                issue("error", "player_capability", "Update the player: required runtime image capability "
+                      "labels must be advertised by replay-capabilities", "run")
+                caps["image_labels"] = {}
             if remap and not caps.get("remap"):
                 issue("error", "player_capability", "Player does not support topic remaps", "run")
             if plan["playback"]["clock_only"] and not caps.get("clock_only"):
@@ -461,61 +502,24 @@ def build(manifest, catalog, descriptors, root, ref, recipe, options, *, host=Tr
             issue("error", "player_capability", str(exc), "run")
     if host and rows and not getattr(manifest, "missing_identity", ()):
         try:
-            from .image_catalog import validate_replay, docker_arch
+            from .image_catalog import docker_arch
+            from . import runtime_images
             architecture = docker_arch()
-            plan["execution"] = validate_replay(
-                manifest, {r.service: descriptors[r.service] for r in rows if r.service in descriptors},
-                fleet_descriptors=descriptors)
-            if not manifest.build_catalog:
-                # Without companion digests check the local tags actually used by launchers.
-                from .build import _service_tag, resolve_base_image, resolve_msgs_image
-                from .targets import variant_spec
-                refs = set()
-                env = dispatch.fleet_env(manifest, descriptors)
-                base_ref, _, _ = resolve_base_image(manifest, descriptors)
-                msgs_ref, _, _ = resolve_msgs_image(manifest, descriptors)
-                replaced = ({d.build_images[0] for d in descriptors.values()
-                             if d.build_provides == "base"} if manifest.image_base else set())
-                for row in rows:
-                    desc = descriptors.get(row.service)
-                    if not desc:
-                        continue
-                    _, images = variant_spec(desc, manifest.platform)
-                    if row.service == PLAYER_SERVICE:
-                        refs.add(env.get("BAG_PLAYER_IMAGE") or msgs_ref or base_ref or
-                                 (f"{manifest.image_registry}/" if manifest.image_registry else "") +
-                                 f"fleet-ros:{manifest.image_tag or 'latest'}")
-                        continue
-                    for image in images:
-                        if image in replaced:
-                            continue
-                        tag = _service_tag(desc, manifest.image_tag, manifest.platform) or "latest"
-                        prefix = f"{manifest.image_registry}/" if manifest.image_registry else ""
-                        key = desc.image_env.get(image)
-                        refs.add(env.get(key) if key and env.get(key) else f"{prefix}{image}:{tag}")
-                for resolver in (resolve_base_image, resolve_msgs_image):
-                    ref, _, error = resolver(manifest, descriptors)
-                    if error:
-                        raise RigError(error)
-                    if ref:
-                        refs.add(ref)
-                for ref in sorted(refs):
-                    proc = subprocess.run(["docker", "image", "inspect", ref, "--format",
-                                           "{{.Os}}/{{.Architecture}}"], capture_output=True,
-                                          text=True, timeout=10)
-                    if proc.returncode or proc.stdout.strip() != "linux/" + architecture:
-                        raise RigError(f"Replay image unavailable for linux/{architecture}: {ref}; "
-                                       "build or pull it explicitly")
-                plan["images"] = sorted(refs)
-                issue("warning", "unpinned_images", "Local image tags checked; no companion digest catalog")
-            try:
-                plan["recording_image_capabilities"] = direct_image_capabilities(
-                    manifest, descriptors, rows, plan["recordings"])
-            except RigError as exc:
-                issue("error", "recording_image_capability", str(exc), "run")
-            issue("ok", "runtime", "Docker architecture and replay image policy checked", "run")
+            if manifest.arch and manifest.arch != architecture:
+                raise RigError(f"Replay deployment requires {manifest.arch}; Docker engine is {architecture}")
+            plan["execution"] = dict(manifest.replay_execution, platform=manifest.platform,
+                                     architecture=architecture)
+            plan["pull_policy"] = options.get("pull", "missing")
+            if (len(plan["configs"]) == len(rows) and all(r.service in descriptors for r in rows)
+                    and not any(i["status"] == "error" and i["phase"] == "prepare" for i in issues)):
+                eprint("rig replay: resolving selected runtime images")
+                plan["image_inventory"] = image_inventory(plan, manifest, descriptors, rows, root, architecture)
+                inspection = runtime_images.inspect_images(plan["image_inventory"], policy=plan["pull_policy"])
+                apply_image_report(plan, inspection)
+            else:
+                issue("not_checked", "runtime_images", "Resolve planning errors before resolving images", "run")
         except (RigError, OSError, subprocess.TimeoutExpired) as exc:
-            issue("not_checked", "runtime", str(exc), "run")
+            issue("not_checked", "runtime_images", str(exc), "run")
         if not options.get("export_calls"):
             try:
                 replay._guard_clean_host(manifest, False)
@@ -541,22 +545,132 @@ def build(manifest, catalog, descriptors, root, ref, recipe, options, *, host=Tr
         surfaces[service] = {str(p): digest(p.read_bytes().hex()) for p in files if p.is_file()}
     plan["launch_surfaces"] = surfaces
     controls = {root / n for n in ("vehicle.yaml", "vehicle.local.yaml", "services.yaml",
-                                   "fleet.yaml", "rig.lock")}
+                                   "fleet.yaml", "rig.lock", "metadata.yaml")}
     controls.update(r.config for r in rows)
+    for row in rows:
+        if row.overlays:
+            # The pinned base determines the local delta applied above overlays. Its
+            # creation/removal changes the rendered config just as editing the working file does.
+            controls.add(root / "config" / ".pins" / f"{row.name}.yaml")
+            controls.update(resolve.overlay_payload_path(root, ref) for ref in row.overlays)
     if options.get("_recipe_path"):
         controls.add(Path(options["_recipe_path"]))
     controls.update(p for p in (root / "config/.overlays").glob("*.yaml"))
     plan["control_files"] = {str(p): digest(p.read_bytes().hex()) if p.is_file() else None
                              for p in sorted(controls)}
-    plan["fingerprint"] = digest(dict(recipe=recipe, source=(source or {}).get("fingerprint"),
+    inspect_recorded_calls(plan, manifest, descriptors, root, verification=verification)
+    plan["fingerprint"] = digest(dict(selection_version=SELECTION_VERSION, ownership=model,
+                                     call_inspection=plan.get("call_inspection"), recipe=recipe, source=(source or {}).get("fingerprint"),
                                      use_proxies=plan["use_proxies"],
                                      namespaces=namespaces,
                                      configs=plan["configs"], selected=plan["selected"],
                                      recordings=plan["recordings"], playback=plan["playback"],
                                      window=plan["window"], surfaces=surfaces, controls=plan["control_files"],
                                      environment=manifest.extra_env, images=manifest.build_catalog,
-                                     execution=plan.get("execution"), calls=plan.get("calls_sha")))
+                                     execution=plan.get("execution"), inventory=plan.get("image_inventory"),
+                                     calls=plan.get("calls_sha")))
     return finish(plan)
+
+
+def inspect_recorded_calls(plan, manifest, descriptors, root, *, execute=False, verification=None):
+    """Resolve candidate requests using exact-window evidence; read-only unless execute=True."""
+    from .replay_call_inspection import inspect_calls
+    plan["issues"][:] = [i for i in plan["issues"] if i["code"] != "recorded_calls"]
+    selection = plan.get("service_selection", {})
+    candidates = selection.get("candidates", [])
+    if not candidates or any(i["status"] == "error" and i["phase"] == "prepare" for i in plan["issues"]):
+        return finish(plan)
+
+    def issue(status, message):
+        plan["issues"].append(dict(status=status, code="recorded_calls", message=message, phase="run"))
+
+    # Candidates remain visible while inspection is pending. They never authorize launch.
+    plan["playback"]["services"] = candidates[:]
+    plan.pop("call_inspection", None)
+    for record in selection["records"]:
+        if record["service"] in candidates:
+            record.update(decision="candidate", reason=record["automatic_reason"]
+                          if selection["mode"] == "auto" else "manual")
+            record.pop("inspection", None)
+    bag = (plan.get("source") or {}).get("bag")
+    player = next((r for r in manifest.sensors if r.name == plan.get("player")), None)
+    if not bag or bag["repair"]:
+        issue("not_checked", "Recorded calls need indexed bag metadata; prepare this source first")
+    elif player is None or player.name not in plan["configs"]:
+        issue("not_checked", "Recorded calls need a configured player")
+    elif (plan.get("capabilities", {}).get("inspect_calls") != 1 or
+          "replay-inspect-calls" not in descriptors[player.service].verbs):
+        issue("error", "Update the player: recorded request inspection (inspect_calls: 1) is required")
+    elif not plan.get("image_pins", {}).get(player.name):
+        issue("not_checked", "Recorded requests need a locally verified player image before inspection")
+    elif plan.get("needs_preparation") and not plan["source"].get("runtime_root"):
+        issue("not_checked", "Prepare the derived source before inspecting recorded requests")
+    else:
+        source = plan["source"]
+        session = (Path(source["runtime_root"]) / "bags" / bag["logger"] / bag["session"]
+                   if source.get("runtime_root") else Path(bag["path"]))
+        request = dict(version=1, session=str(session), start_ns=bag["start_ns"],
+                       from_s=plan["window"]["start"], to_s=plan["window"]["end"],
+                       services=candidates[:], source_mode=plan["playback"]["services_source"])
+        env = dispatch.fleet_env(manifest, descriptors)
+        if plan.get("execution", {}).get("architecture"):
+            env["RIG_TARGET_ARCH"] = plan["execution"]["architecture"]
+        try:
+            evidence = inspect_calls(root, player, descriptors[player.service], plan["configs"][player.name],
+                request, env=env, pins=plan["image_pins"][player.name],
+                expected_surfaces=plan["launch_surfaces"][player.service],
+                execute=execute, verification=verification)
+            plan["call_inspection"] = evidence
+            if evidence["status"] != "ready":
+                issue("not_checked", "Recorded request contents have not been inspected for this selection; "
+                      "run replay prepare or replay to inspect with the verified player image")
+            else:
+                included = []
+                for record in selection["records"]:
+                    name = record["service"]
+                    if name not in candidates:
+                        continue
+                    result = evidence["result"]["services"][name]
+                    record["inspection"] = result
+                    usable = result["status"] == "usable"
+                    record.update(decision="include" if usable else "exclude",
+                                  reason="usable_requests" if usable else result["status"])
+                    if usable:
+                        included.append(name)
+                        if result["duplicate_count"]:
+                            issue("warning", f"{name}: {result['duplicate_count']} repeated request identities "
+                                  "in the selected origin; the player reissues these duplicate events")
+                    else:
+                        message = f"{name}: {result['reason']}"
+                        if result["other_origin_request_count"]:
+                            other = "client" if request["source_mode"] == "service" else "service"
+                            message += f"; requests exist in the other origin: set player play.services_source: {other}"
+                        issue("warning" if selection["mode"] == "auto" else "error", message)
+                plan["playback"]["services"] = included
+                issue("ok", f"Recorded request inspection complete: {len(included)} target(s), "
+                      f"{request['source_mode']} origin")
+        except (RigError, OSError) as exc:
+            issue("error", str(exc))
+    plan["playback"]["clock_only"] = bool(bag and not plan["playback"]["topics"]
+                                          and not plan["playback"]["services"])
+    if plan["playback"]["clock_only"] and not plan.get("capabilities", {}).get("clock_only"):
+        issue("error", "Player does not support the empty-data timeline left after call selection")
+    return finish(plan)
+
+
+def verify_recorded_call_evidence(plan, manifest, descriptors, root):
+    """Fail if evidence changed after inspection, including files with restored mtime."""
+    import copy
+    if not plan.get("service_selection", {}).get("candidates"):
+        return
+    expected = plan.get("call_inspection")
+    current = copy.deepcopy(plan)
+    inspect_recorded_calls(current, manifest, descriptors, root)
+    if (not expected or expected.get("status") != "ready" or current.get("call_inspection") != expected
+            or current["playback"] != plan["playback"]
+            or any(i["status"] in ("error", "not_checked") and i["code"] == "recorded_calls"
+                   for i in current["issues"])):
+        raise RigError("Recorded request evidence changed since inspection; plan/prepare again before launch")
 
 
 def finish(plan):

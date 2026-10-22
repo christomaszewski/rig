@@ -101,8 +101,8 @@ def _stamp(value) -> str:
 def load_epochs(run_dir: Path) -> list[Epoch]:
     """Every parseable epoch under <run>/graph/*/ (sorted by path — writer, then stamp). Missing
     graph/ dir -> [] (the feature is simply absent from this run). Read paths fail SOFT: an
-    unknown schema major or an unparseable file is skipped with a warning, never an error — one
-    bad epoch must not hide the rest of the run's topology."""
+    unknown schema major or a malformed/unreadable file is skipped with a warning, never an
+    error — one bad epoch must not hide the rest of the run's topology."""
     epochs: list[Epoch] = []
     graph_dir = run_dir / "graph"
     if not graph_dir.is_dir():
@@ -110,26 +110,53 @@ def load_epochs(run_dir: Path) -> list[Epoch]:
     for path in sorted(graph_dir.glob("*/epoch_*.yaml")):
         try:
             doc = load_yaml(path)
-        except RigError as exc:
+            epochs.append(_epoch(doc, path))
+        except (RigError, OSError, UnicodeError) as exc:
             eprint(f"rig graph: skipping {path.name}: {exc}")
-            continue
-        schema = doc.get("schema")
-        if schema != 1:
-            eprint(f"rig graph: skipping {path.name}: unknown schema {schema!r} (this rig reads 1)")
-            continue
-        nodes: dict[str, tuple[Edge, ...]] = {}
-        for fqn, entry in (doc.get("nodes") or {}).items():
-            edges = []
-            for kind, key in (("pubs", "topic"), ("subs", "topic"),
-                              ("provides", "service"), ("requires", "service")):
-                for e in (entry or {}).get(kind) or []:
-                    if isinstance(e, dict) and e.get(key):
-                        edges.append(Edge(kind=kind, name=str(e[key]), type=str(e.get("type") or "?")))
-            nodes[str(fqn)] = tuple(edges)
-        epochs.append(Epoch(path=path, writer=path.parent.name,
-                            first=_stamp(doc.get("first") or "?"),
-                            last=_stamp(doc.get("last") or "?"), nodes=nodes))
     return epochs
+
+
+def _epoch(doc: dict, path: Path) -> Epoch:
+    """Validate a whole epoch before admitting any of its ownership evidence."""
+    schema = doc.get("schema")
+    if type(schema) is not int or schema != 1:
+        raise RigError(f"unknown schema {schema!r} (this rig reads 1)")
+    raw_nodes = doc.get("nodes", {})
+    if not isinstance(raw_nodes, dict):
+        raise RigError("nodes: expected a mapping")
+    nodes: dict[str, tuple[Edge, ...]] = {}
+    for fqn, entry in raw_nodes.items():
+        if not isinstance(fqn, str) or not fqn.startswith("/") or len(fqn) < 2 or not fqn.strip():
+            raise RigError(f"nodes: invalid absolute ROS node name {fqn!r}")
+        if not isinstance(entry, dict):
+            raise RigError(f"nodes.{fqn}: expected a mapping")
+        edges = []
+        for kind, key in (("pubs", "topic"), ("subs", "topic"),
+                          ("provides", "service"), ("requires", "service")):
+            raw_edges = entry.get(kind, [])
+            where = f"nodes.{fqn}.{kind}"
+            if not isinstance(raw_edges, list):
+                raise RigError(f"{where}: expected a list")
+            for index, edge in enumerate(raw_edges):
+                location = f"{where}[{index}]"
+                if not isinstance(edge, dict):
+                    raise RigError(f"{location}: expected a mapping")
+                name = edge.get(key)
+                if not isinstance(name, str) or not name.startswith("/") or len(name) < 2:
+                    raise RigError(f"{location}.{key}: expected an absolute ROS name")
+                edge_type = edge.get("type", "?")
+                if not isinstance(edge_type, str) or not edge_type.strip():
+                    raise RigError(f"{location}.type: expected a nonempty string")
+                edges.append(Edge(kind=kind, name=name, type=edge_type))
+        nodes[fqn] = tuple(edges)
+    stamps = {}
+    for key in ("first", "last"):
+        value = doc.get(key)
+        if value is not None and not isinstance(value, (str, datetime.datetime)):
+            raise RigError(f"{key}: expected a timestamp string")
+        stamps[key] = _stamp(value or "?")
+    return Epoch(path=path, writer=path.parent.name, first=stamps["first"],
+                 last=stamps["last"], nodes=nodes)
 
 
 def union(epochs: list[Epoch]) -> GraphUnion:

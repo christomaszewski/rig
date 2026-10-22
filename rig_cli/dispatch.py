@@ -73,6 +73,7 @@ def fleet_env(manifest: Manifest, descriptors: dict[str, Descriptor] | None = No
                        ("RIG_REPLAY_SOURCE", None), ("RIG_REPLAY_PLAN", None), ("RIG_REPLAY_TOPICS", None),
                        ("RIG_REPLAY_EXCLUDE", None), ("RIG_SIM_TIME", None),
                        ("RIG_REPLAY_SERVICES", None), ("RIG_REPLAY_CALLS", None),
+                       ("RIG_RUNTIME_IMAGE_MAP", None), ("RIG_RUNTIME_IMAGE_PINS", None),
                        ("RIG_REPLAY_FROM_S", None), ("RIG_REPLAY_TO_S", None),
                            ("RIG_REPLAY_START_AT_UNIX_S", None),
                        # the export channel (export.py): per-invocation like the replay one
@@ -140,8 +141,19 @@ def instance_env(env: dict[str, str], sensor: Sensor, desc: Descriptor) -> dict[
     containers on any deployment with a vehicle id. Keeping the pairing in one function is what
     makes that unrepresentable.
     """
-    return {**service_env(env, desc),
-            "COMPOSE_PROJECT_NAME": project_name(sensor.name, env.get("VEHICLE_ID"))}
+    out = {**service_env(env, desc),
+           "COMPOSE_PROJECT_NAME": project_name(sensor.name, env.get("VEHICLE_ID"))}
+    # Keep each launcher constrained to its own validated image set. This channel is
+    # created only by replay after acquisition; ordinary fleet verbs clear it above.
+    if "RIG_RUNTIME_IMAGE_MAP" in out:
+        import json
+        try:
+            selections = json.loads(out.pop("RIG_RUNTIME_IMAGE_MAP"))
+            pins = selections[sensor.name]
+        except (ValueError, KeyError, TypeError) as exc:
+            raise RigError(f"{sensor.name}: missing validated runtime image selection") from exc
+        out["RIG_RUNTIME_IMAGE_PINS"] = json.dumps(pins)
+    return out
 
 
 def launcher_cmd(sensor: Sensor, desc: Descriptor, verb: str, extra: list[str] | None = None) -> list[str]:
@@ -181,6 +193,7 @@ def run(
                     "RIG_REPLAY_SOURCE", "RIG_REPLAY_PLAN", "RIG_REPLAY_TOPICS", "RIG_REPLAY_EXCLUDE",
                     "RIG_SIM_TIME", "RIG_REPLAY_SERVICES", "RIG_REPLAY_CALLS",
                     "RIG_REPLAY_FROM_S", "RIG_REPLAY_TO_S",
+                    "RIG_REPLAY_START_AT_UNIX_S",
                     "RIG_TARGET_STATE", desc.platform_override_env or ""):
             if key and env.get(key):
                 envline += f" {key}={env[key]}"
@@ -200,13 +213,23 @@ def run_verb(
     *,
     extra: list[str] | None = None,
     dry_run: bool = False,
+    stop_on_failure: bool = False,
+    on_start=None,
 ) -> list[Outcome]:
-    """Run a streaming verb (up/down/config/logs/pull) across sensors in the given order."""
+    """Run a streaming verb across sensors in order; replay can stop on the first failure.
+
+    on_start records an attempted launch even if command construction or execution raises.
+    Ordinary deployment verbs retain their existing continue-on-failure behavior.
+    """
     outcomes: list[Outcome] = []
     for sensor, desc in pairs:
+        if on_start is not None:
+            on_start(sensor, desc)
         cmd = launcher_cmd(sensor, desc, verb, extra)
         result = run(sensor, desc, env, cmd, dry_run=dry_run)
         outcomes.append(Outcome(sensor, result.returncode))
+        if stop_on_failure and result.returncode:
+            break
     return outcomes
 
 

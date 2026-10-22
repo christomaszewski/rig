@@ -11,7 +11,10 @@ permissions:
   contents: write
 
 jobs:
+  replay-images:
+    uses: ./.github/workflows/replay-images.yml
   release:
+    needs: [replay-images]
     runs-on: ubuntu-latest
     env:
       TAP_TOKEN: ${{ secrets.TAP_PUSH_TOKEN }}  # secrets aren't valid in step `if` — env is
@@ -33,6 +36,17 @@ jobs:
           exit $rc
       - name: wheel + sdist
         run: python3 -m build
+      - name: smoke-test installed wheel
+        run: |
+          python3 -m pip install --no-deps --target "$RUNNER_TEMP/rig-wheel" dist/*.whl
+          cd "$RUNNER_TEMP"
+          PYTHONPATH="$RUNNER_TEMP/rig-wheel" python3 - <<'PY'
+          import pathlib
+          import rig_cli
+          from rig_cli import replay_call_inspection, replay_selection, runtime_images
+          assert pathlib.Path(rig_cli.__file__).parent == pathlib.Path("rig-wheel/rig_cli").resolve()
+          print("Installed Rig", rig_cli.__version__, "with replay helpers")
+          PY
       - name: deb
         run: ./packaging/build-deb.sh
       - name: github release
