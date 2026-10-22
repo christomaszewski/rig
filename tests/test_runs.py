@@ -124,6 +124,30 @@ def test_end_run_seals_removes_current_and_is_idempotent():
     assert runs.ensure(m, data) != rid                              # next up opens a FRESH _auto
 
 
+def test_down_end_run_seals_without_enabled_stacks_but_bare_down_and_dry_run_do_not():
+    from dataclasses import replace
+    from types import SimpleNamespace
+    from rig_cli.cli import cmd_down
+
+    _mark_idle()
+    for disabled_row in (False, True):
+        data = pathlib.Path(tempfile.mkdtemp())
+        m = _manifest(data)
+        m.sensors = [replace(m.sensors[0], enabled=False)] if disabled_row else []
+        rid = runs.ensure(m, data)
+        args = SimpleNamespace(names=[], end_run=False, dry_run=False, rig_root=data)
+        assert cmd_down(args, m, {}, {}) == 0
+        assert (data / "current").is_symlink()
+        args.end_run, args.dry_run = True, True
+        assert cmd_down(args, m, {}, {}) == 0
+        assert (data / "current").is_symlink()
+        args.dry_run = False
+        assert cmd_down(args, m, {}, {}) == 0
+        assert not (data / "current").exists()
+        assert "ended:" in (data / "runs" / rid / "manifest.yaml").read_text()
+        assert cmd_down(args, m, {}, {}) == 0  # already sealed is still a no-op
+
+
 def test_up_run_joins_same_label_and_rotates_different():
     _mark_idle()
     data = pathlib.Path(tempfile.mkdtemp())

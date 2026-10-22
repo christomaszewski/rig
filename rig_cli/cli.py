@@ -141,6 +141,8 @@ def cmd_down(args, manifest, catalog, descriptors) -> int:
     pairs = _pairs(manifest, descriptors, names, reverse=True)  # reverse: consumers before producers
     if not pairs:
         eprint("rig: no enabled stacks to tear down")
+        if args.end_run and not args.dry_run:
+            runs_mod.end_run(manifest, args.rig_root)
         return 0
     eprint(f"rig down: {manifest.vehicle} — {stack_summary([p[0] for p in pairs])}")
     if args.end_run and not args.dry_run and manifest.data_dir:
