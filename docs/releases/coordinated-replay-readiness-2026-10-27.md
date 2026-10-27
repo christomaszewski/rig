@@ -1,17 +1,18 @@
 # Coordinated replay release readiness — 2026-10-27 UTC
 
-Implementation and native release acceptance are complete. All final checks below
-pass. Before tagging, publish the matching companion changes and pass the pinned
-GitHub Actions gate described below.
+Implementation, native acceptance and hosted pre-release CI are complete. All checks
+below pass. The compatible companion packages are published, and Rig's release gate
+pins their exact source commits.
 
 Coordinated startup remains opt-in:
 `./rig replay RUN --startup coordinated`. Omitting the flag retains legacy startup,
 including in artifacts created with `--include-replay`.
 
-The working trees are ready for the release publication sequence below. No release
-has been tagged or published. GitHub Actions has not run against these unpublished
-working-tree changes; the native acceptance runs described here were executed locally,
-on the AMD64 test host, and on the ARM64 vehicle.
+The initial native acceptance ran locally, on the AMD64 test host and on the ARM64
+vehicle using candidate version 0.2.71. Hosted CI then passed against the committed
+0.2.72 release candidate, including the full supported camera runtime matrix and
+both architectures of the coordinated replay gate. Rig's tag-triggered workflow
+repeats its required gates before publishing release assets.
 
 ## Fixes completed during release checks
 
@@ -42,7 +43,7 @@ on the AMD64 test host, and on the ARM64 vehicle.
 | Infra host tests | All 21 selected host suites pass. |
 | Native ROS replay | All 13 cases pass without skips in base and source-message-overlay images on both ARM64 and AMD64. Includes latches, missing selected types, time-zero calls and windowing. |
 | Runtime image regression | Record, convert, read and replay pass with FastDDS and Zenoh; apt-only and source-built message overlays pass on both architectures. |
-| Camera regression | All 599 tests pass without skips on GStreamer 1.28.8, native ARM64 and AMD64; all 599 also pass on the legacy 1.20.3 runtime. An additional 300 repeated mixed-codec replays pass. |
+| Camera regression | All 599 tests pass without skips on GStreamer 1.28.8, native ARM64 and AMD64; all 599 also pass on the legacy 1.20.3 runtime. Hosted CI additionally passes the Ubuntu 24 runtime and service smoke tests on all four runtimes. An additional 300 repeated mixed-codec replays pass. |
 | Combined camera/bag replay | Production launcher, decoder and bridge deliver all 125 expected frames with exact bytes and timestamps, no pre-release delivery, and no duplicates. Delayed consumer, first bag message and recorded calls pass. |
 | Baked artifacts | Extracted `./rig replay` passes with a player automatically added to the artifact. Registry-style artifacts pass on ARM64/AMD64; rebuilt camera-plus-bag offline bundles pass on the vehicle and AMD64. The final AMD64 wheel also passes cold-alias loading through `./run.sh load` and graceful teardown. The vehicle combined test preserves existing shared image aliases; the separate real-recording test clears all of its unique test references before loading. |
 | Timing variants | Installed-wheel tests pass for scripted time-zero calls, a fractional start window, and wall-clock calls at 2x rate. |
@@ -84,16 +85,25 @@ The original run has no camera recording; camera-plus-bag acceptance used genera
 timestamp-aligned MCAP and FFV1 recordings with known payloads. Consumer readiness and
 camera coordination were exercised together in that separate fixture.
 
-## Before tagging
+## Published companions and hosted gates
 
-1. Land and publish the tested `rig-infra` player package/runtime images and
-   `camera-service` package/images. Coordination requires both launcher and active image
-   capability declarations; a new launcher with an old image is deliberately rejected.
-2. Set Rig repository variables `RIG_REPLAY_INFRA_REF` and `RIG_REPLAY_CAMERA_REF` to those
-   full published commit SHAs. Run `replay-coordinated.yml` manually with the same SHAs;
-   the release workflow requires that gate again. Missing pins fail the release gate.
-3. Choose/bump the Rig release version, then tag using the normal release process.
-   Candidate packaging was tested at the current working version, `0.2.71`.
+- [rig-infra 1.19.0](https://github.com/christomaszewski/rig-infra/releases/tag/v1.19.0):
+  `1d74d716d7d098246cf92670ca745d675ea8cbd7`, pinned by `RIG_REPLAY_INFRA_REF`.
+- [camera-service 1.12.0](https://github.com/christomaszewski/camera-service/releases/tag/v1.12.0):
+  `6316f7a71af7fbb02e68003cb249c2bed1fa2e8c`, pinned by `RIG_REPLAY_CAMERA_REF`.
+- Rig 0.2.72 passed [host tests](https://github.com/christomaszewski/rig/actions/runs/40455058070),
+  [native image acquisition](https://github.com/christomaszewski/rig/actions/runs/40455096649)
+  and [coordinated baked-artifact acceptance](https://github.com/christomaszewski/rig/actions/runs/40455094216).
+- Infra passed [certification](https://github.com/christomaszewski/rig-infra/actions/runs/40455062315),
+  [native replay](https://github.com/christomaszewski/rig-infra/actions/runs/40455062297)
+  and [runtime/message-overlay checks](https://github.com/christomaszewski/rig-infra/actions/runs/40455062290).
+- Camera passed [all four runtime jobs, service smoke tests and launcher contracts](https://github.com/christomaszewski/camera-service/actions/runs/40455091948).
+
+The public registry distributes the companion source packages. Runtime images are
+built for each deployment: upgrade the selected packages, rebuild/publish the base,
+messages and camera images through the fleet's normal build workflow, then bake a
+fresh artifact. Coordination requires both launcher and active-image capability
+declarations; a new launcher with an old image is deliberately rejected.
 
 There is **no fleet-wide service migration**. Only the selected bag player and recorded
 camera producers need coordination support. Ordinary consumers use their recorded ROS
