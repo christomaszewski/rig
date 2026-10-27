@@ -352,7 +352,8 @@ def cmd_replay(args, manifest, catalog, descriptors) -> int:
                           force=args.force, dry_run=args.dry_run, calls=args.calls,
                           export_calls=args.export_calls, auto_end_grace=args.auto_end,
                           window_from=args.window_from, window_to=args.window_to,
-                          live=args.live, session=args.session, start_delay=args.start_delay,
+                          live=args.live, session=args.session,
+                          start_delay=args.start_delay if args.start_delay is not None else 20.0,
                           skip_services=args.skip_services,
                           include_services=args.include_services, skip_instances=args.skip_instances)
 
@@ -601,6 +602,8 @@ def cmd_build(args, root: Path) -> int:
 
 
 def cmd_bake(args, root: Path) -> int:
+    if args.replay_player and not args.include_replay:
+        raise RigError("bake --replay-player requires --include-replay")
     tag = args.tag
     if tag is None:
         from .common import load_yaml
@@ -617,13 +620,25 @@ def cmd_bake(args, root: Path) -> int:
         if referenced_vars(tag):
             raise RigError("bake: images.tag in vehicle.yaml is templated — pass --tag to name "
                            "the artifact without resolving per-vehicle values")
+    from .common import safe_component
+    safe_component(tag, what="bake --tag")
+    if args.include_replay:
+        from .bake_replay import deployment_inputs
+        with deployment_inputs(root, player=args.replay_player,
+                               target_overrides={"platform": args.platform, "arch": args.arch}) as inputs:
+            return _bake_inputs(args, inputs, tag, output_root=root)
+    return _bake_inputs(args, root, tag, output_root=root)
+
+
+def _bake_inputs(args, root, tag, *, output_root):
     # Fleet-ness is a property of the deployment, not a flag: {{var}} references anywhere mean
     # bake stages the UNRESOLVED tree (a mandatory-marker deployment can't even load resolved
     # here — bake never reads vehicle.local.yaml/shell vars by design).
     if bake_mod.is_fleet(root):
         bake_mod.bake_fleet(root, tag, registry=args.registry,
                             bundle_images=args.bundle_images, platform=args.platform, arch=args.arch,
-                            overwrite=args.overwrite)
+                            overwrite=args.overwrite, include_replay=args.include_replay,
+                            output_root=output_root)
         return 0
     manifest, catalog, descriptors = _load(root, context="deployment", identity=False, render=False,
                                          target_overrides={"platform": args.platform, "arch": args.arch})
@@ -631,9 +646,12 @@ def cmd_bake(args, root: Path) -> int:
     from .targets import deployment_target
     from .manifest import require_identity
     active = {s.service for s in manifest.sensors if s.enabled}
+    if args.include_replay:
+        from .bake_replay import selected_rows
+        active.update(s.service for s in selected_rows(manifest, descriptors))
     target = deployment_target(manifest, {n: d for n, d in descriptors.items() if n in active},
                                platform=args.platform, arch=args.arch,
-                               required=args.bundle_images or bool(manifest.build_catalog))
+                               required=args.bundle_images or args.include_replay or bool(manifest.build_catalog))
     overrides = {k: v for k, v in (("platform", target.runtime), ("arch", target.arch)) if v}
     manifest = replace(manifest, platform=target.runtime, arch=target.arch,
                        vars={**manifest.vars, **overrides},
@@ -643,7 +661,8 @@ def cmd_bake(args, root: Path) -> int:
     env = dispatch.fleet_env(manifest, descriptors)
     bake_mod.bake(root, manifest, catalog, descriptors, env, tag, registry=args.registry,
                   bundle_images=args.bundle_images, platform=args.platform, arch=args.arch,
-                  overwrite=args.overwrite)
+                  overwrite=args.overwrite, include_replay=args.include_replay,
+                  output_root=output_root)
     return 0
 
 
@@ -873,10 +892,16 @@ def build_parser() -> argparse.ArgumentParser:
     rp.add_argument("--session", default=None, metavar="PREFIX",
                     help="select a camera/source recording session prefix; does not select the "
                          "bag session (use recipe bag.logger/session or player config)")
-    rp.add_argument("--start-delay", dest="start_delay", type=float, default=20.0, metavar="S",
-                    help="release sources at a shared deadline set after source verification and run "
-                         "capture, just before startup (default 20 seconds; 0 releases each as it "
-                         "comes up). This timer does not guarantee consumer readiness")
+    rp.add_argument("--startup", choices=("legacy", "coordinated"), default="legacy",
+                    help="legacy timer (default), or held startup with verified consumer endpoints "
+                         "and a common release; coordinated requires compatible packages and images")
+    rp.add_argument("--startup-timeout", type=float, default=300.0, metavar="S",
+                    help="overall coordinated startup deadline, including settling (default 300s)")
+    rp.add_argument("--ready-timeout", type=float, default=120.0, metavar="S",
+                    help="coordinated participant readiness timeout from launch (default 120s)")
+    rp.add_argument("--start-delay", dest="start_delay", type=float, default=None, metavar="S",
+                    help="legacy: timer from startup; coordinated: settling interval after readiness "
+                         "(defaults: legacy 20s, coordinated 0s). Zero still uses a coordinated common release")
     rp.add_argument("--label", default=None,
                     help="label for the NEW replay run (default: replay-<source-run>)")
     rp.add_argument("--export-calls", action="store_true", dest="export_calls",
@@ -1233,6 +1258,13 @@ def build_parser() -> argparse.ArgumentParser:
     bk.add_argument("--bundle-images", action="store_true",
                     help="save only the deployment runtime/CPU images for offline startup; "
                          "content aliases and image IDs are verified on load")
+    bk.add_argument("--include-replay", action="store_true",
+                    help="add/configure a missing bag player in the artifact and validate onboard "
+                         "replay images; with --bundle-images, include their bytes for offline replay. "
+                         "Existing players and source deployment files are preserved")
+    bk.add_argument("--replay-player", metavar="PATH|PINNED_REF",
+                    help="source for an automatically added player (requires --include-replay); "
+                         "default: existing route, locked package, nearby checkout, or configured registry")
     bk.add_argument("--overwrite", action="store_true",
                     help="replace an existing artifact without the interactive confirmation")
 

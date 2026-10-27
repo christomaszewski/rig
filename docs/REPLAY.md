@@ -366,12 +366,16 @@ is inclusive and the end exclusive for structured replay, matching recorded-requ
 They override standalone player offsets; omitting `--to` keeps the replay window open to the bag end.
 Remaps apply to bag playback and restored
 pre-window latched messages. Empty data selections retain a clock-only timeline. `--wall-clock`
-disables `/clock`; source-only replay without bags uses wall time. The release deadline is
+disables `/clock`; source-only replay without bags uses wall time. With the default
+`--startup legacy`, the release deadline is
 computed after source verification and run capture, immediately before final configuration
 snapshotting and startup. `--start-delay 0` still provides a release timestamp so paused
 sources resume as they start. A positive deadline that expires before any launcher starts
 blocks startup; slow launchers that outlast it produce a warning. This timer does not prove
-that every consumer is ready; coordinated readiness remains planned.
+that every consumer is ready. Opt in to `--startup coordinated` to hold producers until
+recorded consumer endpoints are discovered, then commit one shared release timestamp.
+This requires compatible player/camera packages and images; existing deployments retain
+legacy startup. See [coordinated replay](replay-coordination.md) for requirements and limits.
 
 Canonical runs without captures/epochs work directly. Standalone bags are copied into a derived
 layout. Invalid/missing indexes are rebuilt there with a bounded, network-disabled helper using

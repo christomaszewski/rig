@@ -1,4 +1,4 @@
-"""Select and export only deployment images; catalog companions remain metadata, not payload."""
+"""Select and export deployment images, plus explicitly requested onboard replay images."""
 from __future__ import annotations
 
 from dataclasses import replace
@@ -48,7 +48,7 @@ def source_for(manifest, ref, target):
     return ref, []
 
 
-def export_images(staging: Path, refs, manifest, target):
+def export_images(staging: Path, refs, manifest, target, *, required_labels=None):
     """Pull/inspect the selected CPU, save content-specific local aliases, and record the mapping.
 
     Content aliases survive save/load and don't depend on Docker restoring registry digests.
@@ -71,7 +71,11 @@ def export_images(staging: Path, refs, manifest, target):
             source, synonyms = source_for(manifest, ref, target)
 
             def inspect():
-                result = _run(["image", "inspect", "--format", "{{json .}}", source], timeout=20)
+                # Containerd's default inspection can return an index (including
+                # attestations), which save --platform deliberately drops. Record
+                # the selected child so inspected and exported identities agree.
+                platform = ["--platform", f"linux/{target.arch}"] if api >= (1, 49) else []
+                result = _run(["image", "inspect", *platform, "--format", "{{json .}}", source], timeout=20)
                 try:
                     info = json.loads(result.stdout) if not result.returncode else {}
                     if not isinstance(info, dict):
@@ -91,12 +95,28 @@ def export_images(staging: Path, refs, manifest, target):
             if (info.get("Os") != "linux" or info.get("Architecture") != target.arch
                     or not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id)):
                 raise RigError(f"bundle: {source} is not a verified linux/{target.arch} image")
+            labels = (info.get("Config") or {}).get("Labels") or {}
+            if api < (1, 49) and (info.get("Descriptor") or {}).get("mediaType") in (
+                    "application/vnd.oci.image.index.v1+json",
+                    "application/vnd.docker.distribution.manifest.list.v2+json"):
+                raise RigError("bundle: selecting an image index member requires Docker API 1.49 or newer")
+            for key, value in (required_labels or {}).get(ref, {}).items():
+                if labels.get(key) != value:
+                    raise RigError(f"bundle: {ref} requires image label {key}={value}; "
+                                   "update the replay image before baking")
             # A tag per source repository/content identity, never a release's mutable tag.
             alias = f"rig-bundle/{hashlib.sha256(ref.encode()).hexdigest()[:16]}:{image_id[7:]}"
+            platform = ["--platform", f"linux/{target.arch}"] if api >= (1, 49) else []
             existed = _run(["image", "inspect", "--format", "{{.Id}}", alias], timeout=20)
-            if existed.returncode == 0 and existed.stdout.strip() != image_id:
-                raise RigError(f"bundle: content alias {alias} already refers to a different image")
-            result = _run(["tag", image_id, alias])
+            if existed.returncode == 0:
+                selected = (_run(["image", "inspect", *platform, "--format", "{{.Id}}", alias], timeout=20)
+                            if platform else existed)
+                if selected.returncode or selected.stdout.strip() != image_id:
+                    raise RigError(f"bundle: content alias {alias} already refers to a different image")
+            # An index's child is not necessarily addressable by bare digest in
+            # the local store. Tag the source, then verify the alias's selected
+            # member before and after save; a source moving still fails closed.
+            result = _run(["tag", source, alias])
             if result.returncode:
                 raise RigError(f"bundle: cannot tag {source}: {result.stderr.strip()[:300]}")
             if existed.returncode:
@@ -110,7 +130,8 @@ def export_images(staging: Path, refs, manifest, target):
             ids[alias] = image_id
             sources[ref] = {"source": source, "image_id": image_id, "alias": alias}
         from .bake import _bundle_images
-        bundle = _bundle_images(staging, sorted(ids), arch=target.arch)
+        bundle = _bundle_images(staging, sorted(ids), arch=target.arch,
+                                inspect_platform=api >= (1, 49))
         if bundle["image_ids"] != ids:
             raise RigError("bundle: selected image identities changed during export")
         return dict(bundle, refs=runtime_refs, sources=sources, target=target.as_dict())
@@ -168,6 +189,21 @@ def parse_image_refs(output, *, instance):
     return images
 
 
+def known_values(value, variables):
+    """Resolve deployment inputs, retaining fleet identity markers for image-only queries."""
+    from .interpolate import substitute_scalar
+    if isinstance(value, dict):
+        return {k: known_values(v, variables) for k, v in value.items()}
+    if isinstance(value, list):
+        return [known_values(v, variables) for v in value]
+    if isinstance(value, str):
+        try:
+            return substitute_scalar(value, variables, where="image plan")
+        except RigError:
+            return value
+    return value
+
+
 def fleet_image_refs(root, staging, manifest, descriptors):
     """Optional `verbs.images`: YAML list of refs, from raw layered config + target, no identity.
 
@@ -175,7 +211,6 @@ def fleet_image_refs(root, staging, manifest, descriptors):
     used as a guess at runtime requirements. Existing resolved artifacts use compose capture.
     """
     from .dispatch import fleet_env, service_env
-    from .interpolate import substitute_scalar
     from .resolve import _layered_dict
     refs = set()
     env = fleet_env(replace(manifest, missing_identity=(), vehicle_id=None), descriptors)
@@ -186,18 +221,7 @@ def fleet_image_refs(root, staging, manifest, descriptors):
                            "for a templated artifact (no resolved compose-only form)")
         config = staging / "var" / "image-plan" / f"{sensor.name}.yaml"
         config.parent.mkdir(parents=True, exist_ok=True)
-        def known_values(value):
-            if isinstance(value, dict):
-                return {k: known_values(v) for k, v in value.items()}
-            if isinstance(value, list):
-                return [known_values(v) for v in value]
-            if isinstance(value, str):
-                try:
-                    return substitute_scalar(value, manifest.vars, where="image plan")
-                except RigError:
-                    return value  # vehicle-specific values stay unresolved
-            return value
-        config.write_text(yaml.safe_dump(known_values(_layered_dict(sensor, root)), sort_keys=False))
+        config.write_text(yaml.safe_dump(known_values(_layered_dict(sensor, root), manifest.vars), sort_keys=False))
         repo = staging / "services" / sensor.service
         output = run_image_query(replace(sensor, config=config), desc, service_env(env, desc), repo=repo)
         refs.update(parse_image_refs(output, instance=sensor.name))

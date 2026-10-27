@@ -63,6 +63,7 @@ def _query(row, desc, config, env):
     # The query must see the same instance environment as up. An earlier invocation's
     # pin map must not alter what the launcher reports as its original image references.
     query_env = dispatch.instance_env(env, row, desc)
+    eprint(f"rig replay: resolving images for {row.name} (timeout {QUERY_TIMEOUT}s)")
     for key in _PIN_ENV:
         query_env.pop(key, None)
     with tempfile.TemporaryDirectory(prefix="rig-runtime-images-") as folder:
@@ -281,7 +282,7 @@ def acquire_images(inventory, *, policy="missing", inspection=None, offline=Fals
         return report
     pulled, observed = [], dict(report["observed"])
     for source in report["proposed_pulls"]:
-        eprint(f"rig replay: pulling linux/{inventory['architecture']} {source}")
+        eprint(f"rig replay: pulling linux/{inventory['architecture']} {source} (timeout {PULL_TIMEOUT}s)")
         try:
             result = subprocess.run(["docker", "pull", "--platform", f"linux/{inventory['architecture']}", source],
                                     stdout=sys.stderr, stderr=sys.stderr, text=True, timeout=PULL_TIMEOUT)

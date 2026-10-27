@@ -160,7 +160,8 @@ def _resolve_digest(ref: str, *, local_only: bool = False) -> str | None:
     return None
 
 
-def _bundle_images(staging: Path, refs: list[str], *, arch: str | None = None) -> dict:
+def _bundle_images(staging: Path, refs: list[str], *, arch: str | None = None,
+                   inspect_platform: bool = False) -> dict:
     """``docker save`` the resolved image set into staging/images.tar (one multi-ref save, so shared base
     layers are stored once). Missing images are pulled first; still-missing is a HARD error — a silently
     incomplete bundle would betray the air-gap promise. Returns the metadata block."""
@@ -179,7 +180,8 @@ def _bundle_images(staging: Path, refs: list[str], *, arch: str | None = None) -
     def image_ids() -> dict[str, str]:
         ids = {}
         for ref in refs:
-            p = subprocess.run(["docker", "image", "inspect", "--format", "{{.Id}}", ref],
+            platform = ["--platform", "linux/" + arch] if arch and inspect_platform else []
+            p = subprocess.run(["docker", "image", "inspect", *platform, "--format", "{{.Id}}", ref],
                                capture_output=True, text=True)
             image_id = p.stdout.strip()
             if p.returncode or not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id):
@@ -687,16 +689,20 @@ def _stage_tree(staging: Path, manifest, catalog, *, registry: str | None = None
 
 def bake(root: Path, manifest, catalog, descriptors, env, tag: str, *, registry: str | None = None,
          bundle_images: bool = False, platform: str | None = None, arch: str | None = None,
-         overwrite: bool = False) -> Path:
+         overwrite: bool = False, include_replay: bool = False, output_root: Path | None = None) -> Path:
+    output_root = output_root or root
     safe_component(tag, what="bake --tag")  # names var/bake/<tag>, which is rmtree'd below
     from .artifacts import confirm_overwrite, publish
-    overwrite = confirm_overwrite(root, tag, overwrite=overwrite)
+    overwrite = confirm_overwrite(output_root, tag, overwrite=overwrite)
     from dataclasses import replace
     from .targets import deployment_target
     active = {s.service for s in manifest.sensors if s.enabled}
+    if include_replay:
+        from .bake_replay import selected_rows
+        active.update(s.service for s in selected_rows(manifest, descriptors))
     target = deployment_target(manifest, {n: d for n, d in descriptors.items() if n in active},
                                platform=platform, arch=arch,
-                               required=bundle_images or bool(manifest.build_catalog))
+                               required=bundle_images or include_replay or bool(manifest.build_catalog))
     manifest = replace(manifest, platform=target.runtime, arch=target.arch)
     if registry:
         manifest = replace(manifest, image_registry=registry)
@@ -720,18 +726,25 @@ def bake(root: Path, manifest, catalog, descriptors, env, tag: str, *, registry:
                 env.pop(key, None)
                 if key in localized:
                     env[key] = localized[key]
-    staging = root / "var" / "bake" / tag
+    staging = output_root / "var" / "bake" / tag
     if staging.exists():
         shutil.rmtree(staging)
     staging.mkdir(parents=True)
 
     # 1.–3. rig + configs/vehicle.yaml + vendored surfaces (shared with the run-open capture).
     _stage_tree(staging, manifest, catalog, registry=registry)
+    replay_images = None
+    if include_replay:
+        from .bake_replay import image_plan
+        replay_images = image_plan(root, staging, manifest, descriptors)
 
     # 4. compose-only resolved form (best-effort) + scripts + bootstrap. Bundle mode also `docker save`s
     #    the image set into the artifact: zero registry at deploy time, integrity = the artifact's sha256.
     images: dict[str, str | None] = {}
     entries, skipped = _compose_only(manifest, descriptors, env, staging, images, pin=not bundle_images)
+    for ref in (replay_images or {}).get("images", {}):
+        if ref not in images:
+            images[ref] = _resolve_digest(ref, local_only=bundle_images)
     if skipped:
         # The compose-only form is ALL or nothing. run.sh prefers up.sh whenever it exists and
         # never falls back to rig for the stacks it lacks — a partial up.sh silently started a
@@ -751,7 +764,9 @@ def bake(root: Path, manifest, catalog, descriptors, env, tag: str, *, registry:
             raise RigError("bake --bundle-images: no images captured — the compose-only rendering must "
                            "succeed for every stack you want bundled (see the skip messages above)")
         from .artifact_images import export_images, rewrite_compose
-        bundle = export_images(staging, sorted(images), manifest, target)
+        from .bake_replay import required_labels
+        bundle = export_images(staging, sorted(images), manifest, target,
+                               required_labels=required_labels(replay_images))
         rewrite_compose(staging, entries, bundle["refs"])
     run_ctx = None
     if manifest.data_dir:  # runs feature: inert without data_dir
@@ -808,6 +823,8 @@ def bake(root: Path, manifest, catalog, descriptors, env, tag: str, *, registry:
     }
     if bundle:
         meta["bundle"] = bundle
+    if replay_images:
+        meta["replay"] = replay_images
     if parent:
         meta["parent"] = parent
     (staging / "metadata.yaml").write_text(yaml.safe_dump(meta, sort_keys=False))
@@ -821,7 +838,7 @@ def bake(root: Path, manifest, catalog, descriptors, env, tag: str, *, registry:
     save_lock(staging, locked)
 
     # 6. bundle
-    tarpath = publish(staging, root, tag, overwrite=overwrite)
+    tarpath = publish(staging, output_root, tag, overwrite=overwrite)
     digest = _sha256(tarpath)
     eprint(f"baked '{tag}' -> {tarpath}")
     eprint(f"  sha256:{digest}")
@@ -975,7 +992,7 @@ def fleet_refs(root: Path) -> set[str]:
 
 def bake_fleet(root: Path, tag: str, *, registry: str | None = None,
                bundle_images: bool = False, platform: str | None = None, arch: str | None = None,
-               overwrite: bool = False) -> Path:
+               overwrite: bool = False, include_replay: bool = False, output_root: Path | None = None) -> Path:
     """The fleet artifact: ONE tar for N vehicles. Stages the UNRESOLVED tree (vehicle.yaml +
     the whole config/ tree incl. .pins/.overlays, verbatim) + vendored launch surfaces + the
     bundled rig; rendering happens on-vehicle at `rig up` from /etc/rig/vehicle.local.yaml.
@@ -984,6 +1001,7 @@ def bake_fleet(root: Path, tag: str, *, registry: str | None = None,
     Ships provision.sh + vehicle.local.example.yaml so a fresh vehicle needs zero rig knowledge."""
     from .catalog import load_catalog
     from .interpolate import MARKER
+    output_root = output_root or root
 
     if registry:
         raise RigError("bake: --registry cannot override a fleet artifact (values resolve "
@@ -991,11 +1009,11 @@ def bake_fleet(root: Path, tag: str, *, registry: str | None = None,
                        "vehicle.local.yaml")
     safe_component(tag, what="bake --tag")  # names var/bake/<tag>, which is rmtree'd below
     from .artifacts import confirm_overwrite, publish
-    overwrite = confirm_overwrite(root, tag, overwrite=overwrite)
+    overwrite = confirm_overwrite(output_root, tag, overwrite=overwrite)
     refs = sorted(fleet_refs(root))
     raw = load_yaml(root / "vehicle.yaml")
     manifest, descriptors, target = None, {}, None
-    if bundle_images or platform or arch:
+    if bundle_images or platform or arch or include_replay:
         from .manifest import load_manifest
         from .descriptor import load_descriptor
         from .targets import deployment_target
@@ -1004,17 +1022,22 @@ def bake_fleet(root: Path, tag: str, *, registry: str | None = None,
         routes = load_catalog(root)
         descriptors = {s.service: load_descriptor(s.service, routes[s.service].path) for s in manifest.sensors}
         active = {s.service for s in manifest.sensors if s.enabled}
+        if include_replay:
+            from .bake_replay import selected_rows
+            replay_services = {s.service for s in selected_rows(manifest, descriptors)}
+        else:
+            replay_services = set()
         if bundle_images:
             missing = sorted(n for n in active if "images" not in descriptors[n].verbs)
             if missing:
                 raise RigError(f"bundle: {', '.join(missing)} needs a declared verbs.images image planner "
                                "for a templated artifact (no resolved compose-only form)")
-        target = deployment_target(manifest, {n: d for n, d in descriptors.items() if n in active},
+        target = deployment_target(manifest, {n: d for n, d in descriptors.items() if n in active | replay_services},
                                    platform=platform, arch=arch, required=True)
         manifest = load_manifest(root, context="deployment",
                                  target_overrides={"platform": target.runtime, "arch": target.arch})
 
-    staging = root / "var" / "bake" / tag
+    staging = output_root / "var" / "bake" / tag
     if staging.exists():
         shutil.rmtree(staging)
     staging.mkdir(parents=True)
@@ -1043,20 +1066,26 @@ def bake_fleet(root: Path, tag: str, *, registry: str | None = None,
         catalog_out[service] = {"path": f"services/{service}"}
     (staging / "services.yaml").write_text(yaml.safe_dump({"services": catalog_out}, sort_keys=False))
 
-    bundle = None
+    bundle, replay_images = None, None
     if target:
         from .artifact_images import export_images, fleet_image_refs
         raw = dict(raw, arch=target.arch)
         if target.runtime:
             raw["platform"] = target.runtime
         (staging / "vehicle.yaml").write_text(yaml.safe_dump(raw, sort_keys=False))
+        if include_replay:
+            from .bake_replay import image_plan
+            replay_images = image_plan(root, staging, manifest, descriptors, fleet=True)
         if bundle_images:
             if any(u.startswith("images.") for u in manifest.missing_identity):
                 raise RigError("bundle: image registry/tag/base must resolve from deployment inputs")
             refs_to_bundle = fleet_image_refs(root, staging, manifest, descriptors)
+            refs_to_bundle = sorted(set(refs_to_bundle) | set((replay_images or {}).get("images", {})))
             if not refs_to_bundle:
                 raise RigError("bundle: no enabled service images selected")
-            bundle = export_images(staging, refs_to_bundle, manifest, target)
+            from .bake_replay import required_labels
+            bundle = export_images(staging, refs_to_bundle, manifest, target,
+                                   required_labels=required_labels(replay_images))
             _write_bundle_guard(staging, bundle)
 
     # vehicle.local.example.yaml: every referenced var, split mandatory vs fleet-defaulted
@@ -1104,9 +1133,11 @@ def bake_fleet(root: Path, tag: str, *, registry: str | None = None,
     if bundle:
         meta["bundle"] = bundle
         meta["pinning"] = "target+bundle"
+    if replay_images:
+        meta["replay"] = replay_images
     (staging / "metadata.yaml").write_text(yaml.safe_dump(meta, sort_keys=False))
 
-    tarpath = publish(staging, root, tag, overwrite=overwrite)
+    tarpath = publish(staging, output_root, tag, overwrite=overwrite)
     eprint(f"baked FLEET artifact '{tag}' -> {tarpath}")
     eprint(f"  sha256:{_sha256(tarpath)}")
     eprint(f"  vars: {', '.join(refs)} — resolved per vehicle (vehicle.local.yaml); "

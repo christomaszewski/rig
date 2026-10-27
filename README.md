@@ -218,12 +218,18 @@ rig build --no-cache                         # disable instruction caching in ev
 rig image audit                             # inspect what the stacks will RUN: one ROS distro, the
                                             #   declared rmw installed, ros-* versions agree across images
 rig bake --tag v1                           # -> var/artifacts/v1.tar.gz (auto-vendored + digest-pinned)
+# rig bake --tag v1 --include-replay         # auto-wire a missing player + validate onboard replay
+# add --bundle-images for offline startup AND replay images
 # rig bake                                 # same when vehicle.yaml has images.tag: v1
 scp var/artifacts/v1.tar.gz vehicle:~/      # on the vehicle: `tar xzf v1.tar.gz && cd v1 && ./run.sh up`
 ```
 
 [Portable builds and replay](docs/BUILD_AND_REPLAY.md) covers the build contract, Buildx setup,
 companion digests, reconstruction onto another host, replay startup policy, and migration of old runs.
+[Onboard replay](docs/ONBOARD_REPLAY.md) covers replaying local recordings from a shipped artifact,
+with registry access by default and optional offline replay images.
+[Coordinated startup](docs/replay-coordination.md) covers opt-in held replay, consumer
+readiness, common release, startup timeouts and compatible companion images.
 [Replay preparation](docs/REPLAY.md) covers instance `replay.start`, local recipes, check/prepare,
 renamed services, exact bag selection, and source-preserving legacy imports. No pub/sub declarations
 are required; packaging recipes with suites is deferred.

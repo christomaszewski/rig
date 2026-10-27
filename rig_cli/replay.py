@@ -821,13 +821,18 @@ def _save_completion(manifest, run_id, completion) -> bool:
 
 
 def auto_end(manifest, descriptors, root: Path, pairs, env, player, grace_s: int, *,
-             required_calls=None, started_after=None, run_id=None) -> int:
+             required_calls=None, started_after=None, run_id=None, owned_containers=None,
+             observe_participants=None) -> int:
     """Monitor completion; success requires positive exit-zero evidence for every participant.
 
     Unknown/failed/interrupted sessions stay up for inspection. Only confirmed success runs
     the existing log-capture/down/seal sequence, after preserving exact container evidence.
     The ordinary detached replay path does not call this monitor or promise completion.
+    A coordinated observer receives the player result and may return additional participant
+    evidence. It can delay or fail completion, but cannot override an unsuccessful player.
     """
+    import subprocess
+
     required_calls = bool(env.get("RIG_REPLAY_CALLS")) if required_calls is None else required_calls
     if manifest.data_dir and run_id is None:
         current = runs_mod.current_run(Path(manifest.data_dir))
@@ -844,8 +849,25 @@ def auto_end(manifest, descriptors, root: Path, pairs, env, player, grace_s: int
             if item.get("state") != "created" and item.get("started_at"):
                 previous = started.setdefault(service, item["started_at"])
                 if previous != item["started_at"]:
-                    return ReplayCompletion("unknown", f"{service} restarted during replay",
-                                            result.containers)
+                    result = ReplayCompletion("unknown", f"{service} restarted during replay",
+                                              result.containers)
+                    break
+        if observe_participants is not None:
+            try:
+                additional = observe_participants(result)
+                if additional is not None:
+                    priority = {"succeeded": 0, "active": 1, "unknown": 2, "interrupted": 3, "failed": 4}
+                    if not isinstance(additional, ReplayCompletion) or additional.state not in priority:
+                        raise RigError("invalid coordinated participant completion evidence")
+                    combined = {**result.containers, **additional.containers}
+                    if priority[additional.state] > priority[result.state]:
+                        result = dataclasses.replace(additional, containers=combined)
+                    else:
+                        result = dataclasses.replace(result, containers=combined)
+            except (RigError, OSError, subprocess.SubprocessError) as exc:
+                if result.state not in ("failed", "interrupted"):
+                    result = ReplayCompletion("unknown", f"Cannot inspect replay participants: {exc}",
+                                              result.containers)
         return result
 
     def check_open_run(result):
@@ -872,7 +894,7 @@ def auto_end(manifest, descriptors, root: Path, pairs, env, player, grace_s: int
     try:
         while True:
             completion = observe()
-            if completion.state in ("succeeded", "failed"):
+            if completion.state in ("succeeded", "failed", "interrupted"):
                 break
             if completion.state == "unknown":
                 misses += 1
@@ -912,10 +934,23 @@ def auto_end(manifest, descriptors, root: Path, pairs, env, player, grace_s: int
         if incomplete(completion, _save_completion(manifest, run_id, completion)):
             return 130 if completion.state == "interrupted" else 1
     try:
-        outcomes = dispatch.run_verb(list(reversed(pairs)), env, "down")
-        failed = [o for o in outcomes if o.returncode != 0]
-        if failed:
-            raise RigError("down failed for " + ", ".join(o.sensor.name for o in failed))
+        if observe_participants is not None:
+            # Coordinator evidence may change while completion evidence is persisted.
+            # This is the final live check; removal makes later container checks invalid.
+            completion = check_open_run(observe())
+            if completion.state == "active":
+                completion = ReplayCompletion("unknown", "a replay participant became active before cleanup",
+                                              completion.containers)
+            if incomplete(completion, _save_completion(manifest, run_id, completion)):
+                return 130 if completion.state == "interrupted" else 1
+        if owned_containers is not None:
+            from .replay_workflow import _finish_owned
+            _finish_owned(owned_containers)
+        else:
+            outcomes = dispatch.run_verb(list(reversed(pairs)), env, "down")
+            failed = [o for o in outcomes if o.returncode != 0]
+            if failed:
+                raise RigError("down failed for " + ", ".join(o.sensor.name for o in failed))
         # Down may be slow too; do not seal whichever different run became current meanwhile.
         completion = check_open_run(completion)
         if completion.state != "succeeded":

@@ -13,13 +13,16 @@ request inspection/cache, frozen origin, and policy-version invalidation are imp
 Native ROS tests confirmed mixed-origin playback and exposed two additional window bugs:
 rounded offsets and an inclusive ROS stop bound. Structured replay now preserves fractional
 offsets and enforces an exclusive integer timestamp end. Inspection seeks to the selected
-window and stops at its end. Coordinated readiness (phase 5) remains pending. The checkpoint release is being assembled with compatible companion launchers and rebuilt
-capability-labeled images. Full vehicle replay acceptance remains outstanding.
+window and stops at its end. Those changes shipped in Rig v0.2.71 with infra v1.18.0
+and camera-service v1.11.0. Phase 5 is now implemented locally as the explicit
+`--startup coordinated` mode; see [the startup contract](replay-coordination.md).
+Companion publication, the default switch and full vehicle acceptance remain outstanding.
 
 This batch preserves detached startup behavior: it does not add a background observer for
 later terminal outcomes. Completion evidence is collected by `--auto-end`. Concurrent
-ownership through session labels/locking remains part of the coordination work; startup
-cleanup currently retains projects that already had containers before their launcher ran.
+ownership is enforced for coordinated startup with project locks, fresh session IDs,
+empty-project preflight and cleanup by exact container ID. Legacy startup retains
+projects that already had containers before their launcher ran.
 
 Validation after the image batch: all 72 Rig test scripts pass, including 22 image resolver
 and 15 workflow cases; the opt-in Docker tests are skipped in the ordinary host run. Ten

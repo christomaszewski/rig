@@ -76,6 +76,8 @@ def fleet_env(manifest: Manifest, descriptors: dict[str, Descriptor] | None = No
                        ("RIG_RUNTIME_IMAGE_MAP", None), ("RIG_RUNTIME_IMAGE_PINS", None),
                        ("RIG_REPLAY_FROM_S", None), ("RIG_REPLAY_TO_S", None),
                            ("RIG_REPLAY_START_AT_UNIX_S", None),
+                       ("RIG_REPLAY_CONTROL_DIR", None), ("RIG_REPLAY_SESSION_ID", None),
+                       ("RIG_REPLAY_PLAN_ID", None), ("RIG_REPLAY_PARTICIPANT", None),
                        # the export channel (export.py): per-invocation like the replay one
                        ("RIG_EXPORT_SOURCE", None), ("RIG_EXPORT_DEST", None),
                        ("RIG_EXPORT_OPTIONS", None), ("RIG_EXPORT_PROFILE", None),
@@ -143,6 +145,8 @@ def instance_env(env: dict[str, str], sensor: Sensor, desc: Descriptor) -> dict[
     """
     out = {**service_env(env, desc),
            "COMPOSE_PROJECT_NAME": project_name(sensor.name, env.get("VEHICLE_ID"))}
+    if out.get("RIG_REPLAY_CONTROL_DIR"):
+        out["RIG_REPLAY_PARTICIPANT"] = sensor.name
     # Keep each launcher constrained to its own validated image set. This channel is
     # created only by replay after acquisition; ordinary fleet verbs clear it above.
     if "RIG_RUNTIME_IMAGE_MAP" in out:
@@ -179,6 +183,7 @@ def run(
     *,
     dry_run: bool,
     capture: bool = False,
+    timeout: float | None = None,
 ) -> subprocess.CompletedProcess:
     # rig owns the compose project name (containers = <project>-<compose-service>-N). A launcher honors
     # COMPOSE_PROJECT_NAME unless it overrides with `-p` (see the launcher contract). The platform
@@ -194,6 +199,8 @@ def run(
                     "RIG_SIM_TIME", "RIG_REPLAY_SERVICES", "RIG_REPLAY_CALLS",
                     "RIG_REPLAY_FROM_S", "RIG_REPLAY_TO_S",
                     "RIG_REPLAY_START_AT_UNIX_S",
+                    "RIG_REPLAY_CONTROL_DIR", "RIG_REPLAY_SESSION_ID", "RIG_REPLAY_PLAN_ID",
+                    "RIG_REPLAY_PARTICIPANT",
                     "RIG_TARGET_STATE", desc.platform_override_env or ""):
             if key and env.get(key):
                 envline += f" {key}={env[key]}"
@@ -203,6 +210,23 @@ def run(
         return subprocess.CompletedProcess(cmd, 0, "", "")
     if not capture:
         eprint(f"==> {sensor.name} [{sensor.service}]: {pretty}")
+    if timeout is not None:
+        import signal
+        # Bound the whole launcher process group, including its Docker child. Killing
+        # only the shell can leave an orphan still creating containers after cleanup.
+        child = subprocess.Popen(cmd, env=env, cwd=str(desc.repo), text=True,
+                                 stdout=subprocess.PIPE if capture else None,
+                                 stderr=subprocess.PIPE if capture else None, start_new_session=True)
+        try:
+            stdout, stderr = child.communicate(timeout=timeout)
+        except (subprocess.TimeoutExpired, KeyboardInterrupt):
+            try:
+                os.killpg(child.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            child.communicate()
+            raise
+        return subprocess.CompletedProcess(cmd, child.returncode, stdout, stderr)
     return subprocess.run(cmd, env=env, cwd=str(desc.repo), capture_output=capture, text=True)
 
 
@@ -215,6 +239,7 @@ def run_verb(
     dry_run: bool = False,
     stop_on_failure: bool = False,
     on_start=None,
+    timeout=None,
 ) -> list[Outcome]:
     """Run a streaming verb across sensors in order; replay can stop on the first failure.
 
@@ -226,7 +251,8 @@ def run_verb(
         if on_start is not None:
             on_start(sensor, desc)
         cmd = launcher_cmd(sensor, desc, verb, extra)
-        result = run(sensor, desc, env, cmd, dry_run=dry_run)
+        kwargs = {"timeout": timeout() if callable(timeout) else timeout} if timeout is not None else {}
+        result = run(sensor, desc, env, cmd, dry_run=dry_run, **kwargs)
         outcomes.append(Outcome(sensor, result.returncode))
         if stop_on_failure and result.returncode:
             break

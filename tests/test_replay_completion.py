@@ -121,7 +121,7 @@ class CompletionTests(unittest.TestCase):
         return folder
 
     def monitor(self, *, run_id=None, observer=None, sleep=None, required_calls=False,
-                log_capture=None, cleanup=None):
+                log_capture=None, cleanup=None, participants=None, owned_containers=None):
         events = []
         def capture(*args, **kwargs):
             events.append("logs")
@@ -144,7 +144,8 @@ class CompletionTests(unittest.TestCase):
                 poll.side_effect = observer
             rc = replay.auto_end(self.manifest, {}, self.root, [(self.player, object())], {},
                                  self.player, 0, run_id=run_id, required_calls=required_calls,
-                                 started_after=1000)
+                                 started_after=1000, observe_participants=participants,
+                                 owned_containers=owned_containers)
             return rc, events, poll.call_count
 
     def test_failure_unknown_and_interrupt_never_down_or_seal(self):
@@ -226,6 +227,17 @@ class CompletionTests(unittest.TestCase):
         self.assertEqual(doc["state"], "failed")
         self.assertIn("down failed", doc["reason"])
 
+    def test_coordinated_finalization_failure_never_seals_run(self):
+        from rig_cli import RigError
+        folder = self.open_run()
+        with patch("rig_cli.replay_workflow._finish_owned", side_effect=RigError("forced shutdown")):
+            rc, events, _ = self.monitor(run_id="first", owned_containers=["a" * 64],
+                                         participants=lambda _: None)
+        self.assertEqual((rc, events), (1, ["logs"]))
+        doc = json.loads((folder / ".rig/replay/completion.json").read_text())
+        self.assertEqual(doc["state"], "failed")
+        self.assertIn("forced shutdown", doc["reason"])
+
     def test_current_run_changed_during_down_is_not_sealed(self):
         folder = self.open_run()
         def rotate():
@@ -236,6 +248,59 @@ class CompletionTests(unittest.TestCase):
         self.assertEqual(json.loads((folder / ".rig/replay/completion.json").read_text())["state"],
                          "unknown")
         self.assertFalse((self.root / "runs/second/.rig/replay/completion.json").exists())
+
+    def test_coordinated_failure_overrides_an_active_bag_immediately(self):
+        folder = self.open_run()
+        self.docs[0] = self.container("bag-player", "a" * 64, "running")
+        def failed(player):
+            self.assertEqual(player.state, "active")
+            return replay.ReplayCompletion("failed", "camera.camera: decoder failed",
+                                           {"camera.camera": {"state": "failed"}})
+        rc, events, count = self.monitor(run_id="first", participants=failed)
+        self.assertEqual((rc, events, count), (1, [], 1))
+        evidence = json.loads((folder / ".rig/replay/completion.json").read_text())
+        self.assertEqual(evidence["state"], "failed")
+        self.assertIn("camera.camera", evidence["containers"])
+        self.assertIn("bag-player", evidence["containers"])
+
+    def test_coordinated_camera_must_complete_even_after_bag_finishes(self):
+        observations = iter(["active", "succeeded", "succeeded", "succeeded"])
+        rc, events, count = self.monitor(participants=lambda player: replay.ReplayCompletion(
+            next(observations), "camera completion"))
+        self.assertEqual((rc, events, count), (0, ["down"], 4))
+
+    def test_coordinated_success_cannot_hide_player_failure_or_unknown_evidence(self):
+        success = lambda player: replay.ReplayCompletion("succeeded", "camera finished")
+        for state in ("failed", "unknown"):
+            with self.subTest(state=state):
+                rc, events, count = self.monitor(participants=success,
+                    observer=lambda *a, **k: replay.ReplayCompletion(state, "player " + state))
+                self.assertEqual((rc, events), (1, []))
+                self.assertEqual(count, 1 if state == "failed" else 5)
+
+    def test_coordinated_failure_during_grace_or_logs_or_final_check_blocks_sealing(self):
+        self.open_run()
+        for boundary in ("grace", "logs", "cleanup"):
+            with self.subTest(boundary=boundary):
+                failed, seen = False, 0
+                def fail(*unused):
+                    nonlocal failed
+                    failed = True
+                def participants(player):
+                    nonlocal seen
+                    seen += 1
+                    if failed or (boundary == "cleanup" and seen == 4):
+                        return replay.ReplayCompletion("failed", "camera.camera failed")
+                rc, events, _ = self.monitor(run_id="first", participants=participants,
+                    sleep=fail if boundary == "grace" else None,
+                    log_capture=fail if boundary == "logs" else None)
+                self.assertEqual((rc, events), (1, [] if boundary == "grace" else ["logs"]))
+
+    def test_coordinated_observer_errors_are_bounded_unknown_not_success(self):
+        def unavailable(player):
+            raise OSError("status unreadable")
+        rc, events, count = self.monitor(participants=unavailable)
+        self.assertEqual((rc, events, count), (1, [], 5))
 
 
 if __name__ == "__main__":

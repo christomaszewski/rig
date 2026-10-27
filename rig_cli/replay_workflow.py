@@ -80,6 +80,8 @@ def load_context(root):
 
 
 def command(args, root):
+    if args.start_delay is None:
+        args.start_delay = 0.0 if getattr(args, "startup", "legacy") == "coordinated" else 20.0
     if getattr(args, "format", None) == "json":
         args.json = True
     try:
@@ -96,6 +98,7 @@ def command(args, root):
 def _command(args, root):
     from .service_exports import VerificationContext
     verification = VerificationContext()
+    planning_started = time.monotonic()
     action = args.cmd.removeprefix("replay-") if args.cmd != "replay" else "run"
     options = vars(args).copy()
     recipe_path, recipe = recipes.load(root, args.recipe, create=action == "prepare")
@@ -132,12 +135,15 @@ def _command(args, root):
             planner.finish(plan)
     if runtime:
         plan["preparation"] = str(prepare.location(root, recipe_path, origin, use_proxies=use_proxies))
+    plan["planning_s"] = time.monotonic() - planning_started
+    eprint(f"rig replay: planning and source inspection finished in {plan['planning_s']:.1f}s")
     # Planning never pulls. Execution acquires only this frozen inventory, then
     # updates image evidence without re-reading large bags/proxies or re-querying tags.
     if (action == "run" and not args.dry_run and plan.get("image_inventory") and plan.get("image_inspection")
             and not any(i["status"] == "error" for i in plan["issues"])
             and not any(i["status"] == "not_checked" and i["code"] not in
-                        ("runtime_images", "normalization", "stale_preparation", "recorded_calls") for i in plan["issues"])):
+                        ("runtime_images", "normalization", "stale_preparation", "recorded_calls",
+                         "coordination_readiness") for i in plan["issues"])):
         from . import runtime_images
         _verify_launch_inputs(plan)
         started = time.monotonic()
@@ -150,15 +156,19 @@ def _command(args, root):
                                                    images=plan["execution"]["images"]))
     if (action == "run" and not args.dry_run and
             not any(i["status"] == "error" or
-                    (i["status"] == "not_checked" and i["code"] != "recorded_calls")
+                    (i["status"] == "not_checked" and i["code"] not in ("recorded_calls", "coordination_readiness"))
                     for i in plan["issues"])):
         _verify_launch_inputs(plan)
         started = time.monotonic()
         planner.inspect_recorded_calls(plan, manifest, descriptors, root, execute=True,
                                        verification=verification)
+        from .replay_coordinator import refresh_requirements
+        refresh_requirements(plan, manifest, descriptors,
+                             [r for r in manifest.sensors if r.name in plan["selected"]])
+        planner.finish(plan)
         plan["call_inspection_s"] = time.monotonic() - started
         plan["fingerprint"] = recipes.digest(dict(planned=plan["fingerprint"],
-            playback=plan["playback"], call_inspection=plan.get("call_inspection")))
+            playback=plan["playback"], call_inspection=plan.get("call_inspection"), startup=plan.get("startup")))
     if action != "prepare" or args.dry_run or not plan["ready_to_prepare"]:
         report(plan, as_json=getattr(args, "json", False))
     if action == "check":
@@ -389,8 +399,91 @@ def _verify_launch_inputs(plan):
                 raise RigError(f"Launcher changed since planning: {path}; check again")
 
 
+def _abort_owned(container_ids):
+    """Never tear down a whole Compose project during coordinated failure cleanup."""
+    if not container_ids:
+        return dict(removed=[], failed=[])
+    try:
+        result = subprocess.run(["docker", "rm", "--force", *sorted(container_ids)],
+                                capture_output=True, text=True, timeout=30)
+        if result.returncode:
+            raise RigError((result.stderr or "docker rm failed").strip())
+        return dict(removed=sorted(container_ids), failed=[])
+    except (RigError, OSError, subprocess.TimeoutExpired) as exc:
+        eprint(f"rig replay: exact-container cleanup incomplete: {exc}")
+        return dict(removed=[], failed=sorted(container_ids), error=str(exc))
+
+
+def _finish_owned(container_ids):
+    """Successful playback must let recorders finalize before exact-ID removal.
+
+    Docker honors each image's stop signal. Bound the drain to 30 seconds; a
+    forced kill or failed shutdown leaves the containers and run for inspection.
+    """
+    ids = sorted(container_ids)
+    if not ids:
+        return
+    try:
+        stopped = subprocess.run(["docker", "stop", "--time", "30", *ids],
+                                 capture_output=True, text=True, timeout=45)
+        if stopped.returncode:
+            raise RigError((stopped.stderr or "docker stop failed").strip())
+        inspected = subprocess.run(["docker", "inspect", "--type", "container", *ids],
+                                   capture_output=True, text=True, timeout=10)
+        docs = json.loads(inspected.stdout) if inspected.returncode == 0 else []
+        if not isinstance(docs, list) or {d.get("Id") for d in docs} != set(ids):
+            raise ValueError("owned containers disappeared during shutdown")
+        for doc in docs:
+            state = doc["State"]
+            if (state.get("Running") or state.get("Restarting") or state.get("OOMKilled")
+                    or state.get("Status") != "exited" or state.get("ExitCode") not in (0, 130, 143)):
+                raise ValueError(f"{doc['Id'][:12]}: shutdown did not finish cleanly ({state.get('ExitCode')})")
+        removed = subprocess.run(["docker", "rm", *ids], capture_output=True, text=True, timeout=30)
+        if removed.returncode:
+            raise RigError((removed.stderr or "docker rm failed").strip())
+    except (KeyError, TypeError, ValueError, OSError, subprocess.TimeoutExpired) as exc:
+        raise RigError(f"Owned-container finalization failed: {exc}") from exc
+
+
+def _check_owned_health(container_ids, *, allow_player_exit=False, completed_ids=()):
+    if not container_ids:
+        return
+    try:
+        result = subprocess.run(["docker", "inspect", "--type", "container", *sorted(container_ids)],
+                                capture_output=True, text=True, timeout=10)
+        docs = json.loads(result.stdout) if result.returncode == 0 else []
+        if not isinstance(docs, list) or {d.get("Id") for d in docs} != set(container_ids):
+            raise ValueError("owned containers disappeared")
+        for doc in docs:
+            state = doc["State"]
+            role = doc["Config"].get("Labels", {}).get("com.docker.compose.service")
+            if state.get("OOMKilled") or state.get("Restarting"):
+                raise ValueError(f"{doc['Id'][:12]}: OOM or restart during startup")
+            if state.get("Running") is not True and not ((doc["Id"] in completed_ids or
+                    (allow_player_exit and role in ("bag-player", "call-injector"))) and state.get("Status") == "exited"
+                    and state.get("ExitCode") == 0):
+                raise ValueError(f"{doc['Id'][:12]} ({role}): stopped during startup")
+    except (KeyError, TypeError, ValueError, OSError, subprocess.TimeoutExpired) as exc:
+        raise RigError(f"Replay participant container health lost: {exc}") from exc
+
+
 def execute(args, root, manifest, descriptors, plan, runtime):
-    timings = {"images_s": plan.get("image_acquisition_s", 0),
+    if args.start_delay is None:
+        args.start_delay = 0.0 if plan.get("startup", {}).get("mode") == "coordinated" else 20.0
+    from .replay_coordinator import project_locks
+    if plan.get("startup", {}).get("mode") == "coordinated" and not args.dry_run and not args.export_calls:
+        with project_locks(manifest, plan["selected"], dispatch.fleet_env(manifest, descriptors)):
+            rows = {r.name: r for r in manifest.sensors}
+            for name in plan["selected"]:
+                if _project_container_ids(manifest, rows[name]):
+                    raise RigError(f"{name}: coordinated startup requires an empty project; stop it first")
+            return _execute(args, root, manifest, descriptors, plan, runtime)
+    return _execute(args, root, manifest, descriptors, plan, runtime)
+
+
+def _execute(args, root, manifest, descriptors, plan, runtime):
+    coordinated = plan.get("startup", {}).get("mode") == "coordinated"
+    timings = {"planning_s": plan.get("planning_s", 0), "images_s": plan.get("image_acquisition_s", 0),
                "call_inspection_s": plan.get("call_inspection_s", 0)}
     phase_started = time.monotonic()
     eprint("rig replay: verifying source and launch inputs")
@@ -418,7 +511,8 @@ def execute(args, root, manifest, descriptors, plan, runtime):
     rows = {r.name: r for r in manifest.sensors}
     selected = []
     # Each execution gets immutable config paths; subsequent prepare/check cannot alter a live mount.
-    session_root = root / "var" / "replay" / "sessions" / f"{time.time_ns()}"
+    import uuid
+    session_root = root / "var" / "replay" / "sessions" / (uuid.uuid4().hex if coordinated else f"{time.time_ns()}")
     env = dispatch.fleet_env(manifest, descriptors)
     if plan.get("execution", {}).get("architecture"):
         env["RIG_TARGET_ARCH"] = plan["execution"]["architecture"]
@@ -431,6 +525,9 @@ def execute(args, root, manifest, descriptors, plan, runtime):
         env["RIG_SIM_TIME"] = "1"
     env["RIG_REPLAY_FROM_S"] = str(plan["window"]["start"])
     env["RIG_REPLAY_TO_S"] = str(plan["window"]["end"] if plan["window"]["end"] is not None else 0)
+    if coordinated:
+        env.update(RIG_REPLAY_CONTROL_DIR=str(session_root / "control"),
+                   RIG_REPLAY_SESSION_ID=session_root.name, RIG_REPLAY_PLAN_ID=plan["fingerprint"])
     if plan["player"]:
         path = session_root / "player.json"
         if not args.dry_run:
@@ -502,9 +599,10 @@ def execute(args, root, manifest, descriptors, plan, runtime):
         planner.verify_recorded_call_evidence(plan, manifest, descriptors, root)
     # Capture and source verification can take minutes. Only final rendering/snapshotting
     # remains after the legacy deadline is chosen. Zero delay still releases paused sources.
-    gate = round(time.time() + args.start_delay, 3)
+    gate = None if coordinated else round(time.time() + args.start_delay, 3)
     variables["replay_start_at_unix_s"] = gate
-    env["RIG_REPLAY_START_AT_UNIX_S"] = f"{gate:.3f}"
+    if gate is not None:
+        env["RIG_REPLAY_START_AT_UNIX_S"] = f"{gate:.3f}"
     if not args.dry_run:
         for row, desc in pairs:
             config = resolve._layered_dict(rows[row.name], root,
@@ -515,14 +613,48 @@ def execute(args, root, manifest, descriptors, plan, runtime):
         if manifest.data_dir:
             runs.snapshot(execution_manifest, root, stacks=plan["selected"])
     state = dict(session=session_root.name, run_id=run_id, status="starting",
+                 startup_mode="coordinated" if coordinated else "legacy",
                  start_at_unix_s=gate, timings=timings, attempted=[])
+    coordinator = None
+    if coordinated and not args.dry_run:
+        from .replay_coordinator import Coordinator
+        coordinator = Coordinator(session_root / "control", session_id=session_root.name,
+            plan_id=plan["fingerprint"], participants=plan["startup"]["participants"],
+            requirements=plan["startup"]["requirements"], timeout_s=plan["startup"]["timeout_s"],
+            ready_timeout_s=plan["startup"]["ready_timeout_s"])
     attempted = []
+    owned_ids = set()
+    container_owners = {}
+    recorded_projects = set()
+    def remember_owned():
+        if coordinator is not None:
+            for row, _ in attempted:
+                if row.name not in recorded_projects:
+                    ids = _project_container_ids(manifest, row)
+                    owned_ids.update(ids)
+                    container_owners.update({cid: row.name for cid in ids})
+                    recorded_projects.add(row.name)
+            state["container_ids"] = sorted(owned_ids)
+
+    last_health_check = [0.0]
+    def health():
+        if time.monotonic() - last_health_check[0] >= 0.5:
+            _check_owned_health(owned_ids, allow_player_exit=coordinator.phase == "commit")
+            last_health_check[0] = time.monotonic()
+    if coordinator is not None:
+        coordinator.health = health
+
     def started(row, desc):
         # Check immediately before this launcher, after potentially lengthy run capture
         # and preceding launchers. Never clean up a project reused by --force.
         if not args.dry_run:
             empty.update(_empty_projects(manifest, [(row, desc)]))
-            if not attempted and args.start_delay > 0 and time.time() >= gate:
+            if coordinator is not None:
+                remember_owned()
+                if row.name not in empty:
+                    raise RigError(f"{row.name}: project appeared after coordinated startup preflight")
+                coordinator.launched_instance(row.name)
+            if not coordinated and not attempted and args.start_delay > 0 and time.time() >= gate:
                 raise RigError("Startup inspection outlasted the release deadline; no services started; "
                                "retry with a larger --start-delay")
         attempted.append((row, desc))
@@ -531,43 +663,97 @@ def execute(args, root, manifest, descriptors, plan, runtime):
     state["launch_started_at_unix_s"] = launch_started
     if not args.dry_run:
         _save_execution(session_root, output_run, state)
-        if args.start_delay > 0 and time.time() >= gate:
+        if not coordinated and args.start_delay > 0 and time.time() >= gate:
             state["status"] = "failed"
             state["error"] = "Final configuration capture outlasted the release deadline; no services started"
             _save_execution(session_root, output_run, state)
             raise RigError(state["error"] + "; retry with a larger --start-delay")
     phase_started = time.monotonic()
-    eprint(f"rig replay: starting instances; legacy release at {gate:.3f} "
-           f"({args.start_delay:g}s delay)")
+    if coordinated:
+        eprint("rig replay: starting held instances; release follows verified readiness")
+    else:
+        eprint(f"rig replay: starting instances; legacy release at {gate:.3f} ({args.start_delay:g}s delay)")
     try:
+        launch_options = {"timeout": lambda: min(coordinator.remaining(), coordinator.ready_timeout_s)} if coordinator is not None else {}
         outcomes = dispatch.run_verb(pairs, env, "up", dry_run=args.dry_run,
-                                    stop_on_failure=True, on_start=started)
+                                    stop_on_failure=True, on_start=started, **launch_options)
+        remember_owned()
         failed = [o.sensor.name for o in outcomes if o.returncode]
         if failed:
             state["status"], state["error"] = "failed", "Startup failed for " + ", ".join(failed)
         else:
+            timings["launch_s"] = time.monotonic() - phase_started
+            if coordinator is not None:
+                readiness_started = time.time()
+                result = coordinator.release(args.start_delay)
+                state.update(result)
+                gate = result["start_at_unix_s"]
+                timings["readiness_s"] = result["ready_at_unix_s"] - readiness_started
+                timings["settling_s"] = args.start_delay
+                timings["release_s"] = time.time() - result["ready_at_unix_s"] - args.start_delay
             state["status"] = "started"
-    except (RigError, OSError, KeyboardInterrupt) as exc:
+    except (RigError, OSError, subprocess.TimeoutExpired, KeyboardInterrupt) as exc:
         state["status"] = "cancelled" if isinstance(exc, KeyboardInterrupt) else "failed"
         state["error"] = str(exc) or "Startup interrupted"
     timings["startup_s"] = time.monotonic() - phase_started
     if not args.dry_run:
-        state["release_lateness_s"] = max(0.0, time.time() - gate)
+        state["release_lateness_s"] = (max(
+            (s["actual_release_at_unix_s"] - gate for s in state.get("participants", {}).values()), default=0)
+            if coordinated and gate is not None else max(0.0, time.time() - gate) if gate is not None else None)
         if state["status"] != "started":
             eprint("rig replay: " + state["error"])
             _save_execution(session_root, output_run, state, required=False)
-            state["cleanup"] = _abort_start(execution_manifest, attempted, empty, env)
+            if coordinator is not None:
+                try:
+                    coordinator.abort()
+                except OSError as exc:
+                    eprint(f"rig replay: could not publish abort; removing owned containers: {exc}")
+                try:
+                    remember_owned()
+                except RigError as exc:
+                    eprint(f"rig replay: cannot refresh owned container IDs: {exc}")
+                state["participants"] = coordinator.statuses
+                state["cleanup"] = _abort_owned(owned_ids)
+            else:
+                state["cleanup"] = _abort_start(execution_manifest, attempted, empty, env)
             _save_execution(session_root, output_run, state, required=False)
             return 130 if state["status"] == "cancelled" else 1
         _save_execution(session_root, output_run, state, required=False)
-        if args.start_delay > 0 and state["release_lateness_s"] > 0:
+        if not coordinated and args.start_delay > 0 and state["release_lateness_s"] > 0:
             eprint(f"rig replay: warning: startup outlasted the release gate by "
                    f"{state['release_lateness_s']:.1f}s; increase --start-delay to avoid losing early inputs")
         eprint("rig replay: startup complete; " + ", ".join(f"{k.removesuffix('_s')} {v:.1f}s"
                                                          for k, v in timings.items()))
     if args.auto_end is not None and not args.dry_run:
         player = next(r for r in selected if r.name == plan["player"])
-        return replay.auto_end(execution_manifest, descriptors, root, pairs, env, player, args.auto_end,
+        def observe_participants(completion):
+            try:
+                statuses = coordinator.read_statuses()
+                missing = set(coordinator.participants) - set(statuses)
+                if missing:
+                    return replay.ReplayCompletion("unknown", "Missing replay statuses: " + ", ".join(sorted(missing)), completion.containers)
+                completed_instances = {p.rsplit(".", 1)[0] for p, status in statuses.items()
+                                       if p.endswith(".camera") and status["state"] == "completed"}
+                _check_owned_health(owned_ids, allow_player_exit=True,
+                    completed_ids={cid for cid, name in container_owners.items() if name in completed_instances})
+                state["participants"] = statuses
+                pending = [p for p, status in statuses.items() if status["state"] != "completed"]
+                if pending and completion.state == "succeeded":
+                    return replay.ReplayCompletion("active", "Waiting for " + ", ".join(pending), completion.containers)
+            except (RigError, OSError) as exc:
+                return replay.ReplayCompletion("failed", str(exc), completion.containers)
+            return None
+
+        monitor_options = {"owned_containers": sorted(owned_ids), "observe_participants": observe_participants} if coordinator is not None else {}
+        result = replay.auto_end(execution_manifest, descriptors, root, pairs, env, player, args.auto_end,
                                required_calls=bool(plan["playback"]["calls"]),
-                               started_after=launch_started, run_id=run_id)
+                               started_after=launch_started, run_id=run_id, **monitor_options)
+        if coordinator is not None:
+            state["status"] = "completed" if result == 0 else "interrupted" if result == 130 else "failed"
+            try:
+                state["participants"] = coordinator.read_statuses()
+            except RigError as exc:
+                state["terminal_evidence_error"] = str(exc)
+            _save_execution(session_root, output_run, state, required=False)
+        return result
     return 0 if state["status"] == "started" else 1

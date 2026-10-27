@@ -1,5 +1,6 @@
 """Architecture-specific export, deferred fleet image planning and runtime image membership."""
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -54,7 +55,7 @@ class Docker:
         elif args[0] == 'pull':
             self.images[args[-1]] = dict(self.info, Architecture=self.arch)
         elif args[0] == 'tag':
-            self.images[args[-1]] = next(info for info in self.images.values() if info['Id'] == args[1])
+            self.images[args[-1]] = self.images[args[1]]
         elif args[0] == 'save':
             assert args[1:3] == ['--platform', 'linux/arm64'], args
             write_archive(Path(args[args.index('-o') + 1]), args[args.index('-o') + 2:])
@@ -108,6 +109,56 @@ class ArtifactImages(unittest.TestCase):
         self.assertEqual(set(result['image_ids'].values()), {MANIFEST_ID})
         self.assertEqual(set(result['config_ids'].values()), {CONFIG})
         self.assertEqual(set(next(iter(result['accepted_ids'].values()))), {CONFIG, MANIFEST_ID})
+
+    def test_containerd_index_is_selected_before_tagging_and_export(self):
+        self.docker.api = '1.49'
+        source = 'reg/local:arm64'
+        self.docker.images[source] = dict(self.docker.info, Id=INDEX)
+        self.docker.images[MANIFEST_ID] = dict(self.docker.info, Id=MANIFEST_ID)
+
+        def run(cmd, **kwargs):
+            if (cmd[:3] == ['docker', 'image', 'inspect'] and '--format' in cmd
+                    and cmd[-1] in self.docker.images and self.docker.images[cmd[-1]]['Id'] == INDEX):
+                if cmd[-1] != source and '--platform' not in cmd:
+                    return self.docker.run(cmd, **kwargs)
+                self.assertIn('--platform', cmd)
+                self.assertEqual(cmd[cmd.index('--platform') + 1], 'linux/arm64')
+                result = (json.dumps(self.docker.images[MANIFEST_ID])
+                          if cmd[cmd.index('--format') + 1] == '{{json .}}' else MANIFEST_ID)
+                return subprocess.CompletedProcess(cmd, 0, result, '')
+            return self.docker.run(cmd, **kwargs)
+
+        with patch('subprocess.run', side_effect=run):
+            result = artifact_images.export_images(self.root, [source], self.manifest, self.target)
+        self.assertEqual(set(result['image_ids'].values()), {MANIFEST_ID})
+        self.assertEqual(set(next(iter(result['accepted_ids'].values()))), {CONFIG, MANIFEST_ID})
+        self.assertTrue(any(cmd[1:3] == ['tag', source] for cmd in self.docker.calls))
+        self.assertEqual(self.docker.images[source]['Id'], INDEX)
+
+    def test_old_api_index_fails_before_creating_aliases(self):
+        self.docker.info['Descriptor'] = {'mediaType': 'application/vnd.oci.image.index.v1+json'}
+        with patch('subprocess.run', side_effect=self.docker.run):
+            with self.assertRaisesRegex(RigError, '1.49'):
+                artifact_images.export_images(self.root, ['reg/live:v1-jp6m'], self.manifest, self.target)
+        self.assertFalse(any(cmd[1] in ('tag', 'save') for cmd in self.docker.calls))
+
+    def test_existing_alias_without_target_cpu_is_preserved(self):
+        self.docker.api = '1.49'
+        source = 'reg/live@' + CHILD
+        alias = f'rig-bundle/{hashlib.sha256(source.encode()).hexdigest()[:16]}:{CONFIG[7:]}'
+        self.docker.images[alias] = dict(self.docker.info, Id=OTHER, Architecture='amd64')
+
+        def run(cmd, **kwargs):
+            if cmd[:3] == ['docker', 'image', 'inspect'] and cmd[-1] == alias and '--platform' in cmd:
+                return subprocess.CompletedProcess(cmd, 1, '', 'platform not present')
+            return self.docker.run(cmd, **kwargs)
+
+        with patch('subprocess.run', side_effect=run):
+            with self.assertRaisesRegex(RigError, 'already refers to a different image'):
+                artifact_images.export_images(self.root, [source], self.manifest, self.target)
+        self.assertEqual(self.docker.images[alias]['Id'], OTHER)
+        self.assertFalse(any(cmd[1] in ('tag', 'save') or cmd[1:3] == ['image', 'rm']
+                             for cmd in self.docker.calls))
 
     def test_missing_child_wrong_cpu_and_old_daemon_refuse(self):
         self.catalog['reg/live:v1-jp6m']['children'] = {}

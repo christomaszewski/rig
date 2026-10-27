@@ -47,6 +47,12 @@ def required_image_labels(descriptors, rows, recordings, plan=None):
             and descriptors[row.service].replay_source.image_labels}
     if plan and plan.get("player"):
         required[plan["player"]] = plan.get("capabilities", {}).get("image_labels", {})
+    if plan:
+        required = {name: {role: dict(labels) for role, labels in roles.items()}
+                    for name, roles in required.items()}
+        for name, roles in plan.get("startup", {}).get("image_labels", {}).items():
+            for role, labels in roles.items():
+                required.setdefault(name, {}).setdefault(role, {}).update(labels)
     return required
 
 
@@ -151,6 +157,8 @@ def build(manifest, catalog, descriptors, root, ref, recipe, options, *, host=Tr
     try:
         lo, hi = replay.validate_window(options.get("window_from"), options.get("window_to"))
         delay = options.get("start_delay", 20.0)
+        if delay is None:
+            delay = 0.0 if options.get("startup") == "coordinated" else 20.0
         if not math.isfinite(delay) or delay < 0:
             raise RigError("--start-delay must be finite and nonnegative")
         plan["window"] = dict(start=lo or 0, end=hi)
@@ -500,6 +508,8 @@ def build(manifest, catalog, descriptors, root, ref, recipe, options, *, host=Tr
                 issue("error", "player_capability", "Player does not support an empty-data timeline", "run")
         except RigError as exc:
             issue("error", "player_capability", str(exc), "run")
+    from . import replay_coordinator
+    replay_coordinator.configure_plan(plan, manifest, descriptors, rows, options, capabilities)
     if host and rows and not getattr(manifest, "missing_identity", ()):
         try:
             from .image_catalog import docker_arch
@@ -559,6 +569,7 @@ def build(manifest, catalog, descriptors, root, ref, recipe, options, *, host=Tr
     plan["control_files"] = {str(p): digest(p.read_bytes().hex()) if p.is_file() else None
                              for p in sorted(controls)}
     inspect_recorded_calls(plan, manifest, descriptors, root, verification=verification)
+    replay_coordinator.refresh_requirements(plan, manifest, descriptors, rows)
     plan["fingerprint"] = digest(dict(selection_version=SELECTION_VERSION, ownership=model,
                                      call_inspection=plan.get("call_inspection"), recipe=recipe, source=(source or {}).get("fingerprint"),
                                      use_proxies=plan["use_proxies"],
@@ -568,7 +579,7 @@ def build(manifest, catalog, descriptors, root, ref, recipe, options, *, host=Tr
                                      window=plan["window"], surfaces=surfaces, controls=plan["control_files"],
                                      environment=manifest.extra_env, images=manifest.build_catalog,
                                      execution=plan.get("execution"), inventory=plan.get("image_inventory"),
-                                     calls=plan.get("calls_sha")))
+                                     calls=plan.get("calls_sha"), startup=plan.get("startup")))
     return finish(plan)
 
 

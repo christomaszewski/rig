@@ -177,15 +177,20 @@ whole matrix or was targeted. A failure can leave partial registry uploads but n
 a successful release. Use unique release tags to avoid mutating an existing release during failure.
 
 Bake and native run capture carry the complete catalog, including companion images that the Jetson
-does not run. `rig bake --bundle-images` exports only images used by enabled deployment stacks, for
-the selected runtime and CPU. Catalog-backed images are fetched by their recorded architecture child
+does not run. `rig bake --bundle-images` normally exports only images used by enabled deployment stacks.
+Add `--include-replay` to also query and bundle onboard replay requirements, including the disabled
+player and replay-mode recording sources, for the selected deployment runtime and CPU.
+See [onboard replay](ONBOARD_REPLAY.md) for setup and vehicle commands.
+Catalog-backed images are fetched by their recorded architecture child
 digest. Other images are inspected or pulled for that CPU. Architecture-filtered export requires
-Docker API 1.48 or newer; it also works when the vehicle CPU differs from the builder's CPU.
+Docker API 1.48 or newer (1.49 for images stored as manifest indexes); it also works when the
+vehicle CPU differs from the builder's CPU. Index members are inspected for the selected CPU,
+so the saved identity remains valid when export omits other architectures or attestations.
 
 Bundled Compose files use content-specific aliases because Docker save/load does not reliably restore
 registry digest references. Startup checks the target and exact image IDs, reloads missing or different
 images, verifies every ID, and disables pulls. A missing archive, wrong CPU or unresolved image selection
-fails before containers start. Companion images remain catalog metadata; replay on another runtime/CPU
+fails before containers start. Other companion images remain catalog metadata; replay on another runtime/CPU
 needs those bytes from the release registry or a mirror.
 
 Bake verifies the exported Docker and OCI manifests against the selected aliases and CPU, and records

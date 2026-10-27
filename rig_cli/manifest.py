@@ -44,6 +44,8 @@ RIG_OWNED_ENV = {"RIG_BUILD_PLATFORMS", "RIG_BUILD_RESULT", "RIG_BUILD_PULL", "R
                  "RIG_REPLAY_SOURCE", "RIG_REPLAY_PLAN", "RIG_REPLAY_TOPICS", "RIG_REPLAY_EXCLUDE", "RIG_SIM_TIME",
                  "RIG_REPLAY_SERVICES", "RIG_REPLAY_CALLS",
                  "RIG_REPLAY_FROM_S", "RIG_REPLAY_TO_S", "RIG_REPLAY_START_AT_UNIX_S",  # the window (seconds from bag start)
+                 "RIG_REPLAY_CONTROL_DIR", "RIG_REPLAY_SESSION_ID", "RIG_REPLAY_PLAN_ID",
+                 "RIG_REPLAY_PARTICIPANT",
                  # the operational-state post (dispatch sets/pops it per verb; a manifest `env:`
                  # must not smuggle a standby past every verb -- review 2026-09-04, finding 18)
                  "RIG_TARGET_STATE"}
