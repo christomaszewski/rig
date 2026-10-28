@@ -67,9 +67,9 @@ def fleet_env(manifest: Manifest, descriptors: dict[str, Descriptor] | None = No
                        ("RIG_TARGET_PLATFORM", manifest.platform),
                        ("RIG_TARGET_ARCH", manifest.arch),
                        ("RIG_DATA_DIR", manifest.data_dir),
-                       # the replay channel: None here on EVERY verb (popped) — replay.py alone
-                       # sets them on its env copy after this returns (per-invocation, never
-                       # manifest state)
+                       # Session channels: None on ordinary verbs. Replay sets its selectors;
+                       # replay and simulation explicitly opt into with_clock after this
+                       # returns (per invocation, never persistent manifest state).
                        ("RIG_REPLAY_SOURCE", None), ("RIG_REPLAY_PLAN", None), ("RIG_REPLAY_TOPICS", None),
                        ("RIG_REPLAY_EXCLUDE", None), ("RIG_SIM_TIME", None),
                        ("RIG_REPLAY_SERVICES", None), ("RIG_REPLAY_CALLS", None),
@@ -96,6 +96,21 @@ def fleet_env(manifest: Manifest, descriptors: dict[str, Descriptor] | None = No
     # interpolated; collisions with the rig-owned keys above were rejected at manifest load).
     env.update({key: str(value) for key, value in manifest.extra_env.items()})
     return env
+
+
+def with_clock(env: dict[str, str], *, provider: str | None) -> dict[str, str]:
+    """A session's clock authority, independent of how its inputs are produced.
+
+    Launchers keep the existing RIG_SIM_TIME contract. Ordinary fleet_env always
+    clears this token; only an explicit replay or simulation session enables it.
+    """
+    out = dict(env)
+    out.pop("RIG_SIM_TIME", None)
+    if provider is not None:
+        if provider not in ("replay", "isaac"):
+            raise RigError(f"Unknown session clock provider: {provider}")
+        out["RIG_SIM_TIME"] = "1"
+    return out
 
 
 def service_env(env: dict[str, str], desc: Descriptor) -> dict[str, str]:
@@ -240,6 +255,7 @@ def run_verb(
     stop_on_failure: bool = False,
     on_start=None,
     timeout=None,
+    capture: bool = False,
 ) -> list[Outcome]:
     """Run a streaming verb across sensors in order; replay can stop on the first failure.
 
@@ -252,7 +268,13 @@ def run_verb(
             on_start(sensor, desc)
         cmd = launcher_cmd(sensor, desc, verb, extra)
         kwargs = {"timeout": timeout() if callable(timeout) else timeout} if timeout is not None else {}
+        if capture:
+            kwargs["capture"] = True
         result = run(sensor, desc, env, cmd, dry_run=dry_run, **kwargs)
+        if capture:
+            for output in (result.stdout, result.stderr):
+                if output:
+                    eprint(output.rstrip())
         outcomes.append(Outcome(sensor, result.returncode))
         if stop_on_failure and result.returncode:
             break

@@ -102,6 +102,8 @@ def _layered_dict(sensor: Sensor, root: Path, variables: dict | None = None,
         cfg = dict(working)
     if sensor.overrides:
         cfg = deep_merge(cfg, sensor.overrides)
+    if sensor.session_overrides:
+        cfg = deep_merge(cfg, sensor.session_overrides)
     if extra_overrides:  # a VERB-time layer (rig replay's source patch): on top of everything.
         # Interpolated BEFORE the merge so a variable that resolves to None deletes its key
         # (deep_merge's null-deletes contract): the launcher's own default then applies.
@@ -126,6 +128,8 @@ def resolved_dict(sensor: Sensor, root: Path | None = None) -> dict:
         return _layered_dict(sensor, root)
     base = load_yaml(sensor.config)
     cfg = deep_merge(base, sensor.overrides) if sensor.overrides else dict(base)
+    if sensor.session_overrides:
+        cfg = deep_merge(cfg, sensor.session_overrides)
     cfg.setdefault("service", sensor.service)
     cfg["name"] = sensor.name
     return cfg
@@ -142,7 +146,7 @@ def materialize(sensor: Sensor, root: Path, variables: dict | None = None,
     row (a materialized manifest): re-merging the same layers changes nothing. `out_subdir` keeps
     such a render OUT of var/rendered/<name>.yaml, which every verb re-materializes at load -- a
     `rig status` during the session must not flip the file a restarting container would read."""
-    if (not sensor.overrides and not sensor.overlays and not extra_overrides
+    if (not sensor.overrides and not sensor.session_overrides and not sensor.overlays and not extra_overrides
             and "{{" not in Path(sensor.config).read_text()
             and "name" in load_yaml(sensor.config)):
         return sensor.config

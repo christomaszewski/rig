@@ -367,7 +367,10 @@ startup policy above. For old camera surfaces, update the launcher: `dev` now us
 image. Source mounting is explicit (`cam-up --dev --source CONFIG ...`) and requires a full checkout.
 
 Local tests cover orchestration, command boundaries, compose packaging, catalog selection and
-readiness deadlines. Native image execution on both architectures, registry publication, Jetson
-capture, and software replay of actual Jetson recordings remain release acceptance checks. Camera
-CI includes native modern-runtime jobs on both CPUs. Shared producer readiness/release synchronization
-remains a separate follow-up; `--start-delay` is a timer and does not prove that consumers are ready.
+readiness deadlines. The [v0.2.72 readiness report](releases/coordinated-replay-readiness-2026-10-27.md)
+records native AMD64/ARM64, baked/offline, real-recording and companion-publication evidence.
+[Coordinated startup](replay-coordination.md) supplies opt-in producer holding, consumer readiness
+and common release; legacy startup remains the default, and its `--start-delay` is only a timer.
+New deployments still need acceptance with their own recordings and service versions. Isaac
+attachment has a separate [offline acceptance checklist](ISAAC_OFFLINE.md); replay acceptance
+does not certify a live simulator integration.

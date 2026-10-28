@@ -1,5 +1,8 @@
 # Runbook — deploy a 4-stack vehicle to an Orin from a local registry
 
+For the current workflow map see the [documentation index](README.md). This worked hardware
+deployment is distinct from the [offline Isaac workstation walkthrough](ISAAC_OFFLINE.md).
+
 A concrete, copy-pasteable walkthrough for the test deployment: **two camera-service instances (USB + RTSP)
 + the dashboard + a zenoh router**, built on a dev box, pulled onto a Jetson Orin from a local registry.
 Set the placeholders, then work top to bottom. The only files you author by hand are the two camera configs.

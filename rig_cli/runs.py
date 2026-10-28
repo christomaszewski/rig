@@ -165,7 +165,7 @@ def _iso_now() -> str:
     return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
 
 
-def running_projects(manifest: Manifest) -> list[str]:
+def running_projects(manifest: Manifest, *, env=None) -> list[str]:
     """This manifest's compose projects that are currently up — the rotation/seal guard's evidence.
     EVERY declared row counts, enabled or not: `rig replay` starts the disabled player and any
     disabled source row by explicit name, and a guard that looked only at enabled rows sealed
@@ -175,7 +175,7 @@ def running_projects(manifest: Manifest) -> list[str]:
     expected = {project_name(s.name, manifest.vehicle_id) for s in manifest.sensors}
     try:
         proc = subprocess.run(["docker", "compose", "ls", "-a", "--format", "json"],
-                              capture_output=True, text=True, timeout=15)
+                              capture_output=True, text=True, timeout=15, **({"env": env} if env is not None else {}))
     except FileNotFoundError:
         return []
     except subprocess.TimeoutExpired:
@@ -379,7 +379,7 @@ def snapshot(manifest: Manifest, root: Path, *, stacks: list[str]) -> str | None
         return None
 
 
-def capture_docker_logs(manifest: Manifest, also: set[str] = frozenset()) -> int:
+def capture_docker_logs(manifest: Manifest, also: set[str] = frozenset(), *, env=None) -> int:
     """Save `docker logs` from every container of this manifest's compose projects into the OPEN run.
     cmd_down calls this BEFORE dispatching the down verb when --end-run was asked: `compose down`
     REMOVES the containers, and their stdout/stderr goes with them — seal time is too late.
@@ -407,7 +407,7 @@ def capture_docker_logs(manifest: Manifest, also: set[str] = frozenset()) -> int
                 proc = subprocess.run(
                     ["docker", "ps", "-a", "--filter",
                      f"label=com.docker.compose.project={project}", "--format", "{{.Names}}"],
-                    capture_output=True, text=True, timeout=15)
+                    capture_output=True, text=True, timeout=15, env=env)
             except (FileNotFoundError, subprocess.TimeoutExpired):
                 return 0  # no docker / wedged daemon — nothing to save; down itself will surface it
             if proc.returncode != 0:
@@ -420,7 +420,7 @@ def capture_docker_logs(manifest: Manifest, also: set[str] = frozenset()) -> int
                     with open(dest, "wb") as fh:  # stream to disk — a chatty container won't OOM us
                         rc = subprocess.run(["docker", "logs", "--timestamps", name],
                                             stdout=fh, stderr=subprocess.STDOUT,
-                                            timeout=120).returncode
+                                            timeout=120, env=env).returncode
                     if rc == 0:
                         captured += 1
                     else:  # the daemon's error lands IN the file — a record of why capture failed
@@ -438,7 +438,7 @@ def capture_docker_logs(manifest: Manifest, also: set[str] = frozenset()) -> int
 
 
 def _open_run(manifest: Manifest, root: Path, data: Path, label: str | None,
-              replay: dict | None = None) -> str:
+              replay: dict | None = None, simulation: dict | None = None) -> str:
     runs = data / "runs"
     runs.mkdir(parents=True, exist_ok=True)
     run_id = f"{_now()}_{label or 'auto'}"
@@ -465,6 +465,8 @@ def _open_run(manifest: Manifest, root: Path, data: Path, label: str | None,
         doc["deployment"] = dep  # the OPENING deployment instance; each ups: entry re-attributes
     if replay:  # a SIL replay session: {of: <source-run-id>, source: <abs path>, with: [names]}
         doc["replay"] = replay
+    if simulation:
+        doc["simulation"] = simulation
     if manifest.run_capture:  # every run dir carries the tree that ran (rig-reconstruct plan) —
         try:                  # fail-soft: capture must NEVER block a field session
             from . import bake as bake_mod
@@ -530,7 +532,7 @@ def ensure(manifest: Manifest, root: Path) -> str | None:
 
 
 def new_run(manifest: Manifest, root: Path, label: str | None, *, force: bool = False,
-            replay: dict | None = None) -> str:
+            replay: dict | None = None, simulation: dict | None = None) -> str:
     """Rotate: seal the open run (if any) and open a new one. Guarded while our stacks run.
     `replay` stamps the new run as a SIL replay session (replay.py passes it; see the manifest's
     `replay:` key)."""
@@ -543,7 +545,7 @@ def new_run(manifest: Manifest, root: Path, label: str | None, *, force: bool = 
         digest, dep = _live_state(manifest, root)
         _seal(cur[1], None, live_digest=digest, live_deployment=dep)
         eprint(f"rig: sealed run {cur[0]}")
-    run_id = _open_run(manifest, root, data, label, replay=replay)
+    run_id = _open_run(manifest, root, data, label, replay=replay, simulation=simulation)
     eprint(f"rig: opened run {run_id}")
     return run_id
 

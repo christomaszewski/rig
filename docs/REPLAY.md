@@ -83,8 +83,10 @@ also preserve eligibility for `/tf`, `/tf_static`, and `/diagnostics`.
 
 ## Recipes and generated state
 
-Editable recipes live at `replay/NAME.yaml`; explicit YAML paths also work. Without `--recipe`,
-prepare chooses a source-derived name and prints it.
+Version-1 recipes live at `replay/NAME.yaml`; explicit YAML paths also work. Without `--recipe`,
+prepare chooses a source-derived name and prints it. Shared version-2 recipes live at
+`sessions/NAME.yaml`; when both directories contain the same name, the shared file takes
+precedence. Use an explicit path to select the legacy file in that case.
 
 ```yaml
 version: 1
@@ -143,6 +145,63 @@ Changed source inventories/bindings produce a new generation, preserving existin
 Repeated preparation preserves recipes and detects edited generated files.
 To add positional instances while using a recipe, supply the source explicitly:
 `rig replay RUN planner --recipe field-test` (the first positional argument is always `RUN`).
+
+## Shared simulation and replay recipes
+
+Version 2 separates the common process selection from each provider's input bindings:
+
+```yaml
+version: 2
+session:
+  instances: [bag_logger, planner]
+  clock: source
+  overrides: {}
+replay:
+  source: warehouse-sim
+  playback:
+    exclude: [/planner/cmd_vel]
+```
+
+Save this at `sessions/warehouse.yaml` and use the existing commands:
+
+```sh
+rig replay check --recipe warehouse
+rig replay prepare --recipe warehouse
+rig replay --recipe warehouse
+```
+
+The `replay` section accepts version-1 fields without a nested `version`. A `simulation`
+section can coexist with it to attach the same consumers to Isaac's ROS graph; see
+[Isaac simulation](SIMULATION.md) for a complete example. Each command requires its own
+provider section. Neither command translates recorded identities into simulator bindings.
+Version-1 behavior is unchanged.
+The [offline camera walkthrough](ISAAC_OFFLINE.md) provides a concrete capture→replay recipe
+using existing example instances, including the logger override needed to retain Isaac images.
+
+`session.instances` is exact: include the infrastructure, recording sources and consumers
+you want. The bag player remains managed automatically and must not appear in that list.
+`session.overrides` contains configuration patches for selected instances, applied only
+for the session; changing `name` or `service` is rejected. `session.clock` defaults to
+`source`, which requires a bag timeline for replay and enables the shared simulation clock.
+Use `wall` for a replay that intentionally runs on wall time, including recordings-only
+sessions without a bag. `--wall-clock` cannot contradict `clock: source`.
+
+Positional instance names and `--live` may only name instances already selected in the
+shared session. A selected instance cannot also be skipped. `--include-service` and
+`--skip-service` are rejected for version 2: edit `session.instances` instead. The standalone
+`--export-calls` helper remains a version-1 workflow. Provider-independent selection and
+overrides are saved with replay provenance and included in prepared-state fingerprints.
+Version-2 replay and simulation share lifecycle state in `var/sessions/<id>/state.json` with
+the active pointer at `var/sessions/current.json`. Bare `rig down`, `rig status` and `rig logs`
+follow the saved session selection/configuration/environment. Replay's immutable provider
+configs remain under `var/replay/sessions/`. Use `rig down --end-run` for replay teardown;
+`rig sim down` refuses an active replay session.
+
+A run recorded while attached to Isaac replays like any other recorded run, without
+Isaac running. It contains the fixed sensor history, so new controller outputs do not
+change future inputs. Reconnecting to the live simulator is a separate experiment whose
+trajectory can change. The common recipe keeps the selected consumers consistent across
+those experiments; it does not promise identical generated data.
 
 Original-run fingerprints use size/mtime inventories for media and hashes for small control files;
 they are not full cryptographic verification of recording bytes. Selected service exports also

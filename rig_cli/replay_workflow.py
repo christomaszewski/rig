@@ -1,8 +1,10 @@
 """CLI orchestration. All three verbs consume the same freshly validated replay plan."""
 from __future__ import annotations
 
+import copy
 import dataclasses
 import json
+import os
 import re
 import shlex
 import subprocess
@@ -14,6 +16,7 @@ from .common import eprint, load_yaml
 from .manifest import project_name
 from . import replay_plan as planner, replay_prepare as prepare, replay_recipe as recipes
 from .replay_sources import source_path, source_fingerprint, binding_variables, verify_binding
+from . import session_recipe as sessions
 
 
 class _PreparationNotReady(Exception):
@@ -95,39 +98,95 @@ def command(args, root):
         raise
 
 
+def _session_arguments(args, recipe):
+    """V2 exact selection cannot be silently expanded or reduced by legacy CLI switches."""
+    if recipe.get("version") != 2:
+        return args
+    args = copy.copy(args)
+    selected = set(recipe["session"]["instances"])
+    additions = set(args.names or []) | set(args.live or [])
+    if additions - selected:
+        raise RigError("Session recipe selects exact instances; add these to session.instances: " +
+                       ", ".join(sorted(additions - selected)))
+    if selected & set(args.skip_instances or []):
+        raise RigError("Cannot skip an instance selected by session.instances; edit the session recipe")
+    if args.include_services or args.skip_services:
+        raise RigError("Session recipes use exact instance selection; edit session.instances instead "
+                       "of --include-service/--skip-service")
+    if args.export_calls:
+        raise RigError("--export-calls uses a standalone player; use a version-1 replay recipe")
+    clock = recipe["session"].get("clock", "source")
+    if args.wall_clock and clock != "wall":
+        raise RigError("--wall-clock conflicts with session.clock: source; edit the session recipe")
+    args.wall_clock = clock == "wall"
+    return args
+
+
+def _build_plan(manifest, catalog, descriptors, root, ref, recipe, options, **kwargs):
+    """Lower provider bindings while retaining full session intent in hashes and provenance."""
+    plan = planner.build(manifest, catalog, descriptors, root, ref,
+                         sessions.provider_recipe(recipe, "replay"), options, **kwargs)
+    if recipe.get("version") == 2:
+        plan["session_recipe"] = recipe
+        plan["fingerprint"] = recipes.digest(dict(planned=plan["fingerprint"], session_recipe=recipe))
+        if recipe["session"].get("clock", "source") == "source" and not plan["sim_time"]:
+            plan["issues"].append(dict(status="error", code="session_clock", phase="prepare",
+                message="session.clock: source requires a bag timeline for replay; choose wall "
+                        "for a recordings-only replay"))
+            planner.finish(plan)
+    return plan
+
+
+def _session_environment(manifest, descriptors):
+    """Inventory, ownership checks and launchers must address the same Docker engine."""
+    from .session_runtime import DOCKER_ENV
+    env = dispatch.fleet_env(manifest, descriptors)
+    if any(env.get(key) != os.environ.get(key) for key in DOCKER_ENV):
+        raise RigError("Session Docker routing must come from the shell; remove Docker routing "
+                       "overrides from vehicle.extra_env before replay")
+    return env
+
+
 def _command(args, root):
     from .service_exports import VerificationContext
     verification = VerificationContext()
     planning_started = time.monotonic()
     action = args.cmd.removeprefix("replay-") if args.cmd != "replay" else "run"
-    options = vars(args).copy()
     recipe_path, recipe = recipes.load(root, args.recipe, create=action == "prepare")
-    options["_recipe_path"] = str(recipe_path) if recipe_path else None
-    if recipe_path and recipe.get("playback", {}).get("calls") and not args.calls:
-        calls = Path(recipe["playback"]["calls"]).expanduser()
-        options["calls"] = str(calls if calls.is_absolute() else recipe_path.parent / calls)
     manifest, catalog, descriptors = load_context(root)
+    if action == "prepare" and recipe_path is None:
+        origin = source_path(manifest, args.run)
+        name = re.sub(r"[^A-Za-z0-9_-]", "-", origin.name)[:60] or "source"
+        name += "-" + recipes.digest(str(origin))[:8]
+        # Implicit preparation creates/uses its replay-local recipe. A same-named
+        # shared recipe is opt-in through --recipe, never an accidental selector.
+        recipe_path, recipe = recipes.load(root, str(root / "replay" / (name + ".yaml")), create=True)
+    args = _session_arguments(args, recipe)
+    options = vars(args).copy()
+    options["_recipe_path"] = str(recipe_path) if recipe_path else None
+    provider_recipe = sessions.provider_recipe(recipe, "replay")
+    if recipe_path and provider_recipe.get("playback", {}).get("calls") and not args.calls:
+        calls = Path(provider_recipe["playback"]["calls"]).expanduser()
+        options["calls"] = str(calls if calls.is_absolute() else recipe_path.parent / calls)
+    manifest = sessions.apply_session(manifest, recipe)
+    if recipe.get("version") == 2:
+        _session_environment(manifest, descriptors)
     eprint("rig replay: planning selection and verifying recorded inputs")
     ref = recipes.bound_source(root, recipe_path, recipe, args.run)
     origin = source_path(manifest, ref)
-    if action == "prepare" and recipe_path is None:
-        name = re.sub(r"[^A-Za-z0-9_-]", "-", origin.name)[:60] or "source"
-        name += "-" + recipes.digest(str(origin))[:8]
-        recipe_path, recipe = recipes.load(root, name, create=True)
-        options["_recipe_path"] = str(recipe_path)
     use_proxies = bool(options.get("use_proxies"))
     if recipe_path and use_proxies:
         options["_prepared_proxies"] = prepare.proxy_pins(root, recipe_path, recipe, origin)
     runtime = prepare.prepared(root, recipe_path, recipe, origin, use_proxies=use_proxies) if recipe_path else None
     options["_prepared_source"] = str(runtime) if runtime else None
-    plan = planner.build(manifest, catalog, descriptors, root, str(origin), recipe, options,
+    plan = _build_plan(manifest, catalog, descriptors, root, str(origin), recipe, options,
                          verification=verification)
     if runtime and prepare.location(root, recipe_path, origin, use_proxies=use_proxies).name != prepare.generation(plan):
         runtime = None  # Changed bindings/selections require a new immutable generation.
         # Rebuild without the old runtime: its repaired bag metadata and rendered root must
         # not leak into an execution that is about to fall back to the untouched source.
         options["_prepared_source"] = None
-        plan = planner.build(manifest, catalog, descriptors, root, str(origin), recipe, options,
+        plan = _build_plan(manifest, catalog, descriptors, root, str(origin), recipe, options,
                              verification=verification)
         if plan["needs_preparation"]:
             plan["issues"].append(dict(status="not_checked", code="stale_preparation", phase="run",
@@ -232,7 +291,8 @@ def perform_prepare(args, root, recipe_path, recipe, origin, manifest, catalog, 
                     shutil.copy2(p, backup / name)
             wire_player(root, target)
             manifest, catalog, descriptors = load_context(root)
-            plan = planner.build(manifest, catalog, descriptors, root, str(origin), recipe, options,
+            manifest = sessions.apply_session(manifest, recipe)
+            plan = _build_plan(manifest, catalog, descriptors, root, str(origin), recipe, options,
                                  verification=verification)
         if ((plan["source"].get("bag") or {}).get("repair")
                 and not plan.get("image_pins", {}).get(plan["player"])):
@@ -251,7 +311,7 @@ def perform_prepare(args, root, recipe_path, recipe, origin, manifest, catalog, 
         use_proxies = bool(options.get("use_proxies"))
         if use_proxies:
             options["_prepared_proxies"] = prepare.proxy_pins(root, recipe_path, recipe, origin)
-        plan = planner.build(manifest, catalog, descriptors, root, str(origin), recipe, options,
+        plan = _build_plan(manifest, catalog, descriptors, root, str(origin), recipe, options,
                              verification=verification)
         # Recovered bag timing can narrow automatic camera session selection. Publish that
         # selection now, so the first successful prepare is already reusable by check/run.
@@ -259,7 +319,7 @@ def perform_prepare(args, root, recipe_path, recipe, origin, manifest, catalog, 
                 prepare.location(root, recipe_path, origin, use_proxies=use_proxies).name != prepare.generation(plan)):
             runtime = prepare.create(root, recipe_path, recipe, plan, manifest, descriptors)
             options["_prepared_source"] = str(runtime)
-            plan = planner.build(manifest, catalog, descriptors, root, str(origin), recipe, options,
+            plan = _build_plan(manifest, catalog, descriptors, root, str(origin), recipe, options,
                                  verification=verification)
         plan["preparation"] = str(prepare.location(root, recipe_path, origin, use_proxies=use_proxies))
         if plan["ready_to_prepare"]:
@@ -306,12 +366,12 @@ def perform_prepare(args, root, recipe_path, recipe, origin, manifest, catalog, 
         lock.close()
 
 
-def _project_container_ids(manifest, row):
+def _project_container_ids(manifest, row, env=None):
     project = project_name(row.name, manifest.vehicle_id)
     try:
         result = subprocess.run(
             ["docker", "ps", "-aq", "--no-trunc", "--filter", f"label=com.docker.compose.project={project}"],
-            capture_output=True, text=True, timeout=15)
+            capture_output=True, text=True, timeout=15, env=env)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise RigError(f"Cannot inspect replay project {project}: {exc}") from exc
     ids = (result.stdout or "").split()
@@ -471,17 +531,55 @@ def execute(args, root, manifest, descriptors, plan, runtime):
     if args.start_delay is None:
         args.start_delay = 0.0 if plan.get("startup", {}).get("mode") == "coordinated" else 20.0
     from .replay_coordinator import project_locks
-    if plan.get("startup", {}).get("mode") == "coordinated" and not args.dry_run and not args.export_calls:
-        with project_locks(manifest, plan["selected"], dispatch.fleet_env(manifest, descriptors)):
-            rows = {r.name: r for r in manifest.sensors}
-            for name in plan["selected"]:
-                if _project_container_ids(manifest, rows[name]):
-                    raise RigError(f"{name}: coordinated startup requires an empty project; stop it first")
+    if not args.dry_run:
+        from .session_runtime import session_lock
+        with session_lock(root), project_locks(manifest, plan["selected"], dispatch.fleet_env(manifest, descriptors)):
+            shared = plan.get("session_recipe", {}).get("version") == 2
+            if (shared or plan.get("startup", {}).get("mode") == "coordinated") and not args.export_calls:
+                rows = {r.name: r for r in manifest.sensors}
+                for name in plan["selected"]:
+                    if _project_container_ids(manifest, rows[name]):
+                        mode = "shared session" if shared else "coordinated"
+                        raise RigError(f"{name}: {mode} startup requires an empty project; stop it first")
             return _execute(args, root, manifest, descriptors, plan, runtime)
     return _execute(args, root, manifest, descriptors, plan, runtime)
 
 
 def _execute(args, root, manifest, descriptors, plan, runtime):
+    """Keep v2 replay lifecycle evidence even when startup or auto-end raises."""
+    from . import session_runtime
+    lifecycle = {}
+    if not args.dry_run:
+        if session_runtime.active_session(root):
+            raise RigError("A saved session exists; run rig down --end-run before replay")
+        if plan.get("session_recipe", {}).get("version") == 2:
+            lifecycle["engine_id"] = session_runtime.engine_id(_session_environment(manifest, descriptors))
+    try:
+        return _execute_inner(args, root, manifest, descriptors, plan, runtime, lifecycle)
+    except BaseException as exc:
+        lifecycle["error"] = str(exc) or type(exc).__name__
+        raise
+    finally:
+        if lifecycle.get("path") and not lifecycle.get("cleared"):
+            saved = lifecycle["state"]
+            execution = lifecycle.get("execution", {})
+            status = execution.get("status", "failed")
+            saved["status"] = "running" if status == "started" else status
+            saved["attempted"] = list(execution.get("attempted", saved["attempted"]))
+            for key in ("cleanup", "error", "container_ids"):
+                if key in execution:
+                    saved[key] = execution[key]
+            if lifecycle.get("error"):
+                saved.update(status="failed", error=lifecycle["error"])
+            try:
+                session_runtime.save(lifecycle["path"], saved)
+            except (RigError, OSError) as exc:
+                # The pointer and pre-launch evidence already exist. Preserve the
+                # startup failure while allowing frozen manual teardown to retry.
+                eprint(f"rig replay: could not save session outcome: {exc}")
+
+
+def _execute_inner(args, root, manifest, descriptors, plan, runtime, lifecycle):
     coordinated = plan.get("startup", {}).get("mode") == "coordinated"
     timings = {"planning_s": plan.get("planning_s", 0), "images_s": plan.get("image_acquisition_s", 0),
                "call_inspection_s": plan.get("call_inspection_s", 0)}
@@ -521,8 +619,7 @@ def _execute(args, root, manifest, descriptors, plan, runtime):
     elif not args.dry_run:
         raise RigError("Replay runtime images were not validated; check the image inventory before launch")
     env["RIG_REPLAY_SOURCE"] = str(runtime)
-    if plan["sim_time"]:
-        env["RIG_SIM_TIME"] = "1"
+    env = dispatch.with_clock(env, provider="replay" if plan["sim_time"] else None)
     env["RIG_REPLAY_FROM_S"] = str(plan["window"]["start"])
     env["RIG_REPLAY_TO_S"] = str(plan["window"]["end"] if plan["window"]["end"] is not None else 0)
     if coordinated:
@@ -570,10 +667,17 @@ def _execute(args, root, manifest, descriptors, plan, runtime):
     phase_started = time.monotonic()
     if not args.dry_run and manifest.data_dir:
         eprint("rig replay: capturing replay run")
-        run_id = runs.new_run(manifest, root, args.label or re.sub(
+        # Capture the resolved configs handed to this session, including v2 overrides.
+        # Preserve the deployment's enabled flags: the managed bag-player must remain
+        # disabled for ordinary up after reconstruction. The execution snapshot below
+        # separately records every row actually launched, including that player.
+        capture_manifest = dataclasses.replace(manifest, sensors=[
+            dataclasses.replace(row, config=by_name[row.name].config)
+            if row.name in by_name else row for row in manifest.sensors])
+        run_id = runs.new_run(capture_manifest, root, args.label or re.sub(
             r"[^A-Za-z0-9_-]", "-", "replay-" + source["id"]), force=True,
             replay=dict({"of": source["id"], "source": source["path"], "with": args.names},
-                        recipe=plan["recipe"], fingerprint=plan["fingerprint"],
+                        recipe=plan.get("session_recipe", plan["recipe"]), fingerprint=plan["fingerprint"],
                         use_proxies=bool(plan.get("use_proxies")),
                         source_fingerprint=source["fingerprint"], runtime_source=str(runtime), bag=bag,
                         execution=plan.get("execution"), epoch_unix_ns=(bag or {}).get("start_ns"),
@@ -588,13 +692,20 @@ def _execute(args, root, manifest, descriptors, plan, runtime):
         run_dir = output_run / ".rig" / "replay"
         run_dir.mkdir(parents=True, exist_ok=True)
         prepare.write_yaml(run_dir / "resolved.yaml", plan)
-        prepare.write_yaml(run_dir / "recipe.yaml", plan["recipe"])
+        prepare.write_yaml(run_dir / "recipe.yaml", plan.get("session_recipe", plan["recipe"]))
         if plan.get("preparation"):
             shutil.copy2(Path(plan["preparation"]) / "provenance.yaml", run_dir / "provenance.yaml")
         if plan["playback"]["calls"]:
             shutil.copy2(plan["playback"]["calls"], run_dir / "calls.yaml")
     timings["capture_s"] = time.monotonic() - phase_started
     _verify_launch_inputs(plan)
+    if plan.get("session_recipe"):
+        # Capturing a run may take minutes. The shared session must still launch
+        # the same recording generation that was checked before capture.
+        if source_fingerprint(source["path"]) != source["fingerprint"]:
+            raise RigError("Source changed during replay run capture; no services started")
+        for binding in plan["recordings"].values():
+            verify_binding(binding)
     if not args.dry_run:
         planner.verify_recorded_call_evidence(plan, manifest, descriptors, root)
     # Capture and source verification can take minutes. Only final rendering/snapshotting
@@ -615,6 +726,21 @@ def _execute(args, root, manifest, descriptors, plan, runtime):
     state = dict(session=session_root.name, run_id=run_id, status="starting",
                  startup_mode="coordinated" if coordinated else "legacy",
                  start_at_unix_s=gate, timings=timings, attempted=[])
+    lifecycle["execution"] = state
+    if "engine_id" in lifecycle:
+        from . import session_runtime
+        if session_runtime.engine_id(env) != lifecycle["engine_id"]:
+            raise RigError("Docker engine changed during replay preparation; no services started")
+        lifecycle["path"], lifecycle["state"] = session_runtime.register(
+            root, execution_manifest, pairs, env, provider="replay",
+            engine_id=lifecycle["engine_id"], launch_surfaces=plan["launch_surfaces"],
+            run_id=run_id, output_run=output_run)
+        # The player consumes these through the saved environment rather than its
+        # row YAML; they are part of the frozen configuration used by teardown.
+        for extra in (session_root / "player.json", session_root / "calls.yaml"):
+            if extra.is_file():
+                lifecycle["state"]["configs"][str(extra)] = recipes.digest(extra.read_bytes().hex())
+        session_runtime.save(lifecycle["path"], lifecycle["state"])
     coordinator = None
     if coordinated and not args.dry_run:
         from .replay_coordinator import Coordinator
@@ -649,6 +775,8 @@ def _execute(args, root, manifest, descriptors, plan, runtime):
         # and preceding launchers. Never clean up a project reused by --force.
         if not args.dry_run:
             empty.update(_empty_projects(manifest, [(row, desc)]))
+            if lifecycle.get("path") and row.name not in empty:
+                raise RigError(f"{row.name}: project appeared after shared session startup preflight")
             if coordinator is not None:
                 remember_owned()
                 if row.name not in empty:
@@ -659,6 +787,10 @@ def _execute(args, root, manifest, descriptors, plan, runtime):
                                "retry with a larger --start-delay")
         attempted.append((row, desc))
         state["attempted"].append(row.name)
+        if lifecycle.get("path"):
+            from . import session_runtime
+            lifecycle["state"]["attempted"] = list(state["attempted"])
+            session_runtime.save(lifecycle["path"], lifecycle["state"])
     launch_started = time.time()
     state["launch_started_at_unix_s"] = launch_started
     if not args.dry_run:
@@ -748,12 +880,24 @@ def _execute(args, root, manifest, descriptors, plan, runtime):
         result = replay.auto_end(execution_manifest, descriptors, root, pairs, env, player, args.auto_end,
                                required_calls=bool(plan["playback"]["calls"]),
                                started_after=launch_started, run_id=run_id, **monitor_options)
+        state["status"] = "completed" if result == 0 else "interrupted" if result == 130 else "failed"
         if coordinator is not None:
-            state["status"] = "completed" if result == 0 else "interrupted" if result == 130 else "failed"
             try:
                 state["participants"] = coordinator.read_statuses()
             except RigError as exc:
                 state["terminal_evidence_error"] = str(exc)
             _save_execution(session_root, output_run, state, required=False)
+        if result == 0 and lifecycle.get("path"):
+            from . import session_runtime
+            # Do not retire the frozen teardown state until the launched projects
+            # are absent; an auto-end success must not strand running services.
+            remaining = [row.name for row, _ in pairs if _project_container_ids(manifest, row, env)]
+            if remaining:
+                state.update(status="failed", error="Auto-end left replay projects: " + ", ".join(remaining))
+                raise RigError(state["error"])
+            lifecycle["state"].update(status="completed", attempted=list(state["attempted"]))
+            session_runtime.save(lifecycle["path"], lifecycle["state"])
+            session_runtime.clear(root, lifecycle["state"]["session"])
+            lifecycle["cleared"] = True
         return result
     return 0 if state["status"] == "started" else 1

@@ -110,7 +110,7 @@ abort and cleans up owned containers.
 
 The [2026-10-27 release-readiness report](releases/coordinated-replay-readiness-2026-10-27.md)
 records native architecture, baked/offline, real vehicle recording, compatibility and
-failure-injection results, plus the remaining publication steps.
+failure-injection results, plus completed companion publication and hosted pre-release CI.
 
 `tests/test_replay_coordinator.py` injects slow preparation, stale identities,
 heartbeat loss, lost readiness, missing/mismatched acknowledgements, early output,
@@ -150,6 +150,11 @@ refuses missing or mutable refs, builds their production images, installs Rig's 
 runs baked/offline, timing and real failure cases. It can also run manually with those SHAs.
 Companion packages and images must be published before operators can opt in from a registry;
 there is no requirement to migrate every existing service or deployment.
+
+### Earlier checkpoint — 2026-10-22
+
+The following measurements preserve the earlier checkpoint. Publication and broader
+acceptance subsequently completed as recorded in the 2026-10-27 report above.
 
 Local native arm64 acceptance on 2026-10-22 passed automatic recorded calls, a
 fractional window, scripted time-zero calls and wall-clock calls at 2x rate. Each

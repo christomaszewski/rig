@@ -1,5 +1,10 @@
 # Service exports and opt-in replay proxies implementation plan
 
+Historical checkpoint: retain the dated performance measurements and their limits below.
+Use [REPLAY.md](REPLAY.md) for current behavior and the
+[v0.2.72 readiness report](releases/coordinated-replay-readiness-2026-10-27.md) for subsequent
+native replay acceptance; those results do not establish a general proxy performance gain.
+
 Status: implemented, 2026-10-21. Scope: Rig and camera-service. This document
 preserves the design and acceptance criteria. [REPLAY.md](REPLAY.md) describes the
 implemented commands; suite packaging remains deferred.

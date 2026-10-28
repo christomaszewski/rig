@@ -128,18 +128,17 @@ def validate(doc):
 
 
 def recipe_path(root, token):
-    path = Path(token).expanduser()
-    if "/" not in token and path.suffix not in (".yaml", ".yml"):
-        path = root / "replay" / (token + ".yaml")
-    elif not path.is_absolute():
-        path = root / path
-    return path.resolve()
+    from .session_recipe import recipe_path as session_path
+    return session_path(root, token, "replay")
 
 
 def load(root, token, *, create=False):
     path = recipe_path(root, token) if token else None
     if path and path.exists():
-        return path, validate(load_yaml(path))
+        from .session_recipe import provider_recipe
+        doc = load_yaml(path)
+        provider_recipe(doc, "replay")
+        return path, doc
     if path and not create:
         raise RigError(f"replay recipe not found: {path}")
     return path, {"version": 1}
@@ -157,6 +156,8 @@ def workspace(root, path):
 def bound_source(root, path, doc, override=None):
     if override:
         return override
+    if doc.get("version") == 2:
+        doc = doc["replay"]
     if path:
         binding = workspace(root, path) / "bindings.yaml"
         if binding.exists():

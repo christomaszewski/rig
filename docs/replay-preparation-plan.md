@@ -1,5 +1,10 @@
 # Replay preparation implementation plan
 
+Historical checkpoint: the validation below applies to 2026-10-20. Later AMD64/ARM64 and
+combined camera/bag acceptance is in the
+[v0.2.72 readiness report](releases/coordinated-replay-readiness-2026-10-27.md).
+Current version-1 and shared version-2 recipe behavior is documented in [REPLAY.md](REPLAY.md).
+
 Status: implemented, 2026-10-20. Scope: Rig, the ros2-bag-player in rig-infra,
 and camera-service input mounting. This document preserves the agreed design and acceptance
 criteria; [REPLAY.md](REPLAY.md) describes the implemented workflow. Suite packaging stays deferred.

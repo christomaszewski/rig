@@ -6,6 +6,10 @@
 > The vehicle runs the baked artifact — no source, no internet (fleet artifacts render on-vehicle, §1.6).
 > Install rig itself via deb/brew/pipx (README "Install"); `rig setup` once per user.
 
+For the full documentation map see the [index](README.md). Isaac attachment and offline
+capture→replay are covered in the [simulation reference](SIMULATION.md) and
+[offline walkthrough](ISAAC_OFFLINE.md); those commands are experimental in v0.2.73.
+
 ```
 author configs ──▶ validate ──▶ build images ──▶ bake ──▶ ship ──▶ run ──▶ iterate
                 doctor/certify   rig build        rig bake   scp     run.sh
@@ -535,6 +539,8 @@ rig replay prepare RUN --recipe demo                       # source-preserving l
 rig replay prepare RUN --recipe demo --player public/ros2-bag-player@1.18.0
                                                            # add a missing player row, route and config
 rig replay --recipe demo                                   # replay using that recipe and local binding
+rig replay check RUN --startup coordinated                 # opt-in held producers + consumer readiness
+rig replay RUN --startup coordinated --auto-end            # supported producer packages/images required
 rig replay check RUN --use-proxies                          # require compatible camera proxies
 rig replay prepare RUN --recipe demo --use-proxies           # bind existing proxies, never transcode
 rig replay --recipe demo --use-proxies                      # explicit every time; originals by default
@@ -545,7 +551,9 @@ rig swap planner public/planner@2.1.0                      #   configs, DIFFEREN
 (bare-Docker hosts: `./new-run.sh dock-test && ./up.sh` — the flagged forms need the bundled rig.)
 
 `rig run replay` also accepts every `rig replay` option. `--skip-service` matches the service
-key in `vehicle.yaml`, across enabled and disabled instances. It uses recorded graph epochs to
+key in `vehicle.yaml`, across enabled and disabled instances, for ordinary/version-1 replay.
+Version-2 shared recipes use an exact `session.instances` list instead and reject service
+inclusion/exclusion flags. Ordinary skip selection uses recorded graph epochs to
 exclude topics published exclusively by those instances. Shared topics such as `/tf` stay
 eligible; without graph evidence, use exact recipe `playback.exclude` entries for known outputs.
 The new run records `replay.skipped` for provenance. A skipped

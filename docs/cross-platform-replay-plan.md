@@ -1,5 +1,10 @@
 # Build deploy and replay portability plan
 
+Historical implementation checkpoint. Later native/baked/offline acceptance is recorded in
+the [v0.2.72 readiness report](releases/coordinated-replay-readiness-2026-10-27.md);
+[BUILD_AND_REPLAY.md](BUILD_AND_REPLAY.md) is the current operator reference. The dated
+findings and pending items below describe the original work, not today's release state.
+
 Status: implemented in the local workspaces, 2026-10-16. Scope: Rig, camera-service, Doodle, Dashboard, and the shared images in rig-infra. See [operator and migration documentation](BUILD_AND_REPLAY.md). The findings below describe the pre-change baseline; image publication and hardware acceptance remain pending.
 
 Build on an arm64 Mac or amd64 Linux machine, deploy an immutable artifact to an arm64 Jetson, and reconstruct its run on either development machine without manually rebuilding a second image set or editing away the recorded platform. Keep the deployed runtime and the replay runtime explicit in provenance.

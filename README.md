@@ -34,6 +34,9 @@ services evolve independently and new ones drop in by adding two files (a launch
 Each launcher is the service's own (`cam-up` is the exemplar; `rig rigify` scaffolds one onto existing
 software); rig only sequences the tiers, exports the fleet env, and aggregates status.
 
+Start with the [documentation index](docs/README.md) for deployment, replay and simulation
+workflows, current validation status, and the historical design notes.
+
 ## What rig owns vs. what the launcher owns
 
 - **Launcher (`<service>-up`)** owns everything per-stack: parse the config, derive the ROS namespace
@@ -186,6 +189,9 @@ python3 -m venv .venv && .venv/bin/pip install pyyaml
 ./rig replay --recipe field-test
 ./rig replay --recipe field-test --use-proxies  # explicit opt-in, also on check/prepare; originals
                           #   remain the default. Missing/incompatible proxies are errors
+./rig sim check --recipe warehouse  # inspect an already running Isaac ROS graph and /clock
+./rig sim up --recipe warehouse     # attach selected infra/autonomy using sessions/warehouse.yaml
+./rig sim down --end-run            # stop the saved Rig session; its recording replays normally
 ./rig fleet sync --into fleet-runs --include-service-exports
                           #   include committed proxy generations at their nested paths; default
                           #   sync excludes exports. Cannot combine with legacy --profile
@@ -233,6 +239,12 @@ readiness, common release, startup timeouts and compatible companion images.
 [Replay preparation](docs/REPLAY.md) covers instance `replay.start`, local recipes, check/prepare,
 renamed services, exact bag selection, and source-preserving legacy imports. No pub/sub declarations
 are required; packaging recipes with suites is deferred.
+[Isaac simulation](docs/SIMULATION.md) covers attaching selected services to an existing Isaac
+ROS graph, shared version-2 session recipes, clock checks, recording and replay. Version-1 replay
+recipes retain their existing behavior.
+[Offline Isaac walkthrough](docs/ISAAC_OFFLINE.md) covers preparing a compatible Jazzy/Zenoh
+deployment, local scene/assets and image caches, then camera capture and replay with a shared
+recipe. Isaac attachment is experimental in v0.2.73; live GPU acceptance is still pending.
 Hardware runtimes use separate tags (`v1-jp6m`, `v1-dev`); multiarch indexes select the CPU within a
 runtime. `rig reconstruct RUN --platform dev` selects the software runtime; `--platform recorded`
 keeps the source runtime. Doodle's updated descriptor omits live radio startup during replay while

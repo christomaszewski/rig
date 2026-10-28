@@ -164,6 +164,14 @@ def _walk(words: list[str], cword: int, cur: str) -> list[tuple[str, str | None]
             command = "replay-" + words[i + 1]
             words = words[:i] + [command] + words[i + 2:]
             cword -= 1
+    if command == "sim":
+        verbs = {name: "sim-" + name for name in ("check", "up", "down")}
+        if cword == i + 1 and not cur.startswith("-"):
+            return _group_menu(parser, verbs)
+        if words[i + 1:i + 2] and words[i + 1] in verbs:
+            command = verbs[words[i + 1]]
+            words = words[:i] + [command] + words[i + 2:]
+            cword -= 1
     action = _subparsers(parser)
     sub = action.choices.get(command) if action else None
     if sub is None:
@@ -274,7 +282,7 @@ def _command_menu(parser) -> list[tuple[str, str | None]]:
     action = _subparsers(parser)
     hidden = ({flat for verbs in _GROUP_VERBS.values() for flat in verbs.values()}
               - _CANONICAL_FLAT)
-    hidden.update(("replay-check", "replay-prepare"))
+    hidden.update(("replay-check", "replay-prepare", "sim-check", "sim-up", "sim-down"))
     helps = _helps(action)
     seen_parsers: set[int] = set()
     pairs: list[tuple[str, str | None]] = []
@@ -331,9 +339,11 @@ def _option_candidates(ctx: tuple[str, ...], act: argparse.Action, root_arg: str
     opt = ([s for s in act.option_strings if s.startswith("--")] or act.option_strings)[0]
     if ctx in (("replay-check",), ("replay-prepare",)):
         ctx = ("replay",)
-    if ctx == ("replay",) and opt == "--recipe":
-        root = _deployment(root_arg)
-        return [(p.stem, None) for p in sorted((root / "replay").glob("*.yaml"))] if root else []
+    if opt == "--recipe":
+        if ctx == ("replay",):
+            return _recipe_candidates(root_arg, "replay")
+        if ctx in (("sim-check",), ("sim-up",), ("sim", "check"), ("sim", "up")):
+            return _recipe_candidates(root_arg, "simulation")
     fn = _OPTION_SOURCES.get((ctx, opt))
     return fn(root_arg, [], words or []) if fn else []
 
@@ -357,6 +367,28 @@ def _deployment(root_arg: str | None) -> Path | None:
 def _read_yaml(path: Path):
     import yaml
     return yaml.safe_load(path.read_text()) or {}
+
+
+def _recipe_candidates(root_arg, provider):
+    """Mirror shared-name precedence without loading a deployment or validating services."""
+    root = _deployment(root_arg)
+    if root is None:
+        return []
+    names = ({p.stem for p in (root / "replay").glob("*.yaml") if p.is_file()}
+             if provider == "replay" else set())
+    for path in (root / "sessions").glob("*.yaml"):
+        # A shared name shadows the legacy path even when it is invalid or lacks this
+        # provider. Suggesting the legacy name then would resolve to a different recipe.
+        names.discard(path.stem)
+        if not path.is_file():
+            continue
+        try:
+            doc = _read_yaml(path)
+            if isinstance(doc, dict) and doc.get("version") == 2 and isinstance(doc.get(provider), dict):
+                names.add(path.stem)
+        except Exception:  # malformed YAML must not hide the remaining valid recipes
+            continue
+    return [(name, None) for name in sorted(names)]
 
 
 def _rows(root: Path):

@@ -109,6 +109,29 @@ def test_replay_skip_service_completes_both_spellings():
         assert _c("--root", R, *verb, "flight", "--skip-service", "ca") == ["cam"]
 
 
+def test_provider_recipe_names_and_shared_precedence():
+    with tempfile.TemporaryDirectory() as directory:
+        root = pathlib.Path(directory)
+        (root / "vehicle.yaml").write_text("vehicle: example\n")
+        (root / "replay").mkdir()
+        (root / "sessions").mkdir()
+        for name in ("legacy", "sim-only", "broken", "both"):
+            (root / "replay" / (name + ".yaml")).write_text("version: 1\n")
+        shared = root / "sessions"
+        (shared / "both.yaml").write_text("version: 2\nreplay: {}\nsimulation: {}\n")
+        (shared / "recorded.yaml").write_text("version: 2\nreplay: {}\n")
+        (shared / "sim-only.yaml").write_text("version: 2\nsimulation: {}\n")
+        (shared / "broken.yaml").write_text("invalid: [\n")
+        (shared / "scalar.yaml").write_text("just-a-string\n")
+        before = {p.relative_to(root): p.read_bytes() for p in root.rglob("*") if p.is_file()}
+        for command in (("replay",), ("replay", "check"), ("replay", "prepare"), ("run", "replay")):
+            assert _c("--root", str(root), *command, "--recipe", "") == ["both", "legacy", "recorded"]
+        for verb in ("check", "up"):
+            assert _c("--root", str(root), "sim", verb, "--recipe", "") == ["both", "sim-only"]
+            assert _c("--root", str(root), "sim", verb, "--recipe=sim") == ["--recipe=sim-only"]
+        assert {p.relative_to(root): p.read_bytes() for p in root.rglob("*") if p.is_file()} == before
+
+
 def test_pkg_instance_verbs():
     assert _c("--root", R, "pkg", "upgrade", "pl") == ["planner"]
     assert _c("--root", R, "pkg", "save", "cam") == ["cam", "cam0"]  # service + instance

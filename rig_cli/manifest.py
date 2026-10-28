@@ -65,6 +65,7 @@ class Sensor:
     overlays: tuple = ()  # ORDERED overlay bindings (fully-qualified refs) — layer 2; payload copies
     #                       live under config/.overlays/ so the deployment stays self-contained
     replay_start: bool | None = None  # None preserves automatic replay selection.
+    session_overrides: dict = field(default_factory=dict)  # ephemeral v2 recipe layer; never persisted
 
 
 @dataclass(frozen=True)

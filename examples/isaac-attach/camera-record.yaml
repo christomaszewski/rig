@@ -1,0 +1,34 @@
+# Copy to <deployment>/sessions/camera-record.yaml; prepare the matching Jazzy
+# deployment and Isaac graph first. See docs/ISAAC_OFFLINE.md.
+version: 2
+session:
+  instances: [bag_logger]
+  clock: source
+  overrides:
+    bag_logger:
+      record:
+        mode: allow
+        topics: [/cam_front/image_raw, /cam_front/camera_info]
+        exclude_images: false
+      control:
+        use_sim_time: true
+
+simulation:
+  provider: isaac
+  mode: attach
+  replace: [cam_front]
+  ros: {distro: jazzy, rmw: rmw_zenoh_cpp, domain_id: 42}
+  scene: /srv/isaac-scenes/camera-record.usd
+  isaac_version: "6.0.0"
+  asset_version: camera-record-v1
+  publishes:
+    - {topic: /cam_front/image_raw, type: sensor_msgs/msg/Image, instance: cam_front}
+    - {topic: /cam_front/camera_info, type: sensor_msgs/msg/CameraInfo, instance: cam_front}
+  subscribes: []
+  probe: [/usr/bin/python3]
+  timeout_s: 15
+
+replay:
+  source: isaac-camera
+  playback:
+    topics: [/cam_front/image_raw, /cam_front/camera_info]

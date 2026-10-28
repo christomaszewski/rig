@@ -78,6 +78,15 @@ def test_group_menus():
     assert _c("service", "") == ["certify", "rigify", "vendor"]
 
 
+def test_simulation_menu_and_flags():
+    assert "sim" in _c("")
+    assert not {"sim-check", "sim-up", "sim-down"} & set(_c(""))
+    assert _c("sim", "") == ["check", "down", "up"]
+    assert set(_c("sim", "up", "--")) >= {"--recipe", "--attach", "--dry-run", "--pull", "--label"}
+    assert _c("sim", "check", "--pull", "") == ["always", "missing", "never"]
+    assert _c("sim", "down", "--") == ["--dry-run", "--end-run", "--help"]
+
+
 def test_config_offers_group_verbs_and_stays_legacy():
     menu = _c("config", "")
     for verb in ("show", "render", "diff"):

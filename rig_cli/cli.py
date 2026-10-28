@@ -740,6 +740,8 @@ def translate_argv(argv: list[str]) -> list[str] | None:
         return translate_argv(argv[:i] + argv[i + 1:])
     if noun == "replay" and argv[i + 1:i + 2] in (["check"], ["prepare"]):
         return argv[:i] + ["replay-" + argv[i + 1]] + argv[i + 2:]
+    if noun == "sim" and argv[i + 1:i + 2] in (["check"], ["up"], ["down"]):
+        return argv[:i] + ["sim-" + argv[i + 1]] + argv[i + 2:]
     # `ls` aliases `list` under every noun that has one — rewritten HERE so it covers both the
     # group-translated nouns and the real argparse subparsers (whose dispatch compares the
     # canonical string) without touching either. Alias doctrine: parses forever, menus never
@@ -859,6 +861,25 @@ def build_parser() -> argparse.ArgumentParser:
 
     rn = sub.add_parser("runs", help="list the run registry (OPEN / sealed / interrupted)")
     rn.add_argument("names", nargs="*", default=[], help=argparse.SUPPRESS)
+
+    sim = sub.add_parser("sim", help="attach a deployment to an existing Isaac Sim ROS graph",
+                         description="Use rig sim check/up --recipe NAME, or rig sim down --end-run. "
+                                     "Shared version-2 recipes live in sessions/NAME.yaml.")
+    sim.set_defaults(sim_help=True)
+    for verb in ("check", "up"):
+        sp = sub.add_parser("sim-" + verb, prog=f"{parser.prog} sim {verb}",
+                            help=f"{verb} an Isaac attach session")
+        sp.add_argument("--recipe", required=True, metavar="NAME|YAML")
+        sp.add_argument("--attach", action="store_true", help="attach to an already running scene (the default)")
+        sp.add_argument("--dry-run", action="store_true", help="inspect without creating a run or starting services")
+        sp.add_argument("--pull", choices=("missing", "always", "never"), default="missing")
+        sp.add_argument("--json", action="store_true", help="print the plan as JSON")
+        sp.add_argument("--format", choices=("text", "json"), default="text")
+        sp.add_argument("--label", help="label for the simulation run")
+    sd = sub.add_parser("sim-down", prog=f"{parser.prog} sim down",
+                        help="stop the saved simulation session; leave external Isaac running")
+    sd.add_argument("--dry-run", action="store_true")
+    sd.add_argument("--end-run", action="store_true", help="seal the simulation run after successful teardown")
 
     rp = sub.add_parser("replay", help="replay broad recorded inputs into this deployment; "
                                        "check/prepare inspect and adapt runs without starting services")
@@ -1801,9 +1822,42 @@ def main(argv=None) -> int:
         if args.cmd == "certify":  # may run repo-standalone (--repo/--diff) — routes its own manifest load
             return cmd_certify(args, root)
         if args.cmd in ("replay", "replay-check", "replay-prepare"):
+            if args.cmd == "replay" and not args.dry_run:
+                from .session_runtime import active_session
+                if active_session(root):
+                    raise RigError("A saved session is active; run rig down --end-run before replay")
             from .replay_workflow import command
             return command(args, root)
+        if args.cmd == "sim":
+            print("Use rig sim check/up --recipe NAME, or rig sim down --end-run. "
+                  "Recipes: sessions/NAME.yaml (version 2).")
+            return 0
+        if args.cmd in ("sim-check", "sim-up", "sim-down"):
+            from .sim_workflow import command
+            return command(args, root)
+        if args.cmd in ("status", "logs"):
+            from .session_runtime import active_session, observe
+            if active_session(root):
+                return observe(args, root)
+        if args.cmd in ("up", "down"):
+            from .session_runtime import active_session, down
+            if active_session(root):
+                if args.cmd == "up":
+                    raise RigError("A saved session is active; run rig down --end-run first")
+                if args.names or args.purge:
+                    raise RigError("Use rig down for this session's exact saved selection; "
+                                   "partial teardown and --purge are not supported")
+                return down(root, dry_run=args.dry_run, end_run=args.end_run)
         args.rig_root = root  # handlers that touch the run registry need the deployment root (provenance)
+        if args.cmd in ("up", "down", "new-run", "end-run") and not getattr(args, "dry_run", False):
+            # Shared startup can spend minutes capturing a run before publishing its
+            # pointer. Ordinary lifecycle commands must serialize with that window too.
+            from .session_runtime import session_lock, active_session
+            with session_lock(root):
+                if active_session(root):
+                    raise RigError("A saved session is active; use rig down --end-run before changing its run")
+                manifest, catalog, descriptors = _load(root)
+                return _HANDLERS[args.cmd](args, manifest, catalog, descriptors)
         manifest, catalog, descriptors = _load(root, render=not (
             args.cmd == "run-export" and args.service))
         return _HANDLERS[args.cmd](args, manifest, catalog, descriptors)

@@ -28,7 +28,7 @@ def generation(plan):
     from .replay_plan import SELECTION_VERSION
     return digest(dict(source=plan["source"]["path"], fingerprint=plan["source"]["fingerprint"],
                        selection_version=SELECTION_VERSION,
-                       recipe=plan["recipe"], recordings=plan["recordings"],
+                       recipe=plan.get("session_recipe", plan["recipe"]), recordings=plan["recordings"],
                        use_proxies=bool(plan.get("use_proxies"))))[:20]
 
 
@@ -103,7 +103,8 @@ def save_binding(root, recipe_path, recipe, source, dest, use_proxies):
     saved = load_yaml(path) if path.is_file() else {}
     generations = dict(saved.get("generations", {})) if saved.get("source") == source else {}
     generations["proxies" if use_proxies else "original"] = dest.name
-    write_yaml(path, dict(version=1, recipe_source=recipe.get("source"), source=source,
+    bindings = recipe["replay"] if recipe.get("version") == 2 else recipe
+    write_yaml(path, dict(version=1, recipe_source=bindings.get("source"), source=source,
                           generation=dest.name, generations=generations))
 
 

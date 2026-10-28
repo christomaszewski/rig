@@ -1,6 +1,12 @@
 # Replay reliability implementation plan
 
-Status: implementation in progress. Scope: Rig, the bag player in rig-infra, camera-service,
+Current status: the core reliability work and optional coordinated startup shipped through
+v0.2.72. See [REPLAY.md](REPLAY.md), [the startup contract](replay-coordination.md), and
+[release readiness](releases/coordinated-replay-readiness-2026-10-27.md). Coordinated startup
+remains opt-in; a default switch is not part of the released contract. The checkpoint notes
+below preserve historical test counts and then-pending publication/acceptance items.
+
+Original scope: Rig, the bag player in rig-infra, camera-service,
 and the launch surfaces used by replay-selected services.
 
 Implemented locally: phase 1 correctness fixes and phase 4 invocation-scoped proxy hash

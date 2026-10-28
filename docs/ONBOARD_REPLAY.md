@@ -1,5 +1,10 @@
 # Replay recorded runs on the vehicle
 
+For live Isaac input on a simulation workstation, use [offline Isaac attachment](ISAAC_OFFLINE.md).
+Its recordings become normal replay sources. A shared [version-2 recipe](REPLAY.md#shared-simulation-and-replay-recipes)
+can keep the same exact process selection and overrides for capture and playback; copy the
+recipe into the deployment explicitly. The version-1/default startup policy below remains supported.
+
 An extracted Rig artifact is already a replay deployment. It ships Rig, the service launchers,
 and all configured instances, including disabled ones. Replay can read a run directly from the
 vehicle's `data_dir`; no reconstruction, source checkout, or copy of the recordings is needed.

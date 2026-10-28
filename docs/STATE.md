@@ -1,9 +1,34 @@
 # rig — project state & handoff (resume here)
 
-> Snapshot for picking the project up cold in a new session. Read this first, then `CHEATSHEET.md` /
-> `RUNBOOK.md` (deploy steps), then `DESIGN.md`/`ROADMAP.md` for rationale. As of: rig **v0.2.60**,
-> branch **`main`**, 760 tests passing across 52 suites
-> (`for t in tests/test_*.py; do python3 "$t"; done`).
+Current checkpoint: **v0.2.73 — shared sessions and experimental Isaac attachment**,
+reviewed **2026-10-28 UTC**. Use the [documentation index](README.md) to choose an operator
+workflow. The dated entries below are historical observations, not the current host state.
+
+- Replay supports prepared recipes, native runtime-image acquisition/pinning, recorded calls,
+  offline bundles and opt-in coordinated startup. Legacy startup remains the default.
+  The [v0.2.72 readiness report](releases/coordinated-replay-readiness-2026-10-27.md) records its
+  completed native AMD64/ARM64, baked/offline and companion release validation.
+- Version-2 session recipes share an exact process selection, overrides and clock
+  policy between replay and Isaac attachment. Version-1 replay behavior remains supported.
+- Experimental `rig sim check/up/down` attaches to an existing Isaac ROS graph, checks ROS
+  settings/endpoints/QoS and progressing time, pins selected images, captures a normal run,
+  and uses frozen session state for status/logs/teardown. It does not launch or reset Isaac.
+- The [offline Isaac walkthrough](ISAAC_OFFLINE.md) and [example](../examples/isaac-attach/README.md)
+  cover preparation and capture→replay. The repository's Lyrical default requires a compatibility
+  decision: NVIDIA 6.0.0 documents tested Humble/Jazzy, including Linux Jazzy/Zenoh.
+- Current limitations, documentation audit and new test evidence belong in the
+  [preparation report](ISAAC_PREP_REPORT.md). Live Isaac/GPU and disconnected asset acceptance
+  remain pending. Do not substitute historical replay tests for simulator acceptance.
+- The user authorized the v0.2.73 release with collection-profile and fresh real-run acceptance
+  deferred until an actual collected run is examined. Those checks do not block this release;
+  they remain necessary before claiming collection completeness. See [release notes](releases/v0.2.73.md).
+
+## Historical release notes and handoff observations
+
+The following record starts at v0.2.60 and retains earlier milestones and machine details.
+Test totals, pending items, paths and live-host statements apply to their recorded dates;
+consult the current checkpoint above and linked operator guides before acting on them.
+
 > **v0.2.60 (2026-10-16) — bake tag defaults and the end-to-end replay workflow.** `rig bake`
 > (also `rig artifact bake`) accepts an omitted `--tag` when `vehicle.yaml` supplies a literal
 > `images.tag`; an explicit flag wins. Missing/templated defaults require an explicit artifact
@@ -697,9 +722,9 @@
 > fix); the walkthrough's camera-service checkout sits on that PR branch until it merges. dashboard has NO
 > GitHub remote (origin = local /Users/ckt/ws/dashboard) — no CI gate possible there yet.
 
-## TL;DR — where things are
+## Historical deployment observation — 2026-06-09
 
-**The full 4-stack deployment is UP on the Orin** (2026-06-09): all 9 containers healthy, dashboard serving,
+**The full 4-stack deployment was UP on the Orin** (2026-06-09): all 9 containers healthy, dashboard serving,
 USB camera streaming + recording, zenoh mesh connected. The cross-repo work that was open here is **done and
 landed** (camera-service #25–#33, dashboard image/tag/caddy fixes). What's left: physical-world verification
 (RTSP source was powered off; webrtc video in a real browser) and the small follow-ups listed below.
@@ -887,7 +912,7 @@ A launcher's compose opts into each (`${RIG_IMAGE_REGISTRY:+…}`, `:${RIG_IMAGE
   On its first live run it caught cam-up + dash-up overriding `COMPOSE_PROJECT_NAME` (masked until then by
   the baked scripts' explicit `-p`) — both fixed + re-certified, 0 errors.
 
-## Deploy recipe (current)
+## Historical deploy recipe
 
 ```
 # Dev box (Mac): trust the registry in Docker Desktop (insecure-registries: ["192.168.8.149:5000"])
@@ -899,7 +924,7 @@ scp var/artifacts/testN.tar.gz orin:/tmp/
 #       restart docker; tar xzf; ./run.sh up   (uses the compose-only scripts; pulls by digest/tag)
 ```
 
-## OPEN ITEMS
+## Historical open items (not the current backlog)
 
 The big cross-repo batch from the previous handoff is **all landed** (verified live 2026-06-09). The
 recurring principle held: **a launcher's `config` output must be host-independent** so a dev-box bake is

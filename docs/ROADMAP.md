@@ -1,5 +1,10 @@
 # rig — roadmap
 
+Current checkpoint: **v0.2.73 — shared sessions and experimental Isaac attachment**, reviewed 2026-10-28.
+Sections retain their original design scope and versioned milestones; their proposed schema
+is not a replacement for current operator references. Use [replay](REPLAY.md),
+[simulation](SIMULATION.md), and the [preparation backlog](ISAAC_PREP_REPORT.md) for current behavior.
+
 ## 1. Config overrides & reusable profiles — ✅ implemented (v0.1.1)
 
 ### Motivation
@@ -81,23 +86,16 @@ No launcher changes; no semantic interpretation of config bodies by rig; no simu
 
 ## 2. SIL / HIL via per-sensor source × per-run footprint (related)
 
-> **Status:** the REPLAY half is implemented — §15's graph epochs (v0.2.32) select the topic set,
-> and **`rig replay`** (v0.2.33; plan `rig-replay-plan.md`, player contract
-> `~/ws/infra/rig-replay-player-handoff.md`) plays a sealed run's recorded inputs at the named
-> instances via rig-infra's `ros2-bag-player` (≥ v1.8.0), in a new provenance-linked run
-> (`replay: {of, source, with}`) with one rig-owned clock token (`RIG_SIM_TIME` → the player's
-> `--clock` + adopted launchers' `use_sim_time`). **The per-sensor SOURCE axis landed in v0.2.52**
-> (plan `rig-sensor-replay-plan.md`): a service declares `replay.source` in its rigging (the
-> run-relative `data` dir it records into + the config `overrides` that flip it to replay) and
-> `rig replay` FINDS every instance whose recordings the source run holds, renders its config for
-> the session (a verb-time override layer, `var/rendered/replay/<name>.yaml`) and feeds it from
-> them; no names = REPRODUCE the run (infra + sources + the player for what the bag holds), names
-> stay "under test". One timeline for every producer: the bag's zero (`replay_epoch_unix_ns`), one
-> release instant (`replay_start_at_unix_s` = now + `--start-delay`), the window, the clock
-> decision (`replay_retime`). camera-service is the first source (its `playback:` block). Open:
-> the player's adoption of `RIG_REPLAY_START_AT_UNIX_S` (start paused, resume at the instant —
-> until then a mixed bag + camera replay starts within container-start skew), and the footprint
-> token.
+**Current status:** replay includes per-source recorded input, prepared recipes, portable
+runtime images and optional coordinated readiness/release. See [replay](REPLAY.md),
+[coordinated startup](replay-coordination.md) and the
+[v0.2.72 acceptance evidence](releases/coordinated-replay-readiness-2026-10-27.md).
+Version 0.2.73 adds experimental [Isaac attachment](SIMULATION.md) using version-2 recipes with an exact
+shared process list, session overrides and source clock. The simulator replaces declared
+physical sensors; recording playback uses the same consumers with a bag-owned clock.
+There is no generic automatic simulator launcher, mixed bag/sim source scheduler or per-frame
+TF authority resolver. Those remain separate from this attach scope. The source/footprint
+model below describes the broader design direction, not additional implemented CLI modes.
 
 Not modeled as enforced vehicle-wide modes. Two independent axes:
 - **Data source** — per *sensor*: live | replay | sim (a config / override concern, §1).
@@ -107,7 +105,7 @@ Not modeled as enforced vehicle-wide modes. Two independent axes:
 algorithm stack runs live on the real Jetson** to characterize compute/memory). Replay runs *through the
 real driver* (file transport), so the load is faithful.
 
-rig owns: the per-run footprint token (passed to launchers), **surfacing/validating the source mix** (refuse
+Broader design goal: a per-run footprint token (passed to launchers), **surfacing/validating the source mix** (refuse
 or warn a replay/sim source under a vehicle footprint), and **source-aware doctor** (check "receiver
 pingable" only for live stacks; "capture exists" only for replay stacks). Launchers own the mechanics
 (mounting the replay capture; the footprint image/net swap). Named presets (`deploy`/`hil`/`sil`) are

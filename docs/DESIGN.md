@@ -273,6 +273,26 @@ cam-up carried the scar tissue ("is RIG_IMAGE_TAG a platform name?"). Now the tw
   define what counts as a platform name; rig hardcodes none). `doctor`: ERROR when the declared
   platform isn't in a service's matrix; WARN for matrix-without-platform and tag-is-a-platform cases.
 
+## Shared sessions and provider boundaries (v0.2.73; Isaac experimental)
+
+Version-2 recipes separate common execution intent (`session.instances`, service-owned config
+`overrides`, and `clock`) from provider input descriptions (`replay` and `simulation`). Selection
+is exact, including infrastructure. Replay owns its managed player; Isaac attachment starts
+only selected infrastructure/autonomy and substitutes declared sensor outputs. A shared file
+can carry either provider or both, while existing version-1 replay remains unchanged.
+
+Clock policy is common; the authority is provider-specific. Isaac must already publish one
+advancing simulation clock, while replay generates its clock from the selected bag timeline.
+An attach run stores normal run data and provider evidence. Playing that recording is an open-loop
+recorded trajectory; reconnecting to Isaac runs a live world and does not promise deterministic
+re-execution. Neither a scene label nor a seed proves the actual loaded simulator state.
+
+The initial attach boundary delegates graph/scene construction and transport setup to the
+operator. Rig verifies the declared ROS contract, runtime images and session ownership. Frozen
+configuration and Docker connection/ownership evidence govern status, logs, rollback and down.
+It does not configure QoS, remap frames or divide authority inside a shared TF topic. See
+[the operator contract](SIMULATION.md) and [acceptance limits](ISAAC_PREP_REPORT.md).
+
 ## Status & roadmap
 
 Implemented (see `ROADMAP.md` for the per-version log): manifest/catalog/descriptor loaders with
@@ -301,4 +321,5 @@ boot-time bring-up via a systemd unit + a `rig verify --fix` reconciler; OCI art
 (Fleet mode — one artifact, N vehicles, identity resolved on-vehicle — ✅ shipped v0.1.47–48, above.)
 
 See **`docs/ROADMAP.md`** for config overrides & reusable profiles (✅ implemented, §1) and the **SIL/HIL**
-model (per-sensor source × per-run footprint — still open, §2).
+model (per-sensor source × per-run footprint, §2). Replay and the limited Isaac attach path
+implement parts of that model; broader mixed-source/runtime presets remain open.

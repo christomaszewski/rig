@@ -1,7 +1,12 @@
 # Host setup
 
-`rig` orchestrates; it deliberately does **not** mutate host state (`rig doctor` only *checks*). The
-following are one-time, out-of-band host steps.
+`rig` delegates runtime setup to launchers; it does not implicitly install host drivers or
+configure device networking. `rig doctor` only checks. Explicit setup/provisioning commands
+do write their documented user and machine state. The following are one-time host steps.
+
+For a simulation workstation, use the additional version, transport and offline-asset steps
+in [offline Isaac attachment](ISAAC_OFFLINE.md). The Jetson hardware settings below are not
+a substitute for the simulator release's host requirements.
 
 ## Installing rig
 
@@ -61,14 +66,17 @@ registry, not built on the robot. No git, no submodules on the vehicle.
 
 ## ROS 2 graph
 
-`rig` exports `ROS_DOMAIN_ID` + `RMW_IMPLEMENTATION` (from `vehicle.yaml`) to every launcher; all stacks
-run `network_mode: host` + `ipc: host`, so they share one ROS graph on the host. With the default
+`rig` exports `ROS_DOMAIN_ID` + `RMW_IMPLEMENTATION` (from the effective manifest) to every launcher.
+Each service owns its Compose network and IPC configuration; inspect its rendered config
+rather than assuming host networking is enforced by Rig. With the repository default
 `rmw_zenoh_cpp`, discovery runs through the **shared zenoh router** infra stack (rig-infra ships
 `zenoh-router/` — https://github.com/christomaszewski/rig-infra; `rig doctor` warns when the rmw is
 zenoh and no router is declared). Keep the
-distro aligned (Lyrical) across services. Under a DDS rmw instead (`rmw_fastrtps_cpp`), the one-graph
-model is multicast discovery — at higher sensor counts, partition unrelated stacks onto distinct
-`ROS_DOMAIN_ID`s and/or mount a Fast DDS XML profile (static peers) to tame it.
+distro and message packages aligned across services. The example manifest uses Lyrical;
+Isaac's tested distro choices require a separately prepared compatible deployment. Under
+Fast DDS (`rmw_fastrtps_cpp`), configure discovery/transport for the real network and container
+boundaries. A profile file referenced from the host must also be mounted and selected inside
+the containers that need it. Separate unrelated experiments with distinct domains.
 
 ## Deploying a baked artifact (local registry / offline)
 
