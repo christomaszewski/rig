@@ -768,10 +768,17 @@ def test_safe_extract_refuses_members_that_leave_the_destination():
     # what matters is that nothing lands outside dest, checked below for every case)
     bad = [[("tree/../../ESCAPED.txt", "file", "")], [("tree/link", tarfile.SYMTYPE, "../../outside")],
            [("/abs/ESCAPED.txt", "file", "")]]
-    saved = getattr(tarfile, "data_filter", None)
+    # The hand-checked path older Pythons take: safe_extract sees a tarfile without data_filter.
+    # (Deleting the real attribute breaks tarfile itself on 3.14, whose default filter is it.)
+    class _OldTarfile(type(tarfile)):
+        def __getattr__(self, name):
+            if name == "data_filter":
+                raise AttributeError(name)
+            return getattr(tarfile, name)
+
     for manual in (False, True):
-        if manual and saved is not None:
-            del tarfile.data_filter  # the hand-checked path older Pythons take
+        if manual:
+            sys.modules["tarfile"] = _OldTarfile("tarfile")
         try:
             for members in bad:
                 base = pathlib.Path(tempfile.mkdtemp())
@@ -790,8 +797,7 @@ def test_safe_extract_refuses_members_that_leave_the_destination():
                 safe_extract(tf, ok)
             assert (ok / "tree" / "a.txt").read_text() == "x\n"
         finally:
-            if saved is not None:
-                tarfile.data_filter = saved
+            sys.modules["tarfile"] = tarfile
 
 
 if __name__ == "__main__":
