@@ -1,6 +1,6 @@
 # Offline and local-source builds plan
 
-Status, 2026-10-28, not yet released: phase 0 (section 8) implemented. Phase 1 (section 4)
+Status, 2026-10-29, not yet released: phase 0 (section 8) implemented. Phase 1 (section 4)
 implemented in Rig and rig-infra's `msgs/`; sbg_driver's adoption of `build.sources` is pending,
 and section 9 B records what changed from this plan and what was verified. Phase 2 proposed.
 Scope: Rig, rig-infra (`base/`, `msgs/`), sbg_driver and novatel. camera-service, ouster and
@@ -167,6 +167,25 @@ rig images seed               # online: copy declared external images into image
 
   If (1) fails, use a parent-image build argument that rig sets to the seeded digest. That
   means one Dockerfile change in the first cut.
+
+  **Spike results, 2026-10-29**, on a throwaway `docker-container` builder (BuildKit v0.33.1,
+  Docker Desktop 29) attached only to an internal Docker network with a test registry. Inside
+  it, public hostnames did not resolve and the registry was reachable.
+  1. Yes. `FROM ros:lyrical-ros-core` resolved through `[registry."docker.io"] mirrors` to the
+     seeded copy, at the seeded digest, with Docker Hub unreachable.
+  2. Yes. The builder was created and bootstrapped on the internal network alone, because its
+     BuildKit image was already in the local store.
+  3. Yes. msgs/Dockerfile with `# syntax=` removed built on the built-in frontend, `RUN
+     --mount=type=ssh`, the bind from a stage and `# check=` included.
+
+  Also found:
+  - With the `# syntax=docker/dockerfile:1` line kept, the same build failed with "not found"
+    through the mirror. Removing the line is required, not optional.
+  - Seeding with `docker tag` + `docker push` from the local store pushed one architecture and
+    changed the digest. The copy must go registry to registry (the `mirror:` path), as planned.
+  - Not tested: Docker's own builder with the containerd store, since the Docker Desktop daemon
+    itself could not be disconnected. `--offline` should use rig's managed builder, which was
+    tested.
 - **Remove `# syntax=docker/dockerfile:1`** from msgs, sbg and novatel now, and from ouster
   and mavlink-router when they are adopted.
 - **Registry build cache.** When rig sets `RIG_BUILD_CACHE_REF`, `rig-build.sh` adds
@@ -303,7 +322,13 @@ from this plan: no `RIG_BUILD_NETWORK` (section 1), standalone msgs builds still
   `rig build --offline --check` passed. A real Docker build of the overlay from rig's mirror
   export compiled sbg_msgs without a clone. Its provenance records `v0.8.2` at the commit the
   GitHub tag names, with no `local:` and no local-build label.
-- Not verified: a build on a builder that is actually disconnected.
+- Disconnected, 2026-10-29, on the spike's builder (section 5), with the `# syntax=` line removed
+  from a copy of msgs/Dockerfile. After one online build warmed the cache, the builder was cut
+  off. The overlay then rebuilt with a changed message package from a `FLEET_MSGS_LOCAL`
+  checkout: every apt step came from the cache, the overlay step compiled offline, and the new
+  message type loaded in the image. A disconnected `PUSH=1` build published to the internal
+  registry and wrote the build-result report rig's matrix path reads.
+- Still open: sbg's offline build, which waits on its `build.sources` adoption.
 
 ### C Phase 2: base images and the SDK (Rig, rig-infra base and msgs, sbg_driver, novatel)
 
