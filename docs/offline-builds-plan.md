@@ -1,9 +1,8 @@
 # Offline and local-source builds plan
 
-Status: proposed, 2026-10-28. Nothing below is implemented except the uncommitted
-`FLEET_MSGS_LOCAL` work in rig-infra's `msgs/`, reviewed in section 8. Scope: Rig, rig-infra
-(`base/`, `msgs/`), sbg_driver and novatel. camera-service, ouster and mavlink-router are
-deferred (section 10).
+Status: phase 0 (section 8) implemented 2026-10-28, not yet released; phases 1 and 2
+proposed. Scope: Rig, rig-infra (`base/`, `msgs/`), sbg_driver and novatel. camera-service,
+ouster and mavlink-router are deferred (section 10).
 
 Goal: on a development box with a local registry, `rig build --offline` rebuilds every image
 the deployment builds without reaching a remote git host, a public registry, or a package
@@ -243,7 +242,7 @@ The rig-infra working tree adds `FLEET_MSGS_LOCAL`: host snapshots of named chec
 the pinned clones of matching msgs `source:` repos, passed as the `local-sources` named context.
 Its 18 unit tests pass. Real BuildKit confirms that the empty default stage binds, and that
 `SSH_AUTH_SOCK` is set without a forwarded agent, so `build_msgs.py` is right to test that the
-socket exists. Changes before committing:
+socket exists. Changes made before committing:
 
 1. **Snapshot without writing to the checkout.** `read-tree HEAD` plus `add -A` through a
    temporary index re-hashes every tracked file and writes every untracked, non-ignored file

@@ -15,6 +15,19 @@ from .common import eprint
 from .image_catalog import canonical_ref, pins_for_row
 
 
+# Set by rig-infra's msgs/build-msgs.sh on an overlay built from FLEET_MSGS_LOCAL working trees
+# instead of its pinned sources; the value names the overridden keys. A dev build: `rig image
+# audit` warns about it and bake refuses it unless --allow-local.
+LOCAL_BUILD_LABEL = "io.rig.build.local"
+LOCAL_BUILD_HINT = "rebuild without FLEET_MSGS_LOCAL before shipping, or pass --allow-local"
+
+
+def local_build_note(refs: dict[str, str]) -> str:
+    """Name each local-built image (ref -> label value)."""
+    listed = "; ".join(f"{ref} ({keys})" for ref, keys in sorted(refs.items()))
+    return f"built from local checkouts, not their pinned sources: {listed}"
+
+
 def _run(args, **kwargs):
     try:
         return subprocess.run(["docker", *args], capture_output=True, text=True, **kwargs)
@@ -48,11 +61,13 @@ def source_for(manifest, ref, target):
     return ref, []
 
 
-def export_images(staging: Path, refs, manifest, target, *, required_labels=None):
+def export_images(staging: Path, refs, manifest, target, *, required_labels=None,
+                  allow_local=False):
     """Pull/inspect the selected CPU, save content-specific local aliases, and record the mapping.
 
     Content aliases survive save/load and don't depend on Docker restoring registry digests.
     --platform on save prevents a containerd store from exporting unrelated architecture members.
+    An image carrying LOCAL_BUILD_LABEL is refused unless ``allow_local``.
     """
     if not target.arch:
         raise RigError("bundle: a deployment architecture is required")
@@ -64,7 +79,7 @@ def export_images(staging: Path, refs, manifest, target, *, required_labels=None
         api = ()
     if version.returncode or api < (1, 48):
         raise RigError("bundle: architecture-specific docker save requires Docker API 1.48 or newer")
-    runtime_refs, ids, sources = {}, {}, {}
+    runtime_refs, ids, sources, local = {}, {}, {}, {}
     temporary = set()
     try:
         for ref in sorted(set(refs)):
@@ -104,6 +119,11 @@ def export_images(staging: Path, refs, manifest, target, *, required_labels=None
                 if labels.get(key) != value:
                     raise RigError(f"bundle: {ref} requires image label {key}={value}; "
                                    "update the replay image before baking")
+            if labels.get(LOCAL_BUILD_LABEL):
+                local[ref] = labels[LOCAL_BUILD_LABEL]
+                if not allow_local:
+                    raise RigError(f"bundle: {local_build_note({ref: local[ref]})} — "
+                                   f"{LOCAL_BUILD_HINT}")
             # A tag per source repository/content identity, never a release's mutable tag.
             alias = f"rig-bundle/{hashlib.sha256(ref.encode()).hexdigest()[:16]}:{image_id[7:]}"
             platform = ["--platform", f"linux/{target.arch}"] if api >= (1, 49) else []
@@ -134,6 +154,8 @@ def export_images(staging: Path, refs, manifest, target, *, required_labels=None
                                 inspect_platform=api >= (1, 49))
         if bundle["image_ids"] != ids:
             raise RigError("bundle: selected image identities changed during export")
+        if local:
+            eprint(f"  bundle: warning (--allow-local): {local_build_note(local)}")
         return dict(bundle, refs=runtime_refs, sources=sources, target=target.as_dict())
     finally:
         for alias in sorted(temporary):

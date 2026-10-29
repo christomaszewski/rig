@@ -638,7 +638,7 @@ def _bake_inputs(args, root, tag, *, output_root):
         bake_mod.bake_fleet(root, tag, registry=args.registry,
                             bundle_images=args.bundle_images, platform=args.platform, arch=args.arch,
                             overwrite=args.overwrite, include_replay=args.include_replay,
-                            output_root=output_root)
+                            output_root=output_root, allow_local=args.allow_local)
         return 0
     manifest, catalog, descriptors = _load(root, context="deployment", identity=False, render=False,
                                          target_overrides={"platform": args.platform, "arch": args.arch})
@@ -662,7 +662,7 @@ def _bake_inputs(args, root, tag, *, output_root):
     bake_mod.bake(root, manifest, catalog, descriptors, env, tag, registry=args.registry,
                   bundle_images=args.bundle_images, platform=args.platform, arch=args.arch,
                   overwrite=args.overwrite, include_replay=args.include_replay,
-                  output_root=output_root)
+                  output_root=output_root, allow_local=args.allow_local)
     return 0
 
 
@@ -1288,6 +1288,9 @@ def build_parser() -> argparse.ArgumentParser:
                          "default: existing route, locked package, nearby checkout, or configured registry")
     bk.add_argument("--overwrite", action="store_true",
                     help="replace an existing artifact without the interactive confirmation")
+    bk.add_argument("--allow-local", action="store_true",
+                    help="bake images built from local checkouts (labelled io.rig.build.local, "
+                         "e.g. a FLEET_MSGS_LOCAL msgs overlay); refused by default")
 
     ub = sub.add_parser("unbake", help="extract a baked artifact to an editable tree")
     ub.add_argument("artifact", help="path to the .tar.gz artifact")

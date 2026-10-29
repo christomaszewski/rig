@@ -367,7 +367,8 @@ rig build --no-cache                          # FULL rebuild: RIG_BUILD_NO_CACHE
 rig image audit                               # inspect what the stacks will RUN (docker + images local/pullable):
                                               #   every ROS image carries ros.distro, the declared rmw package
                                               #   is installed, and shared ros-* package VERSIONS agree across
-                                              #   images (a skewed rmw_zenoh_cpp = sessions that can't talk)
+                                              #   images (a skewed rmw_zenoh_cpp = sessions that can't talk);
+                                              #   warns on images built from local checkouts (FLEET_MSGS_LOCAL)
 curl -s http://<dev-box-ip>:5000/v2/_catalog  # expect every repo the composes will pull
 ```
 
@@ -418,6 +419,9 @@ An explicit `--tag` wins; otherwise the artifact name comes from literal `images
 `vehicle.yaml`, not host-local overrides. Missing or templated tags require `--tag`.
 An existing artifact requires confirmation before replacement. `--overwrite` confirms intentional
 replacement for automation; a failed archive write leaves the old archive intact.
+Bake refuses an image labelled `io.rig.build.local`, such as a msgs overlay built with
+rig-infra's `FLEET_MSGS_LOCAL` from unpushed working trees. Rebuild it without the variable, or
+pass `--allow-local` to ship it knowingly.
 
 ```bash
 rig artifact ls                              # archive + staging + extracted-tree sizes, target and provenance

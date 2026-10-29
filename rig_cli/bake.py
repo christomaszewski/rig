@@ -160,6 +160,40 @@ def _resolve_digest(ref: str, *, local_only: bool = False) -> str | None:
     return None
 
 
+def _local_build_keys(ref: str) -> str | None:
+    """The LOCAL_BUILD_LABEL value of a pinned image ref, or None when absent or unverifiable. The
+    local store answers first; otherwise every platform member's config in the registry, bounded
+    like the digest lookup. Only digest-resolved refs reach here, so an unreachable registry was
+    already reported (and the ref left a tag) by `_resolve_digest`."""
+    from .artifact_images import LOCAL_BUILD_LABEL
+
+    def label(labels):
+        return (labels.get(LOCAL_BUILD_LABEL) or None) if isinstance(labels, dict) else None
+
+    try:
+        proc = subprocess.run(["docker", "image", "inspect", "--format", "{{json .Config.Labels}}",
+                               ref], capture_output=True, text=True, timeout=_digest_timeout())
+        if proc.returncode == 0:
+            return label(json.loads(proc.stdout or "null"))
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from .docker_registry import imagetools
+        proc = imagetools(["inspect", ref, "--format", "{{json .Image}}"], [ref],
+                          capture_output=True, text=True, timeout=_digest_timeout())
+        data = json.loads(proc.stdout) if proc.returncode == 0 else None
+    except Exception:  # noqa: BLE001
+        return None
+    if not isinstance(data, dict):
+        return None
+    # One config for a single-platform manifest; platform -> config for an index.
+    for config in ([data] if "config" in data else data.values()):
+        found = label((config.get("config") or {}).get("Labels")) if isinstance(config, dict) else None
+        if found:
+            return found
+    return None
+
+
 def _bundle_images(staging: Path, refs: list[str], *, arch: str | None = None,
                    inspect_platform: bool = False) -> dict:
     """``docker save`` the resolved image set into staging/images.tar (one multi-ref save, so shared base
@@ -689,7 +723,8 @@ def _stage_tree(staging: Path, manifest, catalog, *, registry: str | None = None
 
 def bake(root: Path, manifest, catalog, descriptors, env, tag: str, *, registry: str | None = None,
          bundle_images: bool = False, platform: str | None = None, arch: str | None = None,
-         overwrite: bool = False, include_replay: bool = False, output_root: Path | None = None) -> Path:
+         overwrite: bool = False, include_replay: bool = False, output_root: Path | None = None,
+         allow_local: bool = False) -> Path:
     output_root = output_root or root
     safe_component(tag, what="bake --tag")  # names var/bake/<tag>, which is rmtree'd below
     from .artifacts import confirm_overwrite, publish
@@ -745,6 +780,14 @@ def bake(root: Path, manifest, catalog, descriptors, env, tag: str, *, registry:
     for ref in (replay_images or {}).get("images", {}):
         if ref not in images:
             images[ref] = _resolve_digest(ref, local_only=bundle_images)
+    if not bundle_images:  # bundle mode checks the same label while exporting (export_images)
+        from .artifact_images import LOCAL_BUILD_HINT, local_build_note
+        local = {ref: keys for ref, dig in images.items() if dig
+                 for keys in [_local_build_keys(dig)] if keys}
+        if local and not allow_local:
+            raise RigError(f"bake: {local_build_note(local)} — {LOCAL_BUILD_HINT}")
+        if local:
+            eprint(f"  warning (--allow-local): {local_build_note(local)}")
     if skipped:
         # The compose-only form is ALL or nothing. run.sh prefers up.sh whenever it exists and
         # never falls back to rig for the stacks it lacks — a partial up.sh silently started a
@@ -766,7 +809,8 @@ def bake(root: Path, manifest, catalog, descriptors, env, tag: str, *, registry:
         from .artifact_images import export_images, rewrite_compose
         from .bake_replay import required_labels
         bundle = export_images(staging, sorted(images), manifest, target,
-                               required_labels=required_labels(replay_images))
+                               required_labels=required_labels(replay_images),
+                               allow_local=allow_local)
         rewrite_compose(staging, entries, bundle["refs"])
     run_ctx = None
     if manifest.data_dir:  # runs feature: inert without data_dir
@@ -992,7 +1036,8 @@ def fleet_refs(root: Path) -> set[str]:
 
 def bake_fleet(root: Path, tag: str, *, registry: str | None = None,
                bundle_images: bool = False, platform: str | None = None, arch: str | None = None,
-               overwrite: bool = False, include_replay: bool = False, output_root: Path | None = None) -> Path:
+               overwrite: bool = False, include_replay: bool = False, output_root: Path | None = None,
+               allow_local: bool = False) -> Path:
     """The fleet artifact: ONE tar for N vehicles. Stages the UNRESOLVED tree (vehicle.yaml +
     the whole config/ tree incl. .pins/.overlays, verbatim) + vendored launch surfaces + the
     bundled rig; rendering happens on-vehicle at `rig up` from /etc/rig/vehicle.local.yaml.
@@ -1085,7 +1130,8 @@ def bake_fleet(root: Path, tag: str, *, registry: str | None = None,
                 raise RigError("bundle: no enabled service images selected")
             from .bake_replay import required_labels
             bundle = export_images(staging, refs_to_bundle, manifest, target,
-                                   required_labels=required_labels(replay_images))
+                                   required_labels=required_labels(replay_images),
+                                   allow_local=allow_local)
             _write_bundle_guard(staging, bundle)
 
     # vehicle.local.example.yaml: every referenced var, split mandatory vs fleet-defaulted

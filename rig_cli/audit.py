@@ -37,6 +37,11 @@ docker (`ls /opt/ros` + the dpkg ``ros-*`` package list), and cross-checks:
               refs equal — service and overlay `rev` SHAs differing (a moved tag, a branch built
               twice: the tier only SHAs give) → ERROR; ``rev: unknown`` (vendored snapshot) or a
               malformed file → WARN, never ERROR.
+  - local     an image labelled ``io.rig.build.local`` or an overlay provenance entry carrying
+              ``local:`` (rig-infra's FLEET_MSGS_LOCAL dev loop: working trees instead of the
+              pinned sources) → WARN naming the checkouts. Not an ERROR — the dev loop pushes to
+              the deployment's own registry by design — but ``rig bake`` refuses such an image
+              without ``--allow-local``.
 
 Non-ROS images (no /opt/ros, no ros-* packages) are excluded from the checks; an image without a
 shell/dpkg is reported and skipped (uninspectable this way); a ROS image with zero ros-* dpkg
@@ -45,6 +50,7 @@ images local or pullable: run right after ``rig build`` (or ``rig pull``).
 """
 from __future__ import annotations
 
+import json
 import re
 import shutil
 import subprocess
@@ -121,6 +127,19 @@ def _read_msgs_files(ref: str) -> tuple[dict[str, str | None], str | None]:
         path, _, body = chunk.partition("\n")
         files[path.strip()] = None if _FILE_ABSENT in body else body
     return files, None
+
+
+def _local_build_keys(ref: str) -> str | None:
+    """The image's LOCAL_BUILD_LABEL value (a build from local checkouts), or None. The image is
+    local by now (the inspection's `docker run` pulled it); an unreadable answer is no label."""
+    from .artifact_images import LOCAL_BUILD_LABEL
+    cmd = ["docker", "image", "inspect", "--format", "{{json .Config.Labels}}", ref]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=_DOCKER_TIMEOUT)
+        labels = json.loads(proc.stdout) if proc.returncode == 0 else None
+    except (subprocess.TimeoutExpired, ValueError):
+        return None
+    return (labels.get(LOCAL_BUILD_LABEL) or None) if isinstance(labels, dict) else None
 
 
 def _norm_repo(url: str) -> str:
@@ -383,6 +402,7 @@ def audit(manifest: Manifest, descriptors: dict[str, Descriptor], env: dict[str,
     rmw_pkg = (f"ros-{distro}-{manifest.ros.rmw.replace('_', '-')}"
                if distro and manifest.ros.rmw else None)
     ros_images: list[tuple[str, list[str], dict[str, str], dict[str, str]]] = []
+    local_builds: dict[str, str] = {}  # ref -> label line, for images built from local checkouts
     distro_bad = rmw_bad = 0
     for ref, stacks in refs.items():
         distros, pkgs, sys_pkgs, err = _inspect(ref)
@@ -390,6 +410,9 @@ def audit(manifest: Manifest, descriptors: dict[str, Descriptor], env: dict[str,
         if err:
             issues.append((WARN, f"{label}: uninspectable (no shell/dpkg? unpullable?) — {err}"))
             continue
+        keys = _local_build_keys(ref)
+        if keys:
+            local_builds[ref] = f"{label}: built from local checkouts ({keys})"
         if not distros and not pkgs:  # ROS-ness keys on /opt/ros + ros-* ONLY — a plain debian
             #                           image is full of system packages and must stay excluded
             issues.append((INFO, f"{label}: non-ROS image — excluded from the ROS checks"))
@@ -477,6 +500,15 @@ def audit(manifest: Manifest, descriptors: dict[str, Descriptor], env: dict[str,
                 if malformed:
                     issues.append((WARN, f"msgs overlay {msgs_ref}: malformed provenance "
                                          f"({malformed}) — SHA tier unavailable"))
+                local_src = [e for e in overlay_prov.values() if e.get("local")]
+                if local_src:  # the provenance names each checkout: say it in the overlay's line
+                    detail = "; ".join(f"{e['repo']} from {e['local']} ({e['ref']})"
+                                       for e in local_src)
+                    local_builds[msgs_ref] = (f"msgs overlay {msgs_ref}: built from local "
+                                              f"checkouts instead of the declared pins — {detail}")
+    for line in local_builds.values():
+        issues.append((WARN, f"{line} — a dev build: rebuild without FLEET_MSGS_LOCAL before "
+                             f"shipping (`rig bake` refuses it without --allow-local)"))
 
     # The pin-skew tiers: probe provenance on each msgs.source-declaring service's own image(s).
     prov_svcs = sorted(s for s, d in descriptors.items() if d.msgs_source and s in svc_refs)

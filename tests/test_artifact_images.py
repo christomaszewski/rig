@@ -110,6 +110,19 @@ class ArtifactImages(unittest.TestCase):
         self.assertEqual(set(result['config_ids'].values()), {CONFIG})
         self.assertEqual(set(next(iter(result['accepted_ids'].values()))), {CONFIG, MANIFEST_ID})
 
+    def test_local_checkout_build_is_refused_unless_allowed(self):
+        self.docker.info['Config'] = {'Labels': {artifact_images.LOCAL_BUILD_LABEL: 'px4_msgs'}}
+        with patch('subprocess.run', side_effect=self.docker.run):
+            with self.assertRaisesRegex(RigError, r'local checkouts.*reg/live:v1-jp6m \(px4_msgs\)'):
+                artifact_images.export_images(self.root, ['reg/live:v1-jp6m'], self.manifest, self.target)
+        self.assertFalse([c for c in self.docker.calls if c[1] == 'save'])
+        err = io.StringIO()
+        with patch('subprocess.run', side_effect=self.docker.run), contextlib.redirect_stderr(err):
+            result = artifact_images.export_images(self.root, ['reg/live:v1-jp6m'], self.manifest,
+                                                   self.target, allow_local=True)
+        self.assertEqual(set(result['image_ids'].values()), {CONFIG})
+        self.assertIn('warning (--allow-local)', err.getvalue())
+
     def test_containerd_index_is_selected_before_tagging_and_export(self):
         self.docker.api = '1.49'
         source = 'reg/local:arm64'

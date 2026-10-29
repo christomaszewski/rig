@@ -49,11 +49,15 @@ def _files_out(manifest_yaml: str | None, provenance_yaml: str | None = None) ->
     return out
 
 
-def _fake_docker(inspect: dict[str, str], probes: dict[str, str]) -> pathlib.Path:
-    """`docker` stub: msgs file-probe calls (script carries the file marker) are keyed FIRST so
-    the plain ref patterns of the inspection cases don't swallow them. 'FAIL' -> exit 126."""
+def _fake_docker(inspect: dict[str, str], probes: dict[str, str],
+                 labels: dict[str, str] | None = None) -> pathlib.Path:
+    """`docker` stub: msgs file-probe calls (script carries the file marker) and `image inspect`
+    label reads (`labels`: ref -> label JSON) are keyed FIRST so the plain ref patterns of the
+    inspection cases don't swallow them. 'FAIL' -> exit 126."""
     bin_dir = pathlib.Path(tempfile.mkdtemp())
     lines = ["#!/bin/sh", 'case "$*" in']
+    for ref, out in (labels or {}).items():
+        lines.append(f"  *\"image inspect\"*\"{ref}\"*) printf %s '{out}' ;;")
     for ref, out in probes.items():
         if out == "FAIL":
             lines.append(f'  *"{ref}"*"rig-msgs-file"*) echo "no shell" >&2; exit 126 ;;')
@@ -124,11 +128,11 @@ def _prov(entries, version=1) -> str:
     return out
 
 
-def _run(manifest, descriptors, inspect, probes) -> tuple[int, str]:
+def _run(manifest, descriptors, inspect, probes, labels=None) -> tuple[int, str]:
     # mav's image is file-probed by the pin-skew check whenever mav declares msgs.source — default
     # its provenance to ABSENT so the v0.2.29-era tests read as "not adopted", not a stub error
     probes = {"mav-core": _files_out(None), **probes}
-    bin_dir = _fake_docker(inspect, probes)
+    bin_dir = _fake_docker(inspect, probes, labels)
     old = os.environ["PATH"]
     os.environ["PATH"] = f"{bin_dir}:{old}"
     err = io.StringIO()
@@ -296,6 +300,33 @@ def test_rev_unknown_is_a_warn_verified_by_ref_only():
     assert rc == 0, out
     assert "vendored snapshot" in out and "verified by ref only" in out
     assert "(0 to the SHA tier)" in out  # unknown never reaches the SHA comparison
+
+
+def test_local_overlay_build_is_a_warn_naming_the_checkout():
+    # rig-infra's FLEET_MSGS_LOCAL dev loop: provenance names the checkout and the label is set.
+    # One line for the overlay (provenance detail wins over the label), WARN, never ERROR.
+    local = (f"version: 1\\nsource:\\n- repo: {PX4}\\n  ref: v1.16.0-dirty\\n  rev: unknown\\n"
+             "  local: /home/dev/ws/px4_msgs\\n")
+    m, d = _msgs_deployment()
+    rc, out = _run(m, d, _INSPECT_OK,
+                   {"fleet-ros-msgs": _files_out(FRESH_MANIFEST, local),
+                    "mav-core": _files_out(None, _prov([(PX4, "v1.16.0", SHA_A)]))},
+                   labels={"fleet-ros-msgs": '{"io.rig.build.local":"px4_msgs"}'})
+    assert rc == 0, out
+    lines = [ln for ln in out.splitlines() if "local checkout" in ln]
+    assert len(lines) == 1, out
+    assert "[!]" in lines[0] and "/home/dev/ws/px4_msgs (v1.16.0-dirty)" in lines[0]
+    assert "--allow-local" in lines[0]
+
+
+def test_labelled_image_without_provenance_detail_is_a_warn():
+    m, d = _msgs_deployment()
+    rc, out = _run(m, d, _INSPECT_OK, {"fleet-ros-msgs": OVERLAY_FULL},
+                   labels={"mav-core": '{"io.rig.build.local":"mav_msgs"}',
+                           "fleet-ros-msgs": "null"})
+    assert rc == 0, out
+    assert "mav-core:v1 [mav_0]: built from local checkouts (mav_msgs)" in out
+    assert out.count("local checkouts") == 1
 
 
 def test_malformed_provenance_is_a_warn_never_error():

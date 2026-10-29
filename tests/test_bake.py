@@ -954,6 +954,63 @@ def test_resolve_digest_registry_lookup_is_bounded():
     assert "timed out after 3.5s" in err.getvalue() and "reg.test/foo:t1" in err.getvalue()
 
 
+def test_local_build_keys_reads_the_local_store_then_every_registry_member():
+    import json as js
+    import subprocess as sp
+    from unittest.mock import patch
+    from rig_cli import bake as bake_mod
+
+    def runner(local, remote):
+        def fake_run(cmd, **kw):
+            if cmd[:3] == ["docker", "image", "inspect"]:
+                return sp.CompletedProcess(cmd, 0 if local is not None else 1, local or "", "")
+            if "imagetools" in cmd:
+                return sp.CompletedProcess(cmd, 0 if remote is not None else 1, remote or "", "")
+            raise AssertionError(cmd)
+        return fake_run
+
+    label = {"io.rig.build.local": "px4_msgs"}
+    index = js.dumps({"linux/amd64": {"config": {"Labels": None}},
+                      "linux/arm64": {"config": {"Labels": label}}})
+    cases = [(js.dumps(label), None, "px4_msgs"),                       # local store answers
+             ("null", index, None),                                       # local, unlabelled: final
+             (None, index, "px4_msgs"),                                   # any index member
+             (None, js.dumps({"config": {"Labels": label}}), "px4_msgs"), # single manifest
+             (None, js.dumps({"config": {}}), None),
+             (None, None, None),                                          # unverifiable
+             (None, "not json", None)]
+    for local, remote, want in cases:
+        with patch.object(bake_mod.subprocess, "run", runner(local, remote)):
+            assert bake_mod._local_build_keys("reg/x@sha256:" + "1" * 64) == want, (local, remote)
+
+
+def test_bake_refuses_local_builds_unless_allowed():
+    """A FLEET_MSGS_LOCAL overlay is labelled io.rig.build.local: a dev build pushed under the
+    deployment's normal tag. Registry-mode bake refuses it by name; --allow-local ships it, loudly."""
+    import contextlib
+    import io
+    from unittest.mock import patch
+
+    from rig_cli import RigError
+    import rig_cli.bake as bake_mod
+    root, m, cat, descs = _deployment_fixture(_COMPOSE_LAUNCHER)
+    pinned = "reg.test/foo@sha256:" + "a" * 64
+    with patch.object(bake_mod, "_resolve_digest", return_value=pinned), \
+            patch.object(bake_mod, "_local_build_keys", return_value="px4_msgs") as probe, \
+            contextlib.redirect_stderr(io.StringIO()) as err:
+        try:
+            bake_mod.bake(root, m, cat, descs, {"PATH": os.environ["PATH"]}, "t")
+            raise AssertionError("baked a local build")
+        except RigError as exc:
+            assert "reg.test/foo:t1 (px4_msgs)" in str(exc) and "--allow-local" in str(exc)
+        probe.assert_called_with(pinned)  # the pinned content, never the movable tag
+        assert not (root / "var" / "artifacts" / "t.tar.gz").exists()
+        artifact = bake_mod.bake(root, m, cat, descs, {"PATH": os.environ["PATH"]}, "t",
+                                 allow_local=True)
+    assert artifact.exists()
+    assert "warning (--allow-local)" in err.getvalue() and "px4_msgs" in err.getvalue()
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):
