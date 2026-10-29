@@ -362,6 +362,60 @@ Path(a[a.index('--metadata-file')+1]).write_text(json.dumps({'containerimage.dig
                                 for r in lock['build_catalog'].values()))
 
 
+    def test_selected_services_plan_only_their_tasks_from_the_published_base(self):
+        base = self.service('base', '  provides: base\n  msgs_overlay: {command: msgs.sh, image: fleet-msgs}\n',
+                            '[fleet-ros]')
+        radio = self.service('radio', images='[radio]')
+        radio.msgs_apt = ['nmea_msgs']
+        descs = {'base': base, 'radio': radio, 'core': self.service('core')}
+        m = self.manifest(*descs)
+        tasks = matrix.plan(m, descs, registry=m.image_registry, tag=None, only={'radio'})
+        self.assertEqual([(t.service, t.stage, t.base) for t in tasks],
+                         [('radio', 2, 'registry.test:5000/fleet-ros:v1')])
+        tasks = matrix.plan(m, descs, registry=m.image_registry, tag=None, only={'base'})
+        self.assertEqual([(t.service, t.stage, t.images) for t in tasks],
+                         [('base', 0, ['fleet-ros']), ('base', 1, ['fleet-msgs'])])
+
+    def run_matrix(self, descs, failing=(), **kw):
+        """A real matrix run against a docker stub that fails building any image in `failing`."""
+        for d in descs.values():
+            shutil.copy2(HELPER, d.repo / 'helper.sh')
+            (d.repo / 'build.sh').write_text(f'''#!/bin/sh
+set -eu
+. ./helper.sh
+rig_build "$1/{d.build_images[0]}:$2" .
+''')
+        bin_dir = self.root / 'bin'
+        bin_dir.mkdir(exist_ok=True)
+        (bin_dir / 'docker').write_text(f'''#!/usr/bin/env python3
+import json, sys
+from pathlib import Path
+a = sys.argv[1:]
+if a[a.index('-t') + 1].rsplit('/', 1)[-1].split(':')[0] in {list(failing)!r}:
+    sys.exit(1)
+Path(a[a.index('--metadata-file')+1]).write_text(json.dumps({{'containerimage.digest': 'sha256:'+'a'*64}}))
+''')
+        (bin_dir / 'docker').chmod(0o755)
+        with patch.dict(os.environ, PATH=f'{bin_dir}:{os.environ["PATH"]}'), \
+                patch.object(matrix.docker_registry, 'prepare', return_value=matrix.docker_registry.Access()), \
+                patch.object(matrix, 'preflight'), patch.object(matrix, 'inspect_raw', return_value=index()), \
+                contextlib.redirect_stderr(io.StringIO()):
+            return build(self.manifest(*descs), descs, registry=None, tag='t1', dry_run=False,
+                         root=self.root, **kw)
+
+    def test_selected_matrix_run_is_recorded_as_a_targeted_build(self):
+        descs = {'radio': self.service('radio', images='[radio]'), 'core': self.service('core')}
+        self.assertEqual(self.run_matrix(descs, services=['radio']), 0)
+        last = load_lock(self.root)['last_build']
+        self.assertFalse(last['complete'])
+        self.assertEqual(last['outputs'], ['registry.test:5000/radio:t1'])
+
+    def test_failed_matrix_task_names_the_retry_command(self):
+        descs = {'radio': self.service('radio', images='[radio]'), 'core': self.service('core')}
+        with self.assertRaises(RigError) as caught:
+            self.run_matrix(descs, failing=('radio',), jobs=2)
+        self.assertIn('rig build: to retry only those: rig build --tag t1 radio', str(caught.exception))
+
     def test_offline_matrix_build_never_pulls_and_exports_build_sources(self):
         upstream = self.root / 'dep'
         upstream.mkdir()

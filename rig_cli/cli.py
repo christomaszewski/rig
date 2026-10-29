@@ -599,7 +599,7 @@ def cmd_build(args, root: Path) -> int:
                            dry_run=args.dry_run, jobs=args.jobs, root=root,
                            platform=args.platform, arch=args.arch, no_cache=args.no_cache,
                            base_image=args.base_image, scopes=args.scope, verbose=args.verbose,
-                           offline=args.offline, check=args.check)
+                           offline=args.offline, check=args.check, services=args.services)
 
 
 def cmd_src(args, root: Path) -> int:
@@ -1261,6 +1261,9 @@ def build_parser() -> argparse.ArgumentParser:
                      help="source repo path (default: the service's services.yaml path)")
 
     bld = sub.add_parser("build", help="build/push or mirror each service's images into the registry")
+    bld.add_argument("services", nargs="*", metavar="SERVICE",
+                     help="build only these services (a service name, or an instance standing for "
+                          "its service); default: every service. The others keep their images")
     bld.add_argument("--registry", default=None,
                      help="build registry (default: deployment-local, machine-local, then vehicle.yaml images.registry)")
     bld.add_argument("--tag", default=None, help="image version (default: images.tag); matrix outputs "

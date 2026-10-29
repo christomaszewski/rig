@@ -297,8 +297,10 @@ def _mirror_steps(img: str, target: str):
 def _build_single(manifest: Manifest, descriptors: dict[str, Descriptor], *, registry: str | None,
           tag: str | None, dry_run: bool, jobs: int = 1, root: Path | None = None,
           platform: str | None = None, no_cache: bool = False,
-          base_image: str | None = None, verbose: bool = False, offline: bool = False) -> int:
+          base_image: str | None = None, verbose: bool = False, offline: bool = False,
+          only: set[str] | None = None, retry_flags: list[str] | None = None) -> int:
     from . import build_sources
+    retry_flags = retry_flags or []
     reg = registry or manifest.image_registry
     tag = tag or manifest.image_tag  # default the build tag to vehicle.yaml images.tag (a version)
     platform = platform or manifest.platform  # matrix services build/push <tag>-<platform>
@@ -307,8 +309,11 @@ def _build_single(manifest: Manifest, descriptors: dict[str, Descriptor], *, reg
     if base_err:
         eprint(f"rig build: {base_err}")
         return 1
-    services = [s for s in dict.fromkeys(x.service for x in manifest.sensors)  # unique, manifest order
-                if (d := descriptors.get(s)) and (d.build_command or d.mirror)]
+    # Unique, manifest order; `only` (rig build SERVICE...) narrows WHAT builds — base resolution
+    # and the msgs union below still read every descriptor.
+    services = [s for s in dict.fromkeys(x.service for x in manifest.sensors)
+                if (d := descriptors.get(s)) and (d.build_command or d.mirror)
+                and (only is None or s in only)]
     if not services:
         eprint("rig build: no in-use service declares `build:` or `mirror:` — nothing to do")
         return 0
@@ -431,10 +436,13 @@ def _build_single(manifest: Manifest, descriptors: dict[str, Descriptor], *, reg
         eprint(f"rig build: msgs overlay {msgs_ref} ({msgs_origin}) -> RIG_MSGS_IMAGE")
     operations = []
     groups = {0: [], 1: [], 2: {s: [] for s in services}}
+    owners: dict[int, str] = {}  # operation -> its service, for the retry hint
+    failed: list[str] = []
 
     def add(label, commands, service, stage, env=None, cwd=None):
         index = len(operations)
         operations.append((label, commands, cwd, env))
+        owners[index] = service
         (groups[2][service] if stage == 2 else groups[stage]).append(index)
         return index
 
@@ -512,11 +520,14 @@ def _build_single(manifest: Manifest, descriptors: dict[str, Descriptor], *, reg
                 return 0
             except RigError:
                 eprint(f'{label} FAILED')
+                failed.append(owners[index])
                 return 1
 
         for index in groups[0]:
             if execute(index):
                 eprint(f'rig build: base failed — dependent builds require {base_ref}; stopping here')
+                skipped = [owners[i] for i in (*groups[1], *(i for g in groups[2].values() for i in g))]
+                eprint(retry_hint(failed + skipped, retry_flags))
                 return 1
         for index in groups[1]:
             rc |= execute(index)
@@ -530,7 +541,15 @@ def _build_single(manifest: Manifest, descriptors: dict[str, Descriptor], *, reg
         with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, jobs)) as pool:
             for status in pool.map(execute_service, groups[2].values()):
                 rc |= status
+    if failed:
+        eprint(retry_hint(failed, retry_flags))
     return rc
+
+
+def retry_hint(failed: list[str], flags: list[str]) -> str:
+    """The command that rebuilds only the services that failed (or never ran after a failure)."""
+    return ("rig build: to retry only those: "
+            + shlex.join(["rig", "build", *flags, *sorted(set(failed))]))
 
 
 def build_registry(root: Path | None, manifest: Manifest, registry: str | None = None):
@@ -561,14 +580,40 @@ def build_registry(root: Path | None, manifest: Manifest, registry: str | None =
     return manifest.image_registry, 'vehicle.yaml'
 
 
+def select_services(manifest: Manifest, descriptors: dict[str, Descriptor],
+                    names: list[str] | None) -> set[str] | None:
+    """`rig build SERVICE...`: the services to build, each named by its service name or by one of
+    its instances in vehicle.yaml. None = no selection, build everything. Only the named services
+    build: a consumer builds FROM the base already in the registry, and naming a base provider
+    rebuilds the base (and its msgs overlay) without rebuilding the consumers."""
+    from . import RigError
+    if not names:
+        return None
+    rows = {s.name: s.service for s in manifest.sensors}
+    used = sorted({s.service for s in manifest.sensors})
+    chosen: set[str] = set()
+    for name in names:
+        service = name if name in used else rows.get(name)
+        if service is None:
+            raise RigError(f"build: '{name}' is not a service or an instance in vehicle.yaml — "
+                           f"services: {', '.join(used)}")
+        desc = descriptors.get(service)
+        if desc is None or not (desc.build_command or desc.mirror):
+            raise RigError(f"build: {service} declares no `build:` or `mirror:` — nothing to build")
+        chosen.add(service)
+    return chosen
+
+
 def offline_preflight(manifest: Manifest, descriptors: dict[str, Descriptor], registry: str | None,
-                      root: Path | None) -> list[str]:
+                      root: Path | None, only: set[str] | None = None) -> list[str]:
     """Everything `rig build --offline` would miss, in one list, checked before anything builds:
     git sources absent from the local mirrors (build_sources), and `mirror:` images absent from
     the deployment registry (an offline build cannot copy them in from upstream)."""
     from . import build_sources
-    problems = build_sources.offline_problems(build_sources.requirements(manifest, descriptors, root))
-    images = sorted({img for d in descriptors.values() for img in d.mirror})
+    problems = build_sources.offline_problems(
+        build_sources.requirements(manifest, descriptors, root, only=only))
+    images = sorted({img for s, d in descriptors.items() if only is None or s in only
+                     for img in d.mirror})
     if images and not registry:
         problems.append(f"mirror images {', '.join(images)} need a registry to be read from "
                         f"offline (pass --registry or set images.registry)")
@@ -590,13 +635,20 @@ def build(manifest: Manifest, descriptors: dict[str, Descriptor], *, registry: s
           tag: str | None, dry_run: bool, jobs: int = 1, root: Path | None = None,
           platform: str | None = None, arch: str | None = None, no_cache: bool = False,
           base_image: str | None = None, scopes=None, verbose: bool = False,
-          offline: bool = False, check: bool = False) -> int:
+          offline: bool = False, check: bool = False, services: list[str] | None = None) -> int:
     from . import RigError, gitmirror
     if check and not offline:
         raise RigError('build --check reports what an offline build would miss; use it with --offline')
     if offline and no_cache:
         raise RigError('build --offline cannot use --no-cache: every build step would rerun, and '
                        'steps that download need the network')
+    # What the retry hint repeats: every option that changes what is built or where it goes.
+    retry_flags = [flag for name, value in (("--registry", registry), ("--tag", tag),
+                                            ("--platform", platform), ("--arch", arch),
+                                            ("--base-image", base_image))
+                   if value for flag in (name, value)]
+    retry_flags += [f"--scope={s}" for s in (scopes or []) if s != "all"]
+    retry_flags += [f for f, on in (("--no-cache", no_cache), ("--offline", offline)) if on]
     registry, registry_source = build_registry(root, manifest, registry)
     if registry:
         eprint(f'rig build: registry {registry} (from {registry_source})')
@@ -607,8 +659,12 @@ def build(manifest: Manifest, descriptors: dict[str, Descriptor], *, registry: s
                'pass --registry/--tag to supply build values')
     used = {s.service for s in manifest.sensors}
     descriptors = {s: d for s, d in descriptors.items() if s in used}
+    only = select_services(manifest, descriptors, services)
+    if only is not None:
+        eprint(f'rig build: only {", ".join(sorted(only))} — every other service keeps the images '
+               f'already in the registry (dependents FROM a rebuilt base are not rebuilt)')
     if offline:
-        problems = offline_preflight(manifest, descriptors, registry, root)
+        problems = offline_preflight(manifest, descriptors, registry, root, only)
         if problems:
             eprint(f'rig build --offline: {len(problems)} thing(s) an offline build would need '
                    f'are missing — nothing was built:')
@@ -626,9 +682,12 @@ def build(manifest: Manifest, descriptors: dict[str, Descriptor], *, registry: s
         from .matrix_build import run
         return run(manifest, descriptors, registry=registry, tag=tag, dry_run=dry_run,
                    jobs=jobs, root=root, platform=platform, arch=arch, no_cache=no_cache,
-                   base_image=base_image, scopes=scopes, verbose=verbose, offline=offline)
+                   base_image=base_image, scopes=scopes, verbose=verbose, offline=offline,
+                   only=only, retry_flags=retry_flags)
     if no_cache:
         for service, desc in descriptors.items():
+            if only is not None and service not in only:
+                continue
             if desc.build_command and desc.build_no_cache is not True:
                 from . import RigError
                 raise RigError(f'{service}: --no-cache requires build.capabilities.no_cache; '
@@ -638,4 +697,5 @@ def build(manifest: Manifest, descriptors: dict[str, Descriptor], *, registry: s
                'to publish a portable release with companion digests')
     return _build_single(manifest, descriptors, registry=registry, tag=tag, dry_run=dry_run,
                          jobs=jobs, root=root, platform=platform, no_cache=no_cache,
-                         base_image=base_image, verbose=verbose, offline=offline)
+                         base_image=base_image, verbose=verbose, offline=offline, only=only,
+                         retry_flags=retry_flags)

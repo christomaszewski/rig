@@ -629,6 +629,99 @@ def test_doctor_base_image_checks():
     assert any(i.level == INFO and "no deployment base image" in i.message for i in issues)
 
 
+def _selection_world(fail=()):
+    """A base provider with an msgs overlay (logger) and two consumers (a, b; b declares msgs).
+    Every build script records itself in one shared log; scripts named in `fail` exit 1."""
+    log = pathlib.Path(tempfile.mkdtemp()) / "built.log"
+    record = ('echo "$(basename "$(dirname "$0")")/$(basename "$0") '
+              'base=${RIG_BASE_IMAGE:-none}" >> ' + str(log) + '\n'
+              'if [ -n "${RIG_MSGS_MANIFEST:-}" ]; then cp "$RIG_MSGS_MANIFEST" "' + str(log)
+              + '.msgs"; fi\n')
+    repos = {}
+    for svc, rigging in (
+            ("logger", "build: {command: base.sh, images: [fleet-ros], provides: base,\n"
+                       "        msgs_overlay: {command: msgs.sh, image: fleet-ros-msgs}}\n"),
+            ("a", "build: build.sh\n"),
+            ("b", "build: build.sh\nmsgs: {apt: [nmea_msgs]}\n")):
+        repo = pathlib.Path(tempfile.mkdtemp()) / svc
+        repo.mkdir()
+        (repo / "rigging.yaml").write_text(f"service: {svc}\nlauncher: {svc}-up\n{rigging}")
+        for script in ("base.sh", "msgs.sh", "build.sh"):
+            (repo / script).write_text("#!/bin/sh\n" + record
+                                       + ("exit 1\n" if f"{svc}/{script}" in fail else ""))
+            (repo / script).chmod(0o755)
+        repos[svc] = repo
+    root = _deployment("""\
+        vehicle: t
+        images: {registry: reg.test}
+        sensors:
+          - {name: i0, service: logger, config: config/i0.yaml}
+          - {name: i1, service: a, config: config/i1.yaml}
+          - {name: i2, service: b, config: config/i2.yaml}
+        """, repos)
+    descs = {s: load_descriptor(s, r) for s, r in repos.items()}
+    return load_manifest(root), descs, log
+
+
+def _built(log):
+    return sorted(log.read_text().splitlines()) if log.exists() else []
+
+
+def test_build_selected_services_only():
+    m, descs, log = _selection_world()
+    with contextlib.redirect_stderr(io.StringIO()):
+        assert build(m, descs, registry=None, tag="t1", dry_run=False, services=["a"]) == 0
+    # a consumer alone: no base rebuild, but it still builds FROM the published base
+    assert _built(log) == ["a/build.sh base=reg.test/fleet-ros:t1"]
+    log.unlink()
+    with contextlib.redirect_stderr(io.StringIO()):  # an instance name stands for its service
+        assert build(m, descs, registry=None, tag="t1", dry_run=False, services=["i2"]) == 0
+    assert _built(log) == ["b/build.sh base=reg.test/fleet-ros:t1"]
+    log.unlink()
+    with contextlib.redirect_stderr(io.StringIO()):  # the provider: base + overlay, no consumers
+        assert build(m, descs, registry=None, tag="t1", dry_run=False, services=["logger"]) == 0
+    assert _built(log) == ["logger/base.sh base=none", "logger/msgs.sh base=reg.test/fleet-ros:t1"]
+    # the overlay still gets the WHOLE fleet's msgs union, not just the named service's
+    assert "nmea_msgs" in pathlib.Path(f"{log}.msgs").read_text()
+
+
+def test_build_selection_refuses_unknown_names():
+    m, descs, _ = _selection_world()
+    descs["a"].build_command = None
+    for names, needle in ((["nope"], "is not a service or an instance"),
+                          (["a"], "declares no `build:` or `mirror:`")):
+        try:
+            build(m, descs, registry=None, tag="t1", dry_run=False, services=names)
+            raise AssertionError(f"built {names}")
+        except RigError as exc:
+            assert needle in str(exc), exc
+    assert "services: a, b, logger" in str(_raises(m, descs, ["nope"]))
+
+
+def _raises(m, descs, names):
+    try:
+        build(m, descs, registry=None, tag="t1", dry_run=False, services=names)
+    except RigError as exc:
+        return exc
+    raise AssertionError("no error")
+
+
+def test_failed_builds_print_the_retry_command():
+    m, descs, log = _selection_world(fail=("b/build.sh",))
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        assert build(m, descs, registry=None, tag="t1", dry_run=False) == 1
+    assert len(_built(log)) == 4  # base, overlay, a and b all ran
+    assert "rig build: to retry only those: rig build --tag t1 b" in err.getvalue()
+    # a failed base stops the build: the retry names it AND everything that never ran
+    m, descs, log = _selection_world(fail=("logger/base.sh",))
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        assert build(m, descs, registry=None, tag="t1", dry_run=False) == 1
+    assert _built(log) == ["logger/base.sh base=none"]
+    assert "rig build: to retry only those: rig build --tag t1 a b logger" in err.getvalue()
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

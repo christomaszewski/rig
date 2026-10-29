@@ -687,6 +687,7 @@ _POSITIONAL_SOURCES: dict = {
     **{((verb,), "names"): _instances for verb in _INSTANCE_VERBS},
     (("add",), "service"): _add_specs,
     (("vendor",), "service"): _services,
+    (("build",), "services"): _services,
     (("unbake",), "artifact"): _artifacts,
     (("artifact-show",), "tag"): _artifact_tags,
     (("artifact-rm",), "tags"): _artifact_tags,

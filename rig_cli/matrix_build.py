@@ -35,7 +35,7 @@ class Task:
 
 
 def plan(manifest, descriptors, *, registry, tag, platform=None, arch=None, root=None, base=None,
-         scopes=None, selections=None):
+         scopes=None, selections=None, only=None):
     from .build import (_resolve_build_cwd, _script_identity, _service_tag,
                         resolve_base_image, resolve_msgs_image)
     if arch and arch not in ('arm64', 'amd64'):
@@ -68,6 +68,8 @@ def plan(manifest, descriptors, *, registry, tag, platform=None, arch=None, root
     for service, desc in descriptors.items():
         if selections is not None and service not in selections:
             continue
+        if only is not None and service not in only:  # `rig build SERVICE...`: tasks, not inputs —
+            continue                                   # base and msgs union still read everything
         if not desc.build_command:
             continue
         cwd, note = _resolve_build_cwd(service, desc, root)
@@ -223,9 +225,9 @@ def preflight(tasks, registry, *, access=None):
 
 def run(manifest, descriptors, *, registry, tag, dry_run, jobs=1, root=None,
         platform=None, arch=None, no_cache=False, base_image=None, scopes=None, verbose=False,
-        offline=False):
+        offline=False, only=None, retry_flags=None):
     from . import build_sources
-    from .build import OFFLINE_ENV, _build_cmd, _build_env, msgs_union
+    from .build import OFFLINE_ENV, _build_cmd, _build_env, msgs_union, retry_hint
     from .lock import load_lock, save_lock
     reg = registry or manifest.image_registry
     if not reg:
@@ -239,9 +241,12 @@ def run(manifest, descriptors, *, registry, tag, dry_run, jobs=1, root=None,
                                             scopes, platform=platform, arch=arch)
         for note in notes:
             eprint(f"target {note}")
-    complete = scopes == ["all"] and platform is None and arch is None
+    complete = scopes == ["all"] and platform is None and arch is None and only is None
     tasks = plan(manifest, descriptors, registry=reg, tag=tag, platform=platform,
-                 arch=arch, root=root, base=base_image, scopes=scopes, selections=selections)
+                 arch=arch, root=root, base=base_image, scopes=scopes, selections=selections,
+                 only=only)
+    if only is not None and not tasks and not any(descriptors[s].mirror for s in only):
+        raise RigError(f'nothing to build for {", ".join(sorted(only))} in the selected scope')
     for task in tasks:
         if no_cache and task.desc.build_no_cache is not True:
             raise RigError(f'{task.service} ({task.cwd}): no declared no-cache capability; update its build contract '
@@ -270,7 +275,8 @@ def run(manifest, descriptors, *, registry, tag, dry_run, jobs=1, root=None,
             eprint(f'  {service}{" [msgs]" if stage == 1 else ""}: sources '
                    f'{", ".join(f"{r.name} <- {r.repo} @ {r.ref}" for r in reqs)}')
         return 0
-    mirrors = {image for name, d in descriptors.items() if selections is None or name in selections
+    mirrors = {image for name, d in descriptors.items()
+               if (selections is None or name in selections) and (only is None or name in only)
                for image in d.mirror}
     if offline and mirrors:  # the preflight verified the copies are already in the registry
         eprint(f'rig build: offline — using the copies of {", ".join(sorted(mirrors))} already in {reg}')
@@ -298,10 +304,16 @@ def run(manifest, descriptors, *, registry, tag, dry_run, jobs=1, root=None,
         msgs = temp / 'msgs.yaml'
         msgs.write_text(yaml.safe_dump(union or {}))
 
+        failed = []  # services whose task failed, for the retry hint
+
         def execute(index_task):
             index, task = index_task
-            with progress.step(index) as step:
-                return execute_task(index, task, step)
+            try:
+                with progress.step(index) as step:
+                    return execute_task(index, task, step)
+            except RigError:
+                failed.append(task.service)
+                raise
 
         def execute_task(index, task, step):
             report = temp / f'{index}.jsonl'
@@ -355,9 +367,13 @@ def run(manifest, descriptors, *, registry, tag, dry_run, jobs=1, root=None,
 
         for stage in (0, 1, 2):
             group = [(i, task) for i, task in enumerate(tasks) if task.stage == stage]
-            with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, jobs)) as pool:
-                for rows in pool.map(execute, group):
-                    results.extend(rows)
+            try:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, jobs)) as pool:
+                    for rows in pool.map(execute, group):  # the pool finishes the whole stage
+                        results.extend(rows)
+            except RigError as exc:  # later stages never ran: they need the retry too
+                skipped = [task.service for task in tasks if task.stage > stage]
+                raise RigError(f'{exc}\n{retry_hint(failed + skipped, retry_flags or [])}') from exc
             for row in results:
                 completed_refs[row['ref']] = row['ref'].rsplit(':', 1)[0] + '@' + row['digest']
         for index, image in enumerate(sorted(mirrors), len(tasks)):

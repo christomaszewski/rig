@@ -235,6 +235,13 @@ Publication:
   fresh iteration tag and set images.tag to it before running/baking that build.
   --no-cache does not repin vendored sources. Logs: var/build/<session>/.
 
+Building some services:
+  `rig build SERVICE...` builds only those (service or instance names); every
+  other service keeps the images already in the registry. A named consumer
+  builds FROM the base already published; naming the base provider rebuilds the
+  base and its msgs overlay, not the consumers. After a failure, rig prints the
+  command that retries only the services that failed or never ran.
+
 Offline builds:
   Git sources (rig.lock service pins, msgs overlay sources, build.sources) come
   from local mirrors in $RIG_HOME/cache/git; `rig src sync` fills them online.
@@ -244,6 +251,7 @@ Offline builds:
 
 Examples:
   rig image build --dry-run
+  rig image build sbg novatel --tag release-1
   rig image build --scope host --tag laptop-1
   rig image build --scope deployment,replay --tag release-1
   rig image build --platform dev --arch amd64 --tag bench-1

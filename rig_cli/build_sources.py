@@ -42,19 +42,22 @@ def msgs_requirements(union: dict | None) -> list[Requirement]:
 
 
 def requirements(manifest: Manifest, descriptors: dict[str, Descriptor],
-                 root: Path | None) -> list[Requirement]:
+                 root: Path | None, only: set[str] | None = None) -> list[Requirement]:
+    """Every source the deployment's builds need — or, with ``only`` (`rig build SERVICE...`),
+    just the named services' (the msgs sources when a named service builds the overlay)."""
     from .build import msgs_union, pinned_source
     used = {s.service for s in manifest.sensors}
     descs = {s: d for s, d in sorted(descriptors.items()) if s in used}
+    building = {s: d for s, d in descs.items() if only is None or s in only}
     reqs: list[Requirement] = []
-    for service, desc in descs.items():
+    for service, desc in building.items():
         if not desc.build_command:
             continue
         needed, source = pinned_source(service, desc, root)
         if needed and source:
             reqs.append(Requirement("pin", service, str(source["repo"]), str(source["rev"])))
         reqs += build_requirements(service, desc)
-    if any(d.msgs_overlay_command for d in descs.values()):
+    if any(d.msgs_overlay_command for d in building.values()):  # the union spans ALL services
         union, error = msgs_union(descs)
         if error:
             raise RigError(error)

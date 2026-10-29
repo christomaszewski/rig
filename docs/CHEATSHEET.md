@@ -359,6 +359,9 @@ rig image build -h                            # runtime/CPU scope rules, publica
 rig build -j 3                                # full declared runtime/CPU matrix, including disabled rows
                                               #   registry: --registry, tree-local, machine-local, vehicle.yaml
                                               #   exports ROS_DISTRO from ros.distro (fleet-ros bakes YOUR distro)
+rig build sbg novatel                         # only these services (service or instance names); the rest
+                                              #   keep their registry images. A failed build prints the
+                                              #   `rig build <failed services>` command that retries just those
 rig build --scope host --tag iteration-1       # this machine's runtime and Docker CPU
 rig build --scope deployment,replay --dry-run  # vehicle target plus replay companion build plan
 rig build --no-cache                          # FULL rebuild: RIG_BUILD_NO_CACHE=1 to every build command
