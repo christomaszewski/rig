@@ -13,6 +13,16 @@ import time
 from . import RigError
 from .common import eprint
 
+# A fetch that failed on name resolution (apt, curl/git, pip, Go, npm): the network, not the
+# build — and on a host with a loopback DNS stub, usually BuildKit's 8.8.8.8 fallback.
+_DNS_FAILURE = re.compile(r'Temporary failure (?:in name resolution|resolving)|Could not resolve host|'
+                          r'Name or service not known|no such host|getaddrinfo EAI_AGAIN|'
+                          r'lookup \S+ on \S+:53', re.I)
+DNS_HINT = ('rig: this step could not resolve host names. BuildKit cannot use a loopback DNS stub '
+            "(systemd-resolved's 127.0.0.53) and falls back to 8.8.8.8, which many networks block; "
+            "rig's managed builder gets this host's servers, and RIG_BUILDKITD_CONFIG can name a "
+            'buildkitd.toml snippet with [dns] nameservers (`resolvectl dns` lists them)')
+
 
 def duration(seconds):
     seconds = int(seconds)
@@ -88,11 +98,13 @@ class BuildProgress:
                 self.failed += 1
                 self.write(f'[{index + 1}/{len(self.labels)}] FAILED {label} '
                            f'({duration(time.monotonic() - started)}); {self._counts()}')
+                with log.open('rb') as handle:
+                    handle.seek(max(0, log.stat().st_size - 65536))
+                    text = handle.read().decode('utf-8', errors='replace')
                 if not self.verbose:
-                    with log.open('rb') as handle:
-                        handle.seek(max(0, log.stat().st_size - 16384))
-                        tail = handle.read().decode('utf-8', errors='replace').splitlines()[-40:]
-                    self.write('\n'.join(tail))
+                    self.write('\n'.join(text.splitlines()[-40:]))
+                if _DNS_FAILURE.search(text):
+                    self.write(DNS_HINT)
                 self.write(f'Full log: {log}')
             raise
         else:

@@ -194,7 +194,8 @@ replay: {platform: dev}
         supported = subprocess.CompletedProcess([], 0, 'Platforms: linux/amd64, linux/arm64', '')
         with patch.object(matrix.subprocess, 'run', return_value=supported), \
                 patch.object(matrix, 'inspect_raw', return_value=index()):
-            with self.assertRaisesRegex(RigError, 'replace architecture members'):
+            with self.assertRaisesRegex(RigError, r'replace architecture members .*index serves amd64, '
+                                                  r'arm64, this build writes only arm64 \(dropping amd64\)'):
                 matrix.preflight(tasks, m.image_registry)
         with patch.object(matrix.subprocess, 'run', return_value=supported), \
                 patch.object(matrix, 'inspect_raw', return_value=None):
@@ -203,6 +204,32 @@ replay: {platform: dev}
                 [], 0, 'Platforms: linux/amd64', '')):
             with self.assertRaisesRegex(RigError, 'builder .* lacks'):
                 matrix.preflight(tasks, m.image_registry)
+
+    def test_narrowing_reads_the_architecture_of_a_single_platform_tag(self):
+        desc = self.service('a')
+        m = self.manifest('a')
+        tasks = matrix.plan(m, {'a': desc}, registry=m.image_registry, tag=None, arch='amd64')
+        supported = subprocess.CompletedProcess([], 0, 'Platforms: linux/amd64, linux/arm64', '')
+        plain = {'schemaVersion': 2, 'mediaType': 'application/vnd.oci.image.manifest.v1+json',
+                 'config': {'digest': DIGEST}, 'layers': []}  # a plain `docker push`: no member list
+
+        def config(arch):
+            return subprocess.CompletedProcess([], 0, json.dumps({'os': 'linux', 'architecture': arch}), '')
+        with patch.object(matrix.subprocess, 'run', return_value=supported), \
+                patch.object(matrix, 'inspect_raw', return_value=plain):
+            # rebuilding the architecture the tag already serves replaces nothing
+            with patch.object(matrix.docker_registry, 'imagetools', return_value=config('amd64')) as tools:
+                matrix.preflight(tasks, m.image_registry)
+            self.assertEqual(tools.call_args.args[0][:3], ['inspect', '--format', '{{json .Image}}'])
+            with patch.object(matrix.docker_registry, 'imagetools', return_value=config('arm64')):
+                with self.assertRaisesRegex(RigError, r'single-platform image serves arm64, this build '
+                                                      r'writes only amd64 \(dropping arm64\)'):
+                    matrix.preflight(tasks, m.image_registry)
+            denied = subprocess.CompletedProcess([], 1, '', 'denied')
+            with patch.object(matrix.docker_registry, 'imagetools', return_value=denied):
+                with self.assertRaisesRegex(RigError, 'cannot tell which architectures it serves, so '
+                                                      'building only amd64'):
+                    matrix.preflight(tasks, m.image_registry)
 
     def test_no_cache_rejected_without_capability_and_build_channels_do_not_leak(self):
         desc = self.service('a')

@@ -1,6 +1,7 @@
 # rig — project state & handoff (resume here)
 
-Current checkpoint: **v0.2.74 — offline and selected-service builds**,
+Current checkpoint: **v0.2.75 — build and bench-identity fixes** on v0.2.74's offline and
+selected-service builds,
 reviewed **2026-10-29 UTC**. Use the [documentation index](README.md) to choose an operator
 workflow. The dated entries below are historical observations, not the current host state.
 
@@ -32,6 +33,14 @@ workflow. The dated entries below are historical observations, not the current h
   [the review](releases/v0.2.74-review.md). Open: sbg_driver's `build.sources` adoption,
   phase 2 of the [offline builds plan](offline-builds-plan.md), and tying camera replay speed to
   the bag player's rate.
+- v0.2.75 fixes three items from the Isaac-in-the-loop feedback: targeted builds read a
+  single-platform tag's architecture and name both sides when refusing; a vehicle-local
+  `ros: {domain_id}` sets the ROS domain, doctor names its source, and a bench still on the
+  deployment's explicit domain is warned; managed Buildx builders get the host's real DNS behind
+  a systemd-resolved stub (`RIG_BUILDKITD_CONFIG` adds settings) without losing their cache, and a
+  build step that fails on name resolution says so. Still open from that feedback: hybrid
+  replay + simulation sessions, cross-distro simulator checks by type hash, `rig image adopt`,
+  infra build context in reconstructed trees, and linked-run recordings in replay containers.
 
 ## Historical release notes and handoff observations
 

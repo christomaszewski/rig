@@ -3,9 +3,11 @@ import io
 import json
 import os
 from pathlib import Path
+import socket
 import ssl
 import subprocess
 import sys
+import tempfile
 import unittest
 from unittest.mock import patch
 import urllib.error
@@ -13,6 +15,11 @@ import urllib.error
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from rig_cli import RigError, docker_registry as registry
 from rig_cli.matrix_build import inspect_raw, preflight
+
+# Hermetic: the managed builder's applied-settings records live under $RIG_HOME, and an operator's
+# RIG_BUILDKITD_CONFIG must not reach these.
+os.environ["RIG_HOME"] = tempfile.mkdtemp()
+os.environ.pop("RIG_BUILDKITD_CONFIG", None)
 
 HOST = 'registry.test:5000'
 REF = HOST + '/team/core:v1'
@@ -216,6 +223,99 @@ class ManagedBuilderTests(unittest.TestCase):
             with self.subTest(driver=driver, overrides=overrides, endpoints=endpoints):
                 self.assertEqual(self.prepare_with_driver(driver, overrides=overrides,
                                                          endpoints=endpoints).build_env, {})
+
+
+class BuilderDnsTests(unittest.TestCase):
+    """BuildKit drops a loopback DNS stub from RUN steps and falls back to 8.8.8.8; the managed
+    builder gets the host's real servers instead — without renaming it (its cache is the name's)."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        os.environ["RIG_HOME"] = str(self.tmp / "home")
+        self.resolv, self.upstream = self.tmp / "resolv.conf", self.tmp / "upstream.conf"
+        self.resolv.write_text("# stub\nnameserver 127.0.0.53\noptions edns0\nsearch .\n")
+        self.upstream.write_text("nameserver 10.1.0.2\nnameserver 10.1.0.3\nsearch corp.example\n")
+        for name, path in (("RESOLV_CONF", self.resolv), ("RESOLVED_UPSTREAM", self.upstream)):
+            patcher = patch.object(registry, name, str(path))
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.local = {**INFO, "name": socket.gethostname()}
+
+    def test_a_loopback_stub_yields_the_upstream_servers(self):
+        self.assertEqual(registry.builder_dns(), '[dns]\n  nameservers = ["10.1.0.2", "10.1.0.3"]\n'
+                                                 '  searchDomains = ["corp.example"]\n')
+        self.upstream.write_text("nameserver 127.0.0.1\n")
+        self.assertEqual(registry.builder_dns(), '')  # nothing better to offer
+        self.resolv.write_text("nameserver 192.168.1.1\nnameserver 127.0.0.53\n")
+        self.assertEqual(registry.builder_dns(), '')  # a real server is already there
+
+    def docker(self, exists=False):
+        state = dict(exists=exists, calls=[], configs=[])
+
+        def run(cmd, **kwargs):
+            state["calls"].append(cmd[:3])
+            if cmd[:3] == ['docker', 'buildx', 'inspect']:
+                return completed(cmd, 'Driver: docker-container\n', 0 if state["exists"] else 1)
+            if cmd[:3] == ['docker', 'buildx', 'rm']:
+                self.assertIn('--keep-state', cmd)  # the build cache survives the re-creation
+                state["exists"] = False
+                return completed(cmd)
+            self.assertEqual(cmd[:3], ['docker', 'buildx', 'create'])
+            state["configs"].append(Path(cmd[cmd.index('--buildkitd-config') + 1]).read_text())
+            state["exists"] = True
+            return completed(cmd)
+        return state, patch.object(registry.subprocess, 'run', side_effect=run)
+
+    def test_a_local_daemon_gets_the_dns_and_keeps_its_name(self):
+        plain, runner = self.docker()
+        with runner:
+            remote_name = registry._managed_builder(INFO, {HOST: 'http'})  # no daemon name: not ours
+        self.assertNotIn('[dns]', plain["configs"][0])
+        os.environ["RIG_HOME"] = str(self.tmp / "other-home")
+        state, runner = self.docker()
+        with runner:
+            name = registry._managed_builder(self.local, {HOST: 'http'})
+            self.assertEqual(registry._managed_builder(self.local, {HOST: 'http'}), name)
+        self.assertEqual(name, remote_name)  # DNS never names the builder
+        self.assertEqual(state["configs"], ['[registry."registry.test:5000"]\n  http = true\n'
+                                            + registry.builder_dns()])
+        self.assertEqual([c[2] for c in state["calls"]].count('create'), 1)
+
+    def test_new_servers_recreate_the_builder_under_its_name(self):
+        state, runner = self.docker()
+        with runner:
+            name = registry._managed_builder(self.local, {HOST: 'http'})
+            self.upstream.write_text("nameserver 10.9.0.9\n")  # another network
+            with patch('sys.stderr', new_callable=io.StringIO) as err:
+                self.assertEqual(registry._managed_builder(self.local, {HOST: 'http'}), name)
+            self.assertIn('build cache is kept', err.getvalue())
+        self.assertIn('10.9.0.9', state["configs"][-1])
+        self.assertEqual([c[2] for c in state["calls"]].count('rm'), 1)
+
+    def test_a_builder_from_before_records_is_left_alone_unless_dns_applies(self):
+        self.resolv.write_text("nameserver 192.168.1.1\n")
+        state, runner = self.docker(exists=True)
+        with runner:
+            registry._managed_builder(self.local, {HOST: 'http'})
+        self.assertNotIn('rm', [c[2] for c in state["calls"]])
+        self.resolv.write_text("nameserver 127.0.0.53\n")
+        state, runner = self.docker(exists=True)
+        with runner, patch('sys.stderr', new_callable=io.StringIO):
+            registry._managed_builder(self.local, {HOST: 'http'})
+        self.assertIn('rm', [c[2] for c in state["calls"]])
+        self.assertIn('[dns]', state["configs"][-1])
+
+    def test_an_operator_snippet_is_appended_and_its_dns_wins(self):
+        snippet = self.tmp / "buildkitd.toml"
+        snippet.write_text('[dns]\n  nameservers = ["10.7.7.7"]\n[worker.oci]\n  max-parallelism = 2')
+        state, runner = self.docker()
+        with runner, patch.dict(os.environ, {"RIG_BUILDKITD_CONFIG": str(snippet)}):
+            registry._managed_builder(self.local, {HOST: 'http'})
+        self.assertNotIn('10.1.0.2', state["configs"][0])
+        self.assertTrue(state["configs"][0].endswith('max-parallelism = 2\n'))
+        with patch.dict(os.environ, {"RIG_BUILDKITD_CONFIG": str(self.tmp / "missing.toml")}):
+            with self.assertRaisesRegex(RigError, 'RIG_BUILDKITD_CONFIG: cannot read'):
+                registry._managed_builder(self.local, {HOST: 'http'})
 
 
 class RegistryCallerTests(unittest.TestCase):

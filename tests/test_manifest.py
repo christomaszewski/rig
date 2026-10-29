@@ -166,6 +166,54 @@ def test_vehicle_id_derives_domain():
     assert load_manifest(explicit).ros.domain_id == 0  # explicit ros.domain_id wins
 
 
+def test_a_vehicle_local_domain_outranks_vehicle_yaml_and_is_named():
+    vehicle = ("vehicle: v\nvehicle_id: 5\nros: {domain_id: 5}\n"
+               "sensors: [{name: a, service: novatel, config: x.yaml}]\n")
+    files = {"vehicle.yaml": vehicle, "x.yaml": "service: novatel\nconnection: {type: file}\n"}
+    m = load_manifest(_root_with(files))
+    assert (m.ros.domain_id, m.ros.domain_source, m.ros.domain_warning) == (5, "vehicle.yaml", None)
+    # the bench changes its id but the explicit domain still holds — loudly, not silently
+    m = load_manifest(_root_with(dict(files, **{"vehicle.local.yaml": "vehicle_id: 69\n"})))
+    assert m.vehicle_id == 69 and m.ros.domain_id == 5
+    assert "vehicle_id 69" in m.ros.domain_warning and "ros: {domain_id: N}" in m.ros.domain_warning
+    # the bench's own domain wins and silences it (the same number = sharing on purpose)
+    for domain in (69, 5):
+        m = load_manifest(_root_with(dict(files, **{
+            "vehicle.local.yaml": f"vehicle_id: 69\nros: {{domain_id: {domain}}}\n"})))
+        assert (m.ros.domain_id, m.ros.domain_source, m.ros.domain_warning) == \
+            (domain, "vehicle.local.yaml", None)
+    # deployment planning never reads the local tier
+    bench = _root_with(dict(files, **{"vehicle.local.yaml": "vehicle_id: 69\nros: {domain_id: 69}\n"}))
+    assert load_manifest(bench, context="deployment").ros.domain_id == 5
+    # the machine identity file may carry it too, under the tree's file
+    machine = pathlib.Path(tempfile.mkdtemp()) / "vehicle.local.yaml"
+    machine.write_text("vehicle_id: 12\nros: {domain_id: 40}\n")
+    saved = os.environ["RIG_VEHICLE_LOCAL"]
+    os.environ["RIG_VEHICLE_LOCAL"] = str(machine)
+    try:
+        m = load_manifest(_root_with(files))
+        assert (m.ros.domain_id, m.ros.domain_source) == (40, str(machine))
+        assert m.ros.domain_warning is None  # a machine's identity is not a bench's
+        m = load_manifest(bench)
+        assert (m.ros.domain_id, m.ros.domain_source) == (69, "vehicle.local.yaml")
+    finally:
+        os.environ["RIG_VEHICLE_LOCAL"] = saved
+
+
+def test_vehicle_local_ros_carries_only_a_literal_domain():
+    files = {"vehicle.yaml": "vehicle: v\nsensors: []\n"}
+    for body, needle in (("ros: {rmw: rmw_zenoh_cpp}\n", "carries only domain_id"),
+                         ("ros: {domain_id: 5, distro: jazzy}\n", "carries only domain_id"),
+                         ("ros: 5\n", "carries only domain_id"),
+                         ("ros: {domain_id: '{{vehicle_id}}'}\n", "must be an integer 0..232"),
+                         ("ros: {domain_id: 233}\n", "outside 0..232")):
+        _expect_error(_root_with(dict(files, **{"vehicle.local.yaml": body})), needle)
+    # a reconstruct workspace's tree file names only its data_dir: no identity, no warning
+    root = _root_with({"vehicle.yaml": "vehicle: v\nvehicle_id: 7\nros: {domain_id: 3}\nsensors: []\n",
+                       "vehicle.local.yaml": "data_dir: ./var/data\n"})
+    assert load_manifest(root).ros.domain_warning is None
+
+
 def test_infra_comes_before_sensors_regardless_of_order():
     root = _root_with({
         "vehicle.yaml": """

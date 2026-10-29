@@ -23,7 +23,10 @@ rig src sync && rig build --offline       # build without remote git or upstream
 ```
 
 Use the same version in `images.tag` when running an iteration built with `--tag`. A targeted build
-cannot replace an existing tag that contains other CPU architectures; use a new iteration tag.
+cannot replace an existing tag that contains other CPU architectures; use a new iteration tag. The
+refusal names the architectures the registry tag serves and the ones the build would write. A
+single-platform tag (a plain `docker push`) counts as its one architecture, so rebuilding that
+architecture over it is allowed (v0.2.75).
 Omitting `images.tag` retains platform tags such as `dev` and generic `latest` tags.
 
 Builds run in stages: shared base images first, then the messages overlay, then independent
@@ -181,6 +184,17 @@ This retains provenance without requiring a daemon configuration change. For a s
 needs inherited registry policy. Managed builders retain their own cache between runs; the first
 build cannot reuse the built-in Docker driver's cache. Their host network lets them reach
 registries published on the Docker host's loopback interface.
+
+**DNS in managed builders (v0.2.75).** BuildKit cannot hand a loopback DNS stub (systemd-resolved's
+`127.0.0.53` in `/etc/resolv.conf`) to RUN steps and falls back to `8.8.8.8`. On networks that block
+public DNS, every fetch then stalls and fails, while `docker build` works. When the Docker daemon is
+this host's and its resolv.conf names only a loopback stub, Rig gives the managed builder the
+upstream servers and search domains from `/run/systemd/resolve/resolv.conf`. Set
+`RIG_BUILDKITD_CONFIG` to a `buildkitd.toml` snippet to add your own settings; a `[dns]` table in it
+replaces the automatic one. These settings do not change the builder's name, so its cache survives
+a network change: when they differ from what the builder was created with, Rig re-creates it under
+the same name with `docker buildx rm --keep-state`. A build step that fails on name resolution
+ends with a hint saying so.
 
 Explicit `BUILDX_BUILDER` / `BUILDKIT_HOST` selections and remote/cloud/multinode builders keep their
 build settings and topology; those build servers must already have the required registry access.

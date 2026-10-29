@@ -166,6 +166,23 @@ def manifest_architectures(raw):
             if m.get('platform', {}).get('os') == 'linux'}
 
 
+def tag_architectures(ref, raw, *, access=None):
+    """The linux architectures ``ref`` serves: an index's members, or — for a single-platform
+    manifest (a plain `docker push`, which has no member list) — the one its image config names.
+    Empty when that config cannot be read."""
+    if 'manifests' in raw:
+        return manifest_architectures(raw)
+    try:
+        result = docker_registry.imagetools(['inspect', '--format', '{{json .Image}}', ref], [ref],
+                                            access=access, capture_output=True, text=True, timeout=45)
+        config = json.loads(result.stdout) if not result.returncode else {}
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return set()
+    if isinstance(config, dict) and config.get('os') == 'linux' and config.get('architecture'):
+        return {config['architecture']}
+    return set()
+
+
 def _builder_platforms(access):
     import os
     env = dict(os.environ, **access.build_env) if access else dict(os.environ)
@@ -216,11 +233,21 @@ def preflight(tasks, registry, *, access=None):
         for image in task.images:
             ref = f'{registry}/{image}:{task.tag}'
             raw = inspect_raw(ref, access=access)
-            if raw is not None:
-                existing = manifest_architectures(raw)
-                if not existing or existing - set(task.architectures):
-                    raise RigError(f'targeted build would replace architecture members of {ref}; '
-                                   'use a new iteration tag or build the complete matrix')
+            if raw is None:
+                continue
+            existing = tag_architectures(ref, raw, access=access)
+            planned = ', '.join(sorted(task.architectures))
+            if not existing:
+                raise RigError(f'{ref} already exists and rig cannot tell which architectures it '
+                               f'serves, so building only {planned} could drop some; use a new '
+                               'iteration tag or build the complete matrix')
+            if existing - set(task.architectures):
+                shape = 'index' if 'manifests' in raw else 'single-platform image'
+                raise RigError(f'targeted build would replace architecture members of {ref}: the '
+                               f'registry {shape} serves {", ".join(sorted(existing))}, this build '
+                               f'writes only {planned} (dropping '
+                               f'{", ".join(sorted(existing - set(task.architectures)))}); use a new '
+                               'iteration tag or build the complete matrix')
 
 
 def run(manifest, descriptors, *, registry, tag, dry_run, jobs=1, root=None,

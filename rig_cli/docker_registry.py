@@ -5,6 +5,11 @@ builder supplies that missing policy without changing the user's selected builde
 using the docker driver keep its cache when its image store supports portable builds; classic
 stores and unconfigured container builders can use the managed builder instead. Explicit
 builder overrides remain authoritative.
+
+The managed builder also gets this host's real DNS servers when the host resolves through a
+loopback stub (systemd-resolved), which BuildKit cannot use from a RUN step. Those settings do
+not name the builder — a new network must never cost the build cache an offline build needs —
+so a change re-creates it under the same name with its state kept.
 """
 from __future__ import annotations
 
@@ -125,7 +130,7 @@ def _docker_info():
     try:
         proc = subprocess.run(
             ['docker', 'info', '--format', '{"id":{{json .ID}},"registries":{{json .RegistryConfig}},'
-             '"driver_status":{{json .DriverStatus}}}'],
+             '"driver_status":{{json .DriverStatus}},"name":{{json .Name}}}'],
             capture_output=True, text=True, timeout=10)
         info = json.loads(proc.stdout) if proc.returncode == 0 else None
         if isinstance(info, dict) and isinstance(info.get('registries'), dict) and info.get('id'):
@@ -137,22 +142,104 @@ def _docker_info():
     return None
 
 
+RESOLV_CONF = '/etc/resolv.conf'
+RESOLVED_UPSTREAM = '/run/systemd/resolve/resolv.conf'  # systemd-resolved's real servers
+
+
+def _resolv(path):
+    """(nameservers, search domains) a resolv.conf lists; empty when unreadable."""
+    servers, search = [], []
+    try:
+        lines = Path(path).read_text().splitlines()
+    except OSError:
+        return servers, search
+    for line in lines:
+        fields = line.split('#', 1)[0].split()
+        if len(fields) >= 2 and fields[0] == 'nameserver':
+            servers.append(fields[1])
+        elif fields and fields[0] in ('search', 'domain'):
+            search = [d for d in fields[1:] if d != '.']
+    return servers, search
+
+
+def _loopback(address):
+    try:
+        return ipaddress.ip_address(address.split('%', 1)[0]).is_loopback
+    except ValueError:
+        return False
+
+
+def builder_dns():
+    """``[dns]`` for the managed builder when this host resolves only through a loopback stub
+    (systemd-resolved's 127.0.0.53). BuildKit drops loopback servers from a RUN step's
+    resolv.conf and falls back to 8.8.8.8/8.8.4.4, so on a network that blocks public DNS
+    every fetch stalls and fails — while `docker build` works, because dockerd reads resolved's
+    upstream list. That same list here; '' when no stub is in play or no upstream is known."""
+    local, _ = _resolv(RESOLV_CONF)
+    if not local or not all(_loopback(server) for server in local):
+        return ''
+    upstream, search = _resolv(RESOLVED_UPSTREAM)
+    upstream = [server for server in upstream if not _loopback(server)]
+    if not upstream:
+        return ''
+    text = f'[dns]\n  nameservers = {json.dumps(upstream)}\n'
+    return text + (f'  searchDomains = {json.dumps(search)}\n' if search else '')
+
+
+def _builder_tuning(info):
+    """Builder settings that do not name it: the operator's RIG_BUILDKITD_CONFIG snippet (a
+    buildkitd.toml fragment), and — unless that snippet has its own ``[dns]`` — this host's DNS
+    when the Docker daemon is this host's (a remote daemon's resolvers are not ours to read)."""
+    extra = ''
+    if os.environ.get('RIG_BUILDKITD_CONFIG'):
+        path = Path(os.environ['RIG_BUILDKITD_CONFIG']).expanduser()
+        try:
+            extra = path.read_text()
+        except OSError as exc:
+            raise RigError(f'RIG_BUILDKITD_CONFIG: cannot read {path}: {exc}') from exc
+        extra += '' if extra.endswith('\n') else '\n'
+    local = bool(info.get('name')) and info['name'] == socket.gethostname()
+    dns = builder_dns() if local and not re.search(r'^\s*\[dns\]', extra, re.M) else ''
+    return dns + extra
+
+
+def _applied_record(name):
+    from .registries import rig_home
+    return rig_home() / 'cache' / 'buildx' / f'{name}.toml'
+
+
 def _managed_builder(info, settings):
     config = ''.join(f'[registry.{json.dumps(host)}]\n  {transport} = true\n'
                      for host, transport in sorted(settings.items()))
     identity = json.dumps([info['id'], os.environ.get('DOCKER_CONTEXT'), os.environ.get('DOCKER_HOST'),
                            os.environ.get('DOCKER_TLS_VERIFY'), config], sort_keys=True)
     name = 'rig-registry-' + hashlib.sha256(identity.encode()).hexdigest()[:16]
+    tuning = _builder_tuning(info)
+    record = _applied_record(name)
+    try:
+        applied = record.read_text()
+    except OSError:
+        applied = config  # created before rig recorded settings: from the registry tables alone
     inspect = ['docker', 'buildx', 'inspect', name]
+    recreated = False
     try:
         existing = subprocess.run(inspect, capture_output=True, text=True, timeout=30)
         if existing.returncode == 0:
             if not re.search(r'^Driver:\s+docker-container\s*$', existing.stdout, re.M):
                 raise RigError(f'{name}: expected a Rig-managed docker-container builder')
-            return name
+            if applied == config + tuning:
+                return name
+            # Same name + kept state volume = same build cache, new settings (a new network's DNS).
+            removed = subprocess.run(['docker', 'buildx', 'rm', '--keep-state', name],
+                                     capture_output=True, text=True, timeout=60)
+            if removed.returncode:
+                eprint(f'rig: warning: cannot re-create {name} with new settings '
+                       f'({removed.stderr.strip()}); building with its old ones')
+                return name
+            recreated = True
         with tempfile.TemporaryDirectory(prefix='rig-registry-') as tmp:
             path = Path(tmp) / 'buildkitd.toml'
-            path.write_text(config)
+            path.write_text(config + tuning)
             proc = subprocess.run(
                 ['docker', 'buildx', 'create', '--name', name, '--driver', 'docker-container',
                  '--driver-opt', 'network=host', '--buildkitd-config', str(path)],
@@ -162,6 +249,15 @@ def _managed_builder(info, settings):
             other = subprocess.run(inspect, capture_output=True, text=True, timeout=30)
             if other.returncode or not re.search(r'^Driver:\s+docker-container\s*$', other.stdout, re.M):
                 raise RigError(f'cannot prepare Docker registry settings for Buildx: {proc.stderr.strip()}')
+        else:
+            if tuning:
+                record.parent.mkdir(parents=True, exist_ok=True)
+                record.write_text(config + tuning)
+            else:
+                record.unlink(missing_ok=True)
+            if recreated:
+                eprint(f'rig: re-created managed Buildx builder {name} with new settings; '
+                       'its build cache is kept')
         # No --use or --bootstrap: imagetools needs only the saved config, not a container.
         return name
     except (OSError, subprocess.TimeoutExpired) as exc:

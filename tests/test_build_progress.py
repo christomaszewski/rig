@@ -88,6 +88,20 @@ print('live stderr', file=sys.stderr)
         self.assertIn('Full log: ' + str(step.log), output)
         self.assertIn('rig build: failed in', output)
         self.assertNotIn('DONE', output)
+        self.assertNotIn('could not resolve host names', output)
+
+    def test_a_name_resolution_failure_says_so(self):
+        for verbose in (False, True):
+            self.output.seek(0)
+            self.output.truncate()
+            with self.assertRaises(RigError):
+                with BuildProgress(['build apt'], root=self.root, verbose=verbose) as progress:
+                    with progress.step(0) as step:
+                        step.run([sys.executable, '-c',
+                                  'import sys; print("Err:1 http://archive.ubuntu.com jammy InRelease\\n'
+                                  "  Temporary failure resolving 'archive.ubuntu.com'\"); sys.exit(100)"])
+            self.assertIn('could not resolve host names', self.output.getvalue())
+            self.assertIn('RIG_BUILDKITD_CONFIG', self.output.getvalue())
 
     def test_heartbeat_includes_verification_and_stops_with_context(self):
         running, verifying = threading.Event(), threading.Event()

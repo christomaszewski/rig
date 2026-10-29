@@ -66,8 +66,12 @@ def collect(
                                       'update build.capabilities and run rig certify on its source'))
 
     vid = f" (id {manifest.vehicle_id})" if manifest.vehicle_id is not None else ""
-    issues.append(Issue(OK, f"vehicle '{manifest.vehicle}'{vid} · ROS domain {manifest.ros.domain_id} · "
-                            f"{manifest.ros.rmw}"))
+    source = manifest.ros.domain_source
+    origin = "default" if source == "default" else f"from {source}"
+    issues.append(Issue(OK, f"vehicle '{manifest.vehicle}'{vid} · ROS domain {manifest.ros.domain_id} "
+                            f"({origin}) · {manifest.ros.rmw}"))
+    if manifest.ros.domain_warning:
+        issues.append(Issue(WARN, manifest.ros.domain_warning))
 
     # rmw_zenoh needs a shared zenoh router (one per vehicle) in the infra tier — and the converse:
     # a router on a NON-zenoh fleet is a runtime failure waiting to happen. The router runs `rmw_zenohd`

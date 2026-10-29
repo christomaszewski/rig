@@ -186,6 +186,9 @@ most-specific-wins: shell (`RIG_VAR_*`) > deployment-local `vehicle.local.yaml` 
 **`/etc/rig/vehicle.local.yaml`** (THE machine's identity, written by `sudo rig provision`) >
 vehicle.yaml `vars:` defaults. A self-marker (`vehicle_id: "{{vehicle_id}}"`) declares the value
 MANDATORY per vehicle — loading fails with the provision hint rather than coming up as vehicle 0.
+The ROS domain follows the same tiers through a vehicle-local `ros: {domain_id: N}` (only
+`domain_id`: rmw and distro belong to the deployment), which outranks vehicle.yaml's explicit
+domain and a numeric `vehicle_id`.
 An `env:` map rides the existing fleet_env channel (interpolated; rig-owned keys rejected) for
 services that consume environment instead of config. `rig bake` needs no flag: fleet-ness is a
 property of the deployment (templates in ⇒ templates out), and bake reads NEITHER local file nor

@@ -27,8 +27,9 @@ from .interpolate import MAP, MARKER, resolve_map, substitute_scalar
 MACHINE_LOCAL_DEFAULT = "/etc/rig/vehicle.local.yaml"
 # The only keys a vehicle-local file may carry: the per-host knobs that genuinely vary across a
 # fleet. Never sensor rows — a local file silently flipping stacks makes fleet debugging miserable.
+# `ros` carries domain_id only: rmw and distro belong to the deployment, the domain to the machine.
 LOCAL_KEYS = {"vehicle", "vehicle_id", "vars", "env", "data_dir", "images", "platform", "arch",
-              "run_capture", "replay"}
+              "run_capture", "replay", "ros"}
 # rig's SIL companion service (rig-infra's ros2-bag-player): the one service rig knows by NAME —
 # replay selects its row by service, the graph check exempts it from interface declarations.
 PLAYER_SERVICE = "ros2-bag-player"
@@ -73,6 +74,9 @@ class RosSettings:
     domain_id: int
     rmw: str
     distro: str | None
+    domain_source: str = "default"  # where domain_id came from: a vehicle-local file, vehicle.yaml,
+    #                                 vehicle_id or default — doctor names it
+    domain_warning: str | None = None  # a bench tree still on the deployment's explicit domain
 
 
 # The hard ordering partition: every infra stack before every sensor before every autonomy stack,
@@ -317,17 +321,17 @@ def _user_source() -> dict:
     return {"data_dir": doc["data_dir"]} if doc.get("data_dir") else {}
 
 
-def _local_sources(root: Path) -> list[dict]:
-    """Vehicle-local files, highest precedence first: the deployment-local vehicle.local.yaml
-    (bench/dev trees — artifacts never ship one), the USER's ~/.rig/config.yaml (data_dir only),
-    then the MACHINE identity file."""
-    sources: list[dict] = []
+def _local_files(root: Path) -> list[tuple[str, dict]]:
+    """Vehicle-local files as (label, data), highest precedence first: the deployment-local
+    vehicle.local.yaml (bench/dev trees — artifacts never ship one), the USER's
+    ~/.rig/config.yaml (data_dir only), then the MACHINE identity file (labelled by its path)."""
+    sources: list[tuple[str, dict]] = []
     machine = machine_file()
     for path in (root / "vehicle.local.yaml", None, machine):
         if path is None:
             user = _user_source()
             if user:
-                sources.append(user)
+                sources.append(("~/.rig/config.yaml", user))
             continue
         if not path.is_file():
             continue
@@ -336,7 +340,14 @@ def _local_sources(root: Path) -> list[dict]:
         if unknown:
             raise RigError(f"{path}: unknown key(s): {', '.join(sorted(unknown))} — vehicle-local "
                            f"files carry only: {', '.join(sorted(LOCAL_KEYS))}")
-        sources.append(data)
+        if "ros" in data:
+            ros = data["ros"]
+            if not isinstance(ros, dict) or set(ros) != {"domain_id"}:
+                raise RigError(f"{path}: `ros` here carries only domain_id (rmw and distro belong "
+                               f"to the deployment's vehicle.yaml)")
+            data = dict(data, ros={"domain_id": _domain_value(ros["domain_id"], f"{path}: ros.domain_id")})
+        label = "vehicle.local.yaml" if path == root / "vehicle.local.yaml" else str(path)
+        sources.append((label, data))
     return sources
 
 
@@ -397,29 +408,56 @@ def require_identity(manifest: "Manifest", *, what: str) -> None:
                    + _PROVISION_HINT.format(machine=machine))
 
 
-def _derive_domain(vehicle_id, ros_raw: dict) -> int:
-    """Explicit `ros.domain_id` wins; else a numeric vehicle id IS the domain (so one knob picks both);
-    else 0. ROS 2 domains are 0..232 (DDS port arithmetic); outside that nothing can start, so it
-    is refused here rather than exported."""
+def _domain_value(raw, where: str) -> int:
+    """A literal ROS domain: an integer 0..232 (DDS port arithmetic; outside that nothing can
+    start, so it is refused here rather than exported)."""
+    if isinstance(raw, bool) or not str(raw).strip().isdigit():
+        raise RigError(f"{where} must be an integer 0..232, not {raw!r} "
+                       f"(it is not interpolated — leave it out and a numeric vehicle_id "
+                       f"becomes the domain)")
+    domain = int(str(raw).strip())
+    if not 0 <= domain <= 232:
+        raise RigError(f"ROS domain {domain} is outside 0..232")
+    return domain
+
+
+def _derive_domain(vehicle_id, ros_raw: dict) -> tuple[int, str]:
+    """(domain, its source). Explicit `ros.domain_id` wins; else a numeric vehicle id IS the domain
+    (so one knob picks both); else 0. A vehicle-local `ros.domain_id` outranks both (load_manifest)."""
     if "domain_id" in ros_raw:
-        raw = ros_raw["domain_id"]
-        if isinstance(raw, bool) or not str(raw).strip().isdigit():
-            raise RigError(f"vehicle.yaml: ros.domain_id must be an integer 0..232, not {raw!r} "
-                           f"(it is not interpolated — leave it out and a numeric vehicle_id "
-                           f"becomes the domain)")
-        domain = int(str(raw).strip())
-    elif isinstance(vehicle_id, bool):  # bool is an int subclass — don't treat True/False as a domain
-        return 0
-    elif isinstance(vehicle_id, int):
+        return _domain_value(ros_raw["domain_id"], "vehicle.yaml: ros.domain_id"), "vehicle.yaml"
+    if isinstance(vehicle_id, bool):  # bool is an int subclass — don't treat True/False as a domain
+        return 0, "default"
+    if isinstance(vehicle_id, int):
         domain = vehicle_id
     elif isinstance(vehicle_id, str) and vehicle_id.isdigit():
         domain = int(vehicle_id)
     else:
-        return 0
+        return 0, "default"
     if not 0 <= domain <= 232:
         raise RigError(f"ROS domain {domain} is outside 0..232 — set ros.domain_id explicitly "
                        f"(a vehicle_id above 232 cannot double as the domain)")
-    return domain
+    return domain, "vehicle_id"
+
+
+def _bench_domain_warning(local, vehicle_id, domain: int, source: str) -> str | None:
+    """A bench tree whose own vehicle.local.yaml sets a numeric vehicle_id that differs from the
+    deployment's EXPLICIT ros.domain_id still joins that domain — say so, since the id alone
+    looks like it should have moved it. A vehicle-local ros.domain_id (even the same number)
+    is the deliberate choice that silences it. (A tree file without vehicle_id — a reconstruct
+    workspace naming its data_dir — claims no identity, so it never warns.)"""
+    if source != "vehicle.yaml" or not any(label == "vehicle.local.yaml" and "vehicle_id" in data
+                                           for label, data in local):
+        return None
+    try:
+        implied, how = _derive_domain(vehicle_id, {})
+    except RigError:
+        return None
+    if how != "vehicle_id" or implied == domain:
+        return None
+    return (f"ROS domain {domain} comes from vehicle.yaml's ros.domain_id, not this bench's "
+            f"vehicle_id {vehicle_id} — set `ros: {{domain_id: N}}` in vehicle.local.yaml "
+            f"({domain} to share the deployment's domain on purpose)")
 
 
 def load_manifest(root: Path, *, context: str = "execution", target_overrides: dict | None = None,
@@ -437,7 +475,8 @@ def load_manifest(root: Path, *, context: str = "execution", target_overrides: d
     # Precedence, most-specific-wins: shell > deployment-local > machine (/etc/rig) >
     # fleet.yaml (the FLEET tempo tier — pushed by `rig fleet up`, persists across reboots) >
     # vehicle.yaml. A self-referencing vehicle.yaml field ("{{vehicle_id}}") is MANDATORY.
-    sources = [_shell_source()] + _local_sources(root) if context == "execution" else []
+    local = _local_files(root) if context == "execution" else []
+    sources = [_shell_source()] + [data for _, data in local] if context == "execution" else []
     if context == "execution" and (root / "fleet.yaml").is_file():
         from .fleet import vars_source
         sources.append(vars_source(root / "fleet.yaml"))
@@ -473,10 +512,15 @@ def load_manifest(root: Path, *, context: str = "execution", target_overrides: d
     vehicle = str(ctx.get("vehicle", "vehicle"))
     vehicle_id = ctx.get("vehicle_id")
     ros_raw = data.get("ros") or {}
+    local_domain = next(((label, src["ros"]["domain_id"]) for label, src in local if "ros" in src), None)
+    domain, domain_source = (local_domain[1], local_domain[0]) if local_domain else \
+        _derive_domain(vehicle_id, ros_raw)
     ros = RosSettings(
-        domain_id=_derive_domain(vehicle_id, ros_raw),
+        domain_id=domain,
         rmw=str(ros_raw.get("rmw", "rmw_fastrtps_cpp")),
         distro=ros_raw.get("distro"),
+        domain_source=domain_source,
+        domain_warning=_bench_domain_warning(local, vehicle_id, domain, domain_source),
     )
     ctx.setdefault("vehicle", vehicle)
     ctx["ros_domain_id"] = ros.domain_id

@@ -272,7 +272,13 @@ fleet_ids minus THIS vehicle's id.
 Sources, most-specific wins: shell (`RIG_VEHICLE_ID`, `RIG_VAR_<name>`) > `vehicle.local.yaml`
 beside vehicle.yaml (bench trees) > **`/etc/rig/vehicle.local.yaml`** (THE machine's identity) >
 **`fleet.yaml`** (the fleet tempo tier) > vehicle.yaml. Unknown var = hard error listing what's
-available. Everything lands in every run's config snapshot — per-run fleet composition is
+available.
+
+ROS domain: a vehicle-local `ros: {domain_id: N}` (tree or machine file; nothing else under `ros`)
+> vehicle.yaml `ros.domain_id` > a numeric `vehicle_id` > 0. `rig doctor` names the source. A bench
+tree whose own `vehicle.local.yaml` sets a numeric `vehicle_id` other than vehicle.yaml's explicit
+domain is warned by `rig doctor` and `rig up`; its own `ros.domain_id` (even the same number)
+silences the warning (v0.2.75). Everything lands in every run's config snapshot — per-run fleet composition is
 recorded per vehicle automatically, and a mid-test REBOOT re-renders from the pushed fleet.yaml,
 not stale defaults.
 
@@ -406,7 +412,10 @@ and `<tag>` for generic services. Without an image version, tags are the runtime
 The default build covers all declared runtimes/CPUs; vehicle `platform`/`arch` select a deployment
 target, not release-build filters. `--platform`/`--arch` filter the full matrix, or override only
 the deployment part of narrower scopes. Use a fresh iteration tag for partial builds, and set
-`images.tag` to that version before running/baking it. See [Portable builds](BUILD_AND_REPLAY.md).
+`images.tag` to that version before running/baking it; a refusal names the architectures the tag
+serves and the ones the build would write. See [Portable builds](BUILD_AND_REPLAY.md).
+Managed Buildx builders get the host's real DNS servers when `/etc/resolv.conf` is a loopback stub
+(v0.2.75); `RIG_BUILDKITD_CONFIG=<buildkitd.toml snippet>` adds settings, and its `[dns]` wins.
 
 Base image: a service whose rigging declares `build: {…, provides: base}` (rig-infra's fleet-ros)
 builds FIRST, and its verified published digest is supplied to subsequent builds as **RIG_BASE_IMAGE**.

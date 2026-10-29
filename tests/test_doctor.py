@@ -97,6 +97,30 @@ def test_errors_on_vehicle_vs_service_distro_mismatch():
     assert any(i.level == "OK" and "single ROS distro: lyrical" in i.message for i in agree)
 
 
+def test_names_where_the_ros_domain_came_from_and_warns_a_bench_on_the_vehicles_domain():
+    from rig_cli.catalog import load_catalog
+    from rig_cli.doctor import collect
+    from rig_cli.manifest import load_manifest
+
+    def issues_with(local):
+        d = pathlib.Path(tempfile.mkdtemp())
+        (d / "vehicle.yaml").write_text("vehicle: t\nvehicle_id: 5\nros: {domain_id: 5}\nsensors: []\n")
+        (d / "services.yaml").write_text("services: {}\n")
+        if local is not None:
+            (d / "vehicle.local.yaml").write_text(local)
+        return collect(load_manifest(d), load_catalog(d), {})
+
+    def identity(issues):
+        return next(i.message for i in issues if i.level == "OK" and "ROS domain" in i.message)
+
+    assert "ROS domain 5 (from vehicle.yaml)" in identity(issues_with(None))
+    bench = issues_with("vehicle_id: 69\n")
+    assert any(i.level == "WARN" and "not this bench's vehicle_id 69" in i.message for i in bench)
+    chosen = issues_with("vehicle_id: 69\nros: {domain_id: 69}\n")
+    assert "ROS domain 69 (from vehicle.local.yaml)" in identity(chosen)
+    assert not any("bench's vehicle_id" in i.message for i in chosen)
+
+
 def _three_tier_fixture(sensor_enabled: bool, autonomy_name: str = "planner"):
     import tempfile
 
