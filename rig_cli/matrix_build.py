@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+import contextlib
 import dataclasses
 import json
 from pathlib import Path
@@ -221,8 +222,10 @@ def preflight(tasks, registry, *, access=None):
 
 
 def run(manifest, descriptors, *, registry, tag, dry_run, jobs=1, root=None,
-        platform=None, arch=None, no_cache=False, base_image=None, scopes=None, verbose=False):
-    from .build import _build_cmd, _build_env, msgs_union
+        platform=None, arch=None, no_cache=False, base_image=None, scopes=None, verbose=False,
+        offline=False):
+    from . import build_sources
+    from .build import OFFLINE_ENV, _build_cmd, _build_env, msgs_union
     from .lock import load_lock, save_lock
     reg = registry or manifest.image_registry
     if not reg:
@@ -255,10 +258,23 @@ def run(manifest, descriptors, *, registry, tag, dry_run, jobs=1, root=None,
     union, error = msgs_union(descriptors)
     if error:
         raise RigError(error)
+    # The git sources each task gets as RIG_BUILD_SOURCES: the overlay its msgs repos, any other
+    # task its rigging's build.sources — one export per (service, stage), shared across variants.
+    sources = {(task.service, task.stage): (build_sources.msgs_requirements(union)
+                                            if task.stage == 1 else
+                                            build_sources.build_requirements(task.service, task.desc))
+               for task in tasks}
+    sources = {key: reqs for key, reqs in sources.items() if reqs}
     if dry_run:
+        for (service, stage), reqs in sorted(sources.items()):
+            eprint(f'  {service}{" [msgs]" if stage == 1 else ""}: sources '
+                   f'{", ".join(f"{r.name} <- {r.repo} @ {r.ref}" for r in reqs)}')
         return 0
     mirrors = {image for name, d in descriptors.items() if selections is None or name in selections
                for image in d.mirror}
+    if offline and mirrors:  # the preflight verified the copies are already in the registry
+        eprint(f'rig build: offline — using the copies of {", ".join(sorted(mirrors))} already in {reg}')
+        mirrors = set()
     labels = [f'build {task.service}/{task.variant or "generic"} -> '
               f'{", ".join(image + ":" + task.tag for image in task.images)} '
               f'[{", ".join(task.architectures)}]' for task in tasks]
@@ -274,9 +290,11 @@ def run(manifest, descriptors, *, registry, tag, dry_run, jobs=1, root=None,
     preflight(tasks, reg, access=access)
     results = []
     completed_refs = {}
-    with BuildProgress(labels, root=root, verbose=verbose) as progress, \
-            tempfile.TemporaryDirectory(prefix='rig-build-') as tmp:
-        temp = Path(tmp)
+    with contextlib.ExitStack() as stack:
+        temp = Path(stack.enter_context(tempfile.TemporaryDirectory(prefix='rig-build-')))
+        exported = {key: build_sources.export(reqs, temp / f'sources-{key[0]}-{key[1]}')
+                    for key, reqs in sources.items()}  # before the progress display: may fail
+        progress = stack.enter_context(BuildProgress(labels, root=root, verbose=verbose))
         msgs = temp / 'msgs.yaml'
         msgs.write_text(yaml.safe_dump(union or {}))
 
@@ -291,6 +309,10 @@ def run(manifest, descriptors, *, registry, tag, dry_run, jobs=1, root=None,
                              completed_refs.get(task.base, task.base), no_cache, manifest.ros.rmw,
                              str(msgs) if task.stage == 1 else None)
             env.update(access.build_env)
+            if offline:
+                env.update(OFFLINE_ENV)
+            if (task.service, task.stage) in exported:
+                env['RIG_BUILD_SOURCES'] = str(exported[(task.service, task.stage)])
             env['RIG_BUILD_PLATFORMS'] = ','.join(f'linux/{a}' for a in task.architectures)
             env['RIG_BUILD_RESULT'] = str(report)
             env['PUSH'] = '1'  # matrix builds publish indexes; never inherit a standalone --load path

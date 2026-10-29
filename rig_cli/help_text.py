@@ -235,6 +235,13 @@ Publication:
   fresh iteration tag and set images.tag to it before running/baking that build.
   --no-cache does not repin vendored sources. Logs: var/build/<session>/.
 
+Offline builds:
+  Git sources (rig.lock service pins, msgs overlay sources, build.sources) come
+  from local mirrors in $RIG_HOME/cache/git; `rig src sync` fills them online.
+  --offline checks every source and mirrored image first and builds nothing if
+  one is missing; --offline --check stops after that report. Image layers come
+  from the build cache: a step it lacks (a new apt package) needs the network once.
+
 Examples:
   rig image build --dry-run
   rig image build --scope host --tag laptop-1

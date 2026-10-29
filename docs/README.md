@@ -24,7 +24,7 @@ updating another installation does not upgrade a baked artifact.
 These preserve their original checkpoints and tradeoffs. Their old pending items and test
 totals should not be read as current operator requirements:
 
-- [Offline and local-source builds plan](offline-builds-plan.md) (phase 0 implemented; phases 1–2 proposed)
+- [Offline and local-source builds plan](offline-builds-plan.md) (phases 0–1 implemented; phase 2 proposed)
 - [Build/replay portability plan](cross-platform-replay-plan.md)
 - [Replay preparation plan](replay-preparation-plan.md)
 - [Replay proxy/export plan](replay-proxy-exports-plan.md)

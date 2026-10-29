@@ -171,9 +171,11 @@ def _repo_slug(url: str) -> str:
 
 
 def _fetch_source(name: str, source: dict) -> Path:
-    """Clone the service's code repo at the pinned rev into the src cache (reused when already
-    present at that rev — offline after first fetch). Keyed by (repo, rev) via _repo_slug, so
-    every service pinned at one repo rev shares one checkout. Returns the service dir
+    """Check out the service's code repo at the pinned rev into the src cache (reused when already
+    present at that rev). Keyed by (repo, rev) via _repo_slug, so every service pinned at one repo
+    rev shares one checkout. A new rev comes from the repo's local git mirror (gitmirror): online
+    the mirror fetches first, offline (`rig build --offline`) a rev the mirror already holds still
+    checks out — submodules included, each through its own mirror. Returns the service dir
     (source.path aware)."""
     repo_url, rev = str(source.get("repo") or ""), str(source.get("rev") or "")
     dest = rig_home() / "cache" / "src" / f"{_repo_slug(repo_url)}-{rev[:12]}"
@@ -184,27 +186,23 @@ def _fetch_source(name: str, source: dict) -> Path:
     def git(*args):
         return subprocess.run(["git", "-C", str(dest), *args], capture_output=True, text=True)
 
+    from . import gitmirror
     if not (dest / ".git").is_dir():
         dest.parent.mkdir(parents=True, exist_ok=True)
-        clone = subprocess.run(["git", "clone", "-q", repo_url, str(dest)],
-                               capture_output=True, text=True)
-        if clone.returncode != 0:
-            detail = (clone.stderr or "").strip().splitlines()
-            raise RigError(f"install {name}: clone failed: {repo_url} "
-                           f"({detail[-1] if detail else 'git error'})")
-        if git("checkout", "-q", "--detach", rev).returncode != 0:
-            raise RigError(f"install {name}: rev {rev[:12]}… not found in {repo_url}")
+        try:
+            gitmirror.clone(repo_url, gitmirror.resolve(repo_url, rev), dest)
+        except RigError as exc:
+            shutil.rmtree(dest, ignore_errors=True)  # never leave a half checkout keyed as this rev
+            raise RigError(f"install {name}: {exc}") from exc
     head = git("rev-parse", "HEAD").stdout.strip()
     if head != rev:  # the cache dir is rev-keyed, so this only fires on tampering/corruption
         raise RigError(f"install {name}: source cache at {dest} is at {head[:12]}…, expected "
                        f"{rev[:12]}… — remove the dir and retry")
     if (dest / ".gitmodules").is_file():  # driver source via submodules: the superproject commit
-        sub = git("submodule", "update", "--init", "--recursive", "--quiet")  # pins their revs —
-        if sub.returncode != 0:           # exact-pin transitively. No-op when already initialized
-            detail = (sub.stderr or "").strip().splitlines()
-            raise RigError(f"install {name}: submodule init failed at {rev[:12]}… "
-                           f"({detail[-1] if detail else 'git error'}) — are the submodule URLs "
-                           f"reachable from this machine?")
+        try:                              # pins their revs — exact-pin transitively. No-op when
+            gitmirror.update_submodules(dest, repo_url)  # already initialized
+        except RigError as exc:
+            raise RigError(f"install {name}: submodule init failed at {rev[:12]}… ({exc})") from exc
     service_dir = dest / str(source["path"]) if source.get("path") else dest
     if not service_dir.is_dir():
         raise RigError(f"install {name}: source.path '{source.get('path')}' not in the repo")

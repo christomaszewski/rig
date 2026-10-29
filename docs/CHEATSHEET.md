@@ -364,6 +364,11 @@ rig build --scope deployment,replay --dry-run  # vehicle target plus replay comp
 rig build --no-cache                          # FULL rebuild: RIG_BUILD_NO_CACHE=1 to every build command
                                               #   (scripts opt in: docker build ${RIG_BUILD_NO_CACHE:+--no-cache});
                                               #   the way to re-converge apt-level drift across images
+rig src sync                                  # online: mirror every git source the builds need
+                                              #   (service pins, msgs sources, build.sources) in ~/.rig
+rig build --offline --check                   # what an offline build would miss; builds nothing
+rig build --offline                           # no git fetch, no --pull: sources from the mirrors,
+                                              #   layers from the build cache of an online build
 rig image audit                               # inspect what the stacks will RUN (docker + images local/pullable):
                                               #   every ROS image carries ros.distro, the declared rmw package
                                               #   is installed, and shared ros-* package VERSIONS agree across

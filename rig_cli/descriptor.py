@@ -77,6 +77,17 @@ class MsgsSource:
 
 
 @dataclass(frozen=True)
+class BuildSource:
+    """One `build.sources` entry: a git repo the service's build would otherwise fetch itself
+    (a CMake FetchContent, a `git clone` in a Dockerfile). rig resolves it through its local git
+    mirror and hands the tree to the build as $RIG_BUILD_SOURCES/<name> — which the build script
+    passes on as the BuildKit named context `<name>` — so the build works offline."""
+    name: str  # the named-context / directory name
+    repo: str
+    ref: str
+
+
+@dataclass(frozen=True)
 class ReplaySource:
     """`replay.source` — how `rig replay` turns an instance into a replay of ITS OWN recordings
     (ROADMAP §2, the per-sensor source axis): `data` is the run-relative directory the instance
@@ -143,6 +154,7 @@ class Descriptor:
     #                                              produces; rig composes/exports it as RIG_MSGS_IMAGE
     msgs_apt: list[str] = field(default_factory=list)  # `msgs.apt`: distro-released interface pkgs
     #                                              (ROS names, underscores) this service's topics need
+    build_sources: list[BuildSource] = field(default_factory=list)  # `build.sources` (BuildSource)
     msgs_source: list[MsgsSource] = field(default_factory=list)  # `msgs.source`: pinned from-source
     #                                              interface repos (see MsgsSource)
     platform_auto_detect: str | None = None      # the launcher's standalone host probe (e.g.
@@ -278,6 +290,7 @@ def load_descriptor(service: str, repo: Path) -> Descriptor:
     build_images: list[str] = []
     build_platforms: list[str] = []
     build_provides: str | None = None
+    build_sources: list[BuildSource] = []
     msgs_overlay_command: str | None = None
     msgs_overlay_image: str | None = None
     if isinstance(build_raw, str):
@@ -302,6 +315,24 @@ def load_descriptor(service: str, repo: Path) -> Descriptor:
                                f"produces, e.g. fleet-ros-msgs)")
             msgs_overlay_command = str(overlay_raw["command"])
             msgs_overlay_image = str(overlay_raw["image"])
+        sources_raw = build_raw.get("sources")
+        if sources_raw is not None and not isinstance(sources_raw, list):
+            raise RigError(f"{path}: build.sources must be a list of {{name, repo, ref}}")
+        for i, entry in enumerate(sources_raw or []):
+            if not isinstance(entry, dict) or set(entry) - {"name", "repo", "ref"}:
+                raise RigError(f"{path}: build.sources #{i} must be a mapping with only name, "
+                               f"repo, ref")
+            name, repo_url, ref = (entry.get(k) for k in ("name", "repo", "ref"))
+            if not name or not repo_url or not ref:
+                raise RigError(f"{path}: build.sources #{i} needs `name` (the build context it "
+                               f"arrives as), `repo` and `ref` (a tag, branch or commit)")
+            # A directory name AND a Dockerfile stage name: lowercase, no separators to escape.
+            if not re.match(r"^[a-z0-9][a-z0-9_-]*$", str(name)):
+                raise RigError(f"{path}: build.sources name '{name}' must match [a-z0-9][a-z0-9_-]* "
+                               f"(it names a directory and a BuildKit build context)")
+            if any(s.name == str(name) for s in build_sources):
+                raise RigError(f"{path}: build.sources name '{name}' is declared twice")
+            build_sources.append(BuildSource(str(name), str(repo_url), str(ref)))
     else:
         build_command = None
     for p in build_platforms:  # platform names suffix image tags — they must be tag-safe fragments
@@ -541,6 +572,7 @@ def load_descriptor(service: str, repo: Path) -> Descriptor:
         build_images=build_images,
         build_platforms=build_platforms,
         build_provides=build_provides,
+        build_sources=build_sources,
         msgs_overlay_command=msgs_overlay_command,
         msgs_overlay_image=msgs_overlay_image,
         msgs_apt=msgs_apt,

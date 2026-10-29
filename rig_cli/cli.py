@@ -598,7 +598,27 @@ def cmd_build(args, root: Path) -> int:
     return build_mod.build(manifest, descriptors, registry=args.registry, tag=args.tag,
                            dry_run=args.dry_run, jobs=args.jobs, root=root,
                            platform=args.platform, arch=args.arch, no_cache=args.no_cache,
-                           base_image=args.base_image, scopes=args.scope, verbose=args.verbose)
+                           base_image=args.base_image, scopes=args.scope, verbose=args.verbose,
+                           offline=args.offline, check=args.check)
+
+
+def cmd_src(args, root: Path) -> int:
+    """`rig src sync`: fetch every git source this deployment's builds need into the local
+    mirrors ($RIG_HOME/cache/git), so `rig build --offline` can build without the network."""
+    from . import build_sources
+    manifest, catalog, descriptors = _load(root, identity=False, render=False, context="deployment")
+    reqs = build_sources.requirements(manifest, descriptors, root)
+    if not reqs:
+        eprint("rig src sync: no build of this deployment needs a git source")
+        return 0
+    done, problems = build_sources.sync(reqs)
+    for line in done:
+        eprint(f"  ✓ {line}")
+    for line in problems:
+        eprint(f"  ✗ {line}")
+    eprint(f"rig src sync: {len(done)} of {len(reqs)} source(s) in the local mirrors"
+           + (" — `rig build --offline` can build them" if not problems else ""))
+    return 1 if problems else 0
 
 
 def cmd_bake(args, root: Path) -> int:
@@ -1266,6 +1286,18 @@ def build_parser() -> argparse.ArgumentParser:
                           "`provides: base` service) — exported to builds as RIG_BASE_IMAGE")
     bld.add_argument("--dry-run", action="store_true",
                      help="print selected targets, outputs and build order without building/publishing")
+    bld.add_argument("--offline", action="store_true",
+                     help="build without remote git or upstream registries: git sources come from "
+                          "the local mirrors (`rig src sync`), mirrored images must already be in "
+                          "the registry, and image layers come from the build cache")
+    bld.add_argument("--check", action="store_true",
+                     help="with --offline: report everything an offline build would miss, build nothing")
+
+    srcp = sub.add_parser("src", help="local git mirrors of the sources builds need (offline builds)")
+    srcsub = srcp.add_subparsers(dest="src_cmd", required=True)
+    srcsub.add_parser("sync", help="fetch every git source this deployment's builds need into the "
+                                   "local mirrors, submodules included; then `rig build --offline` "
+                                   "works without the network")
 
     bk = sub.add_parser("bake", help="freeze the deployment into a tagged, content-addressed artifact")
     bk.add_argument("--tag", default=None,
@@ -1820,6 +1852,8 @@ def main(argv=None) -> int:
             return overlay_mod.list_bindings(root, args.instance)
         if args.cmd == "build":
             return cmd_build(args, root)
+        if args.cmd == "src":
+            return cmd_src(args, root)
         if args.cmd == "bake":
             return cmd_bake(args, root)
         if args.cmd == "certify":  # may run repo-standalone (--repo/--diff) — routes its own manifest load

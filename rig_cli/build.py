@@ -15,11 +15,15 @@ resolve_base_image below), RIG_BUILD_NO_CACHE=1 (`rig build --no-cache` — pass
 (vehicle.yaml `ros.rmw` — install THIS rmw, so `rig image audit`'s rmw check has a prevention
 counterpart instead of flagging an image the builder was never told about). The msgs-overlay build
 additionally gets RIG_MSGS_MANIFEST — the path to the rendered union of the riggings' `msgs:`
-blocks (see msgs_union / resolve_msgs_image below).
+blocks (see msgs_union / resolve_msgs_image below). A build with git sources gets
+RIG_BUILD_SOURCES — their trees exported from rig's local git mirrors (build_sources): the
+overlay its msgs `source:` repos, any other build its rigging's `build.sources` — and
+`--offline` adds RIG_OFFLINE=1 and RIG_BUILD_PULL=0 (OFFLINE_ENV).
 """
 from __future__ import annotations
 
 import concurrent.futures
+import contextlib
 import os
 import shlex
 import subprocess
@@ -172,19 +176,11 @@ def _resolve_build_cwd(service: str, desc: Descriptor, root: Path | None):
     rig.lock, because registry installs vendor the launch surface, never the build context
     (`../base/build.sh` siblings, `tools/build-*.sh`). Returns (cwd, note) — cwd None means
     unbuildable, note carries the pointed error."""
-    head = shlex.split(desc.build_command)[0]
-    if (desc.repo / head).exists():
+    needed, source = pinned_source(service, desc, root)
+    if not needed:
         return desc.repo, ""
-    if "/" not in head and not head.startswith("."):  # a bare PATH command (`make`, `docker`) —
-        return desc.repo, ""  # bash -lc resolves it; only repo-relative paths need build context
-    packages = {}
-    if root is not None:
-        from .lock import load_lock
-        packages = load_lock(root).get("packages") or {}
-    ref = next((r for r, info in packages.items() if (info or {}).get("kind") == "service"
-                and unqualified(r) == service), None)
-    source = (packages.get(ref) or {}).get("source") if ref else None
     if not source:
+        head = shlex.split(desc.build_command)[0]
         return None, (f"'{head}' not found under {desc.repo} — vendored surfaces carry launch "
                       f"files, not build context, and rig.lock has no source pin for '{service}'; "
                       f"route services.yaml at a full checkout to build it")
@@ -192,6 +188,23 @@ def _resolve_build_cwd(service: str, desc: Descriptor, root: Path | None):
     src = _fetch_source(service, source)
     return src, (f"vendored dir has no build context — using the pinned source checkout "
                  f"({str(source.get('rev'))[:12]}…)")
+
+
+def pinned_source(service: str, desc: Descriptor, root: Path | None) -> tuple[bool, dict | None]:
+    """(needed, rig.lock source pin) for building ``service``: needed when its routed dir lacks the
+    build entrypoint (a vendored surface) — then the pin, if rig.lock has one, supplies it."""
+    head = shlex.split(desc.build_command)[0]
+    if (desc.repo / head).exists():
+        return False, None
+    if "/" not in head and not head.startswith("."):  # a bare PATH command (`make`, `docker`) —
+        return False, None  # bash -lc resolves it; only repo-relative paths need build context
+    packages = {}
+    if root is not None:
+        from .lock import load_lock
+        packages = load_lock(root).get("packages") or {}
+    ref = next((r for r, info in packages.items() if (info or {}).get("kind") == "service"
+                and unqualified(r) == service), None)
+    return True, ((packages.get(ref) or {}).get("source") if ref else None) or None
 
 
 def _build_env(distro: str | None, desc: Descriptor | None = None, platform: str | None = None,
@@ -211,7 +224,8 @@ def _build_env(distro: str | None, desc: Descriptor | None = None, platform: str
     name is exported in most ROS shells: a dev box's `.bashrc` must not decide what a fleet image
     contains. (The service's own override_env is NOT popped — operators use it standalone.)"""
     env = dict(os.environ)
-    for key in ('RIG_BUILD_PLATFORMS', 'RIG_BUILD_RESULT', 'RIG_BUILD_PULL', 'RIG_TARGET_ARCH'):
+    for key in ('RIG_BUILD_PLATFORMS', 'RIG_BUILD_RESULT', 'RIG_BUILD_PULL', 'RIG_TARGET_ARCH',
+                'RIG_OFFLINE', 'RIG_BUILD_SOURCES'):
         env.pop(key, None)
     if distro:
         env["ROS_DISTRO"] = distro
@@ -229,6 +243,13 @@ def _build_env(distro: str | None, desc: Descriptor | None = None, platform: str
     if plat_active and desc.platform_override_env:
         env[desc.platform_override_env] = platform
     return env
+
+
+# `rig build --offline`: what every build command gets on top of _build_env. RIG_BUILD_PULL=0 keeps
+# `--pull` off; RIG_OFFLINE=1 tells a build script not to reach out itself. Both are rig-owned:
+# _build_env pops them otherwise. (Not `docker build --network none`: BuildKit keys a RUN step's
+# cache on its network mode, so it would rerun — and fail — every step an online build cached.)
+OFFLINE_ENV = {"RIG_OFFLINE": "1", "RIG_BUILD_PULL": "0"}
 
 
 def _service_tag(desc: Descriptor, tag: str | None, platform: str | None) -> str | None:
@@ -276,7 +297,8 @@ def _mirror_steps(img: str, target: str):
 def _build_single(manifest: Manifest, descriptors: dict[str, Descriptor], *, registry: str | None,
           tag: str | None, dry_run: bool, jobs: int = 1, root: Path | None = None,
           platform: str | None = None, no_cache: bool = False,
-          base_image: str | None = None, verbose: bool = False) -> int:
+          base_image: str | None = None, verbose: bool = False, offline: bool = False) -> int:
+    from . import build_sources
     reg = registry or manifest.image_registry
     tag = tag or manifest.image_tag  # default the build tag to vehicle.yaml images.tag (a version)
     platform = platform or manifest.platform  # matrix services build/push <tag>-<platform>
@@ -416,12 +438,21 @@ def _build_single(manifest: Manifest, descriptors: dict[str, Descriptor], *, reg
         (groups[2][service] if stage == 2 else groups[stage]).append(index)
         return index
 
+    exports: dict[int, list] = {}  # operation -> the git sources exported to it (RIG_BUILD_SOURCES)
+
     def add_build(s, stage, command=None, parent=None):
         desc = descriptors[s]
         cmd, _ = _build_cmd(desc, cwds[s], reg, _service_tag(desc, tag, platform), command=command)
         kind = ' [base]' if stage == 0 else ' [msgs]' if stage == 1 else ''
-        return add(f'build {s}{kind}', [cmd], s, stage,
-                   _build_env(distro, desc, platform, parent, no_cache, rmw), cwds[s])
+        env = _build_env(distro, desc, platform, parent, no_cache, rmw)
+        if offline:
+            env.update(OFFLINE_ENV)
+        index = add(f'build {s}{kind}', [cmd], s, stage, env, cwds[s])
+        reqs = (build_sources.msgs_requirements(union) if stage == 1
+                else build_sources.build_requirements(s, desc))
+        if reqs:
+            exports[index] = reqs
+        return index
 
     for s in stage0:
         add_build(s, 0)
@@ -443,20 +474,30 @@ def _build_single(manifest: Manifest, descriptors: dict[str, Descriptor], *, reg
             if not reg:
                 eprint(f'mirror {s}: {img} — no registry (pass --registry or set images.registry); skipped')
                 continue
+            if offline:  # the preflight verified the copy is already there
+                eprint(f'mirror {s}: {img} — offline: using the copy already in {reg}')
+                continue
             add(f'mirror {img}', _mirror_steps(img, f'{reg}/{img}'), s, 2)
     if dry_run:
-        for label, commands, cwd, env in operations:
+        for index, (label, commands, cwd, env) in enumerate(operations):
             note = ' '.join(f'{k}={v}' for k, v in (env or {}).items()
                             if k in ('ROS_DISTRO', 'RIG_TARGET_PLATFORM', 'RIG_BASE_IMAGE',
-                                     'RIG_BUILD_NO_CACHE', 'RIG_ROS_RMW'))
+                                     'RIG_BUILD_NO_CACHE', 'RIG_ROS_RMW', 'RIG_OFFLINE'))
+            if index in exports:
+                note += f' sources={",".join(r.name for r in exports[index])}'
             eprint(f'{label}: ' + ' && '.join(shlex.join(cmd) for cmd in commands)
-                   + (f' (cwd={cwd})' if cwd else '') + (' ' + note if note else ''))
+                   + (f' (cwd={cwd})' if cwd else '') + (' ' + note.strip() if note.strip() else ''))
         return rc
     if not operations:
         return rc
     from . import RigError
-    with tempfile.TemporaryDirectory(prefix='rig-build-') as tmp, \
-            BuildProgress([op[0] for op in operations], root=root, verbose=verbose) as progress:
+    with contextlib.ExitStack() as stack:
+        tmp = stack.enter_context(tempfile.TemporaryDirectory(prefix='rig-build-'))
+        for index, reqs in exports.items():  # before the progress display: may fetch, may fail
+            operations[index][3]['RIG_BUILD_SOURCES'] = str(
+                build_sources.export(reqs, Path(tmp) / f'sources-{index}'))
+        progress = stack.enter_context(
+            BuildProgress([op[0] for op in operations], root=root, verbose=verbose))
         if overlay_index is not None:
             msgs_path = Path(tmp) / 'msgs.yaml'
             msgs_path.write_text(yaml.safe_dump(union, sort_keys=False))
@@ -520,10 +561,42 @@ def build_registry(root: Path | None, manifest: Manifest, registry: str | None =
     return manifest.image_registry, 'vehicle.yaml'
 
 
+def offline_preflight(manifest: Manifest, descriptors: dict[str, Descriptor], registry: str | None,
+                      root: Path | None) -> list[str]:
+    """Everything `rig build --offline` would miss, in one list, checked before anything builds:
+    git sources absent from the local mirrors (build_sources), and `mirror:` images absent from
+    the deployment registry (an offline build cannot copy them in from upstream)."""
+    from . import build_sources
+    problems = build_sources.offline_problems(build_sources.requirements(manifest, descriptors, root))
+    images = sorted({img for d in descriptors.values() for img in d.mirror})
+    if images and not registry:
+        problems.append(f"mirror images {', '.join(images)} need a registry to be read from "
+                        f"offline (pass --registry or set images.registry)")
+    elif images:
+        from . import RigError, docker_registry
+        from .matrix_build import inspect_raw
+        access = docker_registry.prepare([f"{registry}/{img}" for img in images])
+        for img in images:
+            try:
+                if inspect_raw(f"{registry}/{img}", access=access) is None:
+                    problems.append(f"mirror image {img} is not in {registry} — run `rig build` "
+                                    f"online once to copy it in")
+            except RigError as exc:
+                problems.append(f"mirror image {img}: {exc}")
+    return problems
+
+
 def build(manifest: Manifest, descriptors: dict[str, Descriptor], *, registry: str | None,
           tag: str | None, dry_run: bool, jobs: int = 1, root: Path | None = None,
           platform: str | None = None, arch: str | None = None, no_cache: bool = False,
-          base_image: str | None = None, scopes=None, verbose: bool = False) -> int:
+          base_image: str | None = None, scopes=None, verbose: bool = False,
+          offline: bool = False, check: bool = False) -> int:
+    from . import RigError, gitmirror
+    if check and not offline:
+        raise RigError('build --check reports what an offline build would miss; use it with --offline')
+    if offline and no_cache:
+        raise RigError('build --offline cannot use --no-cache: every build step would rerun, and '
+                       'steps that download need the network')
     registry, registry_source = build_registry(root, manifest, registry)
     if registry:
         eprint(f'rig build: registry {registry} (from {registry_source})')
@@ -534,13 +607,26 @@ def build(manifest: Manifest, descriptors: dict[str, Descriptor], *, registry: s
                'pass --registry/--tag to supply build values')
     used = {s.service for s in manifest.sensors}
     descriptors = {s: d for s, d in descriptors.items() if s in used}
+    if offline:
+        problems = offline_preflight(manifest, descriptors, registry, root)
+        if problems:
+            eprint(f'rig build --offline: {len(problems)} thing(s) an offline build would need '
+                   f'are missing — nothing was built:')
+            for problem in problems:
+                eprint(f'  ✗ {problem}')
+            return 1
+        eprint('rig build --offline: every git source and mirrored image is available locally; '
+               'image layers come from the build cache (a step it lacks needs the network once)')
+        if check:
+            return 0
+        gitmirror.offline = True
     from .targets import parse_scopes
     scopes = parse_scopes(scopes)
     if scopes != ["all"] or arch or any(d.build_architectures or d.build_platforms for d in descriptors.values()):
         from .matrix_build import run
         return run(manifest, descriptors, registry=registry, tag=tag, dry_run=dry_run,
                    jobs=jobs, root=root, platform=platform, arch=arch, no_cache=no_cache,
-                   base_image=base_image, scopes=scopes, verbose=verbose)
+                   base_image=base_image, scopes=scopes, verbose=verbose, offline=offline)
     if no_cache:
         for service, desc in descriptors.items():
             if desc.build_command and desc.build_no_cache is not True:
@@ -552,4 +638,4 @@ def build(manifest: Manifest, descriptors: dict[str, Descriptor], *, registry: s
                'to publish a portable release with companion digests')
     return _build_single(manifest, descriptors, registry=registry, tag=tag, dry_run=dry_run,
                          jobs=jobs, root=root, platform=platform, no_cache=no_cache,
-                         base_image=base_image, verbose=verbose)
+                         base_image=base_image, verbose=verbose, offline=offline)

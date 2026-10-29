@@ -1,8 +1,10 @@
 # Offline and local-source builds plan
 
-Status: phase 0 (section 8) implemented 2026-10-28, not yet released; phases 1 and 2
-proposed. Scope: Rig, rig-infra (`base/`, `msgs/`), sbg_driver and novatel. camera-service,
-ouster and mavlink-router are deferred (section 10).
+Status, 2026-10-28, not yet released: phase 0 (section 8) implemented. Phase 1 (section 4)
+implemented in Rig and rig-infra's `msgs/`; sbg_driver's adoption of `build.sources` is pending,
+and section 9 B records what changed from this plan and what was verified. Phase 2 proposed.
+Scope: Rig, rig-infra (`base/`, `msgs/`), sbg_driver and novatel. camera-service, ouster and
+mavlink-router are deferred (section 10).
 
 Goal: on a development box with a local registry, `rig build --offline` rebuilds every image
 the deployment builds without reaching a remote git host, a public registry, or a package
@@ -24,8 +26,11 @@ box's registry, or receives a `rig bake --bundle-images` artifact, exactly as to
   passes them in as named build contexts; Dockerfiles stop cloning.
 - **First cut includes base images:** local-registry seeding, no `# syntax=` directives, no
   forced `--pull`, a shared `fleet-ros-sdk` builder, and a registry-backed build cache.
-- **Offline is enforceable while connected.** `--offline` runs every Dockerfile `RUN` step with
-  `--network none`, so CI can prove an image is offline-ready without disconnecting.
+- **Offline is proven by disconnecting, not by a build flag.** This plan first had `--offline`
+  run every `RUN` step with `--network none`. Measured 2026-10-28: BuildKit keys a `RUN` step's
+  cache on its network mode, so that reran every step an online build had cached and failed at
+  the first download. Acceptance needs a builder with no outside network instead, such as CI with
+  egress blocked except to the local registry.
 
 Deferred: automatic fallback, registry-free builds, camera-service, ouster and
 mavlink-router adoption, an apt proxy, and moving mirror caches between machines.
@@ -66,7 +71,7 @@ named.
 ```sh
 rig src sync                  # online: fetch every repo this deployment builds from
 rig build --offline --check   # report everything an offline build would miss; build nothing
-rig build --offline           # build without remote git, public registries or RUN networking
+rig build --offline           # build without remote git or public registries
 ```
 
 ### Mirror cache
@@ -79,7 +84,8 @@ rig build --offline           # build without remote git, public registries or R
   it offline without `rig src sync`.
 - `rig src sync` covers: service pins in `rig.lock`, the union of `msgs.source` entries,
   `build.sources` entries (below), and submodules of each at the commit its superproject pins.
-  Checkouts redirect submodule URLs to their mirrors with `-c url.<mirror>.insteadOf=<upstream>`.
+  Checkouts point each submodule's URL at its mirror for the clone, then back at the upstream.
+  (Not `url.<mirror>.insteadOf`: git skips that rewrite for local-path submodule URLs.)
 - A branch ref resolves from the mirror's last fetch. `--offline` prints the resolved SHA and
   when the mirror was fetched; provenance records the SHA.
 
@@ -96,10 +102,10 @@ build:
       ref: 5.8.935-stable
 ```
 
-Rig resolves each entry to a commit in the mirror, exports the tree (no `.git`) to
-`$RIG_BUILD_SOURCES/<name>/`, writes `$RIG_BUILD_SOURCES/sources.tsv` (name, repo, ref, SHA), and
-records the SHA in `rig.lock` so `--locked` builds verify it. The build script passes
-`--build-context <name>=$RIG_BUILD_SOURCES/<name>`.
+Rig resolves each entry to a commit in the mirror, exports the tree (no `.git`, submodules
+included) to `$RIG_BUILD_SOURCES/<name>/`, and writes `$RIG_BUILD_SOURCES/sources.tsv` (name,
+repo, ref, SHA). The build script passes `--build-context <name>=$RIG_BUILD_SOURCES/<name>`.
+Not implemented yet: recording these SHAs in `rig.lock` so `--locked` builds verify them.
 
 The Dockerfile keeps working without rig through the pattern `msgs/Dockerfile` already uses
 for `local-sources`. It declares an empty default stage (`FROM scratch AS sbgecom`) and binds it
@@ -113,31 +119,29 @@ the build keeps today's online fetch.
   contract. `build-msgs.sh` passes those trees in the `local-sources` context, with
   `sources.tsv` rows marked `pinned`. `FLEET_MSGS_LOCAL` rows replace a repo's pinned row and
   keep their `local` marking.
-- Standalone (no rig), `build-msgs.sh` clones on the host into its temporary directory
-  (`build_msgs.py prepare`, reusing the existing pin and key resolution). The builder never
-  clones in any mode, so `--mount=type=ssh`, the ssh-agent check, and git/openssh in the builder
-  stage go away. Host git uses the developer's own credentials.
+- Under rig, the builder never clones and needs no ssh agent. Standalone (no rig),
+  `build-msgs.sh` still clones in the builder as before, so git, openssh and the ssh mount stay
+  in the builder stage. Cloning on the host instead would need Python and PyYAML on every
+  standalone build host; not worth it yet.
 - Provenance for pinned rows is unchanged in content: the declared `ref`, and the SHA whose
   tree was exported. The rule "record the revision that was actually built" now applies at
   export time.
 
 ### Enforcement and preflight
 
-- `--offline` exports `RIG_OFFLINE=1`, `RIG_BUILD_PULL=0` and `RIG_BUILD_NETWORK=none`.
-  `rig-build.sh` turns the last into `--network none`, so any `RUN` step that reaches the
-  network fails at that step, even on a connected machine. Rig reports it as "this step needs
-  the network; build once online to cache it."
-- `--network none` covers `RUN` steps only. Image resolution and builder bootstrap are covered
-  by the preflight and by seeding (section 5).
-- The preflight runs before any build and reports everything missing in one go: repos or
-  refs absent from the mirror, declared base images and `mirror:` images absent from
-  `images.registry`, an unreachable local registry, and a builder that cannot start without
-  pulling. `--check` stops after the report.
-- `rig-build.sh` is copied into each service repo and nothing keeps the copies in sync. Update
-  the canonical `packaging/rig-build.sh` and the copies in rig-infra `base/` and `msgs/`,
-  sbg_driver and novatel. Older copies ignore the new variables: they still build, just
-  without enforcement or the registry cache. `rig certify` should report a copy that differs
-  from the canonical one.
+- `--offline` makes rig fetch nothing and exports `RIG_OFFLINE=1` and `RIG_BUILD_PULL=0` to
+  every build. `RUN` steps keep whatever network the machine has (see section 1 for why not
+  `--network none`): on a disconnected machine, a cached step is reused and an uncached one
+  fails where it downloads.
+- `--offline` refuses `--no-cache`, which would rerun every step.
+- The preflight runs before any build and reports everything missing in one go: repos or refs
+  absent from the mirror (submodules included), and `mirror:` images absent from
+  `images.registry`. `--check` stops after the report. Declared base images and a builder that
+  cannot start without pulling join the preflight in phase 2.
+- `rig-build.sh` is unchanged in phase 1. It is copied into each service repo and nothing keeps
+  the copies in sync; phase 2's registry cache will change it, so update the canonical
+  `packaging/rig-build.sh` and the copies together then, and have `rig certify` report a copy
+  that differs from the canonical one.
 
 ## 5 Offline base images (phase 2)
 
@@ -273,8 +277,7 @@ that audit warns about, and bake refuses, an image carrying the local label.
 
 ### B Phase 1: source mirrors and `--offline` (Rig, rig-infra msgs, sbg_driver)
 
-Mirror cache, `rig src sync`, `build.sources`, host-side msgs export, `RIG_BUILD_NETWORK`,
-and the preflight.
+Mirror cache, `rig src sync`, `build.sources`, host-side msgs export, and the preflight.
 
 Acceptance:
 
@@ -282,9 +285,25 @@ Acceptance:
   reported together before any build; a branch ref prints its SHA and fetch time; submodules
   resolve through their mirrors.
 - The msgs overlay (sbg_msgs pinned, from the mirror) and sbg (sbgECom from its declared
-  source) build with `RUN` networking disabled on a warm cache.
+  source) build on a disconnected builder with a warm cache.
 - The overlay's `provenance.yaml` matches an online build's, with no `local:` entries.
 - Standalone `build-msgs.sh` still works without rig.
+
+Implemented 2026-10-28, except sbg_driver's `build.sources` adoption: its Dockerfile, build
+script and rigging carried another branch's uncommitted work, so they were left alone. Changes
+from this plan: no `RIG_BUILD_NETWORK` (section 1), standalone msgs builds still clone (section
+4), and no `rig.lock` record of build-source SHAs yet. Verified:
+
+- Rig host tests cover every bullet above but sbg: mirrors, offline resolution, fetch by commit
+  id, submodules (including relative URLs) offline, `--offline` preflight and `--check`,
+  exports into both build paths, and channels popped on online builds.
+- rig-infra msgs tests cover pinned rows, a local checkout winning over them, and mismatch
+  refusals, on macOS and Ubuntu 24.04.
+- On the real deployment, `rig src sync` mirrored sbg_driver v0.8.2 from GitHub and
+  `rig build --offline --check` passed. A real Docker build of the overlay from rig's mirror
+  export compiled sbg_msgs without a clone. Its provenance records `v0.8.2` at the commit the
+  GitHub tag names, with no `local:` and no local-build label.
+- Not verified: a build on a builder that is actually disconnected.
 
 ### C Phase 2: base images and the SDK (Rig, rig-infra base and msgs, sbg_driver, novatel)
 

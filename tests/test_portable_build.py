@@ -362,6 +362,52 @@ Path(a[a.index('--metadata-file')+1]).write_text(json.dumps({'containerimage.dig
                                 for r in lock['build_catalog'].values()))
 
 
+    def test_offline_matrix_build_never_pulls_and_exports_build_sources(self):
+        upstream = self.root / 'dep'
+        upstream.mkdir()
+        git = ['git', '-c', 'user.name=t', '-c', 'user.email=t@example.invalid', '-C', str(upstream)]
+        subprocess.run([*git, 'init', '-q'], check=True)
+        (upstream / 'dep.c').write_text('int dep;\n')
+        subprocess.run([*git, 'add', '-A'], check=True)
+        subprocess.run([*git, 'commit', '-q', '-m', 'c'], check=True)
+        subprocess.run([*git, 'tag', 'v1'], check=True)
+        svc = self.service('svc', f'  sources: [{{name: dep, repo: "{upstream}", ref: v1}}]\n')
+        shutil.copy2(HELPER, svc.repo / 'helper.sh')
+        (svc.repo / 'build.sh').write_text('''#!/bin/sh
+set -eu
+. ./helper.sh
+rig_build "$1/core:$2" --build-context "dep=$RIG_BUILD_SOURCES/dep" .
+''')
+        bin_dir = self.root / 'bin'
+        bin_dir.mkdir()
+        (bin_dir / 'docker').write_text('''#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+a = sys.argv[1:]
+ctx = a[a.index('--build-context') + 1].split('=', 1)[1]
+with open(os.environ['BUILD_LOG'], 'a') as f:
+    f.write(json.dumps([a, sorted(p.name for p in Path(ctx).iterdir())]) + '\\n')
+Path(a[a.index('--metadata-file')+1]).write_text(json.dumps({'containerimage.digest': 'sha256:'+'a'*64}))
+''')
+        (bin_dir / 'docker').chmod(0o755)
+        log = self.root / 'build.log'
+        from rig_cli import gitmirror
+        self.addCleanup(gitmirror.reset)
+        with patch.dict(os.environ, PATH=f'{bin_dir}:{os.environ["PATH"]}', BUILD_LOG=str(log),
+                        RIG_HOME=str(self.root / 'home')), \
+                patch.object(matrix.docker_registry, 'prepare', return_value=matrix.docker_registry.Access()), \
+                patch.object(matrix, 'preflight'), patch.object(matrix, 'inspect_raw', return_value=index()):
+            gitmirror.resolve(str(upstream), 'v1')  # what `rig src sync` leaves behind
+            shutil.rmtree(upstream)
+            gitmirror.reset()
+            self.assertEqual(build(self.manifest('svc'), {'svc': svc}, registry=None, tag=None,
+                                   dry_run=False, root=self.root, offline=True), 0)
+        (args, files), = [json.loads(x) for x in log.read_text().splitlines()]
+        self.assertNotIn('--network', args)
+        self.assertNotIn('--pull', args)
+        self.assertEqual(files, ['dep.c'])
+
+
 class BuilderPreflight(unittest.TestCase):
     def setUp(self):
         self.tasks = [matrix.Task('core', None, Path('.'), None, ['arm64', 'amd64'],
