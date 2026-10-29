@@ -119,6 +119,71 @@ class ProbeEvaluation(unittest.TestCase):
             self.assertFalse(result["ready"])
             self.assertTrue(any(i["code"] == code for i in result["issues"]))
 
+    def test_endpoints_must_agree_on_the_message_definition(self):
+        jazzy, lyrical = "RIHS01_" + "a" * 64, "RIHS01_" + "b" * 64
+
+        def observed_with(pub_hash, sub_hash):
+            observed = observation()
+            observed["topics"]["/camera/image"] = dict(
+                publishers=[dict(type="sensor_msgs/msg/Image", node="/isaac/camera", type_hash=pub_hash)],
+                subscribers=[dict(type="sensor_msgs/msg/Image", node="/slam/input", type_hash=sub_hash)],
+                qos_checks=[dict(status="ok")])
+            observed["topics"]["/cmd_vel"]["subscribers"][0]["type_hash"] = "RIHS01_" + "c" * 64
+            return observed
+        strict = dict(request(), require_type_hashes=True)
+        # the same definition on both sides passes, required or not
+        for req in (request(), strict):
+            self.assertTrue(sim_probe.evaluate(req, observed_with(jazzy, jazzy))["ready"])
+        # a different definition never matches, whatever the type names say — even same-distro
+        result = sim_probe.evaluate(request(), observed_with(jazzy, lyrical))
+        self.assertFalse(result["ready"])
+        message = next(i["message"] for i in result["issues"] if i["code"] == "type_hash")
+        self.assertIn("/isaac/camera", message)
+        self.assertIn("/slam/input", message)
+        # an endpoint without a hash (Humble) is unverifiable only when hashes are the evidence
+        self.assertTrue(sim_probe.evaluate(request(), observed_with(jazzy, None))["ready"])
+        result = sim_probe.evaluate(strict, observed_with(jazzy, None))
+        self.assertFalse(result["ready"])
+        self.assertTrue(any(i["code"] == "type_hash_unknown" and "/slam/input" in i["message"]
+                            for i in result["issues"]))
+
+    def test_a_one_sided_binding_is_reported_not_passed_when_awaiting_the_deployment(self):
+        waiting = dict(request(), require_type_hashes=True, await_counterparts=True)
+        observed = observation()  # Isaac's camera publisher and command subscriber, no deployment yet
+        for side in observed["topics"].values():
+            for endpoints in side.values():
+                for e in endpoints:
+                    e["type_hash"] = "RIHS01_" + "a" * 64
+        result = sim_probe.evaluate(waiting, observed)
+        self.assertTrue(result["ready"])  # not an error: a topic may have no deployment consumer
+        unverified = [i["message"] for i in result["issues"] if i["code"] == "type_hash_unverified"]
+        self.assertEqual(len(unverified), 2)
+        self.assertTrue(any("/camera/image: no deployment subscriber" in m for m in unverified))
+        self.assertTrue(any("/cmd_vel: no deployment publisher" in m for m in unverified))
+        observed["topics"]["/camera/image"]["subscribers"] = [dict(
+            type="sensor_msgs/msg/Image", node="/slam/input", type_hash="RIHS01_" + "a" * 64)]
+        observed["topics"]["/camera/image"]["qos_checks"] = [dict(status="ok")]
+        observed["topics"]["/cmd_vel"]["publishers"] = [dict(
+            type="geometry_msgs/msg/Twist", node="/planner/cmd", type_hash="RIHS01_" + "a" * 64)]
+        observed["topics"]["/cmd_vel"]["qos_checks"] = [dict(status="ok")]
+        result = sim_probe.evaluate(waiting, observed)
+        self.assertTrue(result["ready"])
+        self.assertEqual([i["code"] for i in result["issues"]], ["connected"])
+
+    def test_type_hashes_come_from_the_endpoint_and_unset_means_unknown(self):
+        class TypeHash(SimpleNamespace):
+            def __str__(self):
+                return f"RIHS{self.version:02d}_" + self.value.hex()
+        qos = SimpleNamespace(depth=10)
+        base = dict(node_namespace="/isaac", node_name="bridge", topic_type="std_msgs/msg/String",
+                    endpoint_gid=[1], qos_profile=qos)
+        cases = ((TypeHash(version=1, value=bytes(range(32))), "RIHS01_" + bytes(range(32)).hex()),
+                 (TypeHash(version=0, value=bytes(32)), None),  # the middleware left it unset
+                 (None, None))
+        for value, expected in cases:
+            info = SimpleNamespace(**base, **({} if value is None else {"topic_type_hash": value}))
+            self.assertEqual(sim_probe._endpoint(info)["type_hash"], expected)
+
     def test_qos_inspection_uses_offered_then_requested_and_fails_closed(self):
         pub = SimpleNamespace(node_namespace="/isaac", node_name="camera", endpoint_gid=[1],
                               qos_profile=object())
@@ -149,6 +214,7 @@ class ProbeEvaluation(unittest.TestCase):
             doc["publishes"][0]["topic"] = topic
             bad.append(doc)
         bad += [[], {}, dict(request(), unknown=True), dict(request(), publishes=[{}, {}]),
+                dict(request(), require_type_hashes="yes"), dict(request(), await_counterparts=1),
                 dict(request(), publishes=request()["publishes"] * 2),
                 dict(request(), subscribes=[dict(topic="/clock", type="rosgraph_msgs/msg/Clock")])]
         for doc in bad:

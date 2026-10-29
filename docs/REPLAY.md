@@ -473,7 +473,8 @@ an old image does not gain this capability label when Rig or the launcher is upd
 
 When a companion catalog exists, every selected image must have a matching native child
 digest. Registry relocation retains that digest. Overrides such as `BAG_PLAYER_IMAGE` are
-part of the inventory and must also have matching catalog entries. Without a catalog, Rig
+part of the inventory and must also have matching catalog entries; `rig image adopt` records
+one for an image rig did not build (see [portable builds](BUILD_AND_REPLAY.md)). Without a catalog, Rig
 validates the selected local image IDs and capability labels. Bundled replay checks the
 recorded local aliases and identities, never contacts a registry, and rejects `--pull always`.
 Missing bundled companions require loading or rebuilding the bundle.

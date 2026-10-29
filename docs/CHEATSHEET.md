@@ -404,6 +404,12 @@ rig image audit                               # inspect what the stacks will RUN
                                               #   is installed, and shared ros-* package VERSIONS agree across
                                               #   images (a skewed rmw_zenoh_cpp = sessions that can't talk);
                                               #   warns on images built from local checkouts (FLEET_MSGS_LOCAL)
+                                              #   and on adopted catalog rows
+rig image adopt <reg>/<image>:<tag>           # record a hand-built/pushed tag in rig.lock's build catalog so
+                                              #   replay accepts it (v0.2.76): digest + arch children from the
+                                              #   registry, marked adopted, no source revision; --like <key>
+                                              #   takes service/runtime from a row; bake refuses it without
+                                              #   --allow-local until rig build replaces it
 curl -s http://<dev-box-ip>:5000/v2/_catalog  # expect every repo the composes will pull
 ```
 

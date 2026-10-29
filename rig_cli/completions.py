@@ -5,12 +5,13 @@ the command line and print candidates. One source of truth: the argparse tree (`
 merged with the noun-group translation (``_GROUP_VERBS``) that lives outside argparse — grouped
 spellings (``rig image build``) and flat ones complete equally.
 
-Menu policy (completion plan, OQ-A): TAB suggests the CANONICAL grammar only. Legacy flat
+Menu policy (completion plan, OQ-A): TAB suggests the grammar the docs teach. Legacy flat
 spellings (``new-run``, ``image-audit``, …) and permanent aliases (``pkg install``, ``pkg rm``)
-keep parsing forever but are never suggested — completion is a teaching surface, and the docs
-teach the grouped forms. The suggested set is derived, not hand-listed: everything in
-``_GROUP_VERBS``'s flat targets is hidden except the verbs the top-of-cli taxonomy keeps
-top-level (pull/certify/config), so a new group entry hides its flat alias automatically.
+keep parsing forever but are never suggested — completion is a teaching surface. The suggested
+set is derived, not hand-listed: everything in ``_GROUP_VERBS``'s flat targets is hidden except
+``_CANONICAL_FLAT`` — the verbs the top-of-cli taxonomy keeps top-level (pull/certify/config) and
+the flat spellings the operator docs teach (``rig build``, ``rig bake``, ``rig replay``, …), whose
+grouped forms complete too — so a new group entry hides its flat alias automatically.
 
 Fail-soft ABSOLUTELY: any stderr or traceback mid-TAB garbles the user's command line, so
 ``main`` prints nothing on any internal failure and always exits 0. The engine never writes,
@@ -24,9 +25,11 @@ import functools
 import sys
 from pathlib import Path
 
-# Flat targets of group verbs that are ALSO canonical top-level (cli.py taxonomy: the
-# deployment is the implicit noun) — everything else in _GROUP_VERBS' values is legacy-flat.
-_CANONICAL_FLAT = {"pull", "certify", "config"}
+# Flat targets of group verbs that are ALSO offered top-level: the deployment-noun verbs of the
+# cli.py taxonomy, and the flat spellings the operator docs teach (`rig build` far outnumbers
+# `rig image build`). Everything else in _GROUP_VERBS' values is legacy-flat.
+_CANONICAL_FLAT = {"pull", "certify", "config",
+                   "build", "bake", "unbake", "replay", "runs", "rigify", "vendor"}
 
 
 def main(argv: list[str]) -> int:

@@ -721,6 +721,17 @@ def _stage_tree(staging: Path, manifest, catalog, *, registry: str | None = None
     (staging / "services.yaml").write_text(_routes_text(catalog_out))
 
 
+def _refuse_adopted(catalog, allow_local: bool) -> None:
+    """A build-catalog row from `rig image adopt` names an image rig did not build — the same
+    shipping question as an image built from local checkouts, so the same --allow-local."""
+    from .image_catalog import ADOPTED_HINT, adopted_note, adopted_rows
+    adopted = adopted_rows(catalog)
+    if adopted and not allow_local:
+        raise RigError(f"bake: {adopted_note(adopted)} — {ADOPTED_HINT}")
+    if adopted:
+        eprint(f"  warning (--allow-local): {adopted_note(adopted)}")
+
+
 def bake(root: Path, manifest, catalog, descriptors, env, tag: str, *, registry: str | None = None,
          bundle_images: bool = False, platform: str | None = None, arch: str | None = None,
          overwrite: bool = False, include_replay: bool = False, output_root: Path | None = None,
@@ -742,6 +753,7 @@ def bake(root: Path, manifest, catalog, descriptors, env, tag: str, *, registry:
     if registry:
         manifest = replace(manifest, image_registry=registry)
     from .image_catalog import artifact_catalog
+    _refuse_adopted(manifest.build_catalog, allow_local)
     build_catalog, _ = artifact_catalog(manifest.build_catalog, manifest.image_registry)
     manifest = replace(manifest, build_catalog=build_catalog)
     if manifest.context == "deployment":
@@ -1096,6 +1108,7 @@ def bake_fleet(root: Path, tag: str, *, registry: str | None = None,
         from .lock import load_lock, save_lock
         from .image_catalog import artifact_lock
         # Registry selection is deferred with the template; carry portable logical identities.
+        _refuse_adopted(load_lock(root).get("build_catalog"), allow_local)
         locked = artifact_lock(load_lock(root), None)
         save_lock(staging, locked)
 

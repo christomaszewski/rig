@@ -84,8 +84,20 @@ and seed fields record the stated simulator setup; attachment does not verify or
 
 Enable Isaac's ROS bridge, configure its topics, and press Play. Use the same ROS domain
 and a compatible ROS distribution and middleware throughout the graph. The recipe's
-`simulation.ros` declares the expected settings; it does not silently convert a deployment
-to a different distribution or transport. All three values must match the deployment.
+`simulation.ros` declares the simulator's settings, which the probe checks in its own sourced
+environment; it does not silently convert a deployment to a different distribution or
+transport. The middleware and domain must match the deployment.
+
+The simulator may run another ROS distribution than the deployment (v0.2.76), for example Isaac
+on Jazzy against a Lyrical deployment. Message type names alone cannot show that the two sides
+agree, so the session then requires every bound topic's REP-2016 type hash to match on all of
+its endpoints. Endpoints appear on both sides once the deployment starts, so the check that
+decides it is the one after startup: it waits up to `timeout_s` for the deployment's side of each
+bound topic, and a mismatch rolls the session back. A topic with no deployment endpoint by then
+is reported as a warning naming it (its hash was not compared), not passed silently. Humble and older report
+no type hashes and cannot be mixed with another distribution. Rig does not check that the
+middleware itself interoperates across the two releases; matching endpoints in the probe are
+the evidence.
 
 ```sh
 rig sim check --recipe warehouse
@@ -118,7 +130,8 @@ and must be greater than zero and at most 120 seconds.
 
 The probe checks its actual ROS distribution, middleware and domain, expected publisher and
 subscriber topic types, and exactly one advancing `/clock` without a backwards jump during
-observation. Missing topics, incompatible types or a paused clock prevent startup. Endpoint
+observation. Endpoints of one topic that report different REP-2016 type hashes (message
+definitions) block startup even on one distribution, because such endpoints never match. Missing topics, incompatible types or a paused clock prevent startup. Endpoint
 discovery does not prove that every sensor is producing valid payloads, that all application
 callbacks are healthy, or that the observed process is the stated Isaac scene. For discovered
 publisher/subscriber pairs, ROS QoS compatibility errors block startup and uncertain
@@ -186,8 +199,9 @@ Simulation preflight currently rejects a topic declared as published by both Isa
 selected service, including `/tf` or `/tf_static`. Even disjoint transform sets do not exempt
 that conflict: this version cannot prove or enforce authority per transform.
 
-Validate the chosen Isaac release against the deployment's ROS distribution, middleware and
-message packages. Matching the domain ID alone cannot establish compatibility. The simulator
+Validate the chosen Isaac release against the deployment's middleware and message packages.
+Matching the domain ID alone cannot establish compatibility; matching type hashes show the
+message definitions agree, not that every middleware feature behaves the same across releases. The simulator
 host and the machine running Rig's containers may have different GPU/CPU requirements.
 
 This feature does not launch Isaac, package its assets, control play/reset/step, validate

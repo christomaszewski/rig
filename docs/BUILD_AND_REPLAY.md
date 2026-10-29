@@ -212,6 +212,16 @@ results are saved in `rig.lock.build_catalog`; `last_build` records whether the 
 whole matrix or was targeted. A failure can leave partial registry uploads but never records them as
 a successful release. Use unique release tags to avoid mutating an existing release during failure.
 
+**Adopting an image rig did not build (v0.2.76).** Replay refuses an image without a catalog row,
+for example a tag built and pushed by hand. `rig image adopt <registry>/<image>:<tag>` records it
+from the registry's own manifest: its digest, architectures and per-architecture children. The tag
+must be in the deployment's build registry. The row replaces any rows for the same image and tag
+and is marked `adopted` with no source revision; it never copies another row's provenance.
+`--like <catalog key>` takes only the service and runtime variant from that row; without it, rig
+uses the image's existing rows when they agree. `--dry-run` shows the row without writing
+`rig.lock`. `rig image audit` warns about adopted rows, and `rig bake` refuses a catalog that has
+one unless `--allow-local`. A later `rig build` of that tag replaces the row with a built one.
+
 Bake and native run capture carry the complete catalog, including companion images that the Jetson
 does not run. `rig bake --bundle-images` normally exports only images used by enabled deployment stacks.
 Add `--include-replay` to also query and bundle onboard replay requirements, including the disabled

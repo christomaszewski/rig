@@ -1,6 +1,6 @@
 # Rig documentation
 
-Current operator references cover Rig **v0.2.75**: offline and selected-service builds, shared
+Current operator references cover Rig **v0.2.76**: offline and selected-service builds, shared
 sessions and explicitly **experimental** Isaac attachment. Use the Rig executable shipped with your deployment;
 updating another installation does not upgrade a baked artifact.
 
@@ -34,6 +34,7 @@ totals should not be read as current operator requirements:
 - [v0.2.73 release notes](releases/v0.2.73.md)
 - [v0.2.74 release notes](releases/v0.2.74.md) and [pre-release review](releases/v0.2.74-review.md) (fixed and known issues)
 - [v0.2.75 release notes](releases/v0.2.75.md)
+- [v0.2.76 release notes](releases/v0.2.76.md)
 - [Coordinated replay readiness, 2026-10-27](releases/coordinated-replay-readiness-2026-10-27.md)
 
 The release readiness report establishes replay evidence on its stated machines/versions.

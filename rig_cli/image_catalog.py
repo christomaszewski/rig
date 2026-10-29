@@ -2,6 +2,7 @@
 from __future__ import annotations
 import os
 import platform as host_platform
+import re
 import subprocess
 from . import RigError
 from .build_contract import variant_spec
@@ -182,3 +183,95 @@ def pins_for_row(manifest, original, row):
     if image:
         repo = f'{manifest.image_registry}/{image}' if manifest.image_registry else original.rsplit(':', 1)[0]
         yield repo + ':' + original.rsplit(':', 1)[-1]
+
+
+def adopted_rows(catalog):
+    """The build-catalog keys `rig image adopt` recorded: images rig did not build, whose rows
+    carry no source revision. Audit warns about them; bake refuses them without --allow-local."""
+    return sorted(key for key, row in (catalog or {}).items() if isinstance(row, dict) and row.get('adopted'))
+
+
+ADOPTED_HINT = 'rebuild them with rig build before shipping, or pass --allow-local'
+
+
+def adopted_note(keys):
+    return f'adopted with rig image adopt, so rig has no build provenance for them: {", ".join(keys)}'
+
+
+def adopt(root, manifest, ref, *, like=None, registry=None, dry_run=False):
+    """`rig image adopt REF`: record an image rig did not build (a hand-built or hand-pushed tag)
+    in rig.lock's build catalog, so replay's companion check accepts it. The row comes from the
+    registry's own manifest — digest, architectures and per-architecture children — and never
+    copies another row's provenance: it is marked ``adopted`` with no source revision. ``like``
+    names a catalog row to take only its service and runtime variant from."""
+    import datetime
+    import json
+    from . import docker_registry
+    from .build import build_registry
+    from .lock import load_lock, save_lock
+    from .matrix_build import inspect_raw, tag_architectures
+    ref = canonical_ref(ref)
+    if '@' in ref:
+        raise RigError(f'image adopt: {ref} is a digest; adopt the tag a deployment refers to (repo:tag)')
+    repo, tag = ref.rsplit(':', 1)
+    reg, source = build_registry(root, manifest, registry)
+    if reg and not repo.startswith(reg + '/'):
+        raise RigError(f"image adopt: {ref} is not in the deployment's registry {reg} (from {source}); "
+                       f'copy it there first: docker buildx imagetools create --tag {reg}/<image>:{tag} {ref}')
+    image = repo[len(reg) + 1:] if reg else repo
+    raw = inspect_raw(ref)
+    if raw is None:
+        raise RigError(f'image adopt: {ref} is not in its registry; push it first')
+    result = docker_registry.imagetools(['inspect', '--format', '{{json .Manifest}}', ref], [ref],
+                                        capture_output=True, text=True, timeout=45)
+    try:
+        digest = json.loads(result.stdout).get('digest', '') if not result.returncode else ''
+    except ValueError:
+        digest = ''
+    if not re.fullmatch(r'sha256:[0-9a-f]{64}', digest or ''):
+        raise RigError(f'image adopt: cannot read the manifest digest of {ref}: {result.stderr.strip()}')
+    if 'manifests' in raw:
+        children = {m['platform']['architecture']: m['digest'] for m in raw['manifests']
+                    if (m.get('platform') or {}).get('os') == 'linux' and m.get('digest')}
+    else:  # a single-platform image: it is its own architecture member
+        children = {arch: digest for arch in tag_architectures(ref, raw)}
+    if not children:
+        raise RigError(f'image adopt: {ref} names no linux architecture rig can record')
+    catalog = load_lock(root).get('build_catalog') or {}
+    template = None
+    if like:
+        template = catalog.get(canonical_ref(like))
+        if template is None:
+            raise RigError(f"image adopt: --like {like} is not in rig.lock's build catalog "
+                           f'({", ".join(sorted(catalog)) or "it is empty"})')
+    else:
+        kinds = {(row.get('service'), row.get('variant')) for row in catalog.values() if row.get('image') == image}
+        if len(kinds) > 1:
+            raise RigError(f'image adopt: {image} has catalog rows for several services or runtimes; '
+                           'pass --like <catalog key> to choose one')
+        template = next((row for row in catalog.values() if row.get('image') == image), None)
+    row = dict(ref=ref, image=image, digest=digest, architectures=sorted(children), children=children,
+               service=(template or {}).get('service'), variant=(template or {}).get('variant'),
+               source_revision=None, source_dirty=None, no_cache=None,
+               adopted=dict(at=datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds'),
+                            like=canonical_ref(like) if like else None))
+    replaced = [key for key, old in catalog.items()
+                if old.get('image') == image and key.rsplit(':', 1)[-1] == tag]
+    for key in replaced:
+        old = catalog[key]
+        what = 'adopted' if old.get('adopted') else f"built from {str(old.get('source_revision') or 'unknown')[:12]}"
+        eprint(f'rig image adopt: replaces {key} ({what}, {str(old.get("digest"))[:19]}…)')
+    eprint(f'rig image adopt: {ref} {digest[:19]}… ({", ".join(sorted(children))})'
+           + (f' as {row["service"]}' + (f'/{row["variant"]}' if row['variant'] else '') if row['service'] else ''))
+    if dry_run:
+        eprint('rig image adopt: dry run — rig.lock unchanged')
+        return 0
+    lock = load_lock(root)
+    entries = lock.setdefault('build_catalog', {})
+    for key in replaced:
+        entries.pop(key, None)
+    entries[ref] = row
+    save_lock(root, lock)
+    eprint('rig image adopt: recorded as adopted — rig image audit warns about it and rig bake '
+           'refuses it without --allow-local until rig build replaces it')
+    return 0

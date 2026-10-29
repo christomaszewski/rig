@@ -42,6 +42,8 @@ docker (`ls /opt/ros` + the dpkg ``ros-*`` package list), and cross-checks:
               pinned sources) → WARN naming the checkouts. Not an ERROR — the dev loop pushes to
               the deployment's own registry by design — but ``rig bake`` refuses such an image
               without ``--allow-local``.
+  - adopted   a build-catalog row recorded by ``rig image adopt`` (an image rig did not build)
+              → WARN; ``rig bake`` refuses it without ``--allow-local`` too.
 
 Non-ROS images (no /opt/ros, no ros-* packages) are excluded from the checks; an image without a
 shell/dpkg is reported and skipped (uninspectable this way); a ROS image with zero ros-* dpkg
@@ -509,6 +511,11 @@ def audit(manifest: Manifest, descriptors: dict[str, Descriptor], env: dict[str,
     for line in local_builds.values():
         issues.append((WARN, f"{line} — a dev build: rebuild without FLEET_MSGS_LOCAL before "
                              f"shipping (`rig bake` refuses it without --allow-local)"))
+    from .image_catalog import adopted_rows
+    for key in adopted_rows(manifest.build_catalog):
+        issues.append((WARN, f"{key}: adopted with `rig image adopt` — rig did not build it and records "
+                             f"no source revision for it; rebuild it with `rig build` before shipping "
+                             f"(`rig bake` refuses it without --allow-local)"))
 
     # The pin-skew tiers: probe provenance on each msgs.source-declaring service's own image(s).
     prov_svcs = sorted(s for s, d in descriptors.items() if d.msgs_source and s in svc_refs)

@@ -5,7 +5,8 @@ object is the deployment itself stay top-level (init/add/fetch/up/down/status/lo
 everything acting on a subordinate noun groups under it (config/run/registry/pkg/overlay/service/
 artifact/image). The noun groups are a thin argv translation over the flat command engine below, so
 every pre-registry spelling (`new-run`, `bake`, `build`, `rigify`, bare `config`, …) keeps working as a
-permanent alias — docs teach the canonical grouped forms."""
+permanent alias. The operator docs still teach the flat `build`/`bake`/`replay`/`runs`/`rigify`/
+`vendor`/`unbake`, so completion offers those beside their grouped forms (completions._CANONICAL_FLAT)."""
 from __future__ import annotations
 
 import argparse
@@ -643,6 +644,14 @@ def cmd_build(args, root: Path) -> int:
                            offline=args.offline, check=args.check, services=args.services)
 
 
+def cmd_image_adopt(args, root: Path) -> int:
+    """`rig image adopt REF`: a hand-built or hand-pushed image gets a build-catalog row from its
+    registry manifest, marked adopted — never another row's provenance (image_catalog.adopt)."""
+    from .image_catalog import adopt
+    manifest, _, _ = _load(root, identity=False, render=False, context="deployment")
+    return adopt(root, manifest, args.ref, like=args.like, registry=args.registry, dry_run=args.dry_run)
+
+
 def cmd_src(args, root: Path) -> int:
     """`rig src sync`: fetch every git source this deployment's builds need into the local
     mirrors ($RIG_HOME/cache/git), so `rig build --offline` can build without the network."""
@@ -773,7 +782,7 @@ _GROUP_VERBS: dict[str, dict[str, str]] = {
                 "remove": "catalog-remove", "rm": "catalog-remove", "roots": "catalog-roots"},
     "artifact": {"bake": "bake", "unbake": "unbake", "list": "artifact-list",
                  "show": "artifact-show", "rm": "artifact-rm", "prune": "artifact-prune"},
-    "image": {"build": "build", "pull": "pull", "audit": "image-audit"},
+    "image": {"build": "build", "pull": "pull", "audit": "image-audit", "adopt": "image-adopt"},
     "service": {"rigify": "rigify", "vendor": "vendor", "certify": "certify"},
 }
 # Not-yet-implemented grouped verbs get a pointed error instead of an "unknown sensor" mystery.
@@ -1217,6 +1226,16 @@ def build_parser() -> argparse.ArgumentParser:
     add("image-audit", "inspect every image the deployment runs for ROS distro/rmw/package-version "
                        "consistency (canonical: image audit; run after build/pull)")
 
+    adp = sub.add_parser("image-adopt", help="record an image rig did not build in rig.lock's build "
+                                             "catalog, marked adopted (canonical: image adopt)")
+    adp.add_argument("ref", help="the registry tag to adopt (<registry>/<image>:<tag>)")
+    adp.add_argument("--like", default=None, metavar="CATALOG_KEY",
+                     help="take the service and runtime from this build-catalog row (default: the "
+                          "image's own rows, when they agree)")
+    adp.add_argument("--registry", default=None,
+                     help="the deployment registry the tag must be in (default: rig build's registry)")
+    adp.add_argument("--dry-run", action="store_true", help="show the row without writing rig.lock")
+
     add("doctor", "read-only preflight checks").add_argument(
         "--deep", action="store_true", help="also certify launchers and available isolated build "
                                              "contracts (requires local build context for build probes)"
@@ -1371,7 +1390,8 @@ def build_parser() -> argparse.ArgumentParser:
                     help="replace an existing artifact without the interactive confirmation")
     bk.add_argument("--allow-local", action="store_true",
                     help="bake images built from local checkouts (labelled io.rig.build.local, "
-                         "e.g. a FLEET_MSGS_LOCAL msgs overlay); refused by default")
+                         "e.g. a FLEET_MSGS_LOCAL msgs overlay) or adopted with rig image adopt; "
+                         "refused by default")
 
     ub = sub.add_parser("unbake", help="extract a baked artifact to an editable tree")
     ub.add_argument("artifact", help="path to the .tar.gz artifact")
@@ -1901,6 +1921,8 @@ def main(argv=None) -> int:
             return overlay_mod.list_bindings(root, args.instance)
         if args.cmd == "build":
             return cmd_build(args, root)
+        if args.cmd == "image-adopt":
+            return cmd_image_adopt(args, root)
         if args.cmd == "src":
             return cmd_src(args, root)
         if args.cmd == "bake":

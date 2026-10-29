@@ -1,7 +1,7 @@
 # rig — project state & handoff (resume here)
 
-Current checkpoint: **v0.2.75 — build and bench-identity fixes** on v0.2.74's offline and
-selected-service builds,
+Current checkpoint: **v0.2.76 — cross-distro simulators and adopted images** on v0.2.74's
+offline and selected-service builds,
 reviewed **2026-10-29 UTC**. Use the [documentation index](README.md) to choose an operator
 workflow. The dated entries below are historical observations, not the current host state.
 
@@ -16,7 +16,9 @@ workflow. The dated entries below are historical observations, not the current h
   and uses frozen session state for status/logs/teardown. It does not launch or reset Isaac.
 - The [offline Isaac walkthrough](ISAAC_OFFLINE.md) and [example](../examples/isaac-attach/README.md)
   cover preparation and capture→replay. The repository's Lyrical default requires a compatibility
-  decision: NVIDIA 6.0.0 documents tested Humble/Jazzy, including Linux Jazzy/Zenoh.
+  decision: NVIDIA 6.0.0 documents tested Humble/Jazzy, including Linux Jazzy/Zenoh. Since
+  v0.2.76 a simulator may run another distro than the deployment when every bound topic's
+  REP-2016 type hash matches.
 - Current limitations, documentation audit and new test evidence belong in the
   [preparation report](ISAAC_PREP_REPORT.md). Live Isaac/GPU and disconnected asset acceptance
   remain pending. Do not substitute historical replay tests for simulator acceptance.
@@ -38,9 +40,15 @@ workflow. The dated entries below are historical observations, not the current h
   `ros: {domain_id}` sets the ROS domain, doctor names its source, and a bench still on the
   deployment's explicit domain is warned; managed Buildx builders get the host's real DNS behind
   a systemd-resolved stub (`RIG_BUILDKITD_CONFIG` adds settings) without losing their cache, and a
-  build step that fails on name resolution says so. Still open from that feedback: hybrid
-  replay + simulation sessions, cross-distro simulator checks by type hash, `rig image adopt`,
-  infra build context in reconstructed trees, and linked-run recordings in replay containers.
+  build step that fails on name resolution says so.
+- v0.2.76 adds two more: `rig sim` accepts a simulator on another ROS distro than the
+  deployment when every bound topic's REP-2016 type hash matches (and flags mismatched hashes
+  on one distro too), and `rig image adopt` records a hand-built tag in the build catalog from
+  its registry manifest, marked adopted (audit warns, bake refuses without `--allow-local`).
+  Still open from that feedback: hybrid replay + simulation sessions, infra build context in
+  reconstructed trees (bake does not record a checkout-routed service's git origin), and
+  linked-run recordings in camera replay (camera-service should mount `RIG_REPLAY_SOURCE`
+  read-only like the bag player).
 
 ## Historical release notes and handoff observations
 

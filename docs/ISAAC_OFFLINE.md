@@ -26,7 +26,11 @@ Humble/Jazzy as tested, other native distributions as experimental, and Linux Ja
 with an externally installed RMW and router. For this walkthrough prepare a **Jazzy + Zenoh**
 deployment, including compatible service images and message packages. Changing a YAML distro
 label does not convert an image or bridge. Keeping Lyrical requires a separately validated
-custom integration; a warning or successful endpoint discovery is not that validation.
+custom integration; a warning or successful endpoint discovery is not that validation. Since
+v0.2.76 Rig accepts Isaac on Jazzy against a Lyrical deployment when every bound topic's REP-2016
+type hash matches after startup (see [simulation](SIMULATION.md#check-start-and-stop)); that
+proves the message definitions agree, not that Jazzy and Lyrical `rmw_zenoh` interoperate in
+every respect.
 [NVIDIA ROS installation](https://docs.isaacsim.omniverse.nvidia.com/6.0.0/installation/install_ros.html)
 
 The effective deployment must contain these settings, adapted to a dedicated test identity:

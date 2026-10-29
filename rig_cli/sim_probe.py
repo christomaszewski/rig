@@ -4,6 +4,14 @@ The configured interpreter must have rclpy and rosgraph_msgs. Rig itself does no
 import ROS. One JSON request arrives on stdin and one JSON result leaves stdout.
 Endpoint discovery establishes connectivity, not the remote process's identity or
 sensor fidelity. ROS_DISTRO describes this probe's sourced environment.
+
+Endpoints on Iron and later carry a REP-2016 type hash of their message definition. Endpoints
+of one topic that disagree never match, whatever their type names say, so any disagreement is
+an error. When the simulator and the deployment run different ROS distros the request sets
+``require_type_hashes``: the hash is then the only evidence of compatibility, so an endpoint
+without one is an error too. ``await_counterparts`` (the check after the deployment starts) keeps
+observing until every bound topic has endpoints on both sides, so the comparison is not passed
+vacuously; a topic still one-sided at the timeout is reported as a warning.
 """
 from __future__ import annotations
 
@@ -18,12 +26,17 @@ import uuid
 
 
 SHARED_TOPICS = frozenset(("/tf", "/tf_static", "/diagnostics"))
+_TYPE_HASH = re.compile(r"RIHS\d{2}_[0-9a-f]{64}")
 
 
 def validate_request(request):
     if not isinstance(request, dict) or set(request) - {
-            "ros", "publishes", "subscribes", "timeout_s"}:
-        raise ValueError("request must contain only ros, publishes, subscribes and timeout_s")
+            "ros", "publishes", "subscribes", "timeout_s", "require_type_hashes", "await_counterparts"}:
+        raise ValueError("request must contain only ros, publishes, subscribes, timeout_s, "
+                         "require_type_hashes and await_counterparts")
+    for flag in ("require_type_hashes", "await_counterparts"):
+        if not isinstance(request.get(flag, False), bool):
+            raise ValueError(f"{flag} must be true or false")
     ros = request.get("ros")
     if not isinstance(ros, dict) or set(ros) != {"distro", "rmw", "domain_id"}:
         raise ValueError("ros requires distro, rmw and domain_id")
@@ -114,6 +127,17 @@ def evaluate(request, observation):
         wrong = [e for e in publishers + subscribers if e.get("type") != typ]
         if wrong:
             error("endpoint_type", f"{topic} has endpoints with incompatible message types; expected {typ}")
+        by_hash = {}
+        for e in publishers + subscribers:
+            by_hash.setdefault(e.get("type_hash"), []).append(e.get("node", "unknown node"))
+        known = sorted(h for h in by_hash if h)
+        if len(known) > 1:
+            error("type_hash", f"{topic}: endpoints disagree on the {typ} definition (REP-2016 hash " +
+                  "; ".join(f"{h[:15]}… at {', '.join(by_hash[h])}" for h in known) +
+                  "); the simulator and the deployment need the same message definitions")
+        elif request.get("require_type_hashes") and None in by_hash:
+            error("type_hash_unknown", f"{topic}: {', '.join(by_hash[None])} report no REP-2016 type "
+                  "hash, so a cross-distro binding cannot be verified (Humble and older have none)")
         pairs = endpoints.get("qos_checks", [])
         if len(pairs) != len(publishers) * len(subscribers):
             error("qos_evidence", f"{topic}: missing QoS compatibility evidence for discovered endpoint pairs")
@@ -127,11 +151,28 @@ def evaluate(request, observation):
                 issues.append(dict(status="warn", code="qos_unknown", message=message))
             elif status != "ok":
                 error("qos_evidence", message)
+    if request.get("await_counterparts"):
+        for direction, other in (("publishes", "subscribers"), ("subscribes", "publishers")):
+            for entry in request.get(direction, []):
+                if not topics.get(entry["topic"], {}).get(other):
+                    issues.append(dict(status="warn", code="type_hash_unverified", message=(
+                        f"{entry['topic']}: no deployment {other[:-1]} discovered, so its type hash "
+                        "was not compared")))
     if not issues:
         issues.append(dict(status="ok", code="connected",
                            message="Expected ROS endpoints and one advancing simulation clock observed"))
     return dict(version=1, ready=not any(i["status"] == "error" for i in issues),
                 issues=issues, ros=ros, clock=clock, topics=topics)
+
+
+def _type_hash(info):
+    """The endpoint's REP-2016 type hash (``RIHS01_<hex>``), or None: rclpy before Iron has
+    none, and version 0 means the middleware left it unset."""
+    value = getattr(info, "topic_type_hash", None)
+    if value is None or getattr(value, "version", 1) == 0:
+        return None
+    text = str(value)
+    return text if _TYPE_HASH.fullmatch(text) else None
 
 
 def _endpoint(info):
@@ -145,7 +186,7 @@ def _endpoint(info):
         duration = getattr(qos, name, None)
         values[name + "_ns"] = getattr(duration, "nanoseconds", None)
     return dict(node=(info.node_namespace.rstrip("/") + "/" + info.node_name),
-                type=info.topic_type, gid=list(info.endpoint_gid), qos=values)
+                type=info.topic_type, type_hash=_type_hash(info), gid=list(info.endpoint_gid), qos=values)
 
 
 def _qos_check(publisher, subscriber, checker):
@@ -237,9 +278,13 @@ def observe(request):
             clock["publishers"] = len(observed["topics"]["/clock"]["publishers"])
             clock["max_publishers"] = max(clock["publishers"], clock["max_publishers"])
             clock["advance_age_s"] = None if last_advance[0] is None else now - last_advance[0]
-            # Allow graph discovery to settle before accepting the first match.
-            if now - started >= min(1.0, timeout) and evaluate(request, observed)["ready"]:
-                break
+            # Allow graph discovery to settle before accepting the first match. A one-sided
+            # binding keeps the observation going (await_counterparts) until the timeout.
+            if now - started >= min(1.0, timeout):
+                result = evaluate(request, observed)
+                if result["ready"] and not any(i["code"] == "type_hash_unverified"
+                                               for i in result["issues"]):
+                    break
         return observed
     finally:
         if executor is not None:

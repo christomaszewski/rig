@@ -45,10 +45,21 @@ def test_command_menu_is_canonical():
 
 def test_command_menu_hides_legacy_flat_spellings():
     menu = _c("")
-    for legacy in ("new-run", "end-run", "runs", "config-render", "config-diff",
-                   "bake", "unbake", "artifact-list", "build", "image-audit",
-                   "rigify", "vendor"):
+    for legacy in ("new-run", "end-run", "config-render", "config-diff", "run-rm",
+                   "artifact-list", "image-audit", "image-adopt", "catalog-add"):
         assert legacy not in menu, f"legacy '{legacy}' should not be suggested"
+
+
+def test_the_flat_spellings_the_docs_teach_complete():
+    # `rig bu<TAB>` must reach build: the docs use `rig build` (and bake/replay/...) far more
+    # than the grouped forms, which complete too.
+    menu = _c("")
+    for verb in ("build", "bake", "unbake", "replay", "runs", "rigify", "vendor"):
+        assert verb in menu, f"documented '{verb}' missing from the menu"
+    assert _c("bu") == ["build"]
+    assert _c("ba") == ["bake"]
+    assert "replay" in _c("rep")
+    assert "build" in _c("image", "")
 
 
 def test_legacy_spellings_still_parse():
@@ -71,7 +82,7 @@ def test_global_flags():
 # --- noun groups ------------------------------------------------------------
 
 def test_group_menus():
-    assert _c("image", "") == ["audit", "build", "pull"]
+    assert _c("image", "") == ["adopt", "audit", "build", "pull"]
     assert _c("run", "") == ["archive", "end", "export", "import", "list", "new", "replay", "retrofit",
                              "rm", "tag", "untag"]
     assert _c("artifact", "") == ["bake", "list", "prune", "rm", "show", "unbake"]

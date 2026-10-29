@@ -121,9 +121,10 @@ class Simulation(unittest.TestCase):
 
     def test_ros_mismatch_physical_start_and_output_conflicts_block(self):
         cases = []
-        doc = copy.deepcopy(self.doc)
-        doc["simulation"]["ros"]["distro"] = "lyrical"
-        cases.append((doc, "ros"))
+        for key, value in (("rmw", "rmw_zenoh_cpp"), ("domain_id", 8)):
+            doc = copy.deepcopy(self.doc)
+            doc["simulation"]["ros"][key] = value
+            cases.append((doc, "ros"))
         doc = copy.deepcopy(self.doc)
         doc["session"]["instances"].append("camera")
         doc["simulation"]["replace"] = []
@@ -137,6 +138,41 @@ class Simulation(unittest.TestCase):
             _, _, plan = self.build(doc, host=False)
             self.assertFalse(plan["ready_to_run"])
             self.assertTrue(any(i["code"] == code and i["status"] == "error" for i in plan["issues"]), plan)
+
+    def test_a_simulator_on_another_distro_needs_matching_type_hashes(self):
+        seen = []
+
+        def probe(simulation, env, require_type_hashes=False, await_counterparts=False):
+            seen.append((require_type_hashes, await_counterparts))
+            return {"version": 1, "ready": True, "issues": [] if not await_counterparts else [
+                {"status": "warn", "code": "type_hash_unverified", "message": "/x: not compared"}]}
+        # same distro: hashes are compared when present, never required
+        with self.host(probe=probe):
+            manifest, desc, plan = self.build()
+        self.assertNotIn("type_hashes", plan)
+        self.assertEqual(seen, [(False, False)])
+        # Isaac on lyrical, the deployment on jazzy: allowed, every probe requires matching hashes
+        doc = copy.deepcopy(self.doc)
+        doc["simulation"]["ros"]["distro"] = "lyrical"
+        self.write("sessions/dockyard.yaml", doc)
+        seen.clear()
+        with self.host(probe=probe):
+            manifest, desc, plan = self.build(doc)
+            self.assertTrue(plan["ready_to_run"], plan["issues"])
+            self.assertEqual(plan["type_hashes"], "required")
+            self.assertTrue(any(i["code"] == "cross_distro" and i["status"] == "warning"
+                                for i in plan["issues"]))
+            with contextlib.redirect_stderr(io.StringIO()) as err:
+                self.assertEqual(sim.execute(self.root, self.path, manifest, desc, plan), 0)
+        # check, before capture and the launch gate require hashes; after startup also waits for
+        # the deployment's side of each binding, and says which were never compared
+        self.assertEqual(seen, [(True, False)] * 3 + [(True, True)])
+        self.assertIn("rig sim: warning: /x: not compared", err.getvalue())
+        # a distro without type hashes cannot prove a cross-distro binding
+        doc["simulation"]["ros"]["distro"] = "humble"
+        _, _, plan = self.build(doc, host=False)
+        self.assertTrue(any(i["code"] == "ros" and i["status"] == "error" and "REP-2016" in i["message"]
+                            for i in plan["issues"]), plan["issues"])
 
     def test_failed_probe_never_starts_or_opens_run(self):
         with self.host(probe={"version": 1, "ready": False, "issues": [{"status": "error", "code": "clock", "message": "paused"}]}):
@@ -192,7 +228,7 @@ class Simulation(unittest.TestCase):
     def test_clock_conflict_after_start_rolls_back(self):
         observations = iter([{"version": 1, "ready": True, "issues": []}] * 3 +
                             [{"version": 1, "ready": False, "issues": [dict(status="error", code="clock", message="two clocks")]}])
-        with self.host(probe=lambda *args: next(observations)):
+        with self.host(probe=lambda *args, **kwargs: next(observations)):
             manifest, desc, plan = self.build()
             with self.assertRaisesRegex(RigError, "two clocks"):
                 sim.execute(self.root, self.path, manifest, desc, plan)
@@ -217,7 +253,7 @@ class Simulation(unittest.TestCase):
     def test_capture_time_connection_loss_starts_no_services(self):
         observations = iter([{"version": 1, "ready": True, "issues": []}] * 2 +
                             [{"version": 1, "ready": False, "issues": [dict(status="error", code="clock", message="paused")]}])
-        with self.host(probe=lambda *args: next(observations)):
+        with self.host(probe=lambda *args, **kwargs: next(observations)):
             manifest, desc, plan = self.build()
             with self.assertRaisesRegex(RigError, "during run capture"):
                 sim.execute(self.root, self.path, manifest, desc, plan)
