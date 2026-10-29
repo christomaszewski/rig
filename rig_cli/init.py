@@ -32,6 +32,7 @@ import re
 import shutil
 import subprocess
 from pathlib import Path
+from typing import Callable
 
 import yaml
 
@@ -382,7 +383,10 @@ def _git_init_deployment(target: Path) -> None:
 
 
 def init(target: Path, *, vehicle_id: int | None = None, infra: list[str] | None = None,
-         discover: Path | None = None, no_git: bool = False) -> Path:
+         discover: Path | None = None, no_git: bool = False,
+         then: Callable[[Path], object] | None = None) -> Path:
+    """``then`` runs on the finished scaffold before its git commit (cli: `--add` and registry
+    `--infra` through `rig add`); if it fails, everything init created is removed again."""
     target = target.resolve()
     if (target / "vehicle.yaml").exists():
         raise RigError(f"init: {target} already has a vehicle.yaml (refusing to overwrite)")
@@ -391,6 +395,7 @@ def init(target: Path, *, vehicle_id: int | None = None, infra: list[str] | None
     plan = _plan_infra(infra or [], target.parent)
     if discover is not None and not discover.resolve().is_dir():
         raise RigError(f"init --discover: not a directory: {discover}")
+    before = set(target.iterdir()) if target.is_dir() else None  # None: init creates the target
     for sub in ("config/sensors", "config/infra", "config/autonomy", "services"):
         (target / sub).mkdir(parents=True, exist_ok=True)
 
@@ -414,12 +419,25 @@ def init(target: Path, *, vehicle_id: int | None = None, infra: list[str] | None
     (target / "services" / ".gitkeep").write_text("")
 
     eprint(f"initialized rig deployment '{target.name}' at {target}")
+    if then is not None:
+        try:
+            then(target)
+        except BaseException:
+            # Undo exactly what init made: the whole target if it created it, else only the
+            # entries that were not there before.
+            if before is None:
+                shutil.rmtree(target, ignore_errors=True)
+            else:
+                for path in set(target.iterdir()) - before:
+                    shutil.rmtree(path) if path.is_dir() else path.unlink()
+            eprint(f"init: removed the new deployment at {target} — nothing was kept")
+            raise
     if not no_git:
         _git_init_deployment(target)
     if discovered:
         eprint(f"  {discovered} service(s) catalogued from {discover} — vehicle.yaml holds a commented MENU;"
                f" uncomment the entries for hardware THIS vehicle carries, then `rig doctor`")
-    if not infra_rows:
+    if not infra_rows and then is None:
         eprint("  tip: rmw_zenoh needs a shared router — `rig init ... --infra zenoh-router` wires one")
     eprint("  next: edit services.yaml + vehicle.yaml, add config/{infra,sensors}/*, then `rig doctor`")
     return target

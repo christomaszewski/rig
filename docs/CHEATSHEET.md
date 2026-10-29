@@ -97,6 +97,10 @@ rig init my-vehicle --vehicle-id 7 && cd my-vehicle    # born a git repo (--no-g
                                    #   MARKERS (v0.2.20) — `rig provision`/RIG_VEHICLE_ID supply them
 rig add public/zenoh-router        # infra from the registry: repo cloned AT THE PIN, launch surface
                                    #   VENDORED into services/, config from its example, rig.lock written
+rig init my-vehicle --infra public/zenoh-router --add public/sbg
+                                   # the same in ONE step: --infra/--add take anything `rig add` does
+                                   #   (registry refs checked before any write; a failed install
+                                   #   removes the new tree), committed in the scaffold commit
 rig add sensor:zr30                # match a profile (exact → glob → fallback), install its service
                                    #   transitively, materialize the payload as the EDITABLE config
 rig pkg search ouster:             # profiles for a service, across registries ("what drives

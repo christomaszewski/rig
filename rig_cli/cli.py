@@ -453,9 +453,48 @@ def cmd_init(args) -> int:
     discover = None
     if args.discover is not None:  # flag given; "" = no dir supplied -> scan the target's parent
         discover = Path(args.discover).resolve() if args.discover else Path(args.target).resolve().parent
-    init_mod.init(Path(args.target), vehicle_id=args.vehicle_id, infra=args.infra or [],
-                  discover=discover, no_git=args.no_git)
+    # --infra keeps wiring local services itself; its registry refs, and every --add, go through
+    # `rig add` once the tree exists. Registry forms are resolved FIRST (offline, from the synced
+    # caches): a typo must not cost a scaffold. Anything else that fails rolls the target back.
+    local_infra = [t for t in args.infra or [] if not _registry_ref(t)]
+    adds = [t for t in args.infra or [] if _registry_ref(t)] + list(args.add or [])
+    for token in adds:
+        _preflight_registry(token)
+    init_mod.init(Path(args.target), vehicle_id=args.vehicle_id, infra=local_infra,
+                  discover=discover, no_git=args.no_git,
+                  then=(lambda root: [route_add(root, t) for t in adds]) if adds else None)
     return 0
+
+
+def _registry_ref(token: str) -> bool:
+    """Whether route_add reads ``token`` as a registry package: `<registry>/<name>[@ver]` with a
+    configured registry — the same rule, ambiguity refusal included."""
+    if "/" not in token:
+        return False
+    ns = token.split("/", 1)[0]
+    if not any(e.name == ns for e in registries_mod.load_entries()):
+        return False
+    if Path(token).expanduser().exists():
+        raise RigError(f"init: '{token}' is ambiguous — the directory exists AND '{ns}' is a "
+                       f"configured registry; use ./{token} for the directory, or "
+                       f"{token}@<version> for the registry package")
+    return True
+
+
+def _preflight_registry(token: str) -> None:
+    """Resolve an init-time registry form (`<registry>/<name>`, `sensor:<id>`,
+    `<service>:<profile>`) against the synced registry caches without installing it. Local
+    paths and workspace names are left to route_add."""
+    if token.startswith("sensor:"):
+        install_mod.resolve_sensor(token[len("sensor:"):])
+        return
+    profile = ":" in token and "/" not in token and not Path(token).expanduser().exists()
+    if not (_registry_ref(token) or profile):
+        return
+    _, _, pkg = install_mod.resolve_ref(token, history=True)
+    if pkg.kind in ("overlay", "vehicle"):
+        raise RigError(f"init: '{token}' is {'an overlay' if pkg.kind == 'overlay' else 'a vehicle plan'}"
+                       f" — install a service, profile, sensor or suite")
 
 
 def route_add(root: Path, token: str, *, as_name: str | None = None, tier: str | None = None,
@@ -1201,10 +1240,15 @@ def build_parser() -> argparse.ArgumentParser:
                           "`vehicle:`) — a single-vehicle tree. Default: per-host MARKERS, "
                           "supplied per machine by `rig provision` / RIG_VEHICLE_ID (nothing "
                           "comes up as vehicle 1 by accident)")
-    ini.add_argument("--infra", action="append", default=[], metavar="NAME|PATH",
-                     help="fully wire a shared-infra service (repeatable): a service-dir path, or a bare "
+    ini.add_argument("--infra", action="append", default=[], metavar="NAME|PATH|REF",
+                     help="fully wire a shared-infra service (repeatable): a service-dir path, a bare "
                           "name resolved from the workspace (e.g. --infra zenoh-router finds "
-                          "../rig-infra/zenoh-router)")
+                          "../rig-infra/zenoh-router), or a registry ref (public/zenoh-router), "
+                          "installed as `rig add` would")
+    ini.add_argument("--add", action="append", default=[], metavar="NAME|PATH|REF",
+                     help="add a service once the tree exists, exactly as `rig add` (repeatable): a "
+                          "registry ref (public/sbg), sensor:<id>, <service>:<profile>, a suite, "
+                          "or a local path / workspace name")
     ini.add_argument("--no-git", action="store_true", dest="no_git",
                      help="skip the default `git init` + scaffold commit (a deployment is born a "
                           "git repo so rollback is always git)")

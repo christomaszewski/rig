@@ -85,6 +85,7 @@ python3 -m venv .venv && .venv/bin/pip install pyyaml
 ./rig init my-vehicle --vehicle-id 1 --infra zenoh-router --discover   # scaffold: wired infra + a menu
                           #   (--vehicle-id pins a single-vehicle identity; without it the tree
                           #   carries per-host MARKERS, supplied by `rig provision`/RIG_VEHICLE_ID)
+./rig init my-vehicle --infra public/zenoh-router --add public/sbg  # or straight from a registry
 ./rig add ../novatel      # wire ONE more service into an existing deployment (path or bare name)
 ./rig fetch               # hand-wrote vehicle.yaml rows? materialize their configs from examples
 ./rig rigify ../my-sw     # make EXISTING software rig-compatible (descriptor + launcher + example)

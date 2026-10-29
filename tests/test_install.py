@@ -119,6 +119,56 @@ def _world():
     return target, reg
 
 
+def _registry_only():
+    """RIG_HOME + the testns registry, no deployment yet — `rig init` makes it."""
+    repo, rev = _code_repo()
+    reg = _registry_with(repo, rev)
+    _run("setup", "--no-default-registry")
+    _run("registry", "add", "testns", "--path", str(reg))
+    return repo
+
+
+def test_init_installs_registry_services_in_one_step():
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        _registry_only()
+        target = pathlib.Path(tempfile.mkdtemp()) / "veh"
+        rc, _, err = _run("init", str(target), "--infra", "testns/routerish",
+                          "--add", "testns/camish")
+        assert rc == 0, err
+        rows = {s.name: s for s in load_manifest(target).sensors}
+        assert rows["routerish"].tier == "infra" and rows["routerish"].enabled
+        assert any(s.service == "camish" for s in rows.values())
+        packages = load_lock(target)["packages"]
+        assert {"testns/routerish", "testns/camish"} <= {k.split("@")[0] for k in packages}
+        # the scaffold commit holds the installs: nothing left uncommitted
+        assert _git("status", "--porcelain", cwd=target).stdout == ""
+
+
+def test_init_registry_typo_writes_nothing():
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        _registry_only()
+        target = pathlib.Path(tempfile.mkdtemp()) / "veh"
+        rc, _, err = _run("init", str(target), "--infra", "testns/routerihs")
+        assert rc == 1 and "not found in any configured registry" in err, err
+        assert not target.exists()
+
+
+def test_init_rolls_back_everything_when_an_install_fails():
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        repo = _registry_only()
+        shutil.rmtree(repo)  # the registry resolves, the service's source can't be fetched
+        target = pathlib.Path(tempfile.mkdtemp()) / "veh"
+        rc, _, err = _run("init", str(target), "--add", "testns/camish")
+        assert rc == 1 and "removed the new deployment" in err, err
+        assert not target.exists()
+        # a target that already existed keeps what was there, and loses only init's files
+        target.mkdir()
+        (target / "notes.txt").write_text("mine\n")
+        rc, _, err = _run("init", str(target), "--add", "testns/camish")
+        assert rc == 1, err
+        assert sorted(p.name for p in target.iterdir()) == ["notes.txt"]
+
+
 def test_fetch_initializes_submodules():
     # Driver source arriving via submodule: the pinned checkout must init it recursively (rig
     # build runs in this tree; the superproject commit pins submodule revs, so exact-pin holds

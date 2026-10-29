@@ -733,6 +733,8 @@ _POSITIONAL_SOURCES: dict = {
 # rig registry — absent here by design (file/no fallback beats a wrong menu).
 _OPTION_SOURCES: dict = {
     (("build",), "--scope"): _build_scopes,
+    (("init",), "--infra"): _add_specs,
+    (("init",), "--add"): _add_specs,
     **{(("pkg", verb), "--to"): _registry_names for verb in ("promote", "repin", "rebase")},
     (("pkg", "yank"), "--from"): _registry_names,
     (("pkg", "search"), "--registry"): _registry_names,
