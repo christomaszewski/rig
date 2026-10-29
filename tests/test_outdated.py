@@ -1,5 +1,7 @@
 """pkg outdated + the sync delta digest — registry-authoring currency (QoL plan F2).
 Run: python3 tests/test_outdated.py"""
+from __future__ import annotations
+
 import contextlib
 import io
 import os

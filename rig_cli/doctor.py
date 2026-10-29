@@ -221,7 +221,9 @@ def collect(
                                        f"it will fail; rename to e.g. '{sensor.name.replace('-', '_')}'"))
 
     # Host-facing port clashes (only for services that declare host_ports in their rigging.yaml).
-    ports: dict[int, list[str]] = {}
+    # Only ENABLED rows run, so only they can clash (a disabled alternative config on the same
+    # port used to block `rig up`); a clash a disabled row would cause is a WARN.
+    ports: dict[int, list[tuple[str, bool]]] = {}
     for sensor in manifest.sensors:
         desc = descriptors.get(sensor.service)
         if not desc or not desc.host_ports:
@@ -229,11 +231,17 @@ def collect(
         cfg = configs[sensor.name] if configs is not None else load_yaml(sensor.config)
         for path in desc.host_ports:
             value = _get_path(cfg, path)
-            if isinstance(value, int):
-                ports.setdefault(value, []).append(sensor.name)
+            if isinstance(value, str) and value.isdigit():  # a port from a shell-tier var
+                value = int(value)
+            if isinstance(value, int) and not isinstance(value, bool):
+                ports.setdefault(value, []).append((sensor.name, sensor.enabled))
     for port, owners in sorted(ports.items()):
-        if len(owners) > 1:
-            issues.append(Issue(ERROR, f"host port {port} claimed by multiple stacks: {owners}"))
+        running = [name for name, enabled in owners if enabled]
+        if len(running) > 1:
+            issues.append(Issue(ERROR, f"host port {port} claimed by multiple stacks: {running}"))
+        elif len(owners) > 1:
+            issues.append(Issue(WARN, f"host port {port} is shared by {[n for n, _ in owners]} — "
+                                      f"fine while only one is enabled"))
 
     # Coarse resource reminders (rig treats driver configs as opaque, so this is advisory).
     cameras = [s.name for s in manifest.sensors if s.service == "camera-service" and s.enabled]

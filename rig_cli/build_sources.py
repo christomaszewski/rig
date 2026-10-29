@@ -71,11 +71,13 @@ def _label(req: Requirement) -> str:
 
 
 def _cached(req: Requirement) -> bool:
-    """A pin already checked out in the src cache needs no mirror at all."""
+    """A pin already checked out in the src cache needs no mirror at all — under the repo-keyed
+    name, or the pre-v0.2.25 per-service name `_fetch_source` still adopts."""
     from .install import _repo_slug
     from .registries import rig_home
-    dest = rig_home() / "cache" / "src" / f"{_repo_slug(req.repo)}-{req.ref[:12]}"
-    return (dest / ".git").is_dir()
+    src = rig_home() / "cache" / "src"
+    return any((src / f"{key}-{req.ref[:12]}" / ".git").is_dir()
+               for key in (_repo_slug(req.repo), req.owner))
 
 
 def sync(reqs: list[Requirement]) -> tuple[list[str], list[str]]:

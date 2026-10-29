@@ -1197,10 +1197,8 @@ def unbake(artifact: Path, into: Path) -> Path:
         raise RigError(f"unbake: artifact not found: {artifact}")
     into.mkdir(parents=True, exist_ok=True)
     with tarfile.open(artifact, "r:gz") as tf:
-        try:
-            tf.extractall(into, filter="data")  # py3.12+: refuse path traversal / unsafe members
-        except TypeError:  # older Python
-            tf.extractall(into)
+        from .common import safe_extract
+        safe_extract(tf, into)  # refuse path traversal / unsafe members on every Python
     tops = sorted(p for p in into.iterdir() if p.is_dir())
     target = tops[-1] if tops else into
     eprint(f"unbaked {artifact.name} -> {target}")

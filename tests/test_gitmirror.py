@@ -101,14 +101,66 @@ def test_offline_resolves_from_the_mirror_and_names_what_is_missing():
                 assert needle in str(exc) and "rig src sync" in str(exc), exc
 
 
-def test_online_fetch_failure_points_at_offline():
+def test_online_fetch_failure_points_at_offline_only_when_a_mirror_exists():
     with _home():
-        try:
+        try:  # no mirror yet: offline could not help either, so no such hint
             gitmirror.resolve(str(pathlib.Path(tempfile.mkdtemp()) / "missing"), "v1")
             raise AssertionError("fetched a missing repo")
         except RigError as exc:
-            assert "cannot fetch" in str(exc) and "rig build --offline" in str(exc), exc
+            assert "cannot fetch" in str(exc) and "--offline" not in str(exc), exc
         assert not list((pathlib.Path(os.environ["RIG_HOME"]) / "cache" / "git").glob("*.git"))
+        up = _repo()
+        gitmirror.resolve(str(up), "main")
+        shutil.rmtree(up)
+        gitmirror.reset()
+        try:  # a mirror exists: name its age and the offline way out
+            gitmirror.resolve(str(up), "main")
+            raise AssertionError("fetched a deleted repo")
+        except RigError as exc:
+            assert "the local mirror has a copy from" in str(exc), exc
+            assert "rig build --offline" in str(exc), exc
+
+
+def test_upstream_branch_renamed_below_its_old_name_does_not_wedge_the_mirror():
+    with _home():
+        up = _repo()
+        _git("branch", "feature", cwd=up)
+        pinned = gitmirror.resolve(str(up), "feature")
+        _git("branch", "-D", "feature", cwd=up)
+        _git("branch", "feature/x", cwd=up)  # refs/heads/feature -> refs/heads/feature/x
+        gitmirror.reset()
+        assert gitmirror.resolve(str(up), "feature/x") == pinned
+        assert gitmirror.resolve(str(up), pinned) == pinned  # the pin survived the prune
+
+
+def test_relative_local_repo_urls_resolve_against_the_callers_cwd():
+    with _home():
+        up = _repo("rel")
+        cwd = os.getcwd()
+        os.chdir(up.parent)
+        try:
+            assert gitmirror.resolve("./rel", "main") == _git("rev-parse", "HEAD", cwd=up)
+        finally:
+            os.chdir(cwd)
+
+
+def test_stale_gitmodules_entries_and_update_none_are_skipped_like_git():
+    with _home():
+        lib = _repo("lib", {"lib.txt": "lib\n"})
+        top = _repo("top", {"x.txt": "x\n"})
+        _git("-c", "protocol.file.allow=always", "submodule", "add", "-q", str(lib), "vendor/lib",
+             cwd=top)
+        _git("config", "-f", ".gitmodules", "submodule.gone.path", "vendor/gone", cwd=top)
+        _git("config", "-f", ".gitmodules", "submodule.gone.url", str(lib), cwd=top)
+        _git("config", "-f", ".gitmodules", "submodule.vendor/lib.update", "none", cwd=top)
+        _git("add", "-A", cwd=top)
+        _git("commit", "-q", "-m", "stale entry + update=none", cwd=top)
+        sha = gitmirror.resolve(str(top), "main")
+        dest = pathlib.Path(tempfile.mkdtemp()) / "co"
+        gitmirror.clone(str(top), sha, dest)
+        gitmirror.update_submodules(dest, str(top))  # the stale entry no longer breaks it
+        assert not (dest / "vendor/lib/lib.txt").exists()  # update = none: left alone
+        assert _git("remote", "get-url", "origin", cwd=dest) == str(top)  # origin untouched
 
 
 def test_unadvertised_pinned_commit_is_fetched_by_id():

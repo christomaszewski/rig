@@ -309,6 +309,46 @@ def test_archive_moves_bytes_keeps_a_linked_entry_and_joins_the_catalog():
         assert rc == 1 and "no run" in err
 
 
+def test_archive_refuses_a_manifest_vehicle_that_leaves_the_destination():
+    home, absent = _fresh()
+    dd = pathlib.Path(tempfile.mkdtemp()) / "data"
+    nas = pathlib.Path(tempfile.mkdtemp()) / "nas" / "deep"
+    nas.mkdir(parents=True)
+    with _env(RIG_HOME=home, RIG_VEHICLE_LOCAL=absent):
+        _cli("setup", "--data-dir", str(dd))
+        run = _run_dir(dd, "20260901T100000Z_a")
+        doc = (run / "manifest.yaml").read_text().replace("vehicle: veh", "vehicle: ../..")
+        (run / "manifest.yaml").write_text(doc)
+        rc, _, err = _cli("run", "archive", "20260901T100000Z_a", "--to", str(nas), cwd=_tree())
+        assert rc == 1 and "is not a plain name" in err, err
+        assert run.is_dir() and not run.is_symlink()           # source kept, nothing moved
+        assert not (nas.parent.parent / "20260901T100000Z_a").exists()
+
+
+def test_migrate_never_merges_into_or_deletes_another_registry():
+    # A target holding only runs/ is accepted so an interrupted copy can resume — but a run the
+    # old registry lacks means another registry: rsync merged it, plain copy deleted it.
+    home, absent = _fresh()
+    with _env(RIG_HOME=home, RIG_VEHICLE_LOCAL=absent):
+        old = pathlib.Path(tempfile.mkdtemp()) / "old"
+        new = pathlib.Path(tempfile.mkdtemp()) / "new"
+        _run_dir(old, "20260901T100000Z_a")
+        _run_dir(new, "20260902T100000Z_b")
+        try:
+            datadir.migrate_registry(old, new)
+            raise AssertionError("migrated into another registry")
+        except RigError as exc:
+            assert "20260902T100000Z_b" in str(exc) and "another registry" in str(exc), exc
+        assert (new / "runs" / "20260902T100000Z_b" / "manifest.yaml").is_file()
+        assert (old / "runs" / "20260901T100000Z_a").is_dir() and not (new / "runs" / "20260901T100000Z_a").exists()
+        # an interrupted copy of THIS registry still resumes
+        new2 = pathlib.Path(tempfile.mkdtemp()) / "new2"
+        (new2 / "runs" / "20260901T100000Z_a").mkdir(parents=True)
+        with contextlib.redirect_stderr(io.StringIO()):
+            datadir.migrate_registry(old, new2, keep_old=True)
+        assert (new2 / "runs" / "20260901T100000Z_a" / "bags" / "big.mcap").is_file()
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

@@ -38,6 +38,23 @@ def test_vendor_copies_only_the_surface_and_stamps():
     assert "demo-up" in stamp["files"] and "rigging.yaml" in stamp["files"]
 
 
+def test_vendor_refuses_surface_entries_outside_the_service():
+    from rig_cli import RigError
+    for entry in ("../common/env.sh", "/etc/hosts", "docker/../../x"):
+        src = _make_source()
+        (src.parent / "common").mkdir(exist_ok=True)
+        (src.parent / "common" / "env.sh").write_text("X=1\n")
+        (src / "rigging.yaml").write_text(
+            f"service: demo\nlauncher: demo-up\nlaunch_surface:\n  - demo-up\n  - '{entry}'\n")
+        root = pathlib.Path(tempfile.mkdtemp())
+        try:
+            vendor("demo", src, root)
+            raise AssertionError(f"vendored {entry}")
+        except RigError as exc:
+            assert "inside the service directory" in str(exc), exc
+        assert not (root / "services").exists() or not any((root / "services").iterdir())
+
+
 def test_vendor_copies_a_directory_in_the_surface():
     s = pathlib.Path(tempfile.mkdtemp())
     (s / "rigging.yaml").write_text("service: demo\nlauncher: demo-up\nlaunch_surface:\n  - demo-up\n  - www\n")

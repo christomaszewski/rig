@@ -1,6 +1,6 @@
 # rig — roadmap
 
-Current checkpoint: **v0.2.73 — shared sessions and experimental Isaac attachment**, reviewed 2026-10-28.
+Current checkpoint: **v0.2.74 — offline and selected-service builds** (§18), reviewed 2026-10-29.
 Sections retain their original design scope and versioned milestones; their proposed schema
 is not a replacement for current operator references. Use [replay](REPLAY.md),
 [simulation](SIMULATION.md), and the [preparation backlog](ISAAC_PREP_REPORT.md) for current behavior.
@@ -708,7 +708,8 @@ times → two package versions → zenoh sessions that can't talk. Prevention, d
   ros-* dpkg packages WARNs (source-built — dpkg can't see it). Canonical spelling `rig image
   audit`; flat alias `image-audit`.
 - **`rig build --no-cache` (remediation)** — exports `RIG_BUILD_NO_CACHE=1` to every build command
-  (rig-owned, set-or-popped; scripts opt in with `docker build ${RIG_BUILD_NO_CACHE:+--no-cache}`)
+  (rig-owned, set-or-popped; scripts opt in with `docker build ${RIG_BUILD_NO_CACHE:+--no-cache}`;
+  since then every building service must declare `build.capabilities.no_cache`)
   for the full re-converge after audit finds drift. Env, not a positional arg — the
   `<cmd> <registry> [tag]` contract is untouched.
 - rig-infra side — ✅ done (v0.2.21, reference provider): zenoh-router + ros2-bag-logger riggings
@@ -895,3 +896,15 @@ content-address verification, config-snapshot overlay, and tree-local localizati
 `retrofitted:` marker flips the overlay default to the run's last `ups:` snapshot — retrofit
 tarballs are as-shipped). Reproduction (reconstructed tree) vs SIL (current tree) stays an
 explicit distinction; replay's config-drift report is the faithfulness proof.
+
+## 18. Offline and local-source builds — ✅ phases 0–1 implemented (v0.2.74)
+
+Plan doc: [offline-builds-plan.md](offline-builds-plan.md). Shipped: rig-infra's `FLEET_MSGS_LOCAL`
+dev loop with a read-only snapshot and the `io.rig.build.local` label (audit warns, bake refuses
+without `--allow-local`); per-repo bare git mirrors in `$RIG_HOME/cache/git`; `rig src sync`;
+`rig build --offline/--check`; the rigging key `build.sources` → `RIG_BUILD_SOURCES`; msgs
+overlays built from rig's exports instead of builder clones. Also in v0.2.74: `rig build SERVICE...`
+with a printed retry command, and `rig init --infra <registry ref>/--add`. Verified on a
+disconnected builder. Open: sbg_driver's `build.sources` adoption, `rig.lock` records of
+build-source commits, and phase 2 (seeded base images through a registry mirror, a shared
+`fleet-ros-sdk` builder, a registry build cache).

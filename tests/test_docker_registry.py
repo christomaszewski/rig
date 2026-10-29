@@ -1,4 +1,5 @@
 """Docker-approved HTTP/TLS policy, isolated Buildx configuration and caller integration."""
+import io
 import json
 import os
 from pathlib import Path
@@ -72,7 +73,7 @@ class RegistryPolicyTests(unittest.TestCase):
         for code in (301, 401, 403, 404, 503):
             with self.subTest(code=code), patch.object(registry.urllib.request, 'build_opener') as opener:
                 opener.return_value.open.side_effect = urllib.error.HTTPError(
-                    f'https://{HOST}/v2/', code, 'response', {}, None)
+                    f'https://{HOST}/v2/', code, 'response', {}, io.BytesIO(b''))
                 registry._probe(HOST, 'https')
                 args, kwargs = opener.return_value.open.call_args
                 self.assertEqual(args, (f'https://{HOST}/v2/',))

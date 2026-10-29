@@ -81,6 +81,12 @@ def vendor(service: str, source: Path, root: Path) -> Path:
     staging = Path(tempfile.mkdtemp(prefix=f".{service}.vendoring-", dir=target.parent))
     try:
         for rel in files:
+            # A surface entry is data from the service's rigging (or a registry): it must stay
+            # inside both the source and the vendored copy — `../common/env.sh` used to land in
+            # services/common/, beside (or over) another service.
+            if Path(rel).is_absolute() or ".." in Path(rel).parts:
+                raise RigError(f"vendor {service}: launch_surface entry {rel!r} must be a path "
+                               f"inside the service directory (no absolute paths, no '..')")
             src = source / rel
             if not src.exists():
                 raise RigError(f"vendor {service}: launch_surface entry missing in source: {src}")

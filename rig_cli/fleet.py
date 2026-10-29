@@ -204,6 +204,9 @@ def _chooser(vehicle: Vehicle, argv: list[str], env: dict[str, str]) -> str:
     """The deployment's own entry points, preference order run.sh > ./rig > rig-on-PATH."""
     path = str(Path(vehicle.path).expanduser()) if vehicle.is_local else vehicle.path
     quoted = " ".join(shlex.quote(a) for a in argv)
+    for k in env:  # env NAMES reach a shell unquoted: never let one carry syntax
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", k):
+            raise RigError(f"fleet: refusing environment name {k!r} for a remote shell")
     prefix = "".join(f"{k}={shlex.quote(str(v))} " for k, v in sorted(env.items()))
     return (f"cd {_pathexpr(path)} && "
             f"if [ -x ./run.sh ]; then {prefix}./run.sh {quoted}; "
@@ -395,6 +398,7 @@ def _vehicle_env(fleet: Fleet, vehicle: Vehicle, extra_vars: dict[str, str]) -> 
         identity = _identity_file(fleet, vehicle)
         if identity is not None and identity.is_file():
             env["RIG_VEHICLE_LOCAL"] = str(identity)
+            env["RIG_SIMULATED_MACHINE"] = "1"  # its data_dir outranks the real user's
     if fleet.network:  # process env for composes (${RIG_NETWORK}) — not rig vars
         env["RIG_NETWORK"] = str(fleet.network["name"])
         if vehicle.ip:
@@ -450,8 +454,11 @@ def cmd_up(fleet: Fleet, names: list[str], *, run_label: str | None, set_vars: l
     extra: dict[str, str] = {}
     for kv in set_vars:
         key, sep, value = kv.partition("=")
-        if not sep or not key:
-            raise RigError(f"fleet up: --var takes k=v, not '{kv}'")
+        # The key becomes a shell env name (RIG_VAR_<key>=... ./run.sh up) on every vehicle:
+        # provision's rule, so a typo fails here and a `;` can never reach a remote shell.
+        if not sep or not re.match(r"^[a-z][a-z0-9_]*$", key):
+            raise RigError(f"fleet up: --var takes name=value with a lowercase name "
+                           f"([a-z][a-z0-9_]*), not '{kv}'")
         extra[key] = value
     _ensure_network(fleet, dry_run=dry_run)
     _push_roster(fleet, vehicles, dry_run=dry_run)
@@ -683,6 +690,7 @@ def cmd_sync(fleet: Fleet, names: list[str], *, label: str | None, into: str, jo
     sparse generations beneath the original run, never onto its root."""
     if profile and include_service_exports:
         raise RigError("fleet sync: --include-service-exports cannot be combined with --profile")
+    from .runs import label_matches
     vehicles = _select(fleet, names)
     dest_root = Path(into).expanduser()
     problems = 0
@@ -711,9 +719,9 @@ def cmd_sync(fleet: Fleet, names: list[str], *, label: str | None, into: str, jo
             run_id = run_id.strip()
             if not run_id:
                 continue
-            run_label = run_id.split("_", 1)[1] if "_" in run_id else run_id
-            if label and run_label != label and not run_label.startswith(f"{label}-"):
+            if label and not label_matches(run_id, label):
                 continue
+            run_label = run_id.split("_", 1)[1] if "_" in run_id else run_id
             if not ended.strip():
                 eprint(f"  {v.name}/{run_id}: skipped (not sealed — `ended:` absent; "
                        f"`fleet down --end-run` seals)")

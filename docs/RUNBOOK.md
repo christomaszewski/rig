@@ -50,7 +50,7 @@ git clone https://github.com/christomaszewski/rig.git rig    # rig is public
 git clone "$CAMERA_URL"    camera-service
 git clone "$DASHBOARD_URL" dashboard       # dashboard has no public remote yet — get it from its maintainer
 alias rig="$HOME/rig-walkthrough/rig/rig"
-rig --version                              # -> rig 0.1.24 (or newer)
+rig --version                              # -> rig 0.2.74 (or newer)
 ```
 
 ## 3 — Scaffold the deployment
@@ -154,8 +154,9 @@ rig up --dry-run    # zenoh-router -> dashboard -> cam_usb -> cam_rtsp; VEHICLE_
 ```bash
 rig image build -h # scope rules: full matrix, deployment, host, replay
 rig build -j 3      # all declared runtime variants and supported CPUs, including disabled rows
+rig build camera    # one service failed? rebuild only it — a failed build prints this command
 rig build --scope deployment,replay --dry-run  # preview only the vehicle target and replay companions
-curl -s http://$REGISTRY/v2/_catalog       # expect: cam-core, ros2-bridge, webrtc-bridge, dashboard-zenoh, dashboard-web, eclipse/zenoh
+curl -s http://$REGISTRY/v2/_catalog       # expect: fleet-ros (+ fleet-ros-msgs with `msgs:`), cam-core, ros2-bridge, webrtc-bridge, dashboard-zenoh, dashboard-web
 ```
 > Duplicate service/runtime builds are shared across instances. `-j N` runs up to N independent tasks
 > concurrently (default 2; use `-j 1` for serial). Logs live under `var/build/`; `--verbose` streams
@@ -730,8 +731,8 @@ camera, which selects the matching runtime overlay — `docker-compose.jp7.yml`,
 for services declaring a build matrix (`cam-core:v1.3.0-jp7`; a bare `jp7` when the tag is empty), passed
 through untouched for the rest (the dashboard falls back `RIG_IMAGE_TAG` → `DASH_IMAGE_TAG` → `arm64`).
 `rig build` passes the same composed tag to each build command, so build + pull agree everywhere;
-`rig certify`'s **tag and platform checks enforce** the agreement per launcher and per matrix entry. Only
-the zenoh-router ignores the tag (it pulls the mirrored `eclipse/zenoh:latest`). *Legacy:* `images.tag:
+`rig certify`'s **tag and platform checks enforce** the agreement per launcher and per matrix entry. The
+zenoh-router runs the deployment's `fleet-ros` base (`RIG_BASE_IMAGE`) at the same tag. *Legacy:* `images.tag:
 jp7` with `platform:` unset still behaves exactly as before (deprecation warning; declare `platform:`).
 
 **The baked compose-only form is correct for the target, by design.** The vehicle.yaml `platform:`
@@ -776,7 +777,7 @@ rig pkg outdated                   # dependency drift across all registries: FIX
 rig pkg repin <pkg> --to internal  # advance declared pins to current (next patch version) —
                                    #   inside-out: profiles (requires.service) first, then suites
                                    #   (every member incl. the vehicle plan refreshes)
-rig pkg rebase <fork> --to internal# ...or three-way a fork's PAYLOAD onto its moved parent
+rig pkg rebase <fork> --to internal   # ...or three-way a fork's PAYLOAD onto its moved parent
 rig registry pending               # what's awaiting publish (promote/* branches in the caches)
 rig registry push internal --all --pr   # publish via YOUR git + gh/glab (PR creation only)
 ```

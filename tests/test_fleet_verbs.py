@@ -284,6 +284,29 @@ def test_fleet_up_sil_view_snapshot_and_sync_round_trip():
     assert rc == 0 and "0 run(s) pulled" in err                    # idempotent re-sync
 
 
+def test_fleet_up_sil_rows_outrank_the_users_data_dir():
+    """`rig setup --data-dir` on the GCS must not merge every simulated vehicle into one registry:
+    a SIL row is its own machine, and its data_root subfolder wins."""
+    a, b = _sil_tree("veh3"), _sil_tree("veh9")
+    data_root = pathlib.Path(tempfile.mkdtemp()) / "sil-data"
+    home = pathlib.Path(tempfile.mkdtemp()) / "home"
+    user_registry = pathlib.Path(tempfile.mkdtemp()) / "rig-data"
+    home.mkdir()
+    (home / "config.yaml").write_text(f"data_dir: {user_registry}\n")
+    fy = _fleet_yaml([{"id": 3, "name": "veh3", "path": str(a)},
+                      {"id": 9, "name": "veh9", "path": str(b)}],
+                     data_root=data_root)
+    with _env(RIG_HOME=str(home)):
+        rc, _, err = _run("fleet", "up", "--fleet", str(fy), "--run", "merged", "-j", "1")
+        assert rc == 0, err
+        for name in ("veh3", "veh9"):
+            run_dirs = list((data_root / name / "runs").iterdir())
+            assert len(run_dirs) == 1 and run_dirs[0].name.endswith("_merged"), run_dirs
+        assert not (user_registry / "runs").exists()
+        rc, _, err = _run("fleet", "down", "--fleet", str(fy), "--end-run", "-j", "1")
+        assert rc == 0, err
+
+
 def test_fleet_up_network_lifecycle_and_env_contract():
     a = _sil_tree("veh1")
     data_root = pathlib.Path(tempfile.mkdtemp()) / "sil-data"
@@ -377,8 +400,9 @@ def test_fleet_up_var_forwarding_and_malformed_var():
     snap = run_dir / ".rig" / "config" / doc["config"]
     vars_doc = yaml.safe_load((snap / "vars.yaml").read_text())
     assert vars_doc["vars"]["mission_tag"] == "alpha7"          # RIG_VAR_* landed in provenance
-    rc, _, err = _run("fleet", "up", "--fleet", str(fy), "--var", "novalue")
-    assert rc == 1 and "k=v" in err                             # malformed --var errors up front
+    for bad in ("novalue", "peer-endpoint=x", "x;touch /tmp/pwn=1", "Upper=1", "=1"):
+        rc, _, err = _run("fleet", "up", "--fleet", str(fy), "--var", bad)
+        assert rc == 1 and "name=value" in err, (bad, err)      # malformed --var errors up front
 
 
 def test_vars_source_explicit_beats_derived_and_rejects_unknown_keys():

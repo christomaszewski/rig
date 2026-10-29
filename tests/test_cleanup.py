@@ -16,6 +16,7 @@ from rig_cli import RigError  # noqa: E402
 from rig_cli.cleanup import (cleanup, declared_volumes, lock_images,  # noqa: E402
                              rendered_images)
 from rig_cli.descriptor import load_descriptor  # noqa: E402
+from rig_cli.lock import save_lock  # noqa: E402
 from rig_cli.manifest import Manifest, RosSettings, Sensor  # noqa: E402
 
 RIGGING = """\
@@ -158,6 +159,26 @@ def test_dry_run_touches_nothing_and_prints_the_plan():
     assert "would rmi docker.io/library/busybox:stable" in plan
     assert "would rm volume fak_cam_a_sock" in plan
     assert "would rm volumes labeled com.docker.compose.project=cam_a-vehicle-1" in plan
+
+
+def test_cleanup_of_some_instances_keeps_every_other_instances_images():
+    # cam_b shares cam_a's images; rig.lock also pins an unrelated stack's image. Cleaning up
+    # cam_a alone must remove neither — an offline vehicle could never bring them back.
+    manifest, descriptors = _fixture()
+    root = pathlib.Path(tempfile.mkdtemp())
+    save_lock(root, {"images": {"reg:5000/other:v1": "reg:5000/other@sha256:" + "c" * 64,
+                                "reg:5000/fak-core:v1": "reg:5000/fak-core@sha256:" + "d" * 64}})
+    err = io.StringIO()
+    with _fake_docker(), contextlib.redirect_stderr(err):
+        assert cleanup(root, manifest, descriptors, {"RIG_IMAGE_TAG": "v1"},
+                       names=["cam_a"], dry_run=True) == 0
+    plan = err.getvalue()
+    assert "would rmi" not in plan, plan               # every image is still used by cam_b
+    assert "would rm volume fak_cam_a_sock" in plan     # its own volume still goes
+    err = io.StringIO()
+    with _fake_docker(), contextlib.redirect_stderr(err):  # whole decommission: all of them
+        cleanup(root, manifest, descriptors, {"RIG_IMAGE_TAG": "v1"}, names=[], dry_run=True)
+    assert "would rmi reg:5000/other:v1" in err.getvalue()
 
 
 def test_guard_refuses_while_containers_exist():

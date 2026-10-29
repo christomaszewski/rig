@@ -169,6 +169,31 @@ def test_online_build_exports_sources_and_never_inherits_offline_channels():
         assert _seen(logger, "base.sh")[2] == "NO_SOURCES"
 
 
+def test_src_sync_names_what_it_could_not_fetch():
+    with _env(RIG_HOME=tempfile.mkdtemp(), **GIT_ENV):
+        dep, _, msgs, _ = _world()
+        root, _, _ = _deployment(dep, msgs)
+        shutil.rmtree(dep.parent)  # one source unreachable, the other fine
+        rc, out = _rig("--root", str(root), "src", "sync")
+        assert rc == 1, out
+        assert f"✗ drv: build source 'dep' {dep} @ v1: cannot fetch" in out, out
+        assert f"✓ msgs overlay: msgs source {msgs} @ v1" in out, out
+        assert "1 of 2 source(s) in the local mirrors" in out, out
+
+
+def test_offline_check_accepts_a_pin_already_in_either_src_cache_layout():
+    from rig_cli import build_sources
+    from rig_cli.install import _repo_slug
+    with _env(RIG_HOME=tempfile.mkdtemp(), **GIT_ENV):
+        rev = "a" * 40
+        src = pathlib.Path(os.environ["RIG_HOME"]) / "cache" / "src"
+        for key in (_repo_slug("https://example.invalid/svc.git"), "svc"):  # repo-keyed, legacy
+            (src / f"{key}-{rev[:12]}" / ".git").mkdir(parents=True)
+            req = build_sources.Requirement("pin", "svc", "https://example.invalid/svc.git", rev)
+            assert build_sources.offline_problems([req]) == [], key
+            shutil.rmtree(src)
+
+
 def test_flag_combinations_are_refused():
     with _env(RIG_HOME=tempfile.mkdtemp(), **GIT_ENV):
         dep, _, msgs, _ = _world()

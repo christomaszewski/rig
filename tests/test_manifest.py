@@ -51,6 +51,33 @@ def test_duplicate_name_rejected():
     }), "duplicate name")
 
 
+def test_instance_names_must_be_compose_and_path_safe():
+    # "../../vehicle" rendered its config over vehicle.yaml; uppercase/dots broke compose.
+    for bad in ("../../vehicle", "cam/front", "FrontCam", "cam.front", "-cam", "_cam"):
+        root = _root_with({"vehicle.yaml": f"""
+            vehicle: t
+            sensors: [{{name: '{bad}', service: cam, config: c.yaml}}]
+            """, "c.yaml": "service: cam\n"})
+        _expect_error(root, "must match [a-z0-9][a-z0-9_-]*")
+    root = _root_with({"vehicle.yaml": """
+        vehicle: t
+        sensors: [{name: front_cam-2, service: cam, config: c.yaml}]
+        """, "c.yaml": "service: cam\n"})
+    assert load_manifest(root).sensors[0].name == "front_cam-2"
+
+
+def test_ros_domain_must_be_a_literal_in_range():
+    for ros, needle in (("ros: {domain_id: '{{vehicle_id}}'}", "must be an integer 0..232"),
+                        ("ros: {domain_id: 7x}", "must be an integer 0..232"),
+                        ("ros: {domain_id: 300}", "outside 0..232")):
+        root = _root_with({"vehicle.yaml": f"vehicle: t\n{ros}\nsensors: []\n"})
+        _expect_error(root, needle)
+    root = _root_with({"vehicle.yaml": "vehicle: t\nvehicle_id: 300\nsensors: []\n"})
+    _expect_error(root, "a vehicle_id above 232 cannot double as the domain")
+    root = _root_with({"vehicle.yaml": "vehicle: t\nvehicle_id: 300\nros: {domain_id: 30}\nsensors: []\n"})
+    assert load_manifest(root).ros.domain_id == 30
+
+
 def test_config_name_mismatch_rejected():
     _expect_error(_root_with({
         "vehicle.yaml": """

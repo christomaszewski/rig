@@ -267,6 +267,35 @@ def test_dry_run_writes_nothing():
         assert snap_veh == sorted((str(p), p.read_bytes()) for p in veh.rglob("*") if p.is_file())
 
 
+def test_save_refuses_to_undo_a_newer_registry_version():
+    """Someone else published 2.0.1 adding `safety`; saving from the 2.0.0 pin would publish
+    2.0.2 without it. Refuse and point at upgrade; after upgrading, the save keeps both."""
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        root, reg, _ = _world()
+        assert _run("--root", str(root), "pkg", "add", "sv/camish:cam", "--as", "cam")[0] == 0
+        pdir = reg / "profiles" / "camish" / "cam"
+        m = yaml.safe_load((pdir / "manifest.yaml").read_text())
+        m["version"] = "1.0.1"
+        (pdir / "manifest.yaml").write_text(yaml.safe_dump(m, sort_keys=False))
+        payload = pdir / str(m["config"]["payload"])
+        newer = yaml.safe_load(payload.read_text())
+        newer["safety"] = {"limit": 3}
+        payload.write_text(yaml.safe_dump(newer, sort_keys=False))
+        _run("registry", "index", str(reg))
+        working = root / "config" / "sensors" / "cam.yaml"
+        data = yaml.safe_load(working.read_text())
+        data["tuned"] = True
+        working.write_text(yaml.safe_dump(data, sort_keys=False))
+        rc, _, err = _run("--root", str(root), "pkg", "save", "cam")
+        assert rc == 1 and "would undo safety.limit" in err and "pkg upgrade cam" in err
+        assert yaml.safe_load((pdir / "manifest.yaml").read_text())["version"] == m["version"]
+        assert _run("--root", str(root), "pkg", "upgrade", "cam")[0] == 0
+        rc, _, err = _run("--root", str(root), "pkg", "save", "cam")
+        assert rc == 0, err
+        published = yaml.safe_load(payload.read_text())
+        assert published["safety"] == {"limit": 3} and published["tuned"] is True
+
+
 if __name__ == "__main__":
     failed = 0
     for name, fn in sorted(globals().items()):

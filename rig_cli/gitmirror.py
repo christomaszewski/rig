@@ -14,10 +14,12 @@ upstream can never let ``git gc`` drop a pin.
 from __future__ import annotations
 
 import datetime
+import os
 import re
 import shutil
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 
 from . import RigError
@@ -26,7 +28,7 @@ from .common import eprint
 offline = False             # `rig build --offline`: never fetch
 _fetched: set[str] = set()  # mirror paths refreshed by this process
 _SHA = re.compile(r"[0-9a-f]{40}")
-_HINT_OFFLINE = "`rig build --offline` builds from the local mirror instead"
+_STAMP = "rig-fetched"  # touched after each SUCCESSFUL fetch (git rewrites FETCH_HEAD on failures)
 _HINT_SYNC = "run `rig src sync` while online to fetch it"
 
 
@@ -46,11 +48,31 @@ def _detail(proc: subprocess.CompletedProcess) -> str:
     return lines[-1] if lines else f"git exited {proc.returncode}"
 
 
+def _remote(url: str) -> str:
+    """The URL as git would read it from the caller's cwd: fetches run with `-C <mirror>`, so a
+    relative local path must be made absolute first."""
+    if re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://|^[^/@:]+@[^:/]+:", url) or os.path.isabs(url):
+        return url
+    return os.path.abspath(os.path.expanduser(url))
+
+
 def _fetch(url: str, path: Path, *refspecs: str) -> None:
+    # --prune: an upstream branch renamed to a path below its old name (`feature` -> `feature/x`)
+    # would otherwise wedge every later fetch on a ref-name conflict. Only heads and tags are
+    # pruned; resolved pins live under refs/rig/pins and stay.
+    prune = () if refspecs else ("--prune",)
     refspecs = refspecs or ("+refs/heads/*:refs/heads/*", "+refs/tags/*:refs/tags/*")
-    proc = _git("-C", str(path), "fetch", "-q", url, *refspecs)
+    for attempt in range(3):  # another rig process may hold a ref lock in the same mirror
+        proc = _git("-C", str(path), "fetch", "-q", *prune, _remote(url), *refspecs)
+        if proc.returncode == 0 or not re.search(r"cannot lock ref|Another git process|\.lock'",
+                                                  proc.stderr or ""):
+            break
+        time.sleep(1 + attempt)
     if proc.returncode:
-        raise RigError(f"cannot fetch {url}: {_detail(proc)} — {_HINT_OFFLINE}")
+        hint = (f" — the local mirror has a copy from {fetched_at(path)}; `rig build --offline` "
+                f"builds from it" if (path / _STAMP).exists() else "")
+        raise RigError(f"cannot fetch {url}: {_detail(proc)}{hint}")
+    (path / _STAMP).write_text(datetime.datetime.now().isoformat(timespec="seconds") + "\n")
     _fetched.add(str(path))
 
 
@@ -80,8 +102,8 @@ def ensure(url: str) -> Path:
 
 
 def fetched_at(path: Path) -> str:
-    """When the mirror last fetched (FETCH_HEAD's mtime), for offline notes."""
-    stamp = path / "FETCH_HEAD"
+    """When the mirror last fetched successfully, for offline notes."""
+    stamp = path / _STAMP
     if not stamp.exists():
         return "an unknown time"
     when = datetime.datetime.fromtimestamp(stamp.stat().st_mtime)
@@ -110,7 +132,7 @@ def resolve(url: str, ref: str) -> str:
         _fetch(url, path)
         sha = _rev(path, ref)
         if sha is None and immutable:  # a commit no branch/tag reaches: ask for it by id
-            proc = _git("-C", str(path), "fetch", "-q", url, ref)
+            proc = _git("-C", str(path), "fetch", "-q", _remote(url), ref)
             sha = _rev(path, ref) if proc.returncode == 0 else None
     if sha is None:
         where = (f"the local mirror (fetched {fetched_at(path)}) — {_HINT_SYNC}" if offline
@@ -194,8 +216,9 @@ def _submodules(gitmodules: str) -> dict[str, dict[str, str]]:
 
 
 def update_submodules(work: Path, origin_url: str) -> None:
-    """``git submodule update --init``, recursively, with every submodule fetched through its
-    own mirror (``url.<mirror>.insteadOf``) — so a pinned superproject checks out offline."""
+    """``git submodule update --init``, recursively, with every submodule cloned from its own
+    mirror — so a pinned superproject checks out offline. Like git, a `.gitmodules` entry whose
+    path is not a gitlink at HEAD (a stale entry) is skipped."""
     if not (work / ".gitmodules").is_file():
         return
     listing = _git("config", "-f", str(work / ".gitmodules"), "--get-regexp",
@@ -211,9 +234,10 @@ def update_submodules(work: Path, origin_url: str) -> None:
         sub["absolute"] = url = _absolute(sub["url"], origin_url)
         if sub["path"] in current:
             continue
-        commit = _git("-C", str(work), "rev-parse", f"HEAD:{sub['path']}").stdout.strip()
-        if commit:
-            resolve(url, commit)
+        tree = _git("-C", str(work), "ls-tree", "HEAD", "--", sub["path"]).stdout.split()
+        if len(tree) < 3 or tree[1] != "commit":
+            continue  # stale .gitmodules entry: not a submodule at this commit
+        resolve(url, tree[2])
         pending[name] = sub
     if pending:
         # Point each pending submodule at its mirror for the clone, then back at its upstream.
@@ -226,14 +250,15 @@ def update_submodules(work: Path, origin_url: str) -> None:
         # refuses it by default, a guard against UNTRUSTED repos pointing at local files).
         steps.append(("-c", "protocol.file.allow=always", "-C", str(work), "submodule", "update",
                       "--quiet", "--", *paths))
-        for name, sub in pending.items():
-            steps += [("-C", str(work), "config", f"submodule.{name}.url", sub["absolute"]),
-                      ("-C", str(work / sub["path"]), "remote", "set-url", "origin",
-                       sub["absolute"])]
+        steps += [("-C", str(work), "config", f"submodule.{name}.url", sub["absolute"])
+                  for name, sub in pending.items()]
         for args in steps:
             proc = _git(*args)
             if proc.returncode:
                 raise RigError(f"submodule update in {work} failed: {_detail(proc)}")
+        for sub in pending.values():  # `update = none` leaves the dir empty: no repo to repoint
+            if (work / sub["path"] / ".git").exists():
+                _git("-C", str(work / sub["path"]), "remote", "set-url", "origin", sub["absolute"])
     for sub in subs.values():
         update_submodules(work / sub["path"], sub["absolute"])
 

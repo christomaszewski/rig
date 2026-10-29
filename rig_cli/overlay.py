@@ -20,7 +20,7 @@ import yaml
 
 from . import RigError
 from .common import eprint, load_yaml
-from .install import qualified, registry_commit, resolve_ref
+from .install import _at_locked_commit, _check_locked, package_commit, qualified, resolve_ref
 from .lock import load_lock, record_instance, record_package, record_registry, save_lock, sha256_file
 from .manifest import Sensor, load_manifest
 from .refs import unqualified
@@ -123,9 +123,13 @@ def _warn_authored_against(lock: dict, pkg, service: str) -> None:
                f"{mine} — re-verify the delta's keys against the current config surface")
 
 
-def apply(root: Path, instance: str, ref: str, *, clear_local: bool = False) -> int:
+def apply(root: Path, instance: str, ref: str, *, clear_local: bool = False,
+          locked: bool = False) -> int:
+    """Bind an overlay to an instance. `locked` (a `--locked` suite install) takes the overlay as
+    rig.lock pins it and refuses a payload whose hash differs from the lock."""
     sensor = _find_instance(root, instance)
     entry, _, pkg = resolve_ref(ref, history="@" in ref)  # an exact @ver may live in git history
+    pkg = _at_locked_commit(entry, pkg, load_lock(root), locked)
     if pkg.kind != "overlay":
         raise RigError(f"overlay apply: '{ref}' is a {pkg.kind}, not an overlay")
     if not _targets_cover(pkg.manifest, sensor):
@@ -147,15 +151,18 @@ def apply(root: Path, instance: str, ref: str, *, clear_local: bool = False) -> 
     src = pkg.pkg_dir / str(payload_rel)
     if not src.is_file():
         raise RigError(f"overlay apply: payload missing in the synced registry: {payload_rel}")
+    lock = load_lock(root)
+    _check_locked(lock, fq, locked=locked, payload_sha=sha256_file(src))
 
     dest = overlay_payload_path(root, fq)
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_bytes(src.read_bytes())
-    lock = load_lock(root)
     record_package(lock, fq, {"kind": "overlay", "payload_sha256": sha256_file(dest),
-                              "project": pkg.manifest.get("project")})
-    record_registry(lock, entry.name, rtype=entry.type, location=entry.location,
-                    commit=registry_commit(entry))
+                              "project": pkg.manifest.get("project"),
+                              "commit": package_commit(entry, pkg)})
+    if not (locked and entry.name in (lock.get("registries") or {})):
+        record_registry(lock, entry.name, rtype=entry.type, location=entry.location,
+                        commit=package_commit(entry, pkg))
     _warn_authored_against(lock, pkg, sensor.service)
 
     def mutate(row: dict) -> None:

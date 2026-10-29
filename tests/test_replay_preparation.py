@@ -5,6 +5,7 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
 import sys
 import tempfile
 from types import SimpleNamespace
@@ -949,6 +950,35 @@ class Preparation(unittest.TestCase):
         self.assertFalse((self.root / "config/autonomy/bag_player.yaml").exists())
         self.assertFalse((self.root / "replay/failed.yaml").exists())
         self.assertFalse(list((self.root / "var/replay/failed").glob("*/provenance.yaml")))
+
+    def test_a_failed_backup_restores_nothing_and_deletes_nothing(self):
+        # A backup copy failing (an unreadable config, a full /tmp) changed nothing in the
+        # deployment — the rollback used to rmtree the live dirs and copy the partial backup back.
+        self.rows["autonomy"] = [r for r in self.rows["autonomy"] if r["name"] != "player"]
+        self.vehicle()
+        keep = self.root / "config" / "autonomy" / "calibration.yaml"
+        keep.parent.mkdir(parents=True, exist_ok=True)
+        keep.write_text("k: 1\n")
+        def tree():
+            return sorted(str(p.relative_to(self.root)) for d in ("config", "services")
+                          for p in (self.root / d).rglob("*"))
+        files = tree()
+        real = shutil.copytree
+
+        def broken(src, dst, *args, **kwargs):
+            if Path(src).name == "services":
+                raise OSError("No space left on device")
+            return real(src, dst, *args, **kwargs)
+        with patch("rig_cli.image_catalog.docker_arch", side_effect=RigError("offline")), \
+                patch("rig_cli.replay._guard_clean_host"), \
+                patch("shutil.copytree", side_effect=broken), \
+                patch("rig_cli.reconstruct.wire_player") as wire:
+            with self.assertRaisesRegex(OSError, "No space left"):
+                command(self.args("prepare", str(self.source), "--recipe", "nospace",
+                                  "--player", str(self.root / "services/ros2-bag-player")), self.root)
+        wire.assert_not_called()
+        self.assertEqual(keep.read_text(), "k: 1\n")
+        self.assertEqual(files, tree())  # services/ was rmtree'd and "restored" empty before
 
     def test_preparation_rejects_source_changes_and_lock_contention(self):
         raw = Path(self.tmp.name) / "raw"

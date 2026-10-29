@@ -202,6 +202,13 @@ def _parse_entries(entries, tier: str, root: Path, seen: dict[str, Path],
         name, service, cfg = entry.get("name"), entry.get("service"), entry.get("config")
         if not (name and service and cfg):
             raise RigError(f"vehicle.yaml: {tier} #{index} needs `name`, `service`, and `config`")
+        # A name keys the compose project (docker accepts only [a-z0-9_-], lowercase first), the
+        # rendered config's file name and generated scripts — "../../vehicle" once rendered over
+        # vehicle.yaml itself. Refuse anything else here, before any of those are built.
+        if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", str(name)):
+            raise RigError(f"vehicle.yaml: {tier} name {name!r} must match [a-z0-9][a-z0-9_-]* — it "
+                           f"names the compose project (lowercase letters, digits, '_', '-'), the "
+                           f"rendered config file and the ROS namespace")
 
         cfg_path = Path(cfg)
         cfg_path = (cfg_path if cfg_path.is_absolute() else (root / cfg_path)).resolve()
@@ -284,16 +291,27 @@ def machine_data_dir() -> str | None:
     return raw or None
 
 
+def simulated_machine() -> bool:
+    """A SIL fleet row runs as a SIMULATED machine (`rig fleet` sets RIG_SIMULATED_MACHINE beside
+    RIG_VEHICLE_LOCAL). It has no user tier: the real user's data_dir would otherwise outrank
+    every row's own and merge the simulated vehicles into one registry."""
+    return os.environ.get("RIG_SIMULATED_MACHINE") == "1"
+
+
 def host_registry_dir() -> str | None:
     """The registry every deployment on this box shares, outside any tree: THIS USER's
     (~/.rig/config.yaml, `rig setup --data-dir`) when set, else the MACHINE's (/etc/rig,
     `sudo rig provision --data-dir`). The read-through registry of a tree that names its own."""
     from .userconfig import user_data_dir
+    if simulated_machine():
+        return machine_data_dir()
     return user_data_dir() or machine_data_dir()
 
 
 def _user_source() -> dict:
     """The user tier of the local precedence: data_dir only (identity stays machine-level)."""
+    if simulated_machine():
+        return {}
     from .userconfig import load_user_config
     doc = load_user_config()  # a typo'd key refuses here — the file must never silently do nothing
     return {"data_dir": doc["data_dir"]} if doc.get("data_dir") else {}
@@ -381,16 +399,27 @@ def require_identity(manifest: "Manifest", *, what: str) -> None:
 
 def _derive_domain(vehicle_id, ros_raw: dict) -> int:
     """Explicit `ros.domain_id` wins; else a numeric vehicle id IS the domain (so one knob picks both);
-    else 0."""
+    else 0. ROS 2 domains are 0..232 (DDS port arithmetic); outside that nothing can start, so it
+    is refused here rather than exported."""
     if "domain_id" in ros_raw:
-        return int(ros_raw["domain_id"])
-    if isinstance(vehicle_id, bool):  # bool is an int subclass — don't treat True/False as a domain
+        raw = ros_raw["domain_id"]
+        if isinstance(raw, bool) or not str(raw).strip().isdigit():
+            raise RigError(f"vehicle.yaml: ros.domain_id must be an integer 0..232, not {raw!r} "
+                           f"(it is not interpolated — leave it out and a numeric vehicle_id "
+                           f"becomes the domain)")
+        domain = int(str(raw).strip())
+    elif isinstance(vehicle_id, bool):  # bool is an int subclass — don't treat True/False as a domain
         return 0
-    if isinstance(vehicle_id, int):
-        return vehicle_id
-    if isinstance(vehicle_id, str) and vehicle_id.isdigit():
-        return int(vehicle_id)
-    return 0
+    elif isinstance(vehicle_id, int):
+        domain = vehicle_id
+    elif isinstance(vehicle_id, str) and vehicle_id.isdigit():
+        domain = int(vehicle_id)
+    else:
+        return 0
+    if not 0 <= domain <= 232:
+        raise RigError(f"ROS domain {domain} is outside 0..232 — set ros.domain_id explicitly "
+                       f"(a vehicle_id above 232 cannot double as the domain)")
+    return domain
 
 
 def load_manifest(root: Path, *, context: str = "execution", target_overrides: dict | None = None,

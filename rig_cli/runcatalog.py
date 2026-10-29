@@ -293,7 +293,7 @@ def select(entries: list[Entry], *, query: list[str], tags: list[str], label: st
     for e in entries:
         if tags and not all(_tag_hit(e.tags, t) for t in tags):
             continue
-        if label and e.label != label and not e.label.startswith(f"{label}-"):
+        if label and e.label != label:  # collision runs keep the base label in their manifest
             continue
         if vehicle and vehicle not in (e.vehicle, e.vehicle_id):
             continue

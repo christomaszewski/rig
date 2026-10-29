@@ -20,7 +20,7 @@ import yaml
 
 from . import RigError
 from .common import eprint, load_yaml
-from .install import qualified, registry_commit
+from .install import package_commit, qualified
 from .lock import load_lock, record_instance, record_package, record_registry, save_lock, sha256_file
 from .manifest import Manifest, Sensor, load_manifest
 from .pkg import _each_index, _entries_or_hint
@@ -188,6 +188,70 @@ def _resolve_current(ref: str):
     raise RigError(f"upgrade: '{ref.split('@')[0]}' no longer exists in registry '{ns}'")
 
 
+def _version_key(version: str) -> tuple | None:
+    """Release order for X.Y.Z versions; None when a version is not numeric."""
+    try:
+        return tuple(int(part) for part in str(version).split("."))
+    except ValueError:
+        return None
+
+
+def is_older(version: str, than: str) -> bool:
+    """`version` sorts before `than` — the registry carries an OLDER version than the lock pins
+    (a save published on an unmerged branch, a yank). Upgrade never moves a pin backwards."""
+    a, b = _version_key(version), _version_key(than)
+    return a is not None and b is not None and a < b
+
+
+def lost_updates(mine_base: Path, upstream: Path, publishing: dict) -> list[str]:
+    """Keys a newer registry version changed relative to what this deployment holds
+    (mine_base → upstream) that `publishing` would undo — a lost update. Empty when every
+    upstream change survives (e.g. the newer version came from this very working copy)."""
+    if not (mine_base.is_file() and upstream.is_file()):
+        return []
+    base = _strip_identity(load_yaml(mine_base))
+    theirs = _strip_identity(load_yaml(upstream))
+    mine = _strip_identity(publishing)
+    return sorted(path for path, value in _flat(structural_diff(base, theirs))
+                  if _dig(mine, path) != value)
+
+
+def _locked_package(ref: str):
+    """A locked `ns/name@ver` -> its package at THAT version (current, or from git history);
+    None when neither has it."""
+    entry, _, pkg = _resolve_current(ref)
+    version = ref.rpartition("@")[2]
+    if pkg.version == version:
+        return pkg
+    from .history import checkout_pkg, kind_dir_of
+    return checkout_pkg(entry, kind_dir_of(pkg.kind), pkg.name, version)
+
+
+def _satisfies(requires: str, version: str) -> bool:
+    from .registry import _CONSTRAINT, constraint_satisfied
+    match = _CONSTRAINT.match(str(requires))
+    return bool(match) and constraint_satisfied(match["ver"], bool(match["caret"]), version)
+
+
+def _service_constraints(packages: dict, service: str, *, skip: set) -> list[tuple[str, str]]:
+    """(profile ref, requires.service) of every locked profile requiring <service>, read from
+    the profile at its pinned version."""
+    out: list[tuple[str, str]] = []
+    for ref, info in list(packages.items()):
+        info = info or {}
+        if (info.get("kind") != "profile" or ref in skip
+                or unqualified(str(info.get("requires") or "")) != service):
+            continue
+        try:
+            pkg = _locked_package(ref)
+        except RigError:
+            pkg = None
+        req = ((pkg.manifest.get("requires") or {}).get("service") if pkg else None)
+        if req:
+            out.append((ref, str(req)))
+    return out
+
+
 def _three_way(root: Path, sensor: Sensor, new_base_path: Path) -> list[str]:
     """New pinned base ⊕ local delta onto the working file + pin; returns the conflict paths.
     Clean (delta-free) working copies take the new base VERBATIM so its comments survive."""
@@ -244,10 +308,53 @@ def upgrade(root: Path, names: list[str], dry_run: bool = False) -> int:
     repinned: dict[str, str] = {}  # old service ref -> current ref (re-vendored at most once)
     snap = _snapshot(root)
 
-    def repin_service(old_ref: str) -> str:
+    def repin_service(old_ref: str, *, skip: set = frozenset(),
+                      wants: tuple = ()) -> str:
+        """Move a SHARED service to the newest version every profile requiring it accepts: the
+        registry's current one, else the old pin (kept), else an exact requirement from history.
+        `wants` adds a profile's new requirement; `skip` drops that profile's old row."""
+        name = unqualified(old_ref.rpartition("@")[0])
+        constraints = _service_constraints(packages, name, skip=set(skip)) + list(wants)
         if old_ref in repinned:
+            done = repinned[old_ref].rpartition("@")[2]
+            clash = [f"{who} requires {req}" for who, req in constraints
+                     if not _satisfies(req, done)]
+            if clash:
+                raise RigError(f"upgrade: service {repinned[old_ref]} cannot satisfy "
+                               f"{'; '.join(clash)} — profiles sharing a service must agree")
             return repinned[old_ref]
         entry, _, pkg = _resolve_current(old_ref)
+        old_ver = old_ref.rpartition("@")[2]
+        if is_older(pkg.version, old_ver):
+            eprint(f"  service: {old_ref} kept — the registry carries older {pkg.version}")
+            repinned[old_ref] = old_ref
+            return old_ref
+        blocked = [(who, req) for who, req in constraints if not _satisfies(req, pkg.version)]
+        if blocked:
+            reasons = "; ".join(f"{who} requires {req}" for who, req in blocked)
+            if all(_satisfies(req, old_ver) for _, req in constraints):
+                eprint(f"  service: {old_ref} kept — {pkg.version} is available but {reasons}")
+                repinned[old_ref] = old_ref
+                return old_ref
+            from .install import resolve_ref
+            from .registry import _CONSTRAINT
+            exact = sorted({m["ver"] for m in (_CONSTRAINT.match(req) for _, req in constraints)
+                            if m and not m["caret"]})
+            pick = None
+            for version in exact:
+                full = ".".join((version.split(".") + ["0", "0", "0"])[:3])
+                if all(_satisfies(req, full) for _, req in constraints):
+                    try:
+                        entry, _, pick = resolve_ref(f"{entry.name}/{pkg.name}@{full}",
+                                                     history=True)
+                    except RigError:
+                        pick = None
+                    break
+            if pick is None:
+                raise RigError(f"upgrade: no {pkg.name} version satisfies every profile "
+                               f"requiring it ({reasons}; the registry carries {pkg.version}, "
+                               f"the lock pins {old_ver})")
+            pkg = pick
         new_ref = qualified(entry, pkg)
         if new_ref != old_ref or not (root / "services" / pkg.name / ".vendored.yaml").exists():
             _install_service(root, entry, pkg, lock, locked=False,  # refetch + re-vendor + record
@@ -294,6 +401,10 @@ def _upgrade_sweep(root: Path, manifest, lock: dict, packages: dict, anchors: di
         if sensor.profile:  # profile instance: new payload three-way + requires re-pin
             ref = str(sensor.profile)
             entry, reg, pkg = _resolve_current(ref)
+            if is_older(pkg.version, ref.rpartition("@")[2]):
+                eprint(f"  {sensor.name}: {ref} kept — the registry carries older {pkg.version} "
+                       f"(a save not merged yet?); upgrade never moves a pin backwards")
+                continue
             payload_rel = (pkg.manifest.get("config") or {}).get("payload")
             payload_path = pkg.pkg_dir / str(payload_rel)
             if not payload_path.is_file():
@@ -306,7 +417,10 @@ def _upgrade_sweep(root: Path, manifest, lock: dict, packages: dict, anchors: di
                 continue
             old_svc = ((packages.get(ref) or {}).get("requires")
                        or service_ref_for(sensor.service))
-            new_svc = repin_service(old_svc) if old_svc else None
+            want = (pkg.manifest.get("requires") or {}).get("service")
+            new_svc = (repin_service(old_svc, skip={ref},
+                                     wants=((new_ref, str(want)),) if want else ())
+                       if old_svc else None)
             if new_ref == ref and sha256_file(payload_path) == sha256_file(pin):
                 if old_svc == new_svc:
                     eprint(f"  {sensor.name}: {ref} is current — up to date")
@@ -317,7 +431,8 @@ def _upgrade_sweep(root: Path, manifest, lock: dict, packages: dict, anchors: di
             conflicts = _three_way(root, sensor, payload_path)
             record_package(lock, new_ref, {"kind": "profile",
                                            "payload_sha256": sha256_file(payload_path),
-                                           "requires": new_svc})
+                                           "requires": new_svc,
+                                           "commit": package_commit(entry, pkg)})
             if new_ref != ref:
                 packages.pop(ref, None)
                 _rewrite_row_profile(root, sensor.name, new_ref)
@@ -325,7 +440,7 @@ def _upgrade_sweep(root: Path, manifest, lock: dict, packages: dict, anchors: di
                             base_sha256=sha256_file(pin_path(root, sensor.name)),
                             overlays=list(sensor.overlays))  # the ORDERED binding record survives
             record_registry(lock, entry.name, rtype=entry.type, location=entry.location,
-                            commit=registry_commit(entry))
+                            commit=package_commit(entry, pkg))
             changed += 1
             eprint(f"  {sensor.name}: {ref} -> {new_ref}"
                    + (f" ({len(conflicts)} conflict(s), local kept)" if conflicts else ""))
@@ -387,6 +502,9 @@ def _upgrade_sweep(root: Path, manifest, lock: dict, packages: dict, anchors: di
             new_ref = qualified(entry, pkg)
             if new_ref == ref:
                 continue
+            if is_older(pkg.version, ref.rpartition("@")[2]):
+                eprint(f"  {iname}: overlay {ref} kept — the registry carries older {pkg.version}")
+                continue
             payload_rel = (pkg.manifest.get("config") or {}).get("payload")
             src = pkg.pkg_dir / str(payload_rel)
             if not src.is_file():
@@ -397,9 +515,10 @@ def _upgrade_sweep(root: Path, manifest, lock: dict, packages: dict, anchors: di
             edit_row(root, iname, lambda row, old=ref, new=new_ref: row.__setitem__(
                 "overlays", [new if o == old else o for o in row.get("overlays") or []]))
             record_package(lock, new_ref, {"kind": "overlay", "payload_sha256": sha256_file(dest),
-                                           "project": pkg.manifest.get("project")})
+                                           "project": pkg.manifest.get("project"),
+                                           "commit": package_commit(entry, pkg)})
             record_registry(lock, entry.name, rtype=entry.type, location=entry.location,
-                            commit=registry_commit(entry))
+                            commit=package_commit(entry, pkg))
             if not any(ref in s.overlays for s in load_manifest(root).sensors):
                 overlay_payload_path(root, ref).unlink(missing_ok=True)  # last binding moved on
                 packages.pop(ref, None)

@@ -193,6 +193,17 @@ class CompletionTests(unittest.TestCase):
         self.assertEqual(doc["state"], "failed")
         self.assertEqual(doc["containers"]["bag-player"]["exit_code"], 7)
 
+    def test_docker_nanosecond_timestamps_parse_on_every_python(self):
+        # Real `docker inspect` stamps: 9 digits, or fewer with trailing zeros trimmed. Python
+        # < 3.11 (JetPack 6 ships 3.10) rejected them, so --auto-end never saw completion.
+        for started in ("1970-01-01T00:16:41.123456789Z", "1970-01-01T00:16:41.5Z",
+                        "1970-01-01T00:16:41.12345Z", "1970-01-01T00:16:41.000000001+00:00"):
+            with self.subTest(started=started):
+                self.docs[0]["State"]["StartedAt"] = started
+                self.docs[0]["Created"] = "1970-01-01T00:16:40.987654321Z"
+                self.assertEqual(self.observe(started_after=1000).state, "succeeded")
+                self.assertEqual(self.observe(started_after=1002).state, "unknown")
+
     def test_restart_that_finishes_during_grace_is_not_this_execution(self):
         def restart(_seconds):
             self.docs[0]["State"]["StartedAt"] = "1970-01-01T00:16:43Z"

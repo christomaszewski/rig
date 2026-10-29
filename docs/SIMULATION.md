@@ -2,7 +2,7 @@
 
 For a complete machine-preparation and disconnected capture/replay walkthrough, start with
 [offline Isaac attachment](ISAAC_OFFLINE.md) and its checked-in camera recipe. This feature
-is experimental in Rig v0.2.73; [preparation status](ISAAC_PREP_REPORT.md) separates local
+is experimental (since Rig v0.2.73); [preparation status](ISAAC_PREP_REPORT.md) separates local
 fixture evidence from pending live Isaac acceptance.
 
 `rig sim` starts a deployment's selected infrastructure and autonomy services against an

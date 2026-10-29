@@ -95,8 +95,9 @@ def _player_source(root, catalog, lock, explicit=None):
     if explicit:
         discard_player_pins()
     record_registry(lock, entry.name, rtype=entry.type, location=entry.location,
-                    commit=install.registry_commit(entry))
-    record_package(lock, install.qualified(entry, pkg), {"kind": "service", "source": source})
+                    commit=install.package_commit(entry, pkg))
+    record_package(lock, install.qualified(entry, pkg), {"kind": "service", "source": source,
+                                                         "commit": install.package_commit(entry, pkg)})
     return path
 
 

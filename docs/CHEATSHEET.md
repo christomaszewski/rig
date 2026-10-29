@@ -1,6 +1,7 @@
 # rig — deployment cheat sheet
 
-> The whole workflow on one page (rig ≥ v0.1.48). Long-form: `RUNBOOK.md` (worked Orin example),
+> The whole workflow on one page (rig ≥ v0.2.74; older features name the version that introduced
+> them). Long-form: `RUNBOOK.md` (worked Orin example),
 > `README.md` (concepts + install), `STATE.md` (current live state). Mental model: **services own their
 > bring-up** (launcher + `rigging.yaml`); **rig owns the vehicle** (manifest, env, ordering, artifacts).
 > The vehicle runs the baked artifact — no source, no internet (fleet artifacts render on-vehicle, §1.6).
@@ -8,7 +9,7 @@
 
 For the full documentation map see the [index](README.md). Isaac attachment and offline
 capture→replay are covered in the [simulation reference](SIMULATION.md) and
-[offline walkthrough](ISAAC_OFFLINE.md); those commands are experimental in v0.2.73.
+[offline walkthrough](ISAAC_OFFLINE.md); those commands are experimental (since v0.2.73).
 
 ```
 author configs ──▶ validate ──▶ build images ──▶ bake ──▶ ship ──▶ run ──▶ iterate
@@ -44,7 +45,8 @@ mkdir -p ~/ws && cd ~/ws                      # service repos + rig + rig-infra 
 git clone <camera-service> <dashboard> <rig> https://github.com/christomaszewski/rig-infra ...
 alias rig="$PWD/rig/rig"                      # only when running rig from this checkout
 
-# --infra: shared services from the workspace (rig-infra), wired + ENABLED (router pinned to order 0)
+# --infra: shared services from the workspace (rig-infra) or a registry ref (public/zenoh-router),
+#   wired + ENABLED (router pinned to order 0); --add: anything `rig add` takes (see §2)
 # --discover: scan sibling repos (rigging.yaml) -> services.yaml populated + examples copied + commented MENU
 rig init my-vehicle --vehicle-id 7 --infra zenoh-router --infra ros2-bag-logger --discover
 cd my-vehicle
@@ -91,16 +93,20 @@ rig setup --show                   # where everything is: ~/.rig, machine identi
 rig setup --data-dir /Volumes/ssd/rig-data --migrate   # outgrew the disk: move the registry (hardlinks
                                    #   kept, verified, a symlink left at the old path); `provision
                                    #   --data-dir NEW --migrate` for a machine-level registry
-rig registry sync                  # clone/ff-pull the caches; everything below is OFFLINE after this
+rig registry sync                  # clone/ff-pull the caches; everything below is offline after this,
+                                   #   except a service's first install at a new pin (fetched into the
+                                   #   local git mirror, $RIG_HOME/cache/git)
 rig init my-vehicle --vehicle-id 7 && cd my-vehicle    # born a git repo (--no-git opts out);
                                    #   without --vehicle-id the tree carries per-host identity
                                    #   MARKERS (v0.2.20) — `rig provision`/RIG_VEHICLE_ID supply them
 rig add public/zenoh-router        # infra from the registry: repo cloned AT THE PIN, launch surface
                                    #   VENDORED into services/, config from its example, rig.lock written
 rig init my-vehicle --infra public/zenoh-router --add public/sbg
-                                   # the same in ONE step: --infra/--add take anything `rig add` does
-                                   #   (registry refs checked before any write; a failed install
-                                   #   removes the new tree), committed in the scaffold commit
+                                   # the same in ONE step: --infra takes a path, workspace name or
+                                   #   registry ref; --add takes anything `rig add` does (registry refs,
+                                   #   sensor:<id>, <service>:<profile>, suites, paths). Registry forms
+                                   #   are checked before any write; a failed install removes what init
+                                   #   created; both land in the scaffold commit
 rig add sensor:zr30                # match a profile (exact → glob → fallback), install its service
                                    #   transitively, materialize the payload as the EDITABLE config
 rig pkg search ouster:             # profiles for a service, across registries ("what drives
@@ -133,7 +139,7 @@ rig pkg promote --all --project gideon --suite gideon-boat --vehicle gideon --to
                                    #   they are skipped loudly. Re-running the same command re-captures
                                    #   the plan by name. Identity stays per-host (markers); fleet
                                    #   defaults (platform, images, data_dir, ros, vars) travel literal
-rig init veh2 && rig pkg add internal/gideon-boat --root veh2
+rig init veh2 && rig --root veh2 pkg add internal/gideon-boat
                                    # a fresh (EMPTY) tree reproduces the vehicle: rows, bindings,
                                    #   platform… — identity arrives per host (`rig provision` /
                                    #   RIG_VEHICLE_ID; `rig init --vehicle-id 7` pins a literal)
@@ -160,12 +166,15 @@ rig registry sync && rig pkg rebase camera-service:org-zr30 --to internal
                                    #   Deployments then follow with plain `rig pkg upgrade`.
 rig pkg upgrade                    # registry moved? three-way merge: new base ⊕ your edits, conflicts
                                    #   loud; bound overlays rebind IN PLACE (order kept). All-or-nothing:
-                                   #   a mid-sweep failure rolls the whole tree + lock back
+                                   #   a mid-sweep failure rolls the whole tree + lock back. A shared
+                                   #   service moves only as far as every profile's requires.service
+                                   #   allows; no pin ever moves to an OLDER version (v0.2.74)
 rig pkg add internal/zr30-gideon@1.0.0
                                    # a PAST version: git-backed registries serve history read-only
                                    #   (git log/show on the full clone — no checkout, no tags).
-                                   #   --locked re-resolves at the LOCKED registry commit, so
-                                   #   reproduction reproduces even after the registry moves
+                                   #   --locked re-resolves each package at the commit its rig.lock
+                                   #   row records (v0.2.74), so reproduction reproduces even after
+                                   #   the registry moves; hashes still refuse rewritten content
 ```
 
 **The daily loop (rig ≥ v0.2.9): discover, save, stay current, publish, undo.**
@@ -183,6 +192,8 @@ rig pkg save siyi_zr30             # publish local edits into the package they C
                                    #   clean, render identical: bound overlay first (top of the
                                    #   stack), else the pinned profile. save = update in place;
                                    #   promote = something NEW (fork/kind/suite). Never pushes.
+                                   #   Refuses when a newer registry version changed keys this
+                                   #   save would undo — `pkg upgrade` first
 rig pkg save camera-service        # a routed dev checkout's CODE pointer (next version @ HEAD);
                                    #   prints which instance configs still carry unsaved edits
 rig pkg outdated                   # registry-authoring currency: profile requires/based_on, overlay
@@ -217,14 +228,16 @@ Registries: `rig registry init <dir>` scaffolds a new one (usable immediately vi
 hash; `rig pkg add <ref> --locked` reproduces byte-identical configs on a second machine.
 
 Canonical grouped commands (old flat spellings stay as permanent aliases): `config show|render|diff` ·
-`run new|end|list|rm|import|retrofit` · `registry init|add|remove|list|sync|pending|push|discard|validate|index` · `pkg
+`run new|end|list|rm|import|export|tag|untag|archive|retrofit|replay` · `registry init|add|remove|list|sync|pending|push|discard|validate|index` · `pkg
 search|info|list|outdated|add|remove|upgrade|lock|save|promote|repin|rebase|yank` · `overlay
 apply|remove|reorder|list` · `service rigify|vendor|certify` · `artifact bake|unbake|list|show|rm|prune` ·
-`image build|pull`.
+`image build|pull|audit` · `catalog [query]|add|remove|roots` · `fleet list|status|sync|up|down` ·
+`src sync`.
 
-Airgap: `sync` → `install` → `rig pull` → `rig bake --bundle-images` — the deployment is
-self-contained after install (vendored surfaces + materialized configs); the registry cache is only
-needed to install/upgrade.
+Airgap: `rig registry sync` → `rig add …` → `rig pull` → `rig bake --bundle-images` — the
+deployment is self-contained after install (vendored surfaces + materialized configs); the registry
+cache is only needed to install/upgrade. A disconnected BUILD box: `rig src sync` and one online
+`rig build`, then `rig build --offline`.
 
 ## 1.6 — fleet vehicles: one artifact, N vehicles (rig ≥ v0.1.48)
 
@@ -365,17 +378,21 @@ rig build -j 3                                # full declared runtime/CPU matrix
                                               #   exports ROS_DISTRO from ros.distro (fleet-ros bakes YOUR distro)
 rig build sbg novatel                         # only these services (service or instance names); the rest
                                               #   keep their registry images. A failed build prints the
-                                              #   `rig build <failed services>` command that retries just those
+                                              #   command that retries only the services that failed
+                                              #   or never ran
 rig build --scope host --tag iteration-1       # this machine's runtime and Docker CPU
 rig build --scope deployment,replay --dry-run  # vehicle target plus replay companion build plan
-rig build --no-cache                          # FULL rebuild: RIG_BUILD_NO_CACHE=1 to every build command
-                                              #   (scripts opt in: docker build ${RIG_BUILD_NO_CACHE:+--no-cache});
-                                              #   the way to re-converge apt-level drift across images
+rig build --no-cache                          # FULL rebuild: RIG_BUILD_NO_CACHE=1 to every build command;
+                                              #   every building service must declare
+                                              #   build.capabilities.no_cache (rig service certify
+                                              #   --require-build-check); not with --offline. The way to
+                                              #   re-converge apt-level drift across images
 rig src sync                                  # online: mirror every git source the builds need
                                               #   (service pins, msgs sources, build.sources) in ~/.rig
 rig build --offline --check                   # what an offline build would miss; builds nothing
 rig build --offline                           # no git fetch, no --pull: sources from the mirrors,
-                                              #   layers from the build cache of an online build
+                                              #   layers from the build cache of an online build;
+                                              #   `mirror:` images must already be in the registry
 rig image audit                               # inspect what the stacks will RUN (docker + images local/pullable):
                                               #   every ROS image carries ros.distro, the declared rmw package
                                               #   is installed, and shared ros-* package VERSIONS agree across

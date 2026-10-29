@@ -77,8 +77,9 @@ template — it adapts to each via `rigging.yaml`'s `verbs` map (e.g. cam-up tak
   rmw — an image that simply has no zenoh in it (builds clean, dies on `up`).
   `rig image audit` is the detection side: it inspects the images the stacks resolve to (distro
   present, declared rmw installed, shared ros-* package versions agree across images); `rig build
-  --no-cache` (RIG_BUILD_NO_CACHE=1 to every build command, opt-in in the script) is the remediation
-  for a fleet whose images have already drifted apart at the apt layer.
+  --no-cache` (RIG_BUILD_NO_CACHE=1 to every build command; every building service must declare
+  `build.capabilities.no_cache`) is the remediation for a fleet whose images have already drifted
+  apart at the apt layer.
 - **Status/health.** rig calls each launcher's `status` (`ps --format json`) and rolls a project up to one
   row: healthy iff every *healthchecked* container is healthy and all are running (a plugin without a probe
   doesn't drag the sensor to "unknown"). ROS `/diagnostics` aggregation is a planned second layer.
@@ -293,6 +294,22 @@ configuration and Docker connection/ownership evidence govern status, logs, roll
 It does not configure QoS, remap frames or divide authority inside a shared TF topic. See
 [the operator contract](SIMULATION.md) and [acceptance limits](ISAAC_PREP_REPORT.md).
 
+## Offline and local-source builds (v0.2.74)
+
+Every git source a build needs resolves through ONE bare mirror per repo in `$RIG_HOME/cache/git`
+(the src cache's normalized-URL key); checkouts and exports are made from it locally. Builds do not
+fetch git themselves: rig exports the trees and hands them over as `RIG_BUILD_SOURCES` (the msgs
+overlay's `source:` repos, a rigging's `build.sources`), so provenance records the commit rig
+resolved. `rig build --offline` fetches nothing and checks every source and mirrored image before
+building. Proving offline-readiness with `docker build --network none` was rejected: BuildKit keys
+a RUN step's cache on its network mode, so it reruns every step an online build cached. Readiness
+is proven on a builder that really has no outside network.
+
+Building a WORKING TREE (rig-infra's `FLEET_MSGS_LOCAL`) stays separate from building a pin
+offline. Such images carry the `io.rig.build.local` label; `rig image audit` warns and `rig bake`
+refuses them without `--allow-local`, so a dev build cannot ship silently under a release tag.
+See [the plan](offline-builds-plan.md) for phase 2 (seeded base images, a shared SDK builder).
+
 ## Status & roadmap
 
 Implemented (see `ROADMAP.md` for the per-version log): manifest/catalog/descriptor loaders with
@@ -304,10 +321,13 @@ enabled-aware host-port clash checks, distro agreement as ERROR) + `doctor --dee
 `certify` (the launcher contract as executable checks, `--repo` CI
 mode, `--emit/--diff` host-independence proof); `build` (per-service build + mirror; exports
 `ros.distro` as ROS_DISTRO; base-image staging via `provides: base`/`images.base` → RIG_BASE_IMAGE;
-`--no-cache`) and `image audit` (deployment-wide image content checks: distro/rmw presence, cross-image
+`--no-cache`; `rig build SERVICE...` with a retry command on failure; `--offline`/`--check` from
+local git mirrors filled by `rig src sync`, `build.sources` → RIG_BUILD_SOURCES) and `image audit` (deployment-wide image content checks: distro/rmw presence, cross-image
 ros-* version agreement); `vendor` (with provenance) and `bake/unbake` (digest pinning, compose-only
-form, `--bundle-images` air-gap bundles, parent provenance on re-bake); the authoring family — `init`
-(name seed, `--infra` path/bare-name workspace resolution, `--discover` one-level scan), `add` (wire a
+form, `--bundle-images` air-gap bundles, parent provenance on re-bake, local-checkout builds refused
+without `--allow-local`); the authoring family — `init`
+(name seed, `--infra` path/bare-name workspace resolution or registry ref, `--add` with `rig add`'s
+grammar, `--discover` one-level scan), `add` (wire a
 service into an existing deployment), `fetch` (materialize configs for hand-authored rows), `rigify`
 (retrofit the contract onto existing software, analysis-seeded, certify-green out of the box); the
 package-registry layer (five kinds — services, profiles, overlays, suites, vehicle plans — with

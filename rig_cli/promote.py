@@ -559,6 +559,21 @@ def promote(root: Path, names: list[str], *, to: str, all_dirty: bool, name: str
                 auto = (not bump and existing is not None and sensor.profile
                         and str(sensor.profile).partition("@")[0] == f"{to}/{pkg_name}")
                 if auto:
+                    from .workingcopy import is_older, lost_updates, pin_path
+                    current = str(existing.get("version") or "")
+                    upstream = (reg_root / "profiles" / pkg_name.replace(":", "/")
+                                / str((existing.get("config") or {}).get("payload")
+                                      or "config/payload.yaml"))
+                    lost = (lost_updates(pin_path(root, sensor.name), upstream, payload)
+                            if is_older(str(sensor.profile).rpartition("@")[2], current) else [])
+                    if lost:
+                        raise RigError(
+                            f"promote: '{sensor.name}' is pinned at {sensor.profile} but "
+                            f"{to}/{pkg_name} is already at {current}, and publishing from the "
+                            f"older pin would undo {', '.join(lost[:5])}"
+                            f"{' …' if len(lost) > 5 else ''}. `rig registry sync`, then `rig pkg "
+                            f"upgrade {sensor.name}` (it three-way merges your edits, local "
+                            f"wins), then save")
                     eprint(f"  {sensor.name}: updating {sensor.profile} — auto-bump")
                 version = _next_version(existing, bump or bool(auto), f"profile '{pkg_name}'")
                 pmanifest: dict = {"kind": "profile", "name": short, "version": version,

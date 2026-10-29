@@ -379,6 +379,8 @@ Path(a[a.index('--metadata-file')+1]).write_text(json.dumps({'containerimage.dig
     def run_matrix(self, descs, failing=(), **kw):
         """A real matrix run against a docker stub that fails building any image in `failing`."""
         for d in descs.values():
+            if not d.build_command:
+                continue
             shutil.copy2(HELPER, d.repo / 'helper.sh')
             (d.repo / 'build.sh').write_text(f'''#!/bin/sh
 set -eu
@@ -415,6 +417,24 @@ Path(a[a.index('--metadata-file')+1]).write_text(json.dumps({{'containerimage.di
         with self.assertRaises(RigError) as caught:
             self.run_matrix(descs, failing=('radio',), jobs=2)
         self.assertIn('rig build: to retry only those: rig build --tag t1 radio', str(caught.exception))
+
+    def test_retry_names_cancelled_tasks_and_mirrors_and_published_images_are_kept(self):
+        mm = self.root / 'mm'
+        mm.mkdir()
+        (mm / 'rigging.yaml').write_text('service: mm\nlauncher: up\nmirror: [busybox:1]\n')
+        descs = {'core': self.service('core'), 'radio': self.service('radio', images='[radio]'),
+                 'zeta': self.service('zeta', images='[zeta]'), 'mm': load_descriptor('mm', mm)}
+        with self.assertRaises(RigError) as caught:  # serial: core publishes, radio fails, zeta
+            self.run_matrix(descs, failing=('radio',), jobs=1)  # may be cancelled, mm never ran
+        hint = str(caught.exception).rsplit('rig build --tag t1 ', 1)[1].split()
+        lock = load_lock(self.root)
+        cataloged = sorted(ref.split('/')[1].split(':')[0] for ref in lock['build_catalog'])
+        self.assertIn('core', cataloged)
+        self.assertTrue({'mm', 'radio'} <= set(hint))
+        # every service either published (kept in the catalog) or is named for the retry
+        self.assertEqual(sorted(set(hint) | set(cataloged)), ['core', 'mm', 'radio', 'zeta'])
+        self.assertFalse(set(hint) & set(cataloged))
+        self.assertNotIn('last_build', lock)  # published, but not a finished build
 
     def test_offline_matrix_build_never_pulls_and_exports_build_sources(self):
         upstream = self.root / 'dep'

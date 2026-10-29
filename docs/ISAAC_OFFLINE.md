@@ -9,7 +9,7 @@ planner service to be installed.
 **Reference checked 2026-10-28 UTC:** NVIDIA's **Isaac Sim 6.0.0** documentation, ROS 2
 **Jazzy**, Linux **Ubuntu 24.04**, and `rmw_zenoh_cpp`. This is a documentation baseline,
 not a claim that this combination has been exercised with Rig on a GPU. The Rig feature is
-experimental in v0.2.73. See [the preparation report](ISAAC_PREP_REPORT.md) for local
+experimental (since v0.2.73). See [the preparation report](ISAAC_PREP_REPORT.md) for local
 evidence and the remaining machine acceptance work. The shorter [simulation reference](SIMULATION.md)
 defines the CLI and recipe semantics.
 

@@ -1,7 +1,7 @@
 # rig — project state & handoff (resume here)
 
-Current checkpoint: **v0.2.73 — shared sessions and experimental Isaac attachment**,
-reviewed **2026-10-28 UTC**. Use the [documentation index](README.md) to choose an operator
+Current checkpoint: **v0.2.74 — offline and selected-service builds**,
+reviewed **2026-10-29 UTC**. Use the [documentation index](README.md) to choose an operator
 workflow. The dated entries below are historical observations, not the current host state.
 
 - Replay supports prepared recipes, native runtime-image acquisition/pinning, recorded calls,
@@ -19,9 +19,19 @@ workflow. The dated entries below are historical observations, not the current h
 - Current limitations, documentation audit and new test evidence belong in the
   [preparation report](ISAAC_PREP_REPORT.md). Live Isaac/GPU and disconnected asset acceptance
   remain pending. Do not substitute historical replay tests for simulator acceptance.
-- The user authorized the v0.2.73 release with collection-profile and fresh real-run acceptance
-  deferred until an actual collected run is examined. Those checks do not block this release;
-  they remain necessary before claiming collection completeness. See [release notes](releases/v0.2.73.md).
+- v0.2.73 shipped with collection-profile and fresh real-run acceptance deferred until an actual
+  collected run is examined; those checks remain necessary before claiming collection
+  completeness. See [its release notes](releases/v0.2.73.md).
+- v0.2.74 adds `rig src sync`, `rig build --offline/--check` from per-repo git mirrors,
+  `build.sources` → `RIG_BUILD_SOURCES`, `rig build SERVICE...` with a retry command,
+  `rig init --infra <registry ref>/--add`, and the `io.rig.build.local` guard (audit warns, bake
+  refuses without `--allow-local`). A pre-release review fixed security, data-loss and breakage
+  findings, including five high-severity package/fleet issues (per-row lock commits for
+  `--locked`, upgrade constraints and no downgrades, save lost-update refusal, suite overlay and
+  plan hash checks, SIL data dirs), and records the medium/low ones it defers in
+  [the review](releases/v0.2.74-review.md). Open: sbg_driver's `build.sources` adoption,
+  phase 2 of the [offline builds plan](offline-builds-plan.md), and tying camera replay speed to
+  the bag player's rate.
 
 ## Historical release notes and handoff observations
 
@@ -955,7 +965,10 @@ Still open:
 4. **rig follow-ups (`ROADMAP.md`):** health verb + reconciler/systemd (top open items), OCI artifact
    format, fleet mode (one artifact, N vehicles). (`bake --bundle-images` shipped in v0.1.21.)
 
-## Gotchas learned the hard way (deployment debugging)
+## Gotchas learned the hard way (deployment debugging — historical)
+
+> Recorded during the 2026-06 deployments. Some mechanisms have changed since (for example,
+> bake now reads registries through `docker buildx imagetools` with rig's managed builder).
 
 - **Registry trust is needed on BOTH machines, with the port.** Mac (Docker Desktop `insecure-registries`)
   for push; Orin (`/etc/docker/daemon.json`, **MERGE** — keep the `nvidia` runtime!) for pull. A bare IP
@@ -971,7 +984,7 @@ Still open:
 - **`images.tag: jp7` is the deployment tag** — platform-specific services (camera) use it; platform-agnostic
   ones (dashboard) must still pull the *same* tag or they won't find their image.
 
-## Resume checklist
+## Resume checklist (historical — the 2026-06 test vehicle)
 
 1. The vehicle is **already up** — check it first: `ssh orin 'cd ~/ws/test1 && ./run.sh status'` (or
    `docker ps`). Dashboard: `http://10.160.1.21:8080`.

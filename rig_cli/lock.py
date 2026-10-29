@@ -7,9 +7,12 @@ picture (packages + images) under one filename and schema.
 Sections (all optional — an empty lock is `{}`):
 
 - ``registries``: name -> {type, url|path, commit} — enough to reproduce the registry set on a
-  fresh machine (`--locked` installs resolve against these exact commits).
+  fresh machine. The commit is the last one any install used; `--locked` falls back to it only
+  for package rows written before rows carried their own.
 - ``packages``: fully-qualified exact ref (``public/siyi-zr30@1.0.0``) -> {kind, source|image,
-  payload_sha256, requires} — what was resolved, pinned, and verified at install time.
+  payload_sha256, requires, commit} — what was resolved, pinned, and verified at install time;
+  ``commit`` is the registry commit the package's bytes came from (`--locked` reproduces each
+  package from its own).
 - ``instances``: instance name -> {profile, base_sha256, overlays: [refs]} — the working-copy
   anchor: which pinned payload materialized the instance's editable config (the hash is what
   `config diff` and `pkg promote` diff against) and the ordered overlay bindings.

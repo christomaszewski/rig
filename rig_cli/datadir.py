@@ -17,7 +17,7 @@ import subprocess
 from pathlib import Path
 
 from . import RigError, __version__
-from .common import eprint, load_yaml
+from .common import contained, eprint, load_yaml
 
 
 # ---- copying ---------------------------------------------------------------------------------------
@@ -101,6 +101,16 @@ def migrate_registry(old: Path, new: Path, *, keep_old: bool = False) -> None:
     if new.is_dir() and any(new.iterdir()):
         if not (new / "runs").is_dir() or not all(p.name == "runs" for p in new.iterdir()):
             raise RigError(f"migrate: {new} is not empty — pick an empty (or absent) directory")
+        # Only an interrupted copy of THIS registry may be resumed: a run the old registry lacks
+        # means another registry, which the copy would merge into (rsync) or delete (no rsync).
+        foreign = sorted({p.name for p in (new / "runs").iterdir()}
+                         - {p.name for p in (old / "runs").iterdir()} if (old / "runs").is_dir()
+                         else {p.name for p in (new / "runs").iterdir()})
+        if foreign:
+            raise RigError(f"migrate: {new} already holds runs that are not in {old} "
+                           f"({', '.join(foreign[:5])}{' …' if len(foreign) > 5 else ''}) — it is "
+                           f"another registry, not a partial copy of this one; pick an empty "
+                           f"directory")
     if str(new.resolve()).startswith(str(old.resolve()) + "/"):
         raise RigError(f"migrate: {new} is inside {old}")
     files, size = _tree_stats(old)
@@ -185,6 +195,14 @@ def archive_runs(manifest, run_ids: list[str], to: str, *, link: bool = True,
             continue
         vehicle = str(doc.get("vehicle") or manifest.vehicle or "vehicle")
         dest = root / vehicle / rid
+        # `vehicle` comes from the run's manifest (possibly imported from elsewhere): one path
+        # component inside --to, never `../..` or `/etc` — the source is removed afterwards.
+        if (vehicle in (".", "..") or "/" in vehicle or "\\" in vehicle
+                or not contained(dest, root)):
+            eprint(f"rig run archive: {rid}: manifest vehicle {vehicle!r} is not a plain name — "
+                   f"not archived")
+            rc = 1
+            continue
         if dest.exists():
             eprint(f"rig run archive: {dest} already exists — not overwritten")
             rc = 1

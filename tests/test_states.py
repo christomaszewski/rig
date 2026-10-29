@@ -6,6 +6,8 @@ Stub launchers are pure sh (no docker): they append their argv to $STATES_LOG, s
 order, verb identity, and env delivery are all asserted from the log. The certify-side checks
 live in tests/test_certify.py (the contract reference); this file covers dispatch + status.
 """
+from __future__ import annotations
+
 import contextlib
 import io
 import json

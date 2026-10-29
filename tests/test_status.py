@@ -181,6 +181,15 @@ def test_gather_rolls_up_healthy_and_failed_launchers():
     assert bad.containers == []
 
 
+def test_gather_reports_a_missing_launcher_as_its_own_row():
+    # One unchecked-out service repo used to abort `rig status` (and `run end`'s snapshot).
+    missing = _desc("gonesvc", _OK_LAUNCHER)
+    (missing.repo / "gonesvc-up").unlink()
+    pairs = [(_sensor("gone", "gonesvc"), missing), (_sensor("cam", "camsvc"), _desc("camsvc", _OK_LAUNCHER))]
+    rows = gather(pairs, {"PATH": os.environ["PATH"]})
+    assert [(r.sensor.name, r.state) for r in rows] == [("gone", "no launcher"), ("cam", "running")]
+
+
 def test_gather_probes_the_project_rig_started():
     """Regression: gather() built its launcher env from service_env() alone, leaving
     COMPOSE_PROJECT_NAME unset. The launcher fell back to its own default project, `docker compose

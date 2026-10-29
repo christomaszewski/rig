@@ -1,5 +1,7 @@
 """Vehicle-local vars: {{var}} interpolation, source precedence, mandatory markers, env passthrough.
 Run: python3 tests/test_vars.py"""
+from __future__ import annotations
+
 import contextlib
 import os
 import pathlib

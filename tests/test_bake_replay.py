@@ -188,7 +188,7 @@ else:
         self.remove_player(route=False)
         source = {"repo": "https://example.invalid/infra", "rev": "a" * 40, "path": "ros2-bag-player"}
         package = SimpleNamespace(name="ros2-bag-player", kind="service", version="1.20.0",
-                                  manifest={"source": source})
+                                  manifest={"source": source}, commit=None)
         entry = Entry("public", "local-dir", str(self.root / "registry"))
         before = self.inputs_snapshot()
         with patch("rig_cli.bake_replay._local_players", return_value=[]), \

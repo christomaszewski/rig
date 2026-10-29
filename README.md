@@ -85,14 +85,15 @@ python3 -m venv .venv && .venv/bin/pip install pyyaml
 ./rig init my-vehicle --vehicle-id 1 --infra zenoh-router --discover   # scaffold: wired infra + a menu
                           #   (--vehicle-id pins a single-vehicle identity; without it the tree
                           #   carries per-host MARKERS, supplied by `rig provision`/RIG_VEHICLE_ID)
-./rig init my-vehicle --infra public/zenoh-router --add public/sbg  # or straight from a registry
 ./rig add ../novatel      # wire ONE more service into an existing deployment (path or bare name)
 ./rig fetch               # hand-wrote vehicle.yaml rows? materialize their configs from examples
 ./rig rigify ../my-sw     # make EXISTING software rig-compatible (descriptor + launcher + example)
 
 # the package registry — no checkouts needed (CHEATSHEET §1.5; public seed registry on GitHub)
 ./rig setup               # once per machine: ~/.rig + the default `public` registry
-./rig registry sync       # then fully offline: pinned installs, vendored surfaces, rig.lock
+./rig registry sync       # then offline: pinned installs, vendored surfaces, rig.lock (a service's
+                          #   first install at a new pin fetches its repo into the local git mirror)
+./rig init my-vehicle --infra public/zenoh-router --add public/sbg  # scaffold straight from a registry
 ./rig add public/zenoh-router          # infra from the registry, at an exact pin
 ./rig add sensor:zr30                  # profile match -> service + editable config, hash-anchored
 ./rig config diff         # git-status for configs
@@ -222,8 +223,12 @@ rig build --scope host --tag iteration-1      # this machine's provisioned runti
 rig build --scope deployment,replay          # vehicle target plus supported replay companions
 rig build --platform dev --arch amd64 --tag iteration-1   # faster targeted iteration
 rig build --no-cache                         # disable instruction caching in every participating build
+rig build sbg novatel                        # only these services; a failure prints the retry command
+rig src sync                                 # mirror every git source the builds need (~/.rig/cache/git)
+rig build --offline                          # then build without remote git or upstream registries
 rig image audit                             # inspect what the stacks will RUN: one ROS distro, the
-                                            #   declared rmw installed, ros-* versions agree across images
+                                            #   declared rmw installed, ros-* versions agree across
+                                            #   images; warns on images built from local checkouts
 rig bake --tag v1                           # -> var/artifacts/v1.tar.gz (auto-vendored + digest-pinned)
 # rig bake --tag v1 --include-replay         # auto-wire a missing player + validate onboard replay
 # add --bundle-images for offline startup AND replay images
@@ -245,7 +250,7 @@ ROS graph, shared version-2 session recipes, clock checks, recording and replay.
 recipes retain their existing behavior.
 [Offline Isaac walkthrough](docs/ISAAC_OFFLINE.md) covers preparing a compatible Jazzy/Zenoh
 deployment, local scene/assets and image caches, then camera capture and replay with a shared
-recipe. Isaac attachment is experimental in v0.2.73; live GPU acceptance is still pending.
+recipe. Isaac attachment is experimental (since v0.2.73); live GPU acceptance is still pending.
 Hardware runtimes use separate tags (`v1-jp6m`, `v1-dev`); multiarch indexes select the CPU within a
 runtime. `rig reconstruct RUN --platform dev` selects the software runtime; `--platform recorded`
 keeps the source runtime. Doodle's updated descriptor omits live radio startup during replay while
@@ -356,7 +361,7 @@ config/.pins/           # GENERATED pristine base copies (registry installs) —
                         #   `pkg upgrade`, and `pkg promote` measure against. Commit them.
 config/.overlays/       # GENERATED bound-overlay payload copies (deployment stays self-contained)
 rig.lock                # GENERATED pins: registries@commit, packages+hashes, instance anchors,
-                        #   image digests (bake). Commit it; `pkg install --locked` reproduces.
+                        #   image digests (bake). Commit it; `rig add <ref> --locked` reproduces.
 rig, rig_cli/           # the CLI (thin shim + package: manifest/catalog/dispatch/status/doctor/certify/
                         #   build/bake/init/rigify/runs/…)
 docs/                   # CHEATSHEET (1-page flow) · RUNBOOK (worked example) · DESIGN/ROADMAP · STATE · HOST_SETUP
@@ -405,7 +410,8 @@ passed through untouched). See `config/sensors/camera.profile.yaml` and `docs/RO
 
 Ready-to-use shared (`infra:`) services live in their own repo — clone it beside your deployment,
 point `services.yaml` at a service dir (`../rig-infra/zenoh-router`) and add an `infra:` entry, or let
-`rig init --infra zenoh-router` (bare name — the workspace scan finds it) wire it for you; in an
+`rig init --infra zenoh-router` (bare name — the workspace scan finds it; or the registry form
+`--infra public/zenoh-router`, no checkout needed) wire it for you; in an
 EXISTING deployment, `rig add <name|path>` does the same wiring after the fact (infra arrives enabled,
 sensor/autonomy services get a commented menu row to uncomment):
 
@@ -432,7 +438,10 @@ sensor/autonomy services get a commented menu row to uncomment):
   (`RIG_MSGS_MANIFEST`), builds the overlay right after the base (FROM `RIG_BASE_IMAGE` — an
   external `images.base` gets an overlay too), and exports the ref as `RIG_MSGS_IMAGE`; the bag
   logger's compose prefers it over the bare base. No declarations → no overlay → the bare base,
-  which is correct.
+  which is correct. Under rig, the `source:` repos are exported on the host from rig's local git
+  mirrors (no clone in the builder, so `rig build --offline` builds the overlay too). An overlay
+  built from local checkouts (rig-infra's `FLEET_MSGS_LOCAL`) is labelled `io.rig.build.local`:
+  `rig image audit` warns about it and `rig bake` refuses it without `--allow-local`.
 
 Each is just a launcher + compose around a stock tool — the same contract any service meets; rig-infra's
 CI runs `rig certify` against every one.
@@ -478,6 +487,10 @@ launch_surface:                              # the minimal file set `rig vendor`
 #          msgs_overlay: { command: ../msgs/build-msgs.sh, image: fleet-ros-msgs } }  # base providers may
 #                                            #   also declare the msgs OVERLAY build: base + the union of
 #                                            #   the riggings' `msgs:` blocks, exported as RIG_MSGS_IMAGE
+# build: { command: ..., sources: [{name: sbgecom, repo: <git url>, ref: <tag|branch|sha>}] }
+#                                            #   repos the build would fetch itself: rig mirrors them
+#                                            #   and hands each over as $RIG_BUILD_SOURCES/<name> (pass
+#                                            #   --build-context <name>=...), so `rig build --offline` works
 #                                            #   (the bag logger prefers it over the bare base)
 # msgs:                                      # interface packages THIS service's topics use (beyond
 #   apt: [mavros_msgs]                       #   ros-base/common_interfaces) — rosbag2 can't record a topic

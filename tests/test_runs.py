@@ -628,6 +628,21 @@ def test_down_selection_covers_what_the_open_session_launched():
     assert runs.launched_names(_manifest(None)) == []                     # no data_dir: inert
 
 
+def test_labels_resolve_exactly_never_to_a_replay_of_the_run():
+    # replay labels its output `replay-<source id>`: resolving `flight1` must find the recording,
+    # not `..._replay-20260101T000000Z_flight1`; `b` must not find `flight_b`.
+    data = pathlib.Path(tempfile.mkdtemp())
+    for rid in ("20260101T000000Z_flight1", "20260102T000000Z_replay-20260101T000000Z_flight1",
+                "20260103T000000Z_flight_b", "20260104T000000Z_b", "20260104T000000Z_b-2"):
+        (data / "runs" / rid).mkdir(parents=True)
+    assert runs._label_in(data, "flight1") == "20260101T000000Z_flight1"
+    assert runs._label_in(data, "b") == "20260104T000000Z_b-2"  # newest, collision suffix ok
+    assert runs._label_in(data, "flight_b") == "20260103T000000Z_flight_b"
+    assert runs._label_in(data, "replay-20260101T000000Z_flight1") == \
+        "20260102T000000Z_replay-20260101T000000Z_flight1"
+    assert runs._label_in(data, "light1") is None
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

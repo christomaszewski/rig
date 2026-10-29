@@ -9,12 +9,15 @@ untouched: no tags, no push; the index still maps name -> current; pins stay exa
 
 Two consumers:
 - ``pkg add ns/name@<non-current>`` — resolve a historical version (checkout_pkg).
-- ``--locked`` reproduction — resolve packages at the LOCKED registry commit
-  (checkout_pkg_at), turning verify-or-fail into actually-reproduce; the lock's hashes still
-  gate the result, so rewritten history fails loudly instead of installing different bytes.
+- ``--locked`` reproduction — resolve each package at the commit its lock row records
+  (checkout_pkg_at), else at its locked version (checkout_pkg), turning verify-or-fail into
+  actually-reproduce; the lock's hashes still gate the result, so rewritten history fails
+  loudly instead of installing different bytes.
 """
 from __future__ import annotations
 
+import atexit
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -61,7 +64,9 @@ def _materialize(toplevel: Path, prefix: str, kind_dir: str, name: str,
     files = [line for line in listing.stdout.splitlines() if line.strip()]
     if listing.returncode != 0 or not files:
         return None
-    scratch = Path(tempfile.mkdtemp(prefix="rig-history-")) / name.replace(":", "--")
+    scratch_root = tempfile.mkdtemp(prefix="rig-history-")
+    atexit.register(shutil.rmtree, scratch_root, True)  # read only within this rig process
+    scratch = Path(scratch_root) / name.replace(":", "--")
     for path in files:
         blob = _read_blob(toplevel, commit, path)
         if blob is None:
@@ -78,7 +83,8 @@ def _materialize(toplevel: Path, prefix: str, kind_dir: str, name: str,
     return Package(kind=str(manifest.get("kind") or kind_dir.rstrip("s")),
                    name=name,  # the KEY (profiles: service:short) — manifest `name` is the short half
                    version=str(manifest.get("version") or "?"),
-                   pkg_dir=scratch, manifest=manifest)
+                   pkg_dir=scratch, manifest=manifest,
+                   commit=_git(toplevel, "rev-parse", f"{commit}^{{commit}}").stdout.strip() or None)
 
 
 def checkout_pkg_at(entry: Entry, kind_dir: str, name: str, commit: str) -> Package | None:

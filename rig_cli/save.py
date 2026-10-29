@@ -129,6 +129,17 @@ def _save_overlay(root: Path, sensor, *, dry_run: bool) -> int:
     file_delta, overrides = state if state else ({}, {})
     target = deep_merge(deep_merge(full, file_delta), overrides)
     new_delta = structural_diff(pre, target)
+    from .workingcopy import is_older, lost_updates
+    upstream = (entry.root / "overlays" / okey
+                / str((existing.get("config") or {}).get("payload") or "config/delta.yaml"))
+    lost = (lost_updates(old_copy, upstream, new_delta)
+            if is_older(str(over), str(existing.get("version") or "")) else [])
+    if lost:
+        raise RigError(f"save: '{sensor.name}' binds {old_ref} but {alias}/{okey} is already at "
+                       f"{existing.get('version')}, and saving from the older binding would undo "
+                       f"{', '.join(lost[:5])}{' …' if len(lost) > 5 else ''}. `rig registry "
+                       f"sync`, then `rig pkg upgrade {sensor.name}` (it rebinds the overlay; "
+                       f"local edits stay), then save")
     version = _next_version(existing, True, f"overlay '{okey}'")
     if dry_run:
         eprint(f"rig pkg save (dry-run): would publish {alias}/{okey}@{version} with the local "

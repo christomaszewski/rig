@@ -59,6 +59,14 @@ def registry_commit(entry: Entry) -> str | None:
     return proc.stdout.strip() or None
 
 
+def package_commit(entry: Entry, pkg: Package) -> str | None:
+    """The registry commit a package's bytes came from: its history commit when read from git
+    history, else the registry's HEAD. Each lock row records its own, so `--locked` reproduces
+    every package from where it was resolved — not from one registry-wide commit that the next
+    install moves."""
+    return pkg.commit or registry_commit(entry)
+
+
 def resolve_ref(ref: str, *, history: bool = False) -> tuple[Entry, Registry, Package]:
     """`[registry/]name[@version]` -> the package, priority order for unqualified names. An explicit
     @version must equal the registry's current version — except with `history=True` (pkg add),
@@ -127,7 +135,8 @@ def profiles_for_service(svc: str) -> list[str]:
     return sorted(set(hits))
 
 
-def _resolve_required_service(entry: Entry, reg: Registry, profile: Package) -> tuple[Entry, Package]:
+def _resolve_required_service(entry: Entry, reg: Registry, profile: Package, *,
+                              lock: dict | None = None, locked: bool = False) -> tuple[Entry, Package]:
     req = (profile.manifest.get("requires") or {}).get("service") or ""
     match = _CONSTRAINT.match(str(req))
     if not match:
@@ -138,6 +147,8 @@ def _resolve_required_service(entry: Entry, reg: Registry, profile: Package) -> 
         svc_entry, service = entry, reg.packages.get(match["name"])
     if service is None or service.kind != "service":
         raise RigError(f"install: requires.service '{req}' does not resolve to a service")
+    if locked:  # the constraint judges the LOCKED service, not whatever the registry carries now
+        service = _at_locked_commit(svc_entry, service, lock or {}, locked)
     if not constraint_satisfied(match["ver"], bool(match["caret"]), service.version):
         if not match["caret"]:  # EXACT pin behind head: honor it from git history (a snapshot
             full = ".".join((str(match["ver"]).split(".") + ["0", "0", "0"])[:3])  # stays valid)
@@ -178,6 +189,11 @@ def _fetch_source(name: str, source: dict) -> Path:
     checks out — submodules included, each through its own mirror. Returns the service dir
     (source.path aware)."""
     repo_url, rev = str(source.get("repo") or ""), str(source.get("rev") or "")
+    # The rev names a cache directory (and a failed checkout's cleanup): only a full commit id
+    # may reach the path — a registry or rig.lock value like "/../../.." must never.
+    if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", rev):
+        raise RigError(f"install {name}: source.rev must be a full commit id (40 or 64 hex), "
+                       f"not {rev!r}")
     dest = rig_home() / "cache" / "src" / f"{_repo_slug(repo_url)}-{rev[:12]}"
     legacy = dest.parent / f"{name}-{rev[:12]}"  # pre-v0.2.25 per-service key: adopt, don't reclone
     if not dest.exists() and legacy != dest and (legacy / ".git").is_dir():
@@ -189,10 +205,12 @@ def _fetch_source(name: str, source: dict) -> Path:
     from . import gitmirror
     if not (dest / ".git").is_dir():
         dest.parent.mkdir(parents=True, exist_ok=True)
+        existed = dest.exists()
         try:
             gitmirror.clone(repo_url, gitmirror.resolve(repo_url, rev), dest)
         except RigError as exc:
-            shutil.rmtree(dest, ignore_errors=True)  # never leave a half checkout keyed as this rev
+            if not existed:  # never leave a half checkout keyed as this rev — and never remove
+                shutil.rmtree(dest, ignore_errors=True)  # a directory this call didn't create
             raise RigError(f"install {name}: {exc}") from exc
     head = git("rev-parse", "HEAD").stdout.strip()
     if head != rev:  # the cache dir is rev-keyed, so this only fires on tampering/corruption
@@ -220,8 +238,9 @@ def _check_locked(lock: dict, ref: str, *, locked: bool, payload_sha: str | None
     recorded = [r for r in (lock.get("packages") or {}) if r.split("@")[0] == name]
     if ref not in (lock.get("packages") or {}):
         have = f" (lock has {', '.join(recorded)})" if recorded else ""
-        raise RigError(f"install --locked: {ref} is not the locked pin{have} — sync the registry "
-                       f"to the locked state or install without --locked to re-pin")
+        raise RigError(f"install --locked: {ref} is not the locked pin{have} — the locked version "
+                       f"is not in the synced registry's history (rig registry sync), or install "
+                       f"without --locked to re-pin")
     entry = lock["packages"][ref] or {}
     want = entry.get("payload_sha256")
     if want and payload_sha and want != payload_sha:
@@ -315,7 +334,7 @@ def _install_service(root: Path, entry: Entry, pkg: Package, lock: dict, *, lock
         record_registry(lock, entry.name, rtype=entry.type, location=entry.location,
                         commit=registry_commit(entry))  # --locked reproduces FROM that commit —
     #                                                     never clobber the anchor it used
-    record_package(lock, ref, {"kind": "service", "source": {
+    record_package(lock, ref, {"kind": "service", "commit": package_commit(entry, pkg), "source": {
         "repo": source.get("repo"), "rev": source.get("rev"),
         **({"path": source["path"]} if source.get("path") else {})}})
     return load_descriptor(pkg.name, vendored)
@@ -385,7 +404,7 @@ def _snapshot(root: Path) -> dict:
     dirs pkg verbs mutate (services/, config/) — contents, not just the file set, because upgrade
     REWRITES working configs and pins in place (a set-only snapshot can undo creations but not
     modifications). These are small text surfaces; holding them in memory is cheap."""
-    files = {p: p.read_bytes()
+    files = {p: (p.read_bytes(), p.stat().st_mode & 0o7777)  # mode too: a vendored launcher
              for d in ("services", "config") for p in (root / d).rglob("*") if p.is_file()}
     return {"texts": {n: (root / n).read_text() if (root / n).exists() else None
                       for n in ("vehicle.yaml", "services.yaml", "rig.lock")},
@@ -403,22 +422,24 @@ def _rollback(root: Path, snap: dict) -> None:
     now = {p for d in ("services", "config") for p in (root / d).rglob("*") if p.is_file()}
     for created in now - set(snap["files"]):
         created.unlink(missing_ok=True)
-    for path, blob in snap["files"].items():  # restore modified + deleted originals
+    for path, (blob, mode) in snap["files"].items():  # restore modified + deleted originals
         if not path.exists() or path.read_bytes() != blob:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(blob)
+        if path.stat().st_mode & 0o7777 != mode:  # must come back executable if it was
+            path.chmod(mode)
     for d in ("services", "config"):  # prune dirs the deletions emptied
         for sub in sorted((root / d).rglob("*"), reverse=True):
             if sub.is_dir() and not any(sub.iterdir()):
                 shutil.rmtree(sub, ignore_errors=True)
 
 
-def _member_pkg(member) -> tuple:
+def _member_pkg(member, lock: dict | None = None, locked: bool = False) -> tuple:
     """Resolve one suite member at its EXACT pin. At head: the current package. Behind head: the
     pinned version from the registry's git history (a suite's value IS its exact set — a member's
     later release must not make the suite uninstallable; `pkg outdated` reports the drift and
     `pkg repin` refreshes). A non-git registry, or a version history never carried, fails with
-    the pointed hint."""
+    the pointed hint. `locked`: then as the member's rig.lock row pins it."""
     ref = str(member)
     m_entry, m_reg, m_pkg = resolve_ref(ref.split("@", 1)[0])
     want = ref.rpartition("@")[-1]
@@ -432,7 +453,7 @@ def _member_pkg(member) -> tuple:
                            f"suite, or sync a git-backed registry")
         eprint(f"  note: suite member {ref} is behind registry-current ({head}) — installing the "
                f"pinned version from history (rig pkg repin <suite> --to <registry> refreshes)")
-    return m_entry, m_reg, m_pkg
+    return m_entry, m_reg, _at_locked_commit(m_entry, m_pkg, lock or {}, locked)
 
 
 def _write_vehicle_settings(root: Path, plan: dict) -> None:
@@ -467,15 +488,16 @@ def _install_planned(root: Path, suite_ref: str, plan: dict, v_entry, v_pkg, v_p
     enabled flags, overrides, and per-row overlay bindings in row order."""
     from .overlay import apply as overlay_apply, edit_row
     _write_vehicle_settings(root, plan)
+    pins = load_lock(root)  # --locked: every member as rig.lock pins it
     service_descs: dict[str, object] = {}
     for member in members.get("services") or []:
-        m_entry, _, m_pkg = _member_pkg(member)
+        m_entry, _, m_pkg = _member_pkg(member, pins, locked)
         lock = load_lock(root)
         service_descs[m_pkg.name] = _install_service(root, m_entry, m_pkg, lock, locked=locked)
         save_lock(root, lock)
     profile_bases: dict[str, tuple] = {}  # member name -> (ref, payload_path, service, desc)
     for member in members.get("profiles") or []:
-        m_entry, m_reg, m_pkg = _member_pkg(member)
+        m_entry, m_reg, m_pkg = _member_pkg(member, pins, locked)
         lock = load_lock(root)
         prepped = _prep_profile(root, m_entry, m_reg, m_pkg, lock, locked=locked)
         save_lock(root, lock)
@@ -485,9 +507,11 @@ def _install_planned(root: Path, suite_ref: str, plan: dict, v_entry, v_pkg, v_p
     for member in members.get("overlays") or []:
         m_entry, _, m_pkg = _member_pkg(member)
         overlay_refs[m_pkg.name] = f"{m_entry.name}/{m_pkg.name}@{m_pkg.version}"  # exact pin
+    #                                                   (apply takes it as the lock pins it)
     lock = load_lock(root)  # the plan itself is provenance
     record_package(lock, qualified(v_entry, v_pkg),
-                   {"kind": "vehicle", "payload_sha256": sha256_file(v_payload)})
+                   {"kind": "vehicle", "payload_sha256": sha256_file(v_payload),
+                    "commit": package_commit(v_entry, v_pkg)})
     save_lock(root, lock)
 
     tier_of = {"infra": "infra", "sensors": "sensor", "autonomy": "autonomy"}
@@ -533,7 +557,7 @@ def _install_planned(root: Path, suite_ref: str, plan: dict, v_entry, v_pkg, v_p
                 if oname not in overlay_refs:
                     raise RigError(f"suite {suite_ref}: plan row '{name}': overlay '{oref}' has "
                                    f"no matching member — the suite is not closed")
-                overlay_apply(root, name, overlay_refs[oname])
+                overlay_apply(root, name, overlay_refs[oname], locked=locked)
     load_manifest(root)  # the gate: the planned deployment must load (uniqueness, cross-checks)
 
 
@@ -550,11 +574,16 @@ def _install_suite(root: Path, entry: Entry, pkg: Package, *, locked: bool) -> i
     if len(vmembers) > 1:
         raise RigError(f"suite {ref}: carries {len(vmembers)} vehicle members — at most one "
                        f"(the instance plan)")
+    pins = load_lock(root)  # --locked: every member as rig.lock pins it
     plan = v_entry = v_pkg = v_payload = None
     if vmembers:
-        v_entry, _, v_pkg = _member_pkg(vmembers[0])
+        v_entry, _, v_pkg = _member_pkg(vmembers[0], pins, locked)
         vrel = (v_pkg.manifest.get("config") or {}).get("payload") or "config/vehicle.yaml"
         v_payload = v_pkg.pkg_dir / str(vrel)
+        if not v_payload.is_file():
+            raise RigError(f"suite member {vmembers[0]}: vehicle payload missing: {vrel}")
+        _check_locked(pins, qualified(v_entry, v_pkg), locked=locked,
+                      payload_sha=sha256_file(v_payload))
         plan = load_yaml(v_payload)
         if not isinstance(plan, dict):
             raise RigError(f"suite member {vmembers[0]}: vehicle payload is not a mapping")
@@ -571,7 +600,7 @@ def _install_suite(root: Path, entry: Entry, pkg: Package, *, locked: bool) -> i
             eprint(f"rig install: suite {ref} complete")
             return 0
         for member in members.get("services") or []:
-            m_entry, _, m_pkg = _member_pkg(member)
+            m_entry, _, m_pkg = _member_pkg(member, pins, locked)
             lock = load_lock(root)
             desc = _install_service(root, m_entry, m_pkg, lock, locked=locked)
             save_lock(root, lock)
@@ -597,7 +626,8 @@ def _install_suite(root: Path, entry: Entry, pkg: Package, *, locked: bool) -> i
                                f"member alongside it; re-promote the suite with rig ≥ 0.2.16, "
                                f"which emits and validates that)")
             for instance in targets:
-                overlay_apply(root, instance, f"{m_entry.name}/{m_pkg.name}@{m_pkg.version}")
+                overlay_apply(root, instance, f"{m_entry.name}/{m_pkg.name}@{m_pkg.version}",
+                              locked=locked)
     except BaseException:
         _rollback(root, snap)
         eprint(f"rig install: suite {ref} FAILED — deployment rolled back untouched")
@@ -1037,21 +1067,40 @@ def _swap_source(root: Path, token: str, *, locked: bool):
 
 
 def _at_locked_commit(entry: Entry, pkg: Package, lock: dict, locked: bool) -> Package:
-    """--locked + a git-backed registry: resolve the package at the LOCKED registry commit —
-    actually reproduce, instead of verify-current-or-fail. The lock's hashes still gate the
-    result downstream, so rewritten history fails loudly rather than installing different
-    bytes. No git / no recorded commit ⇒ the package as resolved (today's behavior)."""
+    """--locked + a git-backed registry: resolve the package as its lock row pins it — at the
+    commit the row records, else at the row's version from history, else (locks written before
+    rows carried commits) at the registry-wide commit. Actually reproduce, instead of
+    verify-current-or-fail; the lock's hashes still gate the result downstream, so rewritten
+    history fails loudly rather than installing different bytes. No git, no row, or several
+    rows ⇒ the package as resolved, for `_check_locked` to judge."""
     if not locked:
         return pkg
-    commit = ((lock.get("registries") or {}).get(entry.name) or {}).get("commit")
-    if not commit:
+    rows = {ref: info or {} for ref, info in (lock.get("packages") or {}).items()
+            if ref.rpartition("@")[0] == f"{entry.name}/{pkg.name}"}
+    ref = qualified(entry, pkg)
+    chosen = ref if ref in rows else (next(iter(rows)) if len(rows) == 1 else None)
+    if chosen is None:
         return pkg
-    from .history import checkout_pkg_at, kind_dir_of
-    hist = checkout_pkg_at(entry, kind_dir_of(pkg.kind), pkg.name, commit)
+    version = chosen.rpartition("@")[2]
+    from .history import checkout_pkg, checkout_pkg_at, kind_dir_of
+    kind_dir = kind_dir_of(pkg.kind)
+    legacy = ((lock.get("registries") or {}).get(entry.name) or {}).get("commit")
+    hist = None
+    for commit in (rows[chosen].get("commit"), None, legacy):
+        if commit:
+            hist = checkout_pkg_at(entry, kind_dir, pkg.name, commit)
+        elif pkg.version == version:
+            return pkg  # no recorded commit: the current package IS the locked version
+        else:
+            hist = checkout_pkg(entry, kind_dir, pkg.name, version)
+        if hist is not None and hist.version == version:
+            break
+        hist = None
     if hist is None:
         return pkg
+    where = f"commit {hist.commit[:7]}" if hist.commit else "history"
     if hist.version != pkg.version:
-        eprint(f"  --locked: {pkg.name} taken from the locked registry commit {commit[:7]} "
+        eprint(f"  --locked: {pkg.name} taken from the locked registry {where} "
                f"(@{hist.version}; the registry currently carries @{pkg.version})")
     return hist
 
@@ -1068,12 +1117,12 @@ def _prep_profile(root: Path, entry: Entry, reg, pkg: Package, lock: dict,
     if not payload_path.is_file():
         raise RigError(f"install: {ref} payload missing in the synced registry: {payload_rel}")
     _check_locked(lock, ref, locked=locked, payload_sha=sha256_file(payload_path))
-    svc_entry, service = _resolve_required_service(entry, reg, pkg)
-    service = _at_locked_commit(svc_entry, service, lock, locked)
+    svc_entry, service = _resolve_required_service(entry, reg, pkg, lock=lock, locked=locked)
     desc = _install_service(root, svc_entry, service, lock, locked=locked)
     eprint(f"rig install: {ref} (requires {qualified(svc_entry, service)})")
     record_package(lock, ref, {"kind": "profile", "payload_sha256": sha256_file(payload_path),
-                               "requires": qualified(svc_entry, service)})
+                               "requires": qualified(svc_entry, service),
+                               "commit": package_commit(entry, pkg)})
     if not (locked and entry.name in (lock.get("registries") or {})):
         record_registry(lock, entry.name, rtype=entry.type, location=entry.location,
                         commit=registry_commit(entry))

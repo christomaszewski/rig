@@ -745,6 +745,55 @@ def test_native_capture_carries_companion_catalog_and_replay_policy():
         assert yaml.safe_load(tf.extractfile(vehicle))['replay'] == m.replay_policy
 
 
+def test_safe_extract_refuses_members_that_leave_the_destination():
+    # A run dir (and its artifact + sha stamp) can come from anywhere: reconstruct and unbake
+    # must never write outside their destination, with or without tarfile's data filter.
+    from rig_cli.common import safe_extract
+
+    def archive(*members):
+        path = pathlib.Path(tempfile.mkdtemp()) / "a.tar"
+        with tarfile.open(path, "w") as tf:
+            for name, kind, link in members:
+                info = tarfile.TarInfo(name)
+                if kind == "file":
+                    data = b"x\n"
+                    info.size = len(data)
+                    tf.addfile(info, io.BytesIO(data))
+                else:
+                    info.type, info.linkname = kind, link
+                    tf.addfile(info)
+        return path
+
+    # (the data filter makes an absolute name relative instead of refusing it — also safe;
+    # what matters is that nothing lands outside dest, checked below for every case)
+    bad = [[("tree/../../ESCAPED.txt", "file", "")], [("tree/link", tarfile.SYMTYPE, "../../outside")],
+           [("/abs/ESCAPED.txt", "file", "")]]
+    saved = getattr(tarfile, "data_filter", None)
+    for manual in (False, True):
+        if manual and saved is not None:
+            del tarfile.data_filter  # the hand-checked path older Pythons take
+        try:
+            for members in bad:
+                base = pathlib.Path(tempfile.mkdtemp())
+                dest = base / "x" / "y"
+                dest.mkdir(parents=True)
+                with tarfile.open(archive(*members)) as tf:
+                    try:
+                        safe_extract(tf, dest)
+                        assert members[0][0].startswith("/"), f"extracted {members} ({manual=})"
+                    except RigError:
+                        pass
+                escaped = [p for p in base.rglob("ESCAPED.txt") if not p.is_relative_to(dest)]
+                assert not escaped and not (base / "x" / "outside").exists(), (members, manual)
+            ok = pathlib.Path(tempfile.mkdtemp())
+            with tarfile.open(archive(("tree/a.txt", "file", ""))) as tf:
+                safe_extract(tf, ok)
+            assert (ok / "tree" / "a.txt").read_text() == "x\n"
+        finally:
+            if saved is not None:
+                tarfile.data_filter = saved
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

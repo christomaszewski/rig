@@ -169,6 +169,54 @@ def test_init_rolls_back_everything_when_an_install_fails():
         assert sorted(p.name for p in target.iterdir()) == ["notes.txt"]
 
 
+def test_fetch_source_refuses_a_rev_that_is_not_a_commit_id():
+    # The rev names a cache dir that a failed checkout removes: "/../../../.." (12 chars) once
+    # resolved to RIG_HOME's parent — the user's home — and the cleanup emptied it.
+    from rig_cli import RigError
+    from rig_cli.install import _fetch_source
+    home = pathlib.Path(tempfile.mkdtemp())
+    (home / "canary.txt").write_text("keep\n")
+    with _env(RIG_HOME=str(home / ".rig")):
+        for rev in ("/../../../..", "v1.0.0", "HEAD", "abc"):
+            try:
+                _fetch_source("svc", {"repo": str(home / "nope"), "rev": rev})
+                raise AssertionError(f"accepted rev {rev!r}")
+            except RigError as exc:
+                assert "full commit id" in str(exc), exc
+    assert (home / "canary.txt").read_text() == "keep\n"
+
+
+def test_init_rollback_restores_files_it_overwrote_in_an_existing_dir():
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        repo = _registry_only()
+        shutil.rmtree(repo)
+        target = pathlib.Path(tempfile.mkdtemp()) / "proj"
+        (target / "config" / "infra").mkdir(parents=True)
+        (target / "README.md").write_text("my readme\n")
+        (target / ".gitignore").write_text("mine\n")
+        (target / "config" / "infra" / "keep.yaml").write_text("a: 1\n")
+        before = sorted(str(p.relative_to(target)) for p in target.rglob("*"))
+        rc, _, err = _run("init", str(target), "--add", "testns/camish")
+        assert rc == 1 and "rolled" in err, err
+        assert sorted(str(p.relative_to(target)) for p in target.rglob("*")) == before
+        assert (target / "README.md").read_text() == "my readme\n"
+        assert (target / ".gitignore").read_text() == "mine\n"
+
+
+def test_rollback_restores_files_with_their_mode():
+    # `swap` deletes services/<svc>; a later failure restored the launcher NON-executable.
+    from rig_cli.install import _rollback, _snapshot
+    root = pathlib.Path(tempfile.mkdtemp())
+    launcher = root / "services" / "svc" / "svc-up"
+    launcher.parent.mkdir(parents=True)
+    launcher.write_text("#!/bin/sh\n")
+    launcher.chmod(0o755)
+    snap = _snapshot(root)
+    shutil.rmtree(root / "services" / "svc")
+    _rollback(root, snap)
+    assert launcher.read_text() == "#!/bin/sh\n" and launcher.stat().st_mode & 0o777 == 0o755
+
+
 def test_fetch_initializes_submodules():
     # Driver source arriving via submodule: the pinned checkout must init it recursively (rig
     # build runs in this tree; the superproject commit pins submodule revs, so exact-pin holds
@@ -617,6 +665,38 @@ def test_locked_reproduces_and_detects_drift():
         assert rc == 1 and "not the locked pin" in err
         assert "testns/camish:acme-cam@2.0.0" in err              # the lock's pin, named in the hint
         assert not (root4 / "config" / "sensors" / "acme_cam.yaml").exists()  # nothing materialized
+
+
+def test_locked_suite_checks_overlay_payloads():
+    """A suite's overlay member is hash-checked under --locked like profiles are: a registry that
+    rewrites the delta under the same version must fail, not install the new bytes."""
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        root, reg = _world()
+        suite = reg / "suites" / "boat"
+        suite.mkdir(parents=True)
+        (suite / "manifest.yaml").write_text(yaml.safe_dump({
+            "kind": "suite", "name": "boat", "version": "1.0.0",
+            "members": {"profiles": ["testns/camish:acme-cam@2.0.0"],
+                        "overlays": ["testns/cam-tune@1.0.0"]}}))
+        _run("registry", "index", str(reg))
+        rc, _, err = _run("--root", str(root), "pkg", "add", "testns/boat")
+        assert rc == 0, err
+
+        def locked_copy():
+            target = pathlib.Path(tempfile.mkdtemp()) / "veh"
+            with contextlib.redirect_stderr(io.StringIO()):
+                init(target, no_git=True)
+            (target / "rig.lock").write_text((root / "rig.lock").read_text())
+            return target, _run("--root", str(target), "pkg", "add", "testns/boat", "--locked")
+
+        root2, (rc, _, err) = locked_copy()
+        assert rc == 0, err
+        assert load_lock(root2)["packages"] == load_lock(root)["packages"]
+        (reg / "overlays" / "cam-tune" / "config" / "delta.yaml").write_text("usb: {width: 9999}\n")
+        _run("registry", "index", str(reg))
+        root3, (rc, _, err) = locked_copy()
+        assert rc == 1 and "testns/cam-tune@1.0.0 payload hash differs" in err
+        assert not (root3 / "config" / ".overlays").exists()          # rolled back untouched
 
 
 if __name__ == "__main__":

@@ -181,6 +181,31 @@ def test_repromote_recaptures_plan_and_repin_refreshes_member():
         assert rc == 1 and "UNVERSIONED" in err
 
 
+def test_locked_plan_install_checks_the_vehicle_payload():
+    """The plan's payload hash is recorded at install; `--locked` must refuse a plan rewritten
+    under the same version before anything is written."""
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        root, internal = _capture_world()
+        rc, _, err = _run("--root", str(root), "pkg", "promote", "--all", "--suite", "boat",
+                          "--vehicle", "gideon", "--to", "internal")
+        assert rc == 0, err
+        origin = _fresh()
+        assert _run("--root", str(origin), "pkg", "install", "internal/boat")[0] == 0
+        root2 = _fresh()
+        (root2 / "rig.lock").write_text((origin / "rig.lock").read_text())
+        rc, _, err = _run("--root", str(root2), "pkg", "install", "internal/boat", "--locked")
+        assert rc == 0, err
+        plan = internal / "vehicles" / "gideon" / "config" / "vehicle.yaml"
+        plan.write_text(plan.read_text().replace("order: 77", "order: 78"))
+        _run("registry", "index", str(internal))
+        root3 = _fresh()
+        (root3 / "rig.lock").write_text((origin / "rig.lock").read_text())
+        before = (root3 / "vehicle.yaml").read_text()
+        rc, _, err = _run("--root", str(root3), "pkg", "install", "internal/boat", "--locked")
+        assert rc == 1 and "internal/gideon@1.0.0 payload hash differs" in err
+        assert (root3 / "vehicle.yaml").read_text() == before
+
+
 def test_capture_preserves_overlay_order_fresh_delta_last():
     # ORDER IS MERGE ORDER: the suite's overlays member carries the existing bindings in binding
     # order with the just-emitted delta overlay appended LAST, and the plan row mirrors the same

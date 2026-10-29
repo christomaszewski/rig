@@ -140,6 +140,85 @@ def test_locked_fails_when_history_rewritten():
         assert rc == 1 and "registry content changed under the pin" in err
 
 
+def _fresh_with_lock(src):
+    root2 = pathlib.Path(tempfile.mkdtemp()) / "veh2"
+    with contextlib.redirect_stderr(io.StringIO()):
+        init(root2, no_git=True)
+    (root2 / "rig.lock").write_text((src / "rig.lock").read_text())
+    return root2
+
+
+def test_locked_reproduces_a_historical_install():
+    """`pkg add …@2.0.0` while the registry is at 2.1.0: the lock row records the commit the
+    2.0.0 bytes came from, so `--locked` reproduces 2.0.0 (it used to resolve at HEAD and fail)."""
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        root, reg = _git_world()
+        _bump_profile(reg, "2.1.0", "service: camish\ncamera: {type: usb}\nusb: {width: 4096}\n")
+        rc, _, err = _run("--root", str(root), "pkg", "install", "testns/camish:acme-cam@2.0.0")
+        assert rc == 0, err
+        row = load_lock(root)["packages"]["testns/camish:acme-cam@2.0.0"]
+        assert row["commit"] != load_lock(root)["registries"]["testns"]["commit"]  # its own commit
+        root2 = _fresh_with_lock(root)
+        rc, _, err = _run("--root", str(root2), "pkg", "install",
+                          "testns/camish:acme-cam@2.0.0", "--locked")
+        assert rc == 0, err
+        assert "width: 1280" in (root2 / "config" / "sensors" / "acme_cam.yaml").read_text()
+
+
+def test_locked_survives_a_later_install_moving_the_registry_commit():
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        root, reg = _git_world()
+        assert _run("--root", str(root), "pkg", "install", "sensor:acme")[0] == 0  # 2.0.0 @ C1
+        _bump_profile(reg, "2.1.0", "service: camish\ncamera: {type: usb}\nusb: {width: 4096}\n")
+        rc, _, err = _run("--root", str(root), "pkg", "install", "testns/routerish")  # lock @ C2
+        assert rc == 0, err
+        root2 = _fresh_with_lock(root)
+        for spec in ("sensor:acme", "testns/routerish"):
+            rc, _, err = _run("--root", str(root2), "pkg", "install", spec, "--locked")
+            assert rc == 0, err
+        assert "width: 1280" in (root2 / "config" / "sensors" / "acme_cam.yaml").read_text()
+
+
+def test_locked_checks_the_required_service_at_its_locked_version():
+    """camish moves to 2.0.0 upstream; the profile requires camish@^1.0 and the lock pins
+    1.2.0 — `--locked` judges the constraint against the LOCKED service, not registry HEAD."""
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        root, reg = _git_world()
+        assert _run("--root", str(root), "pkg", "install", "sensor:acme")[0] == 0
+        mpath = reg / "services" / "camish" / "manifest.yaml"
+        m = yaml.safe_load(mpath.read_text())
+        m["version"] = "2.0.0"
+        mpath.write_text(yaml.safe_dump(m, sort_keys=False))
+        _run("registry", "index", str(reg))
+        _git("add", "-A", cwd=reg)
+        _git("commit", "-q", "-m", "camish 2", cwd=reg)
+        assert _run("registry", "sync")[0] == 0
+        root2 = _fresh_with_lock(root)
+        rc, _, err = _run("--root", str(root2), "pkg", "install", "sensor:acme", "--locked")
+        assert rc == 0, err
+        assert "testns/camish@1.2.0" in load_lock(root2)["packages"]
+
+
+def test_upgrade_never_moves_a_saved_pin_backwards():
+    """A save on a git registry publishes 2.0.1 on an unmerged promote branch and re-pins the
+    instance; the registry's main still carries 2.0.0. That is not an upgrade."""
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        root, _ = _git_world()
+        assert _run("--root", str(root), "pkg", "install", "sensor:acme")[0] == 0
+        working = root / "config" / "sensors" / "acme_cam.yaml"
+        working.write_text(working.read_text().replace("width: 1280", "width: 640"))
+        rc, _, err = _run("--root", str(root), "pkg", "save", "acme_cam")
+        assert rc == 0, err
+        rc, out, _ = _run("--root", str(root), "pkg", "list")
+        assert "registry carries older 2.0.0" in out and "2.0.0 available" not in out
+        rc, _, err = _run("--root", str(root), "pkg", "upgrade")
+        assert rc == 0, err
+        assert "kept" in err
+        from rig_cli.manifest import load_manifest
+        sensor = next(s for s in load_manifest(root).sensors if s.name == "acme_cam")
+        assert sensor.profile == "testns/camish:acme-cam@2.0.1"
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

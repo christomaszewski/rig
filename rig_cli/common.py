@@ -72,6 +72,35 @@ def safe_component(value: str, *, what: str) -> str:
     return value
 
 
+def safe_extract(tf, dest: Path) -> None:
+    """Extract an archive rig did not necessarily write (a run copied off a vehicle, an artifact
+    from someone else) without letting a member escape ``dest``: tarfile's ``data`` filter where
+    Python has it (3.12+, and backports from 3.9.17 / 3.10.12 / 3.11.4), else the same rules by
+    hand — no absolute or ``..`` names, no links leaving ``dest``, no device or fifo members."""
+    import tarfile
+    if hasattr(tarfile, "data_filter"):
+        try:
+            tf.extractall(dest, filter="data")
+        except tarfile.FilterError as exc:
+            raise RigError(f"refusing an unsafe archive member: {exc}") from exc
+        return
+    root = Path(dest).resolve()
+    members = []
+    for member in tf.getmembers():
+        name = Path(member.name)
+        target = (root / member.name).resolve()
+        if name.is_absolute() or ".." in name.parts or not (target == root or target.is_relative_to(root)):
+            raise RigError(f"archive member {member.name!r} would extract outside {dest}")
+        if member.issym() or member.islnk():
+            link = (target.parent / member.linkname if member.issym() else root / member.linkname)
+            if Path(member.linkname).is_absolute() or not link.resolve().is_relative_to(root):
+                raise RigError(f"archive link {member.name!r} -> {member.linkname!r} leaves {dest}")
+        elif not (member.isfile() or member.isdir()):
+            raise RigError(f"archive member {member.name!r} is not a file, directory or link")
+        members.append(member)
+    tf.extractall(dest, members=members)  # noqa: S202 — every member checked above
+
+
 def contained(path: Path, root: Path) -> bool:
     """True iff ``path`` resolves to somewhere STRICTLY inside ``root`` — symlinks resolved on
     both sides, so a link out of the tree fails too. The check behind every "write this under

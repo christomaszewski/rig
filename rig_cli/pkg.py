@@ -213,7 +213,11 @@ def list_installed(root) -> int:
         current = ((index.get("packages") or {}).get(name) or {}).get("version")
         if current is None:
             return "gone from registry"
-        return "" if current == pinned else f"{current} available"
+        if current == pinned:
+            return ""
+        from .workingcopy import is_older
+        return (f"registry carries older {current}" if is_older(str(current), str(pinned))
+                else f"{current} available")
 
     def role(ref: str, kind: str) -> str:
         """active = something you CHOSE (a pinned profile, a bound overlay, an installed suite,
@@ -252,7 +256,7 @@ def list_installed(root) -> int:
     notes = []
     if any("*" in r[3] for r in rows[1:]):
         notes.append("* = local edits (upgrade three-way-merges them, local wins)")
-    if any(r[4] and r[4] != "unpublished" for r in rows[1:]):
+    if any(r[4].endswith(" available") for r in rows[1:]):
         notes.append("`rig registry sync && rig pkg upgrade` updates — profiles/services "
                      "three-way, bound overlays rebound in place")
     if local:

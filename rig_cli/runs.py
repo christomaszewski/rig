@@ -104,11 +104,19 @@ def registries(manifest: Manifest) -> list[Path]:
     return out
 
 
+def label_matches(run_id: str, label: str) -> bool:
+    """Whether a run id `<UTC stamp>_<label>[-N]` (-N: a same-second collision) carries
+    exactly ``label``. Labels may hold `_` and `-` themselves — replay's automatic
+    `replay-<source id>` does — so never match by suffix or prefix: `flight1` must not resolve
+    to `..._replay-20260101T000000Z_flight1`."""
+    return re.fullmatch(r"\d{8}T\d{6}Z_" + re.escape(label) + r"(?:-\d+)?", run_id) is not None
+
+
 def _label_in(data: Path, ref: str) -> str | None:
     runs = data / "runs"
     if not runs.is_dir():
         return None
-    matches = sorted(d.name for d in runs.iterdir() if d.is_dir() and d.name.endswith(f"_{ref}"))
+    matches = sorted(d.name for d in runs.iterdir() if d.is_dir() and label_matches(d.name, ref))
     return matches[-1] if matches else None
 
 

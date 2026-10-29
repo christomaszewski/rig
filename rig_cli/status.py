@@ -11,6 +11,7 @@ import json
 import subprocess
 from dataclasses import dataclass
 
+from . import RigError
 from .descriptor import Descriptor, STATE_VOCAB
 from .dispatch import instance_env, launcher_cmd
 from .manifest import Sensor
@@ -85,7 +86,11 @@ def _op_state(stdout: str) -> str:
 def gather(pairs: list[tuple[Sensor, Descriptor]], env: dict[str, str]) -> list[Row]:
     rows: list[Row] = []
     for sensor, desc in pairs:
-        cmd = launcher_cmd(sensor, desc, "status", ["--format", "json"])
+        try:  # one missing launcher (an unchecked-out repo) is that row's problem, not the table's
+            cmd = launcher_cmd(sensor, desc, "status", ["--format", "json"])
+        except RigError:
+            rows.append(Row(sensor, "no launcher", "-", 0, 0, [], None))
+            continue
         try:  # the SAME per-instance env up/down ran with — platform routing AND the compose
             #     project, or we'd ask the launcher about a stack rig never started
             proc = subprocess.run(cmd, env=instance_env(env, sensor, desc), cwd=str(desc.repo),

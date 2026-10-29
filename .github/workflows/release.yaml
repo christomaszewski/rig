@@ -51,9 +51,11 @@ jobs:
           from rig_cli import bake_replay, replay_coordinator, replay_readiness
           from rig_cli import replay_call_inspection, replay_selection, runtime_images
           from rig_cli import session_recipe, session_runtime, sim_workflow, sim_probe
+          from rig_cli import build_sources, gitmirror
           assert pathlib.Path(rig_cli.__file__).parent == pathlib.Path("rig-wheel/rig_cli").resolve()
           assert pathlib.Path(sim_probe.__file__).is_file()
-          print("Installed Rig", rig_cli.__version__, "with replay and session helpers")
+          assert pathlib.Path(gitmirror.__file__).is_file()
+          print("Installed Rig", rig_cli.__version__, "with replay, session and offline-build helpers")
           PY
       - name: deb
         run: ./packaging/build-deb.sh

@@ -72,12 +72,15 @@ def rendered_images(sensors: list[Sensor], descriptors: dict[str, Descriptor],
     return refs, notes
 
 
-def lock_images(root: Path) -> set[str]:
+def lock_images(root: Path, only: set[str] | None = None) -> set[str]:
     """rig.lock's `images` section: tag refs (keys) AND digest pins (values) — a digest-primed
-    cache (baked artifact) holds both names for the same image; both must be untagged."""
+    cache (baked artifact) holds both names for the same image; both must be untagged. With
+    ``only`` (a cleanup of SOME instances), just the entries for those logical refs."""
     from .lock import load_lock
     refs: set[str] = set()
     for ref, digest in (load_lock(root).get("images") or {}).items():
+        if only is not None and str(ref) not in only:
+            continue
         refs.add(str(ref))
         if digest:
             refs.add(str(digest))
@@ -85,7 +88,11 @@ def lock_images(root: Path) -> set[str]:
     if (root / "metadata.yaml").is_file():
         from .common import load_yaml
         bundle = load_yaml(root / "metadata.yaml").get("bundle") or {}
-        refs.update(str(ref) for ref in bundle.get("image_ids", {}))
+        if only is None:
+            refs.update(str(ref) for ref in bundle.get("image_ids", {}))
+        else:
+            refs.update(str(alias) for ref, alias in (bundle.get("refs") or {}).items()
+                        if str(ref) in only)
     return refs
 
 
@@ -139,7 +146,15 @@ def cleanup(root: Path, manifest: Manifest, descriptors: dict[str, Descriptor],
                            f"(cleanup removes images/volumes, never containers)")
 
     refs, notes = rendered_images(sensors, descriptors, env)
-    refs |= lock_images(root)
+    if names:
+        # SOME instances: only their images — never another instance's (lock entries and
+        # bundle aliases included), and never an image a kept instance also runs.
+        chosen = {s.name for s in sensors}
+        others = [s for s in manifest.select([], enabled_only=False) if s.name not in chosen]
+        kept, _ = rendered_images(others, descriptors, env) if others else (set(), [])
+        refs = (refs | lock_images(root, only=refs)) - kept - lock_images(root, only=kept)
+    else:
+        refs |= lock_images(root)
     for note in notes:
         eprint(f"  note: {note}")
     volumes = set() if keep_volumes else declared_volumes(sensors, descriptors)

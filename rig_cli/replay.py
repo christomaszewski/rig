@@ -759,7 +759,11 @@ def _player_completion(manifest, player, *, required_calls=False, expected=None,
                 raise ValueError(f"{service} has inconsistent terminal Docker state")
             if started_after is not None and status != "created":
                 def stamp(value):
-                    parsed = datetime.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+                    # Docker writes RFC 3339 with up to 9 fractional digits, trailing zeros
+                    # trimmed; fromisoformat before Python 3.11 takes exactly 3 or 6.
+                    text = re.sub(r"\.(\d+)", lambda m: "." + (m.group(1) + "000000")[:6],
+                                  str(value).replace("Z", "+00:00"))
+                    parsed = datetime.datetime.fromisoformat(text)
                     if parsed.tzinfo is None:
                         raise ValueError("Docker timestamp lacks timezone")
                     return parsed.timestamp()

@@ -395,7 +395,17 @@ def init(target: Path, *, vehicle_id: int | None = None, infra: list[str] | None
     plan = _plan_infra(infra or [], target.parent)
     if discover is not None and not discover.resolve().is_dir():
         raise RigError(f"init --discover: not a directory: {discover}")
-    before = set(target.iterdir()) if target.is_dir() else None  # None: init creates the target
+    # What a failed `then` must put back in a target that already existed: every path that was
+    # there, and the bytes of every file init may overwrite (its own files, and configs).
+    before: set[Path] | None = None  # None: init creates the target, rollback removes it whole
+    saved: dict[Path, bytes] = {}
+    if target.is_dir() and then is not None:
+        before = {p for p in target.rglob("*") if ".git" not in p.relative_to(target).parts}
+        mine = [target / n for n in ("services.yaml", "README.md", ".gitignore")]
+        saved = {p: p.read_bytes() for p in [*mine, *(target / "config").rglob("*")]
+                 if p.is_file() and not p.is_symlink()}
+    elif target.is_dir():
+        before = set()  # no rollback needed without `then`; only marks "existed"
     for sub in ("config/sensors", "config/infra", "config/autonomy", "services"):
         (target / sub).mkdir(parents=True, exist_ok=True)
 
@@ -423,14 +433,22 @@ def init(target: Path, *, vehicle_id: int | None = None, infra: list[str] | None
         try:
             then(target)
         except BaseException:
-            # Undo exactly what init made: the whole target if it created it, else only the
-            # entries that were not there before.
+            # Undo exactly what init made: the whole target if it created it, else every path
+            # that was not there before, and the original bytes of every file it overwrote.
             if before is None:
                 shutil.rmtree(target, ignore_errors=True)
+                eprint(f"init: removed the new deployment at {target} — nothing was kept")
             else:
-                for path in set(target.iterdir()) - before:
-                    shutil.rmtree(path) if path.is_dir() else path.unlink()
-            eprint(f"init: removed the new deployment at {target} — nothing was kept")
+                new = [p for p in target.rglob("*") if p not in before
+                       and ".git" not in p.relative_to(target).parts]
+                for path in sorted(new, key=lambda p: len(p.parts), reverse=True):
+                    if path.is_dir() and not path.is_symlink():
+                        shutil.rmtree(path, ignore_errors=True)
+                    elif path.exists() or path.is_symlink():
+                        path.unlink()
+                for path, data in saved.items():
+                    path.write_bytes(data)
+                eprint(f"init: rolled {target} back to how it was before init")
             raise
     if not no_git:
         _git_init_deployment(target)

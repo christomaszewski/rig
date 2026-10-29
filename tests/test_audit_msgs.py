@@ -7,6 +7,8 @@ the declaring service's own image recorded it built, with the SHA tier catching 
 different-tree drift. Docker is STUBBED (test_audit's technique, extended: the msgs file probe is
 keyed on its script marker, the dpkg inspection on the ref alone).
 Run: python3 tests/test_audit_msgs.py"""
+from __future__ import annotations
+
 import contextlib
 import io
 import os

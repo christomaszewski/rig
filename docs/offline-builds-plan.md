@@ -1,6 +1,6 @@
 # Offline and local-source builds plan
 
-Status, 2026-10-29, not yet released: phase 0 (section 8) implemented. Phase 1 (section 4)
+Status, 2026-10-29, released in v0.2.74: phase 0 (section 8) implemented. Phase 1 (section 4)
 implemented in Rig and rig-infra's `msgs/`; sbg_driver's adoption of `build.sources` is pending,
 and section 9 B records what changed from this plan and what was verified. Phase 2 proposed.
 Scope: Rig, rig-infra (`base/`, `msgs/`), sbg_driver and novatel. camera-service, ouster and
@@ -136,7 +136,7 @@ the build keeps today's online fetch.
 - `--offline` refuses `--no-cache`, which would rerun every step.
 - The preflight runs before any build and reports everything missing in one go: repos or refs
   absent from the mirror (submodules included), and `mirror:` images absent from
-  `images.registry`. `--check` stops after the report. Declared base images and a builder that
+  the build registry (`--registry`, tree-local, machine-local, then `images.registry`). `--check` stops after the report. Declared base images and a builder that
   cannot start without pulling join the preflight in phase 2.
 - `rig-build.sh` is unchanged in phase 1. It is copied into each service repo and nothing keeps
   the copies in sync; phase 2's registry cache will change it, so update the canonical

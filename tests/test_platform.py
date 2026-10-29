@@ -1,6 +1,8 @@
 """Platform targeting (v0.2.14): the per-host `platform:` field, the descriptor's build matrix +
 override_env, RIG_TARGET_PLATFORM routing, composed <tag>-<platform> refs, the legacy
 platform-valued images.tag path, and the doctor checks. Run: python3 tests/test_platform.py"""
+from __future__ import annotations
+
 import contextlib
 import os
 import pathlib

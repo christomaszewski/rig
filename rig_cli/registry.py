@@ -69,6 +69,7 @@ class Package:
     version: str
     pkg_dir: Path   # absolute
     manifest: dict
+    commit: str | None = None  # the registry commit these bytes came from (git history reads)
 
 
 @dataclass

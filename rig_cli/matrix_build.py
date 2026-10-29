@@ -246,7 +246,10 @@ def run(manifest, descriptors, *, registry, tag, dry_run, jobs=1, root=None,
                  arch=arch, root=root, base=base_image, scopes=scopes, selections=selections,
                  only=only)
     if only is not None and not tasks and not any(descriptors[s].mirror for s in only):
-        raise RigError(f'nothing to build for {", ".join(sorted(only))} in the selected scope')
+        replaced = ' (an external images.base replaces a base provider\'s own image)' if (
+            base_image or manifest.image_base) else ''
+        raise RigError(f'nothing to build for {", ".join(sorted(only))} in the selected scope'
+                       f'{replaced}')
     for task in tasks:
         if no_cache and task.desc.build_no_cache is not True:
             raise RigError(f'{task.service} ({task.cwd}): no declared no-cache capability; update its build contract '
@@ -278,6 +281,7 @@ def run(manifest, descriptors, *, registry, tag, dry_run, jobs=1, root=None,
     mirrors = {image for name, d in descriptors.items()
                if (selections is None or name in selections) and (only is None or name in only)
                for image in d.mirror}
+    mirror_owners = sorted({name for name, d in descriptors.items() if set(d.mirror) & mirrors})
     if offline and mirrors:  # the preflight verified the copies are already in the registry
         eprint(f'rig build: offline — using the copies of {", ".join(sorted(mirrors))} already in {reg}')
         mirrors = set()
@@ -304,16 +308,34 @@ def run(manifest, descriptors, *, registry, tag, dry_run, jobs=1, root=None,
         msgs = temp / 'msgs.yaml'
         msgs.write_text(yaml.safe_dump(union or {}))
 
-        failed = []  # services whose task failed, for the retry hint
+        done = set()  # task indices that published and verified, for the retry hint
 
         def execute(index_task):
             index, task = index_task
-            try:
-                with progress.step(index) as step:
-                    return execute_task(index, task, step)
-            except RigError:
-                failed.append(task.service)
-                raise
+            with progress.step(index) as step:
+                rows = execute_task(index, task, step)
+            results.extend(rows)  # here, not via pool.map: a failure must not hide the others
+            done.add(index)
+            return rows
+
+        def record(*, last_build):
+            if root is None or not (results or last_build):
+                return
+            lock = load_lock(root)
+            catalog = lock.setdefault('build_catalog', {})
+            for row in results:
+                # One logical image/version, even after publishing into a different registry.
+                for old in list(catalog):
+                    if (catalog[old].get('image') == row['image']
+                            and old.rsplit(':', 1)[-1] == row['ref'].rsplit(':', 1)[-1]):
+                        del catalog[old]
+                catalog[row['ref']] = row
+            if last_build:
+                lock['last_build'] = dict(tag=tag or manifest.image_tag or 'latest',
+                                          complete=complete, scopes=scopes,
+                                          platform=platform, architecture=arch,
+                                          outputs=[r['ref'] for r in results])
+            save_lock(root, lock)
 
         def execute_task(index, task, step):
             report = temp / f'{index}.jsonl'
@@ -369,33 +391,28 @@ def run(manifest, descriptors, *, registry, tag, dry_run, jobs=1, root=None,
             group = [(i, task) for i, task in enumerate(tasks) if task.stage == stage]
             try:
                 with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, jobs)) as pool:
-                    for rows in pool.map(execute, group):  # the pool finishes the whole stage
-                        results.extend(rows)
-            except RigError as exc:  # later stages never ran: they need the retry too
-                skipped = [task.service for task in tasks if task.stage > stage]
-                raise RigError(f'{exc}\n{retry_hint(failed + skipped, retry_flags or [])}') from exc
+                    list(pool.map(execute, group))
+            except RigError as exc:
+                # The images that did publish are real: catalog them (their tags now point at
+                # them), but never as a finished build. Retry everything not done — tasks that
+                # failed, were cancelled, or belong to later stages, and the mirrors after them.
+                record(last_build=False)
+                undone = [task.service for i, task in enumerate(tasks) if i not in done]
+                raise RigError(f'{exc}\n{retry_hint(undone + mirror_owners, retry_flags or [])}'
+                               ) from exc
             for row in results:
                 completed_refs[row['ref']] = row['ref'].rsplit(':', 1)[0] + '@' + row['digest']
-        for index, image in enumerate(sorted(mirrors), len(tasks)):
-            # Preserve all architectures, unlike pull/tag/push through a host-local image store.
-            with progress.step(index) as step:
-                docker_registry.imagetools(['create', '-t', f'{reg}/{image}', image],
-                                           [image, f'{reg}/{image}'], access=access, runner=step.run)
-        if root is not None:
-            lock = load_lock(root)
-            catalog = lock.setdefault('build_catalog', {})
-            for row in results:
-                # One logical image/version, even after publishing into a different registry.
-                for old in list(catalog):
-                    if (catalog[old].get('image') == row['image']
-                            and old.rsplit(':', 1)[-1] == row['ref'].rsplit(':', 1)[-1]):
-                        del catalog[old]
-                catalog[row['ref']] = row
-            lock['last_build'] = dict(tag=tag or manifest.image_tag or 'latest',
-                                      complete=complete, scopes=scopes,
-                                      platform=platform, architecture=arch,
-                                      outputs=[r['ref'] for r in results])
-            save_lock(root, lock)
+        try:
+            for index, image in enumerate(sorted(mirrors), len(tasks)):
+                # Preserve all architectures, unlike pull/tag/push through a host-local store.
+                with progress.step(index) as step:
+                    docker_registry.imagetools(['create', '-t', f'{reg}/{image}', image],
+                                               [image, f'{reg}/{image}'], access=access,
+                                               runner=step.run)
+        except RigError as exc:  # every build published: keep them, retry the mirrors
+            record(last_build=False)
+            raise RigError(f'{exc}\n{retry_hint(mirror_owners, retry_flags or [])}') from exc
+        record(last_build=True)
         eprint(f'rig build: published and verified {len(results)} images; '
                f'{"complete matrix" if complete else "targeted build"}')
     return 0

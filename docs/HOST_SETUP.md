@@ -92,6 +92,10 @@ baked, digest-pinned artifact — no driver source, no internet.
    For a service that declares neither, push its (arm64) image yourself:
    `docker tag <local> devbox:5000/<repo>:<tag> && docker push devbox:5000/<repo>:<tag>`
    (or `docker buildx imagetools create` to preserve a multi-arch index).
+   A dev box that must build while DISCONNECTED prepares once online — `rig registry sync`,
+   `rig src sync` (every git source the builds need, into `~/.rig/cache/git`) and one online
+   `rig build` to warm the build cache — then builds with `rig build --offline` (`--offline
+   --check` first lists anything still missing). See [Builds and replay](BUILD_AND_REPLAY.md).
 2. Bake against that registry (digest-pins every image found in the local registry):
    ```
    rig bake --registry devbox:5000 --tag <name>      # -> var/artifacts/<name>.tar.gz
@@ -133,8 +137,8 @@ Until a dedicated unit exists, a single oneshot systemd service can run `rig up`
 # /etc/systemd/system/rig.service  (sketch)
 [Service]
 Type=oneshot
-WorkingDirectory=/opt/rig
-ExecStart=/opt/rig/rig up
+WorkingDirectory=/opt/rig/<name>
+ExecStart=/opt/rig/<name>/run.sh up
 RemainAfterExit=yes
 [Install]
 WantedBy=multi-user.target

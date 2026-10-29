@@ -268,7 +268,10 @@ def perform_prepare(args, root, recipe_path, recipe, origin, manifest, catalog, 
     except BlockingIOError:
         lock.close()
         raise RigError("Another preparation is already using this recipe workspace")
-    saved = {}
+    saved = {}  # tracked name -> existed; set only once that name's backup is COMPLETE
+    wiring = False  # True from the first write: only then is there anything to restore
+    keep_backup = False
+    backup = None
     created_recipe = False
     try:
         if args.player and not plan["player"]:
@@ -283,12 +286,14 @@ def perform_prepare(args, root, recipe_path, recipe, origin, manifest, catalog, 
             tracked = ["vehicle.yaml", "services.yaml", "rig.lock", "config", "services", "registries.yaml"]
             for name in tracked:
                 p = root / name
-                saved[name] = p.exists()
+                existed = p.exists()
                 if p.is_dir():
                     shutil.copytree(p, backup / name, symlinks=True)
                 elif p.is_file():
                     (backup / name).parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(p, backup / name)
+                saved[name] = existed
+            wiring = True  # every backup is complete; the deployment changes from here
             wire_player(root, target)
             manifest, catalog, descriptors = load_context(root)
             manifest = sessions.apply_session(manifest, recipe)
@@ -341,19 +346,25 @@ def perform_prepare(args, root, recipe_path, recipe, origin, manifest, catalog, 
         eprint("Replay with: " + shlex.join(replay_command))
         return 0 if plan["ready_to_run"] else 1
     except BaseException as exc:
-        if saved:
-            for name, existed in saved.items():
-                p = root / name
-                if p.is_dir():
-                    shutil.rmtree(p)
-                elif p.exists():
-                    p.unlink()
-                if existed:
-                    if (backup / name).is_dir():
-                        shutil.copytree(backup / name, p, symlinks=True)
-                    else:
-                        p.parent.mkdir(parents=True, exist_ok=True)
-                        shutil.copy2(backup / name, p)
+        if wiring:  # a failed BACKUP changed nothing in the deployment: nothing to restore
+            try:
+                for name, existed in saved.items():
+                    p = root / name
+                    if p.is_dir():
+                        shutil.rmtree(p)
+                    elif p.exists():
+                        p.unlink()
+                    if existed:
+                        if (backup / name).is_dir():
+                            shutil.copytree(backup / name, p, symlinks=True)
+                        else:
+                            p.parent.mkdir(parents=True, exist_ok=True)
+                            shutil.copy2(backup / name, p)
+            except BaseException as restore_exc:  # never delete the only good copy
+                keep_backup = True
+                raise RigError(f"replay prepare: restoring the deployment after a failure "
+                               f"failed ({restore_exc}); the pre-wiring copy is in {backup} — "
+                               f"restore from it by hand") from exc
         if created_recipe:
             recipe_path.unlink(missing_ok=True)
         if isinstance(exc, _PreparationNotReady):
@@ -361,8 +372,8 @@ def perform_prepare(args, root, recipe_path, recipe, origin, manifest, catalog, 
             return 1
         raise
     finally:
-        if saved:
-            shutil.rmtree(backup)
+        if backup is not None and not keep_backup:
+            shutil.rmtree(backup, ignore_errors=True)
         lock.close()
 
 

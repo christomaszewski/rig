@@ -169,6 +169,87 @@ def test_upgrade_repins_profile_required_service():
         assert vend["ref"] == rev
 
 
+def test_upgrade_keeps_a_service_the_profile_requirement_excludes():
+    """The profile requires camish@^1.0; camish 2.0.0 is published. Upgrade must not move the
+    shared service past what its profile accepts."""
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        root, reg = _world()
+        _install_acme(root)
+        _bump_service(reg, "camish", "2.0.0", "service: camish\ncamera: {type: usb}\n")
+        rc, _, err = _run("--root", str(root), "pkg", "upgrade")
+        assert rc == 0, err
+        assert "testns/camish@1.2.0 kept" in err and "requires camish@^1.0" in err
+        lock = load_lock(root)
+        assert lock["packages"]["testns/camish:acme-cam@2.0.0"]["requires"] == "testns/camish@1.2.0"
+        assert "testns/camish@2.0.0" not in lock["packages"]
+
+
+def test_upgrade_honors_the_new_profile_exact_requirement():
+    """A new profile version pinning camish EXACTLY to the locked 1.2.0 keeps it there even
+    though 1.3.0 is current."""
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        root, reg = _world()
+        _install_acme(root)
+        _bump_service(reg, "camish", "1.3.0", "service: camish\ncamera: {type: usb}\n")
+        mpath = reg / "profiles" / "camish" / "acme-cam" / "manifest.yaml"
+        m = yaml.safe_load(mpath.read_text())
+        m["version"], m["requires"] = "2.0.1", {"service": "camish@1.2.0"}
+        mpath.write_text(yaml.safe_dump(m, sort_keys=False))
+        _run("registry", "index", str(reg))
+        rc, _, err = _run("--root", str(root), "pkg", "upgrade")
+        assert rc == 0, err
+        lock = load_lock(root)
+        assert lock["packages"]["testns/camish:acme-cam@2.0.1"]["requires"] == "testns/camish@1.2.0"
+        assert "testns/camish@1.3.0" not in lock["packages"]
+
+
+def _republish_profile(reg, version, requires):
+    mpath = reg / "profiles" / "camish" / "acme-cam" / "manifest.yaml"
+    m = yaml.safe_load(mpath.read_text())
+    m["version"], m["requires"] = version, {"service": requires}
+    mpath.write_text(yaml.safe_dump(m, sort_keys=False))
+    _run("registry", "index", str(reg))
+
+
+def test_upgrade_follows_a_major_bump_the_new_profile_accepts():
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        root, reg = _world()
+        _install_acme(root)
+        _bump_service(reg, "camish", "2.0.0", "service: camish\ncamera: {type: usb}\n")
+        _republish_profile(reg, "3.0.0", "camish@^2.0")
+        rc, _, err = _run("--root", str(root), "pkg", "upgrade")
+        assert rc == 0, err
+        lock = load_lock(root)
+        assert lock["packages"]["testns/camish:acme-cam@3.0.0"]["requires"] == "testns/camish@2.0.0"
+
+
+def test_upgrade_refuses_when_no_service_version_fits_and_rolls_back():
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        root, reg = _world()
+        _install_acme(root)
+        before = (root / "rig.lock").read_text()
+        _bump_service(reg, "camish", "1.3.0", "service: camish\ncamera: {type: usb}\n")
+        _republish_profile(reg, "2.0.1", "camish@1.1.0")   # exact; no history serves 1.1.0
+        rc, _, err = _run("--root", str(root), "pkg", "upgrade")
+        assert rc == 1 and "no camish version satisfies" in err
+        assert (root / "rig.lock").read_text() == before
+
+
+def test_upgrade_keeps_a_service_the_registry_carries_older():
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        root, reg = _world()
+        _install_acme(root)
+        mpath = reg / "services" / "camish" / "manifest.yaml"
+        m = yaml.safe_load(mpath.read_text())
+        m["version"] = "1.1.0"
+        mpath.write_text(yaml.safe_dump(m, sort_keys=False))
+        _run("registry", "index", str(reg))
+        rc, _, err = _run("--root", str(root), "pkg", "upgrade")
+        assert rc == 0, err
+        assert "testns/camish@1.2.0 kept — the registry carries older 1.1.0" in err
+        assert "testns/camish@1.2.0" in load_lock(root)["packages"]
+
+
 def test_readd_of_installed_package_errors_early_without_mutation():
     with _env(RIG_HOME=tempfile.mkdtemp()):
         root, reg = _world()

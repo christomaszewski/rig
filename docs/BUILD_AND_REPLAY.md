@@ -18,6 +18,8 @@ rig build --scope host --tag laptop-iteration
 rig build --scope deployment,replay --tag release-1
 rig build --platform jp6m --arch arm64 --tag bench-1
 rig build --platform dev --arch amd64 --tag bench-2
+rig build sbg novatel --tag release-1    # only these services
+rig src sync && rig build --offline       # build without remote git or upstream registries
 ```
 
 Use the same version in `images.tag` when running an iteration built with `--tag`. A targeted build
@@ -48,6 +50,26 @@ Docker selects arm64 or amd64 from an index. It cannot distinguish JetPack versi
 arm64. Runtime variants therefore keep separate tags. `dev` uses software codecs and requires no
 NVIDIA runtime; its core and WebRTC bridge share the pinned modern GStreamer userspace. It is not
 a macOS container: Docker Desktop runs the arm64 Linux member.
+
+## Building some services, and building offline
+
+`rig build SERVICE...` builds only the named services (service names, or instance names standing
+for their service); every other service keeps the images already in the registry. A named consumer
+builds FROM the base already published. Naming a base provider rebuilds the base and its messages
+overlay — still from the whole fleet's `msgs:` union — but not the consumers. The run is recorded
+as targeted in `rig.lock` `last_build`. When builds fail, Rig prints the command that retries only
+the services that failed or never ran, repeating the options that change what is built.
+
+Every git source a build needs — service source pins in `rig.lock`, the messages overlay's
+`source:` repos and a rigging's `build.sources` — resolves through one bare mirror per repo in
+`$RIG_HOME/cache/git` (default `~/.rig`). Online builds fetch into the mirror first; `rig src sync`
+fills every mirror, submodules included, without building. `rig build --offline` fetches nothing,
+turns `--pull` off (`RIG_OFFLINE=1`, `RIG_BUILD_PULL=0`) and requires `mirror:` images to already be
+in the build registry. It reports everything missing before any build starts;
+`rig build --offline --check` stops after that report. Image layers come from the build cache: a
+step not cached by an earlier online build (a new apt package, say) needs the network once.
+`--offline` cannot be combined with `--no-cache`. See the
+[offline builds plan](offline-builds-plan.md) for what is verified and what remains.
 
 ## Targets and scopes
 
@@ -197,6 +219,10 @@ Bake verifies the exported Docker and OCI manifests against the selected aliases
 both config digests and exported OCI digests. Startup accepts only those verified identities, so the
 same artifact loads on classic and containerd Docker image stores even though they report different IDs.
 
+Bake refuses an image labelled `io.rig.build.local` — such as a messages overlay built from
+rig-infra's `FLEET_MSGS_LOCAL` working-tree snapshots — unless given `--allow-local`;
+`rig image audit` warns about such images and names the checkouts.
+
 Templated fleet artifacts preserve identity variables until execution. To bundle one, every enabled
 service must declare `verbs: {images: images}` in `rigging.yaml`. Rig invokes the launcher as
 `<launcher> <layered-config> images` with the selected runtime, CPU and image inputs. It must emit only
@@ -216,6 +242,7 @@ build:
   platforms: [jetson, dev]
   architectures: [arm64, amd64]
   capabilities: {no_cache: true, platforms: true}
+  sources: [{name: sbgecom, repo: https://github.com/SBG-Systems/sbgECom.git, ref: 5.8.935-stable}]
   variants:
     jetson: {architectures: [arm64], images: [core, bridge]}
     dev: {images: [software-core, bridge]}
@@ -238,6 +265,13 @@ and call `rig_build IMAGE [docker build arguments...]` for each declared output.
 Buildx with provenance and registry publication under Rig, while retaining standalone Docker builds.
 With standalone `PUSH=0`, a Buildx invocation may load one architecture locally; multiple architectures
 require publication. A portable `rig build` always publishes.
+
+`build.sources` lists git repos the build would otherwise fetch itself (a CMake FetchContent, a
+`git clone` in a Dockerfile). Rig exports each one from its local mirror and passes
+`RIG_BUILD_SOURCES`: one directory per source plus `sources.tsv` (name, repo, ref, commit). Pass
+`--build-context <name>=$RIG_BUILD_SOURCES/<name>` and bind that stage in the Dockerfile, keeping an
+empty default stage (`FROM scratch AS <name>`) so standalone builds still fetch. Names match
+`[a-z0-9][a-z0-9_-]*`. The messages overlay receives its `source:` repos the same way.
 
 `images.override_env` declares the service-owned image variables honored by its compose/launcher.
 Rig uses these to inject catalog digest references for build/pull agreement. Infra that runs

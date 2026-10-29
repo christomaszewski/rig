@@ -330,7 +330,10 @@ def cmd_reconstruct(root: Path | None, *, run_ref: str, into: str | None,
     work = Path(tempfile.mkdtemp(prefix="rig-reconstruct-"))
     try:
         with tarfile.open(tarpath) as tf:
-            tf.extractall(work)  # noqa: S202 — rig-authored archives; single top-level dir
+            # The run dir — and its sha stamp — may come from anywhere (a vehicle, an archive):
+            # never trust member paths.
+            from .common import safe_extract
+            safe_extract(tf, work)
         tops = [p for p in work.iterdir() if p.is_dir()]
         if len(tops) != 1:
             raise RigError(f"reconstruct: {tarpath} does not contain a single tree "

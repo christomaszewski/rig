@@ -172,6 +172,19 @@ def test_errors_on_host_port_clash_across_instances():
     assert not any("host port" in i.message for i in issues_with(8444))  # distinct ports: clean
 
 
+def test_a_disabled_alternative_on_the_same_port_does_not_block_up():
+    svc = _svc_repo("dash", "service: dash\nlauncher: dash-up\nhost_ports: [server.port]\n")
+    issues = _collect_from(
+        "vehicle: t\n"
+        "sensors: [{name: dash_a, service: dash, config: config/a.yaml},\n"
+        "          {name: dash_b, service: dash, config: config/b.yaml, enabled: false}]\n",
+        {"dash": svc},
+        {"a.yaml": "service: dash\nname: dash_a\nserver: {port: 8443}\n",
+         "b.yaml": "service: dash\nname: dash_b\nserver: {port: '8443'}\n"})  # a string port too
+    port = [i for i in issues if "host port 8443" in i.message]
+    assert [i.level for i in port] == ["WARN"], port
+
+
 def test_errors_on_mixed_distros_across_services():
     cam = _svc_repo("cam", "service: cam\nlauncher: cam-up\nros_distro: lyrical\n")
     gnss = _svc_repo("gnss", "service: gnss\nlauncher: gnss-up\nros_distro: jazzy\n")

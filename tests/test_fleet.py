@@ -16,6 +16,7 @@ import yaml  # noqa: E402
 from rig_cli import RigError  # noqa: E402
 from rig_cli.bake import fleet_refs, is_fleet  # noqa: E402
 from rig_cli.cli import main  # noqa: E402
+from rig_cli.common import safe_extract  # noqa: E402
 from rig_cli.manifest import load_manifest  # noqa: E402
 from rig_cli.resolve import materialize_manifest  # noqa: E402
 # Hermetic user state: rig remembers registries it touches in $RIG_HOME/catalog.yaml (rig catalog)
@@ -188,7 +189,7 @@ def test_one_artifact_two_vehicles_peer_exclusion():
     for vid in (3, 9):
         vehicle_home = pathlib.Path(tempfile.mkdtemp())
         with tarfile.open(artifact) as tf:
-            tf.extractall(vehicle_home, filter="data")
+            safe_extract(tf, vehicle_home)
         tree = vehicle_home / "m2"
         machine = vehicle_home / "machine.yaml"
         machine.write_text(f"vehicle: skiff-{vid:02d}\nvehicle_id: {vid}\n")
@@ -210,7 +211,7 @@ def test_one_artifact_two_vehicles():
     for vid in (3, 9):
         vehicle_home = pathlib.Path(tempfile.mkdtemp())
         with tarfile.open(artifact) as tf:
-            tf.extractall(vehicle_home, filter="data")
+            safe_extract(tf, vehicle_home)
         tree = vehicle_home / "f1"
         machine = vehicle_home / "machine.yaml"
         machine.write_text(f"vehicle: skiff-{vid:02d}\nvehicle_id: {vid}\n")
