@@ -156,6 +156,83 @@ def test_sync_git_clone_pull_and_divergence():
         assert rc == 1 and "FAILED" in err and "ff-only" in err
 
 
+def _checkout_with_upstream():
+    """A registry checkout cloned from a bare upstream (a GitHub/GitLab clone, in miniature)."""
+    seed = _seed_registry()
+    _git("init", "-q", "-b", "main", cwd=seed)
+    _git("add", "-A", cwd=seed)
+    _git("commit", "-q", "-m", "seed", cwd=seed)
+    upstream = pathlib.Path(tempfile.mkdtemp()) / "upstream.git"
+    _git("clone", "-q", "--bare", str(seed), str(upstream), cwd=seed.parent)
+    checkout = pathlib.Path(tempfile.mkdtemp()) / "checkout"
+    _git("clone", "-q", str(upstream), str(checkout), cwd=upstream.parent)
+    return checkout
+
+
+def test_add_stores_a_local_clone_source_absolutely():
+    with _env(RIG_HOME=_home()):
+        _run("setup", "--no-default-registry")
+        checkout = _checkout_with_upstream()
+        old = os.getcwd()
+        os.chdir(checkout.parent)
+        try:
+            rc, _, err = _run("registry", "add", "rel", checkout.name)  # relative, positional
+        finally:
+            os.chdir(old)
+        assert rc == 0 and "cloned from the local checkout" in err, err
+        entry = next(e for e in load_entries() if e.name == "rel")
+        assert (entry.type, entry.location) == ("git", str(checkout.resolve()))
+        rc, _, err = _run("registry", "sync", "rel")                 # from any directory
+        assert rc == 0 and "cloned" in err, err
+        plain = _seed_registry()                                     # a folder, no git
+        rc, _, err = _run("registry", "add", "plain", str(plain))
+        assert rc == 1 and "not a git repository" in err and "--path" in err
+        rc, _, err = _run("registry", "add", "sub", str(checkout / "services"))
+        assert rc == 1 and "not its root" in err
+        upstream = pathlib.Path(_git("config", "--get", "remote.origin.url", cwd=checkout).stdout.strip())
+        rc, _, err = _run("registry", "add", "bare", str(upstream))     # a bare repository
+        assert rc == 0, err
+        rc, _, err = _run("registry", "add", "inbare", str(upstream / "refs"))
+        assert rc == 1 and "not its root" in err, err
+        rc, _, _ = _run("registry", "add", "remote", "https://example.com/reg.git")
+        assert rc == 0 and next(e for e in load_entries() if e.name == "remote").location == \
+            "https://example.com/reg.git"                            # URLs stay as given
+
+
+def test_sync_and_list_show_a_local_dir_checkouts_git_state():
+    with _env(RIG_HOME=_home()):
+        _run("setup", "--no-default-registry")
+        checkout = _checkout_with_upstream()
+        _run("registry", "add", "mine", "--path", str(checkout))
+        rc, _, err = _run("registry", "sync", "mine")
+        assert rc == 0 and "git checkout: main, even with origin/main" in err, err
+        (checkout / "NOTES.md").write_text("x\n")
+        _git("add", "-A", cwd=checkout)
+        _git("commit", "-q", "-m", "local", cwd=checkout)
+        (checkout / "draft.txt").write_text("y\n")
+        rc, _, err = _run("registry", "sync", "mine")
+        assert "main, 1 unpushed, 1 uncommitted" in err and "rig does not pull" in err, err
+        rc, out, _ = _run("registry", "list")
+        assert "in place (main, 1 unpushed, 1 uncommitted)" in out, out
+        _run("registry", "add", "plain", "--path", str(_seed_registry()))
+        rc, _, err = _run("registry", "sync", "plain")
+        assert rc == 0 and "git checkout" not in err                 # a plain folder: no git line
+
+
+def test_checkout_state_parses_every_change_kind():
+    from rig_cli.registries import checkout_state
+    checkout = _checkout_with_upstream()
+    assert checkout_state(pathlib.Path(tempfile.mkdtemp())) is None
+    _git("mv", "registry.yaml", "registry2.yaml", cwd=checkout)
+    (checkout / "index.json").write_text("{}")
+    (checkout / "new dir").mkdir()
+    (checkout / "new dir" / "a b.txt").write_text("z")
+    state = checkout_state(checkout)
+    assert state["branch"] == "main" and state["upstream"] == "origin/main"
+    assert sorted(state["dirty"]) == ["index.json", "new dir/a b.txt", "registry2.yaml"], state
+    assert checkout_state(checkout, ("services",))["dirty"] == []   # limited to the given paths
+
+
 def test_sync_warns_on_namespace_mismatch_and_degrades_broken():
     with _env(RIG_HOME=_home()):
         _run("setup", "--no-default-registry")

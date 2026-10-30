@@ -12,7 +12,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
 import yaml  # noqa: E402
 
-from test_install import _code_repo, _env, _git, _registry_with, _run  # noqa: E402
+from test_install import _code_repo, _env, _git, _registry_with, _run, _world  # noqa: E402
 
 from rig_cli.init import init  # noqa: E402
 from rig_cli.lock import load_lock  # noqa: E402
@@ -32,6 +32,79 @@ def _git_world():
     with contextlib.redirect_stderr(io.StringIO()):
         init(target, no_git=True)
     return target, reg
+
+
+def _checkout_world():
+    """A LOCAL-DIR registry that is a git checkout with an upstream — a GitHub/GitLab clone used
+    in place — plus a fresh deployment; returns (deployment, checkout)."""
+    repo, rev = _code_repo()
+    seed = _registry_with(repo, rev)
+    _git("init", "-q", "-b", "main", cwd=seed)
+    _git("add", "-A", cwd=seed)
+    _git("commit", "-q", "-m", "seed", cwd=seed)
+    upstream = pathlib.Path(tempfile.mkdtemp()) / "upstream.git"
+    _git("clone", "-q", "--bare", str(seed), str(upstream), cwd=seed.parent)
+    checkout = pathlib.Path(tempfile.mkdtemp()) / "checkout"
+    _git("clone", "-q", str(upstream), str(checkout), cwd=upstream.parent)
+    _run("setup", "--no-default-registry")
+    _run("registry", "add", "testns", "--path", str(checkout))
+    return _fresh(), checkout
+
+
+def _fresh():
+    target = pathlib.Path(tempfile.mkdtemp()) / "veh"
+    with contextlib.redirect_stderr(io.StringIO()):
+        init(target, no_git=True)
+    return target
+
+
+def test_local_checkout_registry_records_commits_and_warns_about_unshared_bytes():
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        root, checkout = _checkout_world()
+        head = _git("rev-parse", "HEAD", cwd=checkout).stdout.strip()
+        rc, _, err = _run("--root", str(root), "pkg", "install", "testns/camish:acme-cam")
+        assert rc == 0 and "warning" not in err, err
+        rows = load_lock(root)["packages"]
+        assert rows["testns/camish:acme-cam@2.0.0"]["commit"] == head  # was never recorded
+        assert load_lock(root)["registries"]["testns"]["commit"] == head
+        # an uncommitted edit is installed loudly, and the lock records no commit for it
+        payload = checkout / "profiles" / "camish" / "acme-cam" / "config" / "payload.yaml"
+        payload.write_text(payload.read_text().replace("1280", "1281"))
+        root2 = _fresh()
+        rc, _, err = _run("--root", str(root2), "pkg", "install", "testns/camish:acme-cam")
+        assert rc == 0 and "UNCOMMITTED changes" in err and "config/payload.yaml" in err, err
+        assert "commit" not in load_lock(root2)["packages"]["testns/camish:acme-cam@2.0.0"]
+        # committed but not pushed: recorded, and warned that no other machine can fetch it
+        _git("commit", "-q", "-am", "tune", cwd=checkout)
+        tuned = _git("rev-parse", "HEAD", cwd=checkout).stdout.strip()
+        root3 = _fresh()
+        rc, _, err = _run("--root", str(root3), "pkg", "install", "testns/camish:acme-cam")
+        assert rc == 0 and f"commit {tuned[:7]}" in err and "on no remote branch" in err, err
+        assert load_lock(root3)["packages"]["testns/camish:acme-cam@2.0.0"]["commit"] == tuned
+        # the service row records the last commit that touched IT, which is pushed: no warning
+        assert load_lock(root3)["packages"]["testns/camish@1.2.0"]["commit"] == head
+        assert not [line for line in err.splitlines() if "warning" in line and "camish@1.2.0" in line]
+        # pushed: silent
+        _git("push", "-q", "origin", "main", cwd=checkout)
+        rc, _, err = _run("--root", str(_fresh()), "pkg", "install", "testns/camish:acme-cam")
+        assert rc == 0 and "warning" not in err, err
+
+
+def test_a_plain_folder_registry_records_no_commit_and_says_nothing():
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        root, reg = _world()                              # local-dir, no git anywhere
+        rc, _, err = _run("--root", str(root), "pkg", "install", "testns/camish:acme-cam")
+        assert rc == 0 and "warning" not in err, err
+        assert "commit" not in load_lock(root)["packages"]["testns/camish:acme-cam@2.0.0"]
+        # inside an UNRELATED repository (a $HOME kept in git): still a plain folder
+        _git("init", "-q", cwd=reg.parent)
+        (reg.parent / "dotfile").write_text("x\n")
+        _git("add", "dotfile", cwd=reg.parent)
+        _git("commit", "-q", "-m", "home", cwd=reg.parent)
+        rc, _, err = _run("--root", str(_fresh()), "pkg", "install", "testns/camish:acme-cam")
+        assert rc == 0 and "warning" not in err, err
+        rc, _, err = _run("registry", "sync", "testns")
+        assert "git checkout" not in err, err
 
 
 def _bump_profile(reg, version, payload):

@@ -1,7 +1,7 @@
 # rig — project state & handoff (resume here)
 
-Current checkpoint: **v0.2.76 — cross-distro simulators and adopted images** on v0.2.74's
-offline and selected-service builds,
+Current checkpoint: **v0.2.77 — local-checkout registries** on v0.2.74's offline and
+selected-service builds,
 reviewed **2026-10-29 UTC**. Use the [documentation index](README.md) to choose an operator
 workflow. The dated entries below are historical observations, not the current host state.
 
@@ -49,6 +49,12 @@ workflow. The dated entries below are historical observations, not the current h
   reconstructed trees (bake does not record a checkout-routed service's git origin), and
   linked-run recordings in camera replay (camera-service should mount `RIG_REPLAY_SOURCE`
   read-only like the bag player).
+- v0.2.77 makes local GitHub/GitLab checkouts used as registries honest about reproducibility:
+  lock rows record the last commit that touched each package, installs warn about uncommitted
+  or unpushed package bytes, a positional local clone source is stored absolutely, and sync/list
+  show a local-dir checkout's git state. Open: lock refs carry the registry alias, so a checkout
+  shadowing `public` under another name pins `dev/...` refs (a stand-in-for-an-alias design is
+  undecided).
 
 ## Historical release notes and handoff observations
 

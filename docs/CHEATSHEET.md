@@ -227,6 +227,17 @@ Registries: `rig registry init <dir>` scaffolds a new one (usable immediately vi
 `--front` makes a dev checkout shadow `public` for unqualified names. `rig.lock` records every pin +
 hash; `rig pkg add <ref> --locked` reproduces byte-identical configs on a second machine.
 
+A local GitHub/GitLab checkout as a registry (v0.2.77) — two ways:
+- `rig registry add NAME --path <checkout>` uses it in place: no pull (update it with git), writes
+  from `pkg save/promote` land in your working tree. Sync and `registry list` show its branch,
+  unpushed commits and uncommitted changes (as of its last fetch). Lock rows record the last commit
+  that touched each package; installing a package with uncommitted changes, or from a commit on no
+  remote branch, warns that `--locked` (elsewhere) cannot reproduce it until you commit and push.
+- `rig registry add NAME <checkout>` clones it into rig's cache like any git registry (stored as an
+  absolute path; it must be the repository root). Sync pulls its committed default branch.
+Lock refs carry the registry NAME (`dev/...` vs `public/...`): a checkout added under another name
+shadows `public` for unqualified names, but its pins stay `dev/...`.
+
 Canonical grouped commands (old flat spellings stay as permanent aliases): `config show|render|diff` ·
 `run new|end|list|rm|import|export|tag|untag|archive|retrofit|replay` · `registry init|add|remove|list|sync|pending|push|discard|validate|index` · `pkg
 search|info|list|outdated|add|remove|upgrade|lock|save|promote|repin|rebase|yank` · `overlay

@@ -52,19 +52,68 @@ def qualified(entry: Entry, pkg: Package) -> str:
 
 
 def registry_commit(entry: Entry) -> str | None:
-    if entry.type != "git":
+    """The registry's HEAD: the managed clone's for a git registry, the checkout's for a local-dir
+    folder that is a git checkout of the registry (None for a plain folder)."""
+    from .registries import is_registry_checkout
+    if entry.type == "local-dir" and not is_registry_checkout(entry.root):
         return None
     proc = subprocess.run(["git", "-C", str(entry.root), "rev-parse", "HEAD"],
                           capture_output=True, text=True)
+    if proc.returncode != 0:
+        return None
     return proc.stdout.strip() or None
 
 
 def package_commit(entry: Entry, pkg: Package) -> str | None:
     """The registry commit a package's bytes came from: its history commit when read from git
-    history, else the registry's HEAD. Each lock row records its own, so `--locked` reproduces
-    every package from where it was resolved — not from one registry-wide commit that the next
-    install moves."""
-    return pkg.commit or registry_commit(entry)
+    history, else the registry's HEAD — or, in a local-dir checkout, the last commit that touched
+    the package (_checkout_commit). Each lock row records its own, so `--locked` reproduces every
+    package from where it was resolved — not from one registry-wide commit that the next install
+    moves."""
+    if pkg.commit:
+        return pkg.commit
+    if entry.type == "local-dir":
+        return _checkout_commit(entry, pkg)
+    return registry_commit(entry)
+
+
+_CHECKOUT_WARNED: set[tuple] = set()  # one warning per package situation (files / commit)
+
+
+def _checkout_commit(entry: Entry, pkg: Package) -> str | None:
+    """A local-dir package's commit: the last one that touched its files when the working tree
+    matches it, else None. Warns (once per package) when the bytes are UNCOMMITTED — the lock
+    then pins content no commit holds — or committed on no remote branch, which other machines
+    cannot fetch. A plain folder (no git) says nothing: it is local by design."""
+    from .registries import checkout_state, is_registry_checkout
+    state = checkout_state(pkg.pkg_dir, (str(pkg.pkg_dir),)) if is_registry_checkout(entry.root) else None
+    if state is None:
+        return None
+    ref = f"{entry.name}/{pkg.name}@{pkg.version}"
+
+    def warn(key: tuple, message: str) -> None:
+        if (ref, *key) not in _CHECKOUT_WARNED:
+            _CHECKOUT_WARNED.add((ref, *key))
+            eprint(f"  warning: {message}")
+    if state["dirty"]:
+        shown = ", ".join(state["dirty"][:3]) + (", …" if len(state["dirty"]) > 3 else "")
+        warn(("dirty", str(entry.root), *state["dirty"]), f"{ref} comes from UNCOMMITTED changes in the '{entry.name}' checkout "
+                      f"({shown}) — rig.lock pins bytes no commit holds, so `--locked` cannot "
+                      f"reproduce them; commit and push them")
+        return None
+    git = ["git", "-C", str(pkg.pkg_dir)]
+    last = subprocess.run([*git, "log", "-1", "--format=%H", "--", "."],
+                          capture_output=True, text=True).stdout.strip()
+    if not last:
+        return None
+    remotes = subprocess.run([*git, "remote"], capture_output=True, text=True).stdout.split()
+    pushed = subprocess.run([*git, "branch", "-r", "--contains", last],
+                            capture_output=True, text=True).stdout.strip()
+    if remotes and not pushed:
+        warn(("unpushed", last), f"{ref} comes from commit {last[:7]} in the '{entry.name}' checkout, "
+                         f"which is on no remote branch (as of its last fetch) — other machines "
+                         f"cannot reproduce it until you push")
+    return last
 
 
 def resolve_ref(ref: str, *, history: bool = False) -> tuple[Entry, Registry, Package]:

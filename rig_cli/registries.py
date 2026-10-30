@@ -7,7 +7,9 @@ holds managed full clones of git-type registries. Two registry types, both promo
   (divergence is an error with guidance, never a merge). All resolution runs on the cache — fully
   offline after sync.
 - ``local-dir`` — an existing folder used IN PLACE (shared drives, test fixtures, and the dev loop:
-  a higher-priority local-dir checkout shadows the cached public copy). Sync just re-checks it.
+  a higher-priority local-dir checkout shadows the cached public copy). Sync just re-checks it,
+  and for a git checkout reports its branch, unpushed commits and uncommitted changes
+  (``checkout_state`` — read without fetching; rig never pulls a folder it uses in place).
 
 Degrade, never brick (OQ-8): a registry whose schema this rig can't read, or whose tree is broken,
 is skipped with a loud warning — only operations explicitly targeting it fail. One upgraded/broken
@@ -21,6 +23,7 @@ checkout onto PATH via a delimited rc block, and ``--purge`` reverses everything
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -101,14 +104,33 @@ def add_entry(name: str, *, url: str | None, path: str | None, front: bool) -> N
             raise RigError(f"registry add: {target} is not a registry (no registry.yaml)")
         entry = Entry(name=name, type="local-dir", location=str(target))
     else:
+        local = Path(url).expanduser()
+        if "://" not in url and not re.match(r"^[^/@]+@[^/:]+:", url) and local.exists():
+            # A local checkout given as the clone source: stored absolute, since sync runs from
+            # any directory ('reg' alone would resolve against wherever sync happens to run).
+            # The repository's own root: a work tree's top level, or a bare repository itself.
+            bare = _git("rev-parse", "--is-bare-repository", cwd=local) if local.is_dir() else None
+            if bare is None or bare.returncode != 0:
+                raise RigError(f"registry add: {local} is not a git repository — `--path {local}` "
+                               "uses a plain folder in place")
+            root = _git("rev-parse", "--absolute-git-dir" if bare.stdout.strip() == "true"
+                        else "--show-toplevel", cwd=local).stdout.strip()
+            if not root or Path(root).resolve() != local.resolve():
+                raise RigError(f"registry add: {local} is inside the git repository {root}, not "
+                               f"its root — a git registry clones a whole repository; "
+                               f"`--path {local}` uses the subfolder in place")
+            url = str(local.resolve())
         entry = Entry(name=name, type="git", location=str(url))
     entries = [entry] + entries if front else entries + [entry]
     save_entries(entries)
-    eprint(f"rig registry add: '{name}' ({entry.type}) at priority "
-           f"{'1 (front)' if front else len(entries)} — sync with `rig registry sync {name}`"
-           if entry.type == "git" else
-           f"rig registry add: '{name}' (local-dir, used in place) at priority "
-           f"{1 if front else len(entries)}")
+    if entry.type == "git":
+        source = (f", cloned from the local checkout {entry.location} — `--path` would use it in "
+                  "place instead" if Path(entry.location).is_absolute() else "")
+        eprint(f"rig registry add: '{name}' (git{source}) at priority "
+               f"{'1 (front)' if front else len(entries)} — sync with `rig registry sync {name}`")
+    else:
+        eprint(f"rig registry add: '{name}' (local-dir, used in place) at priority "
+               f"{1 if front else len(entries)}")
 
 
 def remove_entry(name: str) -> None:
@@ -123,6 +145,57 @@ def remove_entry(name: str) -> None:
 
 def _git(*args: str, cwd: Path | None = None) -> subprocess.CompletedProcess:
     return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
+
+
+def is_registry_checkout(root: Path) -> bool:
+    """True when the registry folder is a git checkout OF THE REGISTRY: its registry.yaml is
+    tracked. A plain folder that merely sits inside some other repository (a $HOME kept in git)
+    is not one, so its untracked files never read as uncommitted registry changes."""
+    return root.is_dir() and _git("ls-files", "--error-unmatch", "registry.yaml", cwd=root).returncode == 0
+
+
+def checkout_state(where: Path, paths: tuple[str, ...] = (".",)) -> dict | None:
+    """Git facts about the checkout holding ``where``, limited to ``paths`` for uncommitted
+    changes; None when it is not in a git work tree (a plain folder). Read WITHOUT fetching, so
+    ahead/behind are as of the last fetch: {head, branch, upstream, ahead, behind, dirty}."""
+    if not where.is_dir():
+        return None
+    status = _git("status", "--porcelain=v2", "--branch", "--untracked-files=all", "--", *paths,
+                  cwd=where)
+    if status.returncode != 0:
+        return None
+    state: dict = dict(head=None, branch=None, upstream=None, ahead=0, behind=0, dirty=[])
+    for line in status.stdout.splitlines():
+        if line.startswith("# branch.oid "):
+            state["head"] = None if line.endswith("(initial)") else line.split()[2]
+        elif line.startswith("# branch.head "):
+            state["branch"] = None if line.endswith("(detached)") else line.split(None, 2)[2]
+        elif line.startswith("# branch.upstream "):
+            state["upstream"] = line.split(None, 2)[2]
+        elif line.startswith("# branch.ab "):
+            ahead, behind = line.split()[2:4]
+            state["ahead"], state["behind"] = int(ahead), -int(behind)
+        elif line[:2] in ("1 ", "2 ", "u ", "? "):
+            fields = {"1": 9, "2": 10, "u": 11, "?": 2}[line[0]]
+            state["dirty"].append(line.split(" ", fields - 1)[-1].split("\t")[0])
+    return state
+
+
+def checkout_summary(state: dict) -> str:
+    """``main, 2 unpushed, 3 uncommitted`` — the checkout state sync and list show."""
+    parts = [state["branch"] or "detached HEAD"]
+    if state["upstream"]:
+        if state["ahead"]:
+            parts.append(f"{state['ahead']} unpushed")
+        if state["behind"]:
+            parts.append(f"{state['behind']} behind {state['upstream']}")
+        if not state["ahead"] and not state["behind"]:
+            parts.append(f"even with {state['upstream']}")
+    else:
+        parts.append("no upstream")
+    if state["dirty"]:
+        parts.append(f"{len(state['dirty'])} uncommitted")
+    return ", ".join(parts)
 
 
 def open_registry(entry: Entry) -> tuple[Registry, dict]:
@@ -223,8 +296,11 @@ def sync(names: list[str] | None = None) -> int:
                 mismatch = "" if reg.namespace == entry.name else \
                     f" — WARNING: registry declares namespace '{reg.namespace}' but you consume it " \
                     f"as '{entry.name}'"
+                state = checkout_state(entry.root) if is_registry_checkout(entry.root) else None
+                git = (f" — git checkout: {checkout_summary(state)} (as of its last fetch; "
+                       f"rig does not pull a local-dir)" if state else "")
                 eprint(f"  {entry.name}: local-dir, used in place "
-                       f"({len(index.get('packages', {}))} packages){mismatch}"
+                       f"({len(index.get('packages', {}))} packages){git}{mismatch}"
                        f"{_stale_note(entry, reg)}")
             except RigError as exc:
                 failed += 1
@@ -282,8 +358,11 @@ def list_registries() -> int:
     for i, entry in enumerate(entries, 1):
         try:
             _, index = open_registry(entry)
-            state = "in place" if entry.type == "local-dir" else \
-                f"synced @ {_git('rev-parse', '--short', 'HEAD', cwd=entry.root).stdout.strip()}"
+            if entry.type == "local-dir":
+                checkout = checkout_state(entry.root) if is_registry_checkout(entry.root) else None
+                state = f"in place ({checkout_summary(checkout)})" if checkout else "in place"
+            else:
+                state = f"synced @ {_git('rev-parse', '--short', 'HEAD', cwd=entry.root).stdout.strip()}"
             count = str(len(index.get("packages", {})))
         except RigError:
             state, count = ("NOT SYNCED" if entry.type == "git" else "DEGRADED"), "—"

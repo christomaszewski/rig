@@ -1,7 +1,7 @@
 # rig — roadmap
 
-Current checkpoint: **v0.2.76 — cross-distro simulators and adopted images** on v0.2.74's
-offline and selected-service builds (§18), reviewed 2026-10-29.
+Current checkpoint: **v0.2.77 — local-checkout registries** on v0.2.74's offline and
+selected-service builds (§18), reviewed 2026-10-29.
 Sections retain their original design scope and versioned milestones; their proposed schema
 is not a replacement for current operator references. Use [replay](REPLAY.md),
 [simulation](SIMULATION.md), and the [preparation backlog](ISAAC_PREP_REPORT.md) for current behavior.
