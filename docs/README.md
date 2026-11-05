@@ -1,7 +1,7 @@
 # Rig documentation
 
-Current operator references cover Rig **v0.2.77**: offline and selected-service builds, shared
-sessions and explicitly **experimental** Isaac attachment. Use the Rig executable shipped with your deployment;
+Current operator references cover Rig **v0.2.78**: concurrent lifecycle groups, offline and
+selected-service builds, shared sessions and explicitly **experimental** Isaac attachment. Use the Rig executable shipped with your deployment;
 updating another installation does not upgrade a baked artifact.
 
 | Task | Start here |
@@ -20,6 +20,11 @@ updating another installation does not upgrade a baked artifact.
 | Inspect current evidence and remaining Isaac acceptance | [Preparation report](ISAAC_PREP_REPORT.md) |
 | Resume development or understand decisions | [State](STATE.md), [design](DESIGN.md), [roadmap](ROADMAP.md) |
 
+## Tentative future work
+
+- [Windows replay without WSL](windows-replay-plan.md): proposed Docker Desktop Hyper-V
+  controller and offline baked-artifact packaging; not implemented or supported yet.
+
 ## Historical plans and release evidence
 
 These preserve their original checkpoints and tradeoffs. Their old pending items and test
@@ -36,6 +41,7 @@ totals should not be read as current operator requirements:
 - [v0.2.75 release notes](releases/v0.2.75.md)
 - [v0.2.76 release notes](releases/v0.2.76.md)
 - [v0.2.77 release notes](releases/v0.2.77.md)
+- [v0.2.78 release notes](releases/v0.2.78.md)
 - [Coordinated replay readiness, 2026-10-27](releases/coordinated-replay-readiness-2026-10-27.md)
 
 The release readiness report establishes replay evidence on its stated machines/versions.

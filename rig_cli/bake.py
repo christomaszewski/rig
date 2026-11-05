@@ -450,6 +450,91 @@ def _cleanup_script(entries: list[dict], refs: list[str]) -> list[str]:
     return lines
 
 
+def _lifecycle_groups(entries: list[dict]) -> list[list[dict]]:
+    """Keep capture order, joining adjacent peers only when both scheduling keys are known.
+
+    Older callers/artifacts may have no tier/order metadata; those retain serial execution.
+    """
+    groups: list[list[dict]] = []
+    previous = None
+    for index, entry in enumerate(entries):
+        key = ((entry["tier"], entry["order"]) if "tier" in entry and "order" in entry
+               else ("legacy", index))
+        if groups and key == previous:
+            groups[-1].append(entry)
+        else:
+            groups.append([entry])
+        previous = key
+    return groups
+
+
+def _lifecycle_commands(entries: list[dict], *, verb: str, offline: bool = False) -> list[str]:
+    """POSIX-sh lifecycle waves, with every child accounted for before advancing or failing.
+
+    Traps only record cancellation: a signal between `cmd &` and saving `$!` must not
+    strand an untracked child. The checks after launch and wait perform the cleanup.
+    Stopping each process before finding its children closes the usual descendant-walk
+    race with a launcher spawning another child. No Python, setsid, or job control needed.
+    """
+    lines = [
+        "_rig_pids=''",
+        "_rig_cancelled=0",
+        "_rig_any_failed=0",
+        "trap '_rig_cancelled=130' INT",
+        "trap '_rig_cancelled=143' TERM",
+        "trap '_rig_cancelled=129' HUP",
+        "_rig_kill_tree() {",
+        '  kill -s STOP "$1" 2>/dev/null || return 0',
+        "  for _rig_child in $(ps -e -o pid= -o ppid= | awk -v parent=\"$1\" '$2 == parent { print $1 }'); do",
+        '    _rig_kill_tree "$_rig_child"',
+        "  done",
+        '  kill -s KILL "$1" 2>/dev/null || :',
+        "}",
+        "_rig_check_cancel() {",
+        '  if [ "$_rig_cancelled" -ne 0 ]; then',
+        "    trap '' INT TERM HUP",
+        '    for _rig_pid in $_rig_pids; do _rig_kill_tree "$_rig_pid"; done',
+        '    for _rig_pid in $_rig_pids; do wait "$_rig_pid" 2>/dev/null || :; done',
+        f'    echo "rig {verb}: interrupted" >&2',
+        '    exit "$_rig_cancelled"',
+        "  fi",
+        "}",
+        "_rig_wait() {",
+        '  if wait "$1"; then _rig_rc=0; else _rig_rc=$?; fi',
+        "  _rig_check_cancel",
+        "  _rig_live=''",
+        '  for _rig_pid in $_rig_pids; do',
+        '    [ "$_rig_pid" = "$1" ] || _rig_live="$_rig_live $_rig_pid"',
+        "  done",
+        '  _rig_pids="$_rig_live"',
+        '  if [ "$_rig_rc" -ne 0 ]; then',
+        f'    echo "rig {verb}: $2 failed (exit $_rig_rc)" >&2',
+        "    _rig_failed=1",
+        "    _rig_any_failed=1",
+        "  fi",
+        "}",
+    ]
+    for group in _lifecycle_groups(entries):
+        lines += ["_rig_failed=0", "_rig_pids=''"]
+        for index, entry in enumerate(group):
+            lines += ["_rig_check_cancel", "(",
+                      f'  echo "==> {entry["sensor"]} ({entry["project"]}): {verb}" >&2']
+            for volume in entry["external_volumes"] if verb == "up" else []:
+                lines.append(f'  docker volume create "{volume}" >/dev/null')
+            pull_policy = " --pull never" if offline else ""
+            args = f"up -d{pull_policy}" if verb == "up" else "down"
+            lines += [f'  exec docker compose -p "{entry["project"]}" -f "{entry["compose"]}" {args}',
+                      ") &", f"_rig_pid_{index}=$!",
+                      f'_rig_pids="$_rig_pids $_rig_pid_{index}"', "_rig_check_cancel"]
+        for index, entry in enumerate(group):
+            lines.append(f'_rig_wait "$_rig_pid_{index}" {shlex.quote(entry["sensor"])}')
+        lines.append("_rig_pids=''")
+        if verb == "up":
+            lines.append('[ "$_rig_failed" -eq 0 ] || exit 1')
+    lines += ["_rig_check_cancel", "trap - INT TERM HUP", '[ "$_rig_any_failed" -eq 0 ] || exit 1']
+    return lines
+
+
 def _write_scripts(staging: Path, entries: list[dict], *, bundle_ids: dict[str, str] | None = None,
                    bundle_accepted_ids: dict[str, list[str]] | None = None,
                    run_ctx: dict | None = None, aliases: dict[str, str] | None = None,
@@ -460,16 +545,11 @@ def _write_scripts(staging: Path, entries: list[dict], *, bundle_ids: dict[str, 
         up += _run_ensure_guard(run_ctx)
     if bundle_ids:
         up += _load_guard(bundle_ids, accepted_ids=bundle_accepted_ids)
-    for e in entries:
-        for vol in e["external_volumes"]:
-            up.append(f'docker volume create "{vol}" >/dev/null')
-        pull_policy = " --pull never" if bundle_ids else ""
-        up.append(f'docker compose -p "{e["project"]}" -f "{e["compose"]}" up -d{pull_policy}')
+    up += _lifecycle_commands(entries, verb="up", offline=bool(bundle_ids))
     if aliases:  # after up: everything referenced is now local — leave the namespace unified
         up += _alias_lines(aliases)
     down = ["#!/usr/bin/env sh", "cd \"$(dirname \"$0\")\""]
-    for e in reversed(entries):
-        down.append(f'docker compose -p "{e["project"]}" -f "{e["compose"]}" down')
+    down += _lifecycle_commands(list(reversed(entries)), verb="down")
     status = ["#!/usr/bin/env sh", "cd \"$(dirname \"$0\")\""]
     for e in entries:
         status.append(f'echo "== {e["sensor"]} ({e["project"]}) =="')
@@ -609,6 +689,8 @@ def _compose_only(manifest, descriptors, env, staging: Path, images: dict, *,
         (outdir / "docker-compose.yaml").write_text(yaml.safe_dump(compose, sort_keys=False))
         entries.append({
             "sensor": sensor.name,
+            "tier": sensor.tier,
+            "order": sensor.order,
             "project": project_name(sensor.name, manifest.vehicle_id),
             "compose": f"compose/{sensor.name}/docker-compose.yaml",
             "external_volumes": ext,

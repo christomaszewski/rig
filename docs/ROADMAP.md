@@ -1,10 +1,14 @@
 # rig — roadmap
 
-Current checkpoint: **v0.2.77 — local-checkout registries** on v0.2.74's offline and
-selected-service builds (§18), reviewed 2026-10-29.
+Current checkpoint: **v0.2.78 — concurrent lifecycle groups**, reviewed 2026-11-05.
 Sections retain their original design scope and versioned milestones; their proposed schema
 is not a replacement for current operator references. Use [replay](REPLAY.md),
 [simulation](SIMULATION.md), and the [preparation backlog](ISAAC_PREP_REPORT.md) for current behavior.
+
+Ordinary `rig up` and `rig down` run services sharing a tier and order concurrently, including
+newly baked artifacts. See [v0.2.78](releases/v0.2.78.md) for barriers and failure semantics.
+[Windows replay without WSL](windows-replay-plan.md) is a tentative future plan, including
+Docker Desktop Hyper-V and offline baked artifacts; Windows support is not implemented.
 
 ## 1. Config overrides & reusable profiles — ✅ implemented (v0.1.1)
 

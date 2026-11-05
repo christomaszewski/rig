@@ -2,10 +2,43 @@
 from __future__ import annotations
 
 from pathlib import Path
+import signal
 import subprocess
 
 from . import RigError
 from .common import load_yaml
+
+
+def _run_startup_script(path: Path) -> int:
+    """Let up.sh stop/reap its in-flight Compose children on cancellation.
+
+    The script has its own session so a terminal interrupt reaches it once, via this
+    forwarding handler. Keep waiting for its cleanup rather than orphaning the shell
+    when Python receives SIGINT/TERM. Install handlers before spawn to cover that gap.
+    """
+    child = None
+    pending = None
+
+    def forward(signum, _frame):
+        nonlocal pending
+        pending = signum
+        if child is not None:
+            try:
+                child.send_signal(signum)
+            except ProcessLookupError:
+                pass
+
+    previous = {sig: signal.signal(sig, forward)
+                for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
+    try:
+        child = subprocess.Popen([str(path)], start_new_session=True)
+        if pending is not None:
+            forward(pending, None)
+        code = child.wait()
+        return 128 - code if code < 0 else code
+    finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
 
 
 def check_target(root: Path, manifest=None, *, check_arch=True):
@@ -59,4 +92,4 @@ def run_bundle(root, manifest, descriptors, env, *, dry_run=False):
     loaded = subprocess.run([str(root / "ensure-images.sh")])
     if loaded.returncode:
         return loaded.returncode
-    return subprocess.run([str(staging / "up.sh")]).returncode
+    return _run_startup_script(staging / "up.sh")

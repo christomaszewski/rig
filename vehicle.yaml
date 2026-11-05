@@ -1,7 +1,9 @@
 # vehicle.yaml — which sensors THIS machine runs, plus fleet-wide ROS settings.
 #
-# `rig` loops over `sensors` in `order` (ascending for up = producers first; reversed for down) and
-# delegates each to its service's `<service>-up` launcher. Disable a sensor with `enabled: false`
+# `rig up` starts equal-order instances within a tier concurrently, waiting for the whole group
+# before the next order/tier (infra -> sensors -> autonomy). `down` reverses the group order,
+# stopping equal-order peers concurrently and waiting for the group before continuing.
+# Each instance delegates to its service's `<service>-up` launcher. Disable one with `enabled: false`
 # instead of deleting its config. Instance `name` MUST be unique across the vehicle — it keys the
 # compose project, external volumes, and ROS namespace.
 vehicle: orin-dev

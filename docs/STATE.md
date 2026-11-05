@@ -1,10 +1,16 @@
 # rig — project state & handoff (resume here)
 
-Current checkpoint: **v0.2.77 — local-checkout registries** on v0.2.74's offline and
-selected-service builds,
-reviewed **2026-10-29 UTC**. Use the [documentation index](README.md) to choose an operator
+Current checkpoint: **v0.2.78 — concurrent lifecycle groups**,
+reviewed **2026-11-05**. Use the [documentation index](README.md) to choose an operator
 workflow. The dated entries below are historical observations, not the current host state.
 
+- Ordinary `rig up` and `rig down` run equal `(tier, order)` groups concurrently by default;
+  down reverses the group sequence. Newly baked artifacts carry the behavior in their bundled
+  Rig and generated scripts. Unique orders remain serial, and saved replay/simulation sessions
+  retain their existing lifecycle. See [v0.2.78](releases/v0.2.78.md).
+- [Windows replay without WSL](windows-replay-plan.md) is tentative future work: a native
+  launcher, Linux controller on Docker Desktop Hyper-V, and compatible baked bundles with
+  replay images. No Windows implementation or acceptance is included in this release.
 - Replay supports prepared recipes, native runtime-image acquisition/pinning, recorded calls,
   offline bundles and opt-in coordinated startup. Legacy startup remains the default.
   The [v0.2.72 readiness report](releases/coordinated-replay-readiness-2026-10-27.md) records its

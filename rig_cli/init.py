@@ -42,6 +42,9 @@ from .descriptor import find_descriptor, load_descriptor
 
 _VEHICLE_HEAD = """\
 # vehicle.yaml — vehicle identity, fleet-wide settings, shared infra, and sensors.
+# up: infra -> sensors -> autonomy; equal order within a tier starts concurrently.
+# Each group finishes before the next order/tier starts; use different orders for dependencies.
+# down: reverse group order, with equal-order peers stopping concurrently.
 {identity}
 ros:
   # domain_id: 0        # defaults to vehicle_id

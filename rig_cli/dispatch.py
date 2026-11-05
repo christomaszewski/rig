@@ -281,6 +281,154 @@ def run_verb(
     return outcomes
 
 
+def run_lifecycle(pairs: list[tuple[Sensor, Descriptor]], env: dict[str, str], verb: str, *,
+                  dry_run: bool = False) -> list[Outcome]:
+    """Run equal-(tier, order) groups together, awaiting each entire group.
+
+    Ordinary deployment up/down use this scheduler with pairs in launch/reverse
+    order respectively. Replay/simulation and other verbs retain run_verb's
+    ordering and callback semantics. As before,
+    launcher failures are collected without skipping later deployment groups.
+    Completion is the launcher's contract, not an additional readiness check.
+    """
+    from itertools import groupby
+
+    if verb not in ("up", "down"):
+        raise ValueError(f"not a deployment lifecycle verb: {verb}")
+    outcomes: list[Outcome] = []
+    for (tier, order), members in groupby(pairs, key=lambda p: (p[0].tier, p[0].order)):
+        group = list(members)
+        if len(group) > 1:
+            eprint(f"rig {verb}: concurrent {tier} order {order}: "
+                   + ", ".join(s.name for s, _ in group))
+        if dry_run:
+            outcomes.extend(run_verb(group, env, verb, dry_run=True))
+        else:
+            outcomes.extend(_run_group(group, env, verb))
+    return outcomes
+
+
+def _run_group(pairs: list[tuple[Sensor, Descriptor]], env: dict[str, str], verb: str) -> list[Outcome]:
+    """Own launcher processes in the main thread; multiplex their labeled output.
+
+    Signals request cancellation rather than raising inside Popen: every created
+    child is registered before cleanup. Each launcher has its own process group
+    so cancellation also stops Docker children, without additional container operations.
+    """
+    import codecs
+    import selectors
+    import signal
+    import time
+
+    commands = [(sensor, desc, launcher_cmd(sensor, desc, verb), instance_env(env, sensor, desc))
+                for sensor, desc in pairs]
+    children = []
+    cancelled = None
+
+    def cancel(signum, _frame):
+        nonlocal cancelled
+        cancelled = signum
+
+    def check_cancelled():
+        if cancelled == signal.SIGINT:
+            raise KeyboardInterrupt
+        if cancelled is not None:
+            raise SystemExit(128 + cancelled)
+
+    def emit(state, data=b"", *, final=False):
+        state["pending"] += state["decoder"].decode(data, final=final)
+        while "\n" in state["pending"]:
+            line, state["pending"] = state["pending"].split("\n", 1)
+            eprint(f"[{state['name']}] {line}", flush=True)
+        # Bound memory even for a launcher producing progress without newlines.
+        if state["pending"] and (final or len(state["pending"]) >= 65536):
+            eprint(f"[{state['name']}] {state['pending']}", flush=True)
+            state["pending"] = ""
+
+    handlers = {sig: signal.signal(sig, cancel)
+                for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
+    try:
+        with selectors.DefaultSelector() as output:
+            try:
+                for sensor, desc, cmd, child_env in commands:
+                    check_cancelled()
+                    eprint(f"==> {sensor.name} [{sensor.service}]: {shlex.join(cmd)}", flush=True)
+                    try:
+                        child = subprocess.Popen(cmd, env=child_env, cwd=str(desc.repo),
+                                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                                 start_new_session=True)
+                    except OSError as exc:
+                        raise RigError(f"{sensor.name}: cannot start launcher: {exc}") from exc
+                    children.append((sensor, child))
+                    os.set_blocking(child.stdout.fileno(), False)
+                    output.register(child.stdout, selectors.EVENT_READ,
+                                    {"name": sensor.name, "child": child, "pending": "",
+                                     "decoder": codecs.getincrementaldecoder("utf-8")("replace")})
+                while output.get_map() or any(child.poll() is None for _, child in children):
+                    check_cancelled()
+                    events = output.select(timeout=0.1)
+                    readable = {key.fd for key, _ in events}
+                    for key in list(output.get_map().values()):
+                        # A detached descendant may inherit stdout. Once its launcher
+                        # exits, drain what's available without waiting for that daemon.
+                        if key.fd not in readable and key.data["child"].poll() is None:
+                            continue
+                        try:
+                            data = os.read(key.fd, 65536)
+                        except BlockingIOError:
+                            if key.data["child"].poll() is None:
+                                continue
+                            data = b""
+                        finished = not data
+                        emit(key.data, data, final=finished)
+                        if data and key.data["child"].poll() is not None:
+                            # The launcher may refill the pipe between read and
+                            # poll. Preserve queued final diagnostics, but bound
+                            # draining if a descendant keeps writing forever.
+                            remaining = 1024 * 1024
+                            while remaining:
+                                check_cancelled()
+                                try:
+                                    tail = os.read(key.fd, min(remaining, 65536))
+                                except BlockingIOError:
+                                    break
+                                if not tail:
+                                    break
+                                emit(key.data, tail)
+                                remaining -= len(tail)
+                            emit(key.data, final=True)
+                            finished = True
+                        if finished:
+                            output.unregister(key.fileobj)
+                            key.fileobj.close()
+                check_cancelled()
+                return [Outcome(sensor, child.wait()) for sensor, child in children]
+            except BaseException:
+                # Stop every launcher first, then reap; a serial wait can leave a
+                # sibling creating containers while another launcher shuts down.
+                for _, child in children:
+                    try:
+                        os.killpg(child.pid, signal.SIGTERM)
+                    except ProcessLookupError:
+                        pass
+                deadline = time.monotonic() + 1
+                while any(child.poll() is None for _, child in children) and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                for _, child in children:
+                    try:
+                        os.killpg(child.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    child.wait()
+                raise
+            finally:
+                for _, child in children:
+                    child.stdout.close()
+    finally:
+        for sig, handler in handlers.items():
+            signal.signal(sig, handler)
+
+
 def purge_external_volumes(sensor: Sensor, desc: Descriptor, *, dry_run: bool) -> None:
     """Remove a service's declared external volumes — FINAL teardown only. `docker volume rm` refuses a
     volume that's still in use, which is exactly the safety we want (a consumer may still be attached)."""

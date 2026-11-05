@@ -40,8 +40,16 @@ template — it adapts to each via `rigging.yaml`'s `verbs` map (e.g. cam-up tak
   derive from `name`; rig rejects a manifest with duplicates before doing anything. It also
   cross-checks each manifest entry against the config's own `service`/`name`. ROS ownership defaults
   to `/<name>`; an optional `ros_namespace` in rigging.yaml describes services using another namespace.
-- **Bring-up order: producers → consumers.** Ascending `order` for `up`, reversed for `down`, so shm/topics
-  exist before consumers attach. Consumers are best-effort/retry regardless (`restart: unless-stopped`).
+- **Bring-up order: producers → consumers.** `up` starts equal `(tier, order)` groups concurrently,
+  waiting for every launcher in a group before advancing to the next order or tier. The hard tier
+  sequence remains infra → sensors → autonomy. Launchers own readiness; a returned launcher is not
+  a common health gate. `down` runs equal-order peers concurrently in reverse group order,
+  awaiting each group before moving on. Consumers retry regardless
+  (`restart: unless-stopped`). The bundled CLI and Compose-only baked scripts preserve these groups;
+  replay/simulation retain their existing dispatch semantics. Ordinary startup aggregates failures
+  and continues; baked Compose-only startup drains the current group then stops on failure.
+  Teardown continues all groups and aggregates failures in both paths. Log capture precedes
+  teardown; volume purge and successful run sealing follow completion of all teardown groups.
 - **Fleet ROS env.** rig exports one `ROS_DOMAIN_ID` + `RMW_IMPLEMENTATION` before each launcher call; the
   launchers pass them into their containers, so every stack shares one DDS graph. Launchers choose their
   ROS namespaces; the usual convention is `/<name>/…`.

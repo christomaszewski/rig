@@ -110,7 +110,9 @@ def cmd_up(args, manifest, catalog, descriptors) -> int:
         #                                              `up` only, over the config's initial_state)
     if args.run and not manifest.data_dir:  # an EXPLICIT --run must never be silently dropped
         raise RigError("up --run needs `data_dir` in vehicle.yaml (the run registry lives under it)")
-    pairs = _pairs(manifest, descriptors, args.names)  # ascending order: producers before consumers
+    # Repeated explicit names must never launch the same Compose project twice
+    # concurrently (also applies to the bundled-artifact path below).
+    pairs = _pairs(manifest, descriptors, list(dict.fromkeys(args.names)))
     if not pairs:
         eprint("rig: no enabled stacks to bring up")
         return 0
@@ -127,7 +129,7 @@ def cmd_up(args, manifest, catalog, descriptors) -> int:
                           descriptors, env, dry_run=args.dry_run) if artifact_root else None)
     if bundled is not None:
         return bundled
-    return _summarize(dispatch.run_verb(pairs, env, "up", dry_run=args.dry_run))
+    return _summarize(dispatch.run_lifecycle(pairs, env, "up", dry_run=args.dry_run))
 
 
 def cmd_down(args, manifest, catalog, descriptors) -> int:
@@ -141,7 +143,7 @@ def cmd_down(args, manifest, catalog, descriptors) -> int:
     for n in stale:
         eprint(f"rig down: warning: the open run launched '{n}', which this vehicle.yaml no longer "
                f"declares — its containers (if any) are not torn down here")
-    pairs = _pairs(manifest, descriptors, names, reverse=True)  # reverse: consumers before producers
+    pairs = _pairs(manifest, descriptors, list(dict.fromkeys(names)), reverse=True)
     if not pairs:
         eprint("rig: no enabled stacks to tear down")
         if args.end_run and not args.dry_run:
@@ -151,7 +153,7 @@ def cmd_down(args, manifest, catalog, descriptors) -> int:
     if args.end_run and not args.dry_run and manifest.data_dir:
         # BEFORE the verb: `compose down` removes the containers — their docker logs go with them
         runs_mod.capture_docker_logs(manifest, also=set(extra))
-    rc = _summarize(dispatch.run_verb(pairs, env, "down", dry_run=args.dry_run))
+    rc = _summarize(dispatch.run_lifecycle(pairs, env, "down", dry_run=args.dry_run))
     if args.purge:
         eprint("rig: purging external volumes (final teardown)")
         for sensor, desc in pairs:
@@ -881,7 +883,7 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("names", nargs="*", help="sensor name(s); default: all enabled")
         return p
 
-    up = add("up", "bring sensors up (producers first)")
+    up = add("up", "bring sensors up (producers first; equal order within a tier starts together)")
     up.add_argument("--dry-run", action="store_true", help="print the exact launcher invocations only")
     up.add_argument("--force", action="store_true", help="bring up even if preflight reports errors")
     up.add_argument("--run", default=None, metavar="LABEL",
@@ -901,7 +903,7 @@ def build_parser() -> argparse.ArgumentParser:
     ac = add("activate", "wake declared stacks (producers first): devices to normal, running")
     ac.add_argument("--dry-run", action="store_true", help="print the exact launcher invocations only")
 
-    down = add("down", "tear sensors down (reverse order)")
+    down = add("down", "tear sensors down (reverse groups; equal order within a tier stops together)")
     down.add_argument("--dry-run", action="store_true")
     down.add_argument("--purge", action="store_true", help="also remove declared external volumes (FINAL teardown)")
     down.add_argument("--end-run", action="store_true", dest="end_run",

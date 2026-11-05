@@ -110,7 +110,7 @@ python3 -m venv .venv && .venv/bin/pip install pyyaml
 ./rig doctor --deep       # + certify each service's launcher against the contract (runs `config`)
 ./rig certify             # launcher-contract conformance under a poisoned fleet env (see below)
 ./rig up --dry-run        # print the exact launcher invocations + fleet ROS env, run nothing
-./rig up                  # bring everything up: infra → sensors → autonomy (order within a tier)
+./rig up                  # infra → sensors → autonomy; equal order within a tier starts concurrently
 ./rig pull                # pre-pull every stack's images, NO container changes (prime a cache, then run offline)
 ./rig status             # one rolled-up row per sensor (state + health from compose ps; OP =
                           #   observed operational state for services declaring the state verbs —
@@ -183,7 +183,8 @@ python3 -m venv .venv && .venv/bin/pip install pyyaml
                           # replay without camera services/video; skips every camera instance
                           # and its bag topics. Repeat --skip-service for other services.
                           # `rig replay` and `rig run replay` are equivalent; --dry-run previews.
-./rig down                # tear down in reverse (autonomy FIRST); --purge also GCs external volumes
+./rig down                # reverse groups (autonomy FIRST); equal-order peers stop concurrently
+                          #   --purge also GCs external volumes after teardown
 ./rig replay check <run>   # inspect a hand-built deployment's readiness, without writes
 ./rig replay prepare <run> --recipe field-test
                           # --player public/ros2-bag-player@1.18.0 adds a missing player row,
@@ -371,8 +372,37 @@ docs/                   # CHEATSHEET (1-page flow) · RUNBOOK (worked example) �
 Lists active stacks (`name`, `service`, `config`, `enabled`, `order`) and the fleet ROS settings, in three
 tiers: `infra:` (substrate — routers, loggers, dashboards; up FIRST, down last), `sensors:` (producers),
 and `autonomy:` (graph consumers — planners, SLAM, perception; up after ALL sensors, down FIRST, so the
-decider dies before its eyes). The tier partition is hard; per-entry `order` sorts within a tier only —
-and ordering is a courtesy, not correctness: consumers must still retry (discovery is dynamic). Disable
+decider dies before its eyes). The tier partition is hard; per-entry `order` sorts within a tier only.
+For `up`, entries with the **same tier and order start concurrently**, without a flag. Rig waits for
+every launcher in that group to finish before starting the next order or tier. Assign independent
+sensors the same order to overlap their startup waits; keep different orders for dependencies or
+services sharing an exclusive resource. For example:
+
+```yaml
+sensors:
+  - {name: lidar, service: ouster, config: config/sensors/lidar.yaml, order: 10}
+  - {name: camera, service: camera-service, config: config/sensors/camera.yaml, order: 10}
+  - {name: consumer, service: processor, config: config/sensors/consumer.yaml, order: 20}
+```
+
+`lidar` and `camera` start together; `consumer` waits for both launchers to return. `up --dry-run`
+shows concurrent groups in a stable order. `down` reverses the groups: autonomy → sensors → infra,
+with higher orders first within each tier. Equal-order peers stop concurrently, and the next group
+waits for all of them. `down --dry-run` shows that reverse schedule.
+
+This also works in newly baked artifacts: the bundled `rig`, `run.sh up` / `run.sh down`, and
+generated `up.sh` / `down.sh` preserve the same groups. Re-bake existing artifacts to include the
+new scheduler. Compose-only scripts wait for Compose startup; launcher-based startup
+also includes any sensor-state waits implemented by each launcher. Neither adds a universal sensor
+health check, and consumers must still retry as discovery is dynamic.
+
+Ordinary `rig up` / `rig down` attempt remaining groups after launcher failures and report failures at the
+end. Compose-only artifact startup still stops on failure, after waiting for all peers already
+started in the failing group; artifact teardown continues through all groups and reports any failure.
+`down --end-run` captures logs before teardown and seals only after success; `--purge` runs after all
+teardown groups finish. Ctrl-C stops in-flight launcher processes without rolling back completed
+container operations. Use `rig status` to inspect the result. Other verbs, replay, and simulation
+retain their existing ordering. Disable
 a stack with `enabled: false` rather than deleting its config. `name` must be unique across the vehicle —
 it keys the compose project, external volumes, and ROS namespace.
 
