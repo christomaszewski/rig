@@ -249,7 +249,8 @@ class Preparation(unittest.TestCase):
         self.assertEqual(plan["source"]["bag"]["start_ns"], 100_000_000_000)
         self.assertNotIn("/later", plan["playback"]["topics"])
         self.bag(self.source / "bags" / "other" / "session-3")
-        self.assertFalse(self.plan()["ready_to_prepare"])
+        self.assertFalse(self.plan({"version": 1, "bag": {}})["ready_to_prepare"])
+        self.assertEqual(len(self.plan()["source"]["bags"]), 3)
         self.assertTrue(self.plan({"version": 1, "bag": {"logger": "logger"}})["ready_to_prepare"])
 
     def test_malformed_legacy_index_reports_repair(self):
@@ -1054,6 +1055,7 @@ class Preparation(unittest.TestCase):
         import shutil
         from unittest.mock import Mock
         def resolve(root, binding, *, service, profile=None, export_id=None, descriptor=None, verification=None):
+            from rig_cli.service_exports import profile_for
             export = Path(root) / "exports/services" / service / (profile or "h264") / (export_id or "generation-a")
             rec = export / "recordings" / binding["recorded_as"]
             if not rec.is_dir():
@@ -1061,7 +1063,8 @@ class Preparation(unittest.TestCase):
             return {**binding, "path": str(rec), "original": dict(binding),
                     "files": [str(rec / Path(p).name) for p in binding["files"]],
                     "fingerprint": inventory_fingerprint(rec), "proxy": {
-                        "export_id": export.name, "profile": profile or "h264", "profile_hash": "profile-a",
+                        "export_id": export.name, "profile": profile or "h264",
+                        "profile_hash": profile_for(descriptor, profile)["sha256"],
                         "manifest": str(export / "export.yaml"), "lossy": True}}
         def make(name="cam", export_id="generation-a"):
             export = self.source / "exports/services/camera/h264" / export_id

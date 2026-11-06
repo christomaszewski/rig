@@ -12,16 +12,120 @@ import re
 import subprocess
 from pathlib import Path
 
-from . import RigError, dispatch, graph, replay, resolve, replay_selection
+from . import RigError, dispatch, graph, replay, resolve, replay_selection, replay_inputs
 from .manifest import PLAYER_SERVICE
 from .common import eprint
 from .descriptor import resolve_ros_namespace
 from .replay_policy import forced, setting
 from .replay_recipe import digest, recorded_namespaces
-from .replay_sources import inspect_source, recording_binding, metadata, select_proxy, binding_variables
+from .replay_sources import (inspect_source, recording_binding, metadata, select_proxy,
+                             binding_variables, selected_bags, aggregate_bags, bag_path,
+                             bag_relative_path)
 
 
-SELECTION_VERSION = 2
+SELECTION_VERSION = 3
+
+
+def image_source_config(config, mode):
+    """Apply the planned ROS image authority to a newly resolved camera config."""
+    plugins = config.get("plugins") or []
+    config = dict(config, plugins=[{**p, "enabled": mode == "camera"}
+                                  if p.get("name") == "ros2-bridge" else dict(p) for p in plugins])
+    if mode == "camera" and not any(p.get("name") == "ros2-bridge" for p in plugins):
+        config["plugins"].append(dict(name="ros2-bridge", enabled=True, isolation="container"))
+    return config
+
+
+def camera_image_topics(config, namespace, *, force_bridge=False):
+    """Exact raw/compressed names from Camera Service's friendly and env parameters."""
+    plugins = config.get("plugins") or []
+    plugins = [p for p in plugins if isinstance(p, dict)] if isinstance(plugins, list) else []
+    bridges = [p for p in plugins if p.get("name") == "ros2-bridge"]
+    if not force_bridge and not any(p.get("enabled", True) for p in bridges):
+        return set()
+    params = (bridges[-1].get("params") or {}) if bridges else {}
+    topic = params.get("topic", "image_raw") if isinstance(params, dict) else "image_raw"
+    # sensor_env applies uppercase parameters last, across enabled container plugins.
+    for plugin in plugins:
+        active = plugin.get("enabled", True) or (force_bridge and plugin.get("name") == "ros2-bridge")
+        values = plugin.get("params") or {}
+        if (active and plugin.get("isolation", "process") == "container" and
+                isinstance(values, dict) and "CAM_ROS_TOPIC" in values):
+            topic = values["CAM_ROS_TOPIC"]
+    topic = str(topic).strip()
+    raw_topic = topic if topic.startswith("/") else namespace.rstrip("/") + "/" + topic
+    return {raw_topic, raw_topic.rstrip("/") + "/compressed"}
+
+
+def image_authority(plan, playback, model, aliases, namespaces, issue):
+    """Resolve explicit camera ROS output ownership separately from its video input."""
+    image_types = {"sensor_msgs/msg/Image", "sensor_msgs/msg/CompressedImage"}
+    bag_topics = ((plan.get("source") or {}).get("bag") or {}).get("topics", {})
+    keep, exclude = set(), set()
+    plan["image_sources"] = {}
+    for name, mode in playback.get("image_sources", {}).items():
+        if name not in plan["recordings"] or name not in plan["configs"]:
+            issue("error", "image_source", f"{name}: image_sources requires a selected camera recording source")
+            continue
+        config = plan["configs"][name]
+        plugins = config.get("plugins") or []
+        if not isinstance(plugins, list) or any(not isinstance(p, dict) for p in plugins):
+            issue("error", "image_source", f"{name}: camera plugins must be a list")
+            continue
+        bridge = next((p for p in plugins if p.get("name") == "ros2-bridge"), None)
+        params = (bridge or {}).get("params") or {}
+        if not isinstance(params, dict):
+            issue("error", "image_source", f"{name}: ros2-bridge params must be a mapping")
+            continue
+        identity = aliases[name]
+        owned = {topic for topic, entry in model["topics"].items()
+                 if any(p["owner"] == identity for p in entry["publishers"])}
+        # An explicit authority declaration can also bind the configured camera image topic.
+        # This is an exact name, not the broad namespace suppression heuristic.
+        namespace = namespaces.get(identity, "/" + identity)
+        owned |= camera_image_topics(config, namespace, force_bridge=True)
+        images = {t for t in owned if bag_topics.get(t, {}).get("type") in image_types}
+        if mode == "bag" and not images:
+            if ((plan.get("source") or {}).get("bag") or {}).get("repair"):
+                issue("not_checked", "image_source", f"{name}: bag image authority needs repaired metadata", "run")
+            else:
+                issue("error", "image_source", f"{name}: bag image authority needs an owned sensor_msgs/Image "
+                      "or CompressedImage topic in the selected bags")
+                continue
+        if mode == "bag" and images & set(playback.get("exclude", [])):
+            issue("error", "image_source", f"{name}: bag image authority conflicts with playback.exclude")
+        if mode == "camera" and images & set(playback.get("keep", [])):
+            issue("error", "image_source", f"{name}: camera image authority conflicts with playback.keep")
+        plan["configs"][name] = image_source_config(config, mode)
+        (keep if mode == "bag" else exclude).update(images)
+        plan["image_sources"][name] = dict(source=mode, topics=sorted(images))
+    if keep & exclude:
+        issue("error", "image_source", "Conflicting camera and bag image authorities for " +
+              ", ".join(sorted(keep & exclude)))
+    for topic in sorted(keep):
+        destination = playback.get("remap", {}).get(topic, topic)
+        publishers = set()
+        for node in model["topics"].get(destination, {}).get("publishers", []):
+            for owner in node["possible_owners"]:
+                publishers.update(model["owners"][owner]["selected_instances"])
+        for name, config in plan["configs"].items():
+            if destination in camera_image_topics(config, "/" + str(config.get("name") or name)):
+                publishers.add(name)
+        active = []
+        for name in sorted(publishers):
+            if plan["image_sources"].get(name, {}).get("source") == "bag":
+                continue
+            plugins = plan["configs"].get(name, {}).get("plugins") or []
+            bridges = [p for p in plugins if isinstance(p, dict) and p.get("name") == "ros2-bridge"] \
+                if isinstance(plugins, list) else []
+            if bridges and all(not p.get("enabled", True) for p in bridges):
+                continue
+            active.append(name)
+        if active:
+            issue("error", "image_source", f"Bag image authority for {destination} conflicts with selected "
+                  f"publisher(s): {', '.join(active)}; select bag authority for each camera or omit "
+                  "the conflicting instance")
+    return keep, exclude
 
 
 def capabilities(row, desc):
@@ -105,6 +209,7 @@ def apply_image_report(plan, inspection):
 
 
 def build(manifest, catalog, descriptors, root, ref, recipe, options, *, host=True, verification=None):
+    options = dict(options, _deployment_root=str(root))
     issues = []
 
     def issue(status, code, message, phase="prepare"):
@@ -112,7 +217,11 @@ def build(manifest, catalog, descriptors, root, ref, recipe, options, *, host=Tr
 
     plan = dict(version=1, selection_version=SELECTION_VERSION, recipe=recipe, issues=issues, selected=[], roles={}, recordings={},
                 configs={}, omitted={}, player=None, playback={}, source=None,
-                window={}, sim_time=False, use_proxies=bool(options.get("use_proxies")))
+                window={}, sim_time=False, use_proxies=replay_inputs.uses_proxies(recipe, options))
+    try:
+        replay_inputs.validate_targets(recipe, manifest)
+    except RigError as exc:
+        issue("error", "input_selector", str(exc))
     known = {r.name: r for r in manifest.sensors}
     aliases = {n: recipe.get("instances", {}).get(n, {}).get("recorded_as", n) for n in known}
     namespaces = recorded_namespaces(recipe)
@@ -172,22 +281,29 @@ def build(manifest, catalog, descriptors, root, ref, recipe, options, *, host=Tr
     except RigError as exc:
         issue("error", "window", str(exc))
     try:
-        bag_config = dict(recipe.get("bag", {}))
-        player_cfg = next((r.config for r in manifest.sensors if r.service == PLAYER_SERVICE), None)
-        if player_cfg and player_cfg.is_file():
+        bag_config = dict(recipe["bag"]) if "bag" in recipe else None
+        player_row = next((r for r in manifest.sensors if r.service == PLAYER_SERVICE), None)
+        player_cfg = player_row.config if player_row else None
+        if bag_config is not None and player_cfg and player_cfg.is_file():
             from .common import load_yaml
             defaults = load_yaml(player_cfg).get("source") or {}
             bag_config = {**{k: defaults[k] for k in ("logger", "session") if defaults.get(k)}, **bag_config}
-        source = inspect_source(manifest, ref, bag_config)
+        source = inspect_source(manifest, ref, bag_config, bags_config=recipe.get("bags"))
+        selector = replay_inputs.selection(recipe, "bags", use_proxies=bool(options.get("use_proxies")))
+        from .bag_proxies import apply_selection
+        source = apply_selection(source, selector, player_row,
+                                 descriptors.get(player_row.service) if player_row else None,
+                                 options, verification=verification)
         plan["source"] = source
         runtime = options.get("_prepared_source")
         if runtime:
             source["runtime_root"] = runtime
-            if source["bag"] and source["bag"]["repair"]:
-                selected = source["bag"]
-                selected.update(metadata(Path(runtime) / "bags" / selected["logger"] / selected["session"]))
-                selected["repair"] = False
-                selected["prepared_index"] = True
+            for selected in selected_bags(source):
+                if selected.get("repair"):
+                    selected.update(metadata(bag_path(source, selected)))
+                    selected["repair"] = False
+                    selected["prepared_index"] = True
+            source["bag"] = aggregate_bags(selected_bags(source))
         if not source["manifest"].get("ended"):
             issue("warning", "unsealed", "Source is unsealed; stability is checked again before use")
         if not (Path(source["root"]) / ".rig").exists():
@@ -245,6 +361,10 @@ def build(manifest, catalog, descriptors, root, ref, recipe, options, *, host=Tr
             except (RigError, OSError, ValueError) as exc:
                 issue("error", "recording", str(exc))
     candidates -= set(plan["omitted"])
+    for target in recipe.get("inputs", {}):
+        if target.startswith("instance:") and target.split(":", 1)[1] not in plan["recordings"]:
+            issue("error", "input_selector", f"{target}: input selection requires a selected recording source; "
+                  "the instance is skipped, live, or has no recording binding")
     player_rows = [r for r in manifest.sensors if r.service == PLAYER_SERVICE]
     if len(player_rows) > 1:
         issue("error", "player", "Only one ros2-bag-player instance is supported")
@@ -273,6 +393,31 @@ def build(manifest, catalog, descriptors, root, ref, recipe, options, *, host=Tr
         plan["roles"][row.name] = dict(role=role, reason="CLI" if row.name in requested else
                                       reason if explicit else "automatic " + role)
 
+    variables = dict(manifest.vars or {})
+    variables.update(replay_source=(source or {}).get("runtime_root", (source or {}).get("root")),
+                     replay_session=options.get("session"),
+                     replay_retime="original" if plan["sim_time"] else "wall",
+                     replay_start_at_unix_s=None, replay_epoch_unix_ns=(bag or {}).get("start_ns"),
+                     replay_from_s=plan["window"].get("start"), replay_to_s=plan["window"].get("end"))
+    for row in rows:
+        desc = descriptors.get(row.service)
+        if desc is None:
+            issue("error", "descriptor", f"{row.name}: service descriptor unavailable")
+            continue
+        if not (desc.repo / desc.launcher).is_file():
+            issue("error", "launcher", f"{row.name}: launcher missing: {desc.launcher}")
+        try:
+            from .common import load_yaml
+            raw = load_yaml(row.config)
+            if any(raw.get(key) is not None and raw[key] != value
+                   for key, value in (("name", row.name), ("service", row.service))):
+                raise RigError("config name/service disagrees with the instance row")
+            plan["configs"][row.name] = resolve._layered_dict(
+                row, root, variables=binding_variables(variables, row, plan["recordings"].get(row.name)),
+                extra_overrides=desc.replay_source.overrides if row.name in plan["recordings"] else None)
+        except (RigError, OSError) as exc:
+            issue("error", "config", f"{row.name}: {exc}")
+
     playback = recipe.get("playback", {})
     ownership_names = set(aliases.values()) | set(((source or {}).get("manifest") or {}).get("stacks") or [])
     namespace_owners = {}
@@ -298,6 +443,8 @@ def build(manifest, catalog, descriptors, root, ref, recipe, options, *, host=Tr
     plan["ownership"] = model
     evidence = replay_selection.topic_selection(model, data_topics | set(model["topics"]))
     regenerated = set(evidence["suppressed"])
+    bag_images, camera_images = image_authority(plan, playback, model, aliases, namespaces, issue)
+    regenerated = (regenerated - bag_images) | camera_images
     initially_selected = set(topics)
     if source and bag and not bag["repair"]:
         if options.get("selection", "broad") == "recorded":
@@ -331,7 +478,8 @@ def build(manifest, catalog, descriptors, root, ref, recipe, options, *, host=Tr
     if skip and not model["graph_available"]:
         issue("warning", "skip_topics", "Skipped instances have no recorded publisher evidence; "
               "their bag topics remain eligible. Use playback.exclude to remove known topics")
-    keeps, excludes = set(playback.get("keep", [])), set(playback.get("exclude", []))
+    keeps = set(playback.get("keep", [])) | bag_images
+    excludes = set(playback.get("exclude", [])) | camera_images
     topics = (((topics - regenerated) | keeps) - excludes - skipped_topics) & data_topics
     remap = playback.get("remap", {})
     destinations = [remap.get(t, t) for t in topics]
@@ -347,7 +495,8 @@ def build(manifest, catalog, descriptors, root, ref, recipe, options, *, host=Tr
         name = record["topic"]
         if name not in data_topics:
             continue
-        reason = ("skipped_instance" if name in skipped_topics else "explicit_exclude" if name in excludes
+        reason = ("image_source_bag" if name in bag_images else "image_source_camera" if name in camera_images
+                  else "skipped_instance" if name in skipped_topics else "explicit_exclude" if name in excludes
                   else "explicit_keep" if name in keeps else "not_requested" if name not in initially_selected
                   else "recorded_subscriber_selection" if name not in subscriber_selected else record["reason"])
         plan["topic_selection"].append(dict(record, original=name, destination=remap.get(name, name),
@@ -407,30 +556,6 @@ def build(manifest, catalog, descriptors, root, ref, recipe, options, *, host=Tr
           "Bag metadata cannot prove new subscriber compatibility or current output ownership; "
           "no service interface declarations are required")
 
-    variables = dict(manifest.vars or {})
-    variables.update(replay_source=(source or {}).get("runtime_root", (source or {}).get("root")),
-                     replay_session=options.get("session"),
-                     replay_retime="original" if plan["sim_time"] else "wall",
-                     replay_start_at_unix_s=None, replay_epoch_unix_ns=(bag or {}).get("start_ns"),
-                     replay_from_s=plan["window"].get("start"), replay_to_s=plan["window"].get("end"))
-    for row in rows:
-        desc = descriptors.get(row.service)
-        if desc is None:
-            issue("error", "descriptor", f"{row.name}: service descriptor unavailable")
-            continue
-        if not (desc.repo / desc.launcher).is_file():
-            issue("error", "launcher", f"{row.name}: launcher missing: {desc.launcher}")
-        try:
-            from .common import load_yaml
-            raw = load_yaml(row.config)
-            if any(raw.get(key) is not None and raw[key] != value
-                   for key, value in (("name", row.name), ("service", row.service))):
-                raise RigError("config name/service disagrees with the instance row")
-            plan["configs"][row.name] = resolve._layered_dict(
-                row, root, variables=binding_variables(variables, row, plan["recordings"].get(row.name)),
-                extra_overrides=desc.replay_source.overrides if row.name in plan["recordings"] else None)
-        except (RigError, OSError) as exc:
-            issue("error", "config", f"{row.name}: {exc}")
     if getattr(manifest, "missing_identity", ()):
         issue("error", "identity", "Resolve deployment identity before playback", "run")
     if manifest.data_dir and source:
@@ -492,8 +617,27 @@ def build(manifest, catalog, descriptors, root, ref, recipe, options, *, host=Tr
         try:
             caps = capabilities(player, descriptors[player.service])
             plan["capabilities"] = caps
-            if caps.get("plan") != 1:
+            if caps.get("plan") not in (1, 2):
                 issue("error", "player_capability", "Update the player: replay plan v1 is required", "run")
+            multi = source and (len(selected_bags(source)) > 1 or any(
+                bag_relative_path(b) != Path("bags") / b["logger"] / b["session"]
+                for b in selected_bags(source)))
+            if multi:
+                if caps.get("plan") != 2 or caps.get("multi_input") != 1:
+                    issue("error", "player_capability", "Update the player: multi-input replay plan v2 is required", "run")
+                extra_labels = caps.get("multi_input_image_labels", {})
+                if (not isinstance(extra_labels, dict) or not extra_labels or any(
+                        not isinstance(role, str) or not isinstance(values, dict) or
+                        values.get("io.rig.rosbag2.multi_input") != "1" or
+                        any(not isinstance(k, str) or not isinstance(v, str) for k, v in values.items())
+                        for role, values in extra_labels.items())):
+                    issue("error", "player_capability", "Multi-input replay requires verified runtime image labels", "run")
+                else:
+                    base_labels = caps.get("image_labels")
+                    caps["image_labels"] = {role: dict(values) for role, values in base_labels.items()
+                                            if isinstance(values, dict)} if isinstance(base_labels, dict) else {}
+                    for role, values in extra_labels.items():
+                        caps["image_labels"].setdefault(role, {}).update(values)
             labels = caps.get("image_labels")
             if (not isinstance(labels, dict) or not labels or any(
                     not isinstance(role, str) or not role or not isinstance(values, dict) or not values
@@ -572,6 +716,7 @@ def build(manifest, catalog, descriptors, root, ref, recipe, options, *, host=Tr
     replay_coordinator.refresh_requirements(plan, manifest, descriptors, rows)
     plan["fingerprint"] = digest(dict(selection_version=SELECTION_VERSION, ownership=model,
                                      call_inspection=plan.get("call_inspection"), recipe=recipe, source=(source or {}).get("fingerprint"),
+                                     bags=selected_bags(source) if source else [], bag_proxy=(source or {}).get("bag_proxy"),
                                      use_proxies=plan["use_proxies"],
                                      namespaces=namespaces,
                                      configs=plan["configs"], selected=plan["selected"],
@@ -609,7 +754,7 @@ def inspect_recorded_calls(plan, manifest, descriptors, root, *, execute=False, 
         issue("not_checked", "Recorded calls need indexed bag metadata; prepare this source first")
     elif player is None or player.name not in plan["configs"]:
         issue("not_checked", "Recorded calls need a configured player")
-    elif (plan.get("capabilities", {}).get("inspect_calls") != 1 or
+    elif (plan.get("capabilities", {}).get("inspect_calls") not in (1, 2) or
           "replay-inspect-calls" not in descriptors[player.service].verbs):
         issue("error", "Update the player: recorded request inspection (inspect_calls: 1) is required")
     elif not plan.get("image_pins", {}).get(player.name):
@@ -618,11 +763,18 @@ def inspect_recorded_calls(plan, manifest, descriptors, root, *, execute=False, 
         issue("not_checked", "Prepare the derived source before inspecting recorded requests")
     else:
         source = plan["source"]
-        session = (Path(source["runtime_root"]) / "bags" / bag["logger"] / bag["session"]
-                   if source.get("runtime_root") else Path(bag["path"]))
-        request = dict(version=1, session=str(session), start_ns=bag["start_ns"],
+        inputs = selected_bags(source)
+        request = dict(version=1, session=str(bag_path(source, inputs[0])), start_ns=bag["start_ns"],
                        from_s=plan["window"]["start"], to_s=plan["window"]["end"],
                        services=candidates[:], source_mode=plan["playback"]["services_source"])
+        if len(inputs) > 1:
+            if plan.get("capabilities", {}).get("inspect_calls") != 2:
+                issue("error", "Update the player: multi-input request inspection (inspect_calls: 2) is required")
+                return finish(plan)
+            from .replay_prepare import player_document
+            document = player_document(plan, source.get("runtime_root", source["root"]))
+            request.pop("session")
+            request.update(version=2, source=document["source"], bags=document["bags"])
         env = dispatch.fleet_env(manifest, descriptors)
         if plan.get("execution", {}).get("architecture"):
             env["RIG_TARGET_ARCH"] = plan["execution"]["architecture"]

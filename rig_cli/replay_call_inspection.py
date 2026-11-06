@@ -34,13 +34,34 @@ _STATUSES = {"usable", "metadata_only", "response_only", "other_origin", "empty_
 
 
 def validate_request(request):
-    expected = {"version", "session", "start_ns", "from_s", "to_s", "services", "source_mode"}
+    version = request.get("version") if isinstance(request, dict) else None
+    expected = {"version", "start_ns", "from_s", "to_s", "services", "source_mode"}
+    expected |= {"source", "bags"} if version == 2 else {"session"}
     if (not isinstance(request, dict) or set(request) != expected or
-            type(request.get("version")) is not int or request["version"] != 1):
-        raise RigError("Call inspection needs a version: 1 request with session, window and service targets")
-    session = request["session"]
+            type(version) is not int or version not in (1, 2)):
+        raise RigError("Call inspection needs a version: 1/2 request with inputs, window and service targets")
+    session = request["source"] if version == 2 else request["session"]
     if not isinstance(session, str) or not session or "\0" in session or not Path(session).is_absolute():
         raise RigError("Call inspection session must be an absolute bag directory")
+    if version == 2:
+        bags, seen = request["bags"], set()
+        if not isinstance(bags, list) or not bags:
+            raise RigError("Call inspection bags must be a nonempty list")
+        for bag in bags:
+            if not isinstance(bag, dict) or set(bag) != {"logger", "session", "relative_path", "storage"}:
+                raise RigError("Call inspection needs exact bag input identities")
+            for key in ("logger", "session"):
+                value = bag[key]
+                if (not isinstance(value, str) or not value or "/" in value or "\\" in value or
+                        "\0" in value or value in (".", "..", "latest", "all")):
+                    raise RigError(f"Call inspection bag {key} must be an exact name")
+            relative = bag["relative_path"]
+            if (not isinstance(relative, str) or not relative or "\\" in relative or "\0" in relative or
+                    Path(relative).is_absolute() or any(p in ("", ".", "..") for p in relative.split("/"))):
+                raise RigError("Call inspection bag path must stay inside the source")
+            if relative in seen or bag["storage"] not in ("mcap", "sqlite3"):
+                raise RigError("Call inspection has duplicate bags or unsupported storage")
+            seen.add(relative)
     if type(request["start_ns"]) is not int or request["start_ns"] < 0:
         raise RigError("Call inspection start_ns must be a nonnegative integer")
     for name in ("from_s", "to_s"):
@@ -63,6 +84,21 @@ def validate_request(request):
     if request["source_mode"] not in ("service", "client"):
         raise RigError("Call inspection source_mode must be service or client")
     return dict(request, services=sorted(names))
+
+
+def _request_source_identity(request):
+    if request["version"] == 1:
+        return _session_identity(request["session"])
+    root = Path(request["source"]).resolve()
+    sources, seen = [], set()
+    for bag in request["bags"]:
+        path = Path(request["source"]) / bag["relative_path"]
+        canonical = path.resolve()
+        if not canonical.is_relative_to(root) or canonical in seen:
+            raise RigError("Call inspection input escapes the source or selects a bag more than once")
+        seen.add(canonical)
+        sources.append(_session_identity(path))
+    return sources
 
 
 def validate_response(response, request):
@@ -219,7 +255,7 @@ def inspect_calls(root, row, desc, config, request, *, env, pins, expected_surfa
             raise RigError("Call inspection helper changed since planning; plan again")
         selectors = ("BAG_PLAYER_IMAGE", "RIG_MSGS_IMAGE", "RIG_BASE_IMAGE", "RIG_IMAGE_REGISTRY",
                      "RIG_IMAGE_TAG", "RIG_IMAGE_PINS", "DOCKER_DEFAULT_PLATFORM")
-        return dict(version=1, request=request, source=_session_identity(request["session"]),
+        return dict(version=1, request=request, source=_request_source_identity(request),
                     helper=helper, config=digest(config), pins=pins,
                     environment=digest({name: effective_env.get(name) for name in selectors}),
                     architecture=effective_env.get("RIG_TARGET_ARCH"),

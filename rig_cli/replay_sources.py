@@ -68,8 +68,8 @@ def metadata(path):
     duration = info.get("duration")
     start = start.get("nanoseconds_since_epoch") if isinstance(start, dict) else start
     duration = duration.get("nanoseconds") if isinstance(duration, dict) else duration
-    if start is None or duration is None or int(start) < 0 or int(duration) <= 0:
-        raise RigError(f"{path}: metadata needs a positive bag duration and known starting time")
+    if start is None or duration is None or int(start) < 0 or int(duration) < 0:
+        raise RigError(f"{path}: metadata needs a nonnegative bag duration and known starting time")
     if info.get("storage_identifier") not in ("mcap", "sqlite3"):
         raise RigError(f"{path}: unsupported or missing ROS 2 storage identifier")
     paths = info.get("relative_file_paths")
@@ -90,14 +90,78 @@ def metadata(path):
         if tm.get("name") is not None and not isinstance(tm["name"], str):
             raise RigError(f"{path}: invalid topic name")
         if tm.get("name"):
-            topics[tm["name"]] = dict(type=tm.get("type"), count=row.get("message_count", 0),
-                                     qos=tm.get("offered_qos_profiles"))
+            count = row.get("message_count", 0)
+            if type(count) is not int or count < 0:
+                raise RigError(f"{path}: invalid topic message count")
+            type_hash = tm.get("type_description_hash")
+            if type_hash == "RIHS01_" + "0" * 64:
+                type_hash = None  # rosbag2's unknown type hash is not schema evidence.
+            topics[tm["name"]] = dict(type=tm.get("type"), count=count,
+                                     qos=tm.get("offered_qos_profiles"),
+                                     serialization=tm.get("serialization_format"),
+                                     type_hash=type_hash)
+    if not sum(topic["count"] for topic in topics.values()):
+        raise RigError(f"{path}: metadata has no recorded messages")
     return dict(start_ns=int(start) if start is not None else None,
-                duration_ns=int(duration) if duration is not None else None,
+                duration_ns=max(1, int(duration)) if duration is not None else None,
                 topics=topics, storage=info.get("storage_identifier"))
 
 
-def inspect_source(manifest, ref, bag_config=None):
+def selected_bags(source):
+    """The actual inputs; source.bag is only an aggregate when there is more than one."""
+    if "bags" in source:
+        return source["bags"]
+    return [source["bag"]] if source.get("bag") else []
+
+
+def bag_relative_path(bag):
+    relative = Path(bag.get("relative_path") or Path("bags") / bag["logger"] / bag["session"])
+    if relative.is_absolute() or ".." in relative.parts or not relative.parts:
+        raise RigError("replay: bag path must remain inside the runtime source")
+    return relative
+
+
+def bag_path(source, bag, runtime=None):
+    root = runtime or source.get("runtime_root")
+    return Path(root) / bag_relative_path(bag) if root else Path(bag["path"])
+
+
+def aggregate_bags(bags):
+    """Union metadata without modifying, merging, or deduplicating recorded messages."""
+    if not bags:
+        return None
+    if len(bags) == 1:
+        return bags[0]
+    topics = {}
+    for bag in bags:
+        for name, entry in bag.get("topics", {}).items():
+            if name not in topics:
+                topics[name] = {**entry, "count": 0, "sources": []}
+            combined = topics[name]
+            for field in ("type", "serialization", "type_hash"):
+                before, after = combined.get(field), entry.get(field)
+                if before and after and before != after:
+                    raise RigError(f"replay: incompatible {field} for topic {name} across selected bags")
+                if not before and after:
+                    combined[field] = after
+            combined["count"] += entry.get("count", 0)
+            combined["sources"].append({"logger": bag["logger"], "session": bag["session"]})
+            # Retain each source's QoS evidence; runtime helpers read the original metadata.
+            combined.setdefault("source_qos", []).append(entry.get("qos"))
+    indexed = all(b.get("start_ns") is not None and b.get("duration_ns") is not None for b in bags)
+    start = min(b["start_ns"] for b in bags) if indexed else None
+    end = max(b["start_ns"] + b["duration_ns"] for b in bags) if indexed else None
+    stores = {b.get("storage") for b in bags}
+    return dict(logger="multiple", session="selected", topics=topics, start_ns=start,
+                duration_ns=end - start if indexed else None,
+                storage=next(iter(stores)) if len(stores) == 1 else "mixed",
+                files=[p for b in bags for p in b["files"]],
+                repair=any(b.get("repair") for b in bags),
+                requires_copy=any(b.get("requires_copy") for b in bags),
+                prepared_index=any(b.get("prepared_index") for b in bags))
+
+
+def inspect_source(manifest, ref, bag_config=None, *, bags_config=None):
     path = source_path(manifest, ref)
     if path.is_file() and path.suffix not in (".mcap", ".db3"):
         raise RigError(f"{path}: expected a ROS 2 .mcap/.db3 bag or a directory")
@@ -116,8 +180,8 @@ def inspect_source(manifest, ref, bag_config=None):
         candidates = [(config.get("logger", "bag_logger"), base.name, base)]
     elif not (base / "recordings").is_dir():
         raise RigError(f"{path}: no ROS 2 bags or recording layout found")
-    selected = None
-    if candidates:
+    choices = []
+    if candidates and bag_config is not None:
         loggers = {c[0] for c in candidates}
         logger = config.get("logger")
         if logger is None:
@@ -132,12 +196,38 @@ def inspect_source(manifest, ref, bag_config=None):
             c for c in available if c[1] in (session, f"{logger}_{session}")]
         if not choices:
             raise RigError(f"replay: bag session {session!r} not found")
-        _, session, folder = max(choices, key=lambda c: c[1])
+        choices = [max(choices, key=lambda c: c[1])]
+    elif candidates:
+        if bags_config is None or bags_config == "all":
+            choices = candidates[:]
+        else:
+            for selection in bags_config:
+                logger = selection["logger"]
+                available = [c for c in candidates if c[0] == logger]
+                if not available:
+                    raise RigError(f"replay: bag logger {logger!r} not found")
+                session = selection.get("session", "all")
+                matches = available if session in ("all", "latest") else [
+                    c for c in available if c[1] in (session, f"{logger}_{session}")]
+                if not matches:
+                    raise RigError(f"replay: bag session {session!r} not found for {logger}")
+                choices.extend([max(matches, key=lambda c: c[1])] if session == "latest" else matches)
+    elif bag_config is not None or isinstance(bags_config, list):
+        raise RigError("replay: selected bag recordings were not found")
+    bags, seen = [], set()
+    for logger, session, folder in choices:
+        canonical = folder.resolve()
+        if canonical in seen:
+            raise RigError(f"replay: bag session selected more than once: {logger}/{session}")
+        seen.add(canonical)
         files = sorted([*folder.glob("*.mcap"), *folder.glob("*.db3")])
         if path.is_file() and len(files) > 1:
             raise RigError("replay: a bag file belongs to a multi-file directory; supply the directory")
         selected = dict(logger=logger, session=session, path=str(folder),
+                        relative_path=str(Path("bags") / logger / session),
                         files=[str(p) for p in files], repair=False)
+        formats = {"mcap" if p.suffix == ".mcap" else "sqlite3" for p in files}
+        selected["storage"] = next(iter(formats)) if len(formats) == 1 else None
         selected["requires_copy"] = any(not p.resolve().is_relative_to(base.resolve())
                                          for p in [*files, folder / "metadata.yaml"])
         try:
@@ -145,12 +235,13 @@ def inspect_source(manifest, ref, bag_config=None):
         except (RigError, OSError, TypeError, ValueError) as exc:
             selected.update(repair=True, topics={}, start_ns=None, duration_ns=None,
                             repair_reason=str(exc))
+        bags.append(selected)
     try:
         doc = load_yaml(base / "manifest.yaml") if (base / "manifest.yaml").is_file() else {}
     except RigError:
         doc = {}  # Legacy runs may have an incomplete manifest; never rewrite it.
     return dict(path=str(path), root=str(base), id=str(doc.get("run") or base.name),
-                kind="run" if native else "rosbag2", manifest=doc, bag=selected,
+                kind="run" if native else "rosbag2", manifest=doc, bags=bags, bag=aggregate_bags(bags),
                 sessions=[{"logger": a, "session": b} for a, b, _ in candidates],
                 fingerprint=source_fingerprint(path))
 
@@ -244,31 +335,48 @@ def recording_binding(row, desc, source, recipe, *, camera_session=None, window=
 
 def select_proxy(row, desc, source, binding, recipe, options, *, verification=None):
     """Apply explicit proxy intent only after original recording/session selection."""
-    if not options.get("use_proxies"):
-        return binding
+    from .replay_inputs import selection
+    target = "instance:" + row.name
+    selector = selection(recipe, target, service=row.service,
+                         use_proxies=bool(options.get("use_proxies")))
     preferences = recipe.get("proxies", {})
     instance = preferences.get("instances", {}).get(row.name, {})
-    if instance.get("use") == "original":
+    if selector.get("use") == "original":
         return binding
     exporter = getattr(desc, "export_source", None)
     requested = preferences.get("services", {}).get(row.service, {})
     eligible = exporter and "service" in getattr(exporter, "modes", ()) and getattr(exporter, "profiles", {})
     if not eligible:
-        if requested or instance:
+        if requested or instance or target in recipe.get("inputs", {}):
             raise RigError(f"{row.name}: service {row.service} does not declare proxy profiles; upgrade it")
         return binding
     if not binding.get("direct"):
         raise RigError(f"{row.name}: proxy playback requires replay.source.binding: direct; "
                        f"upgrade {row.service}")
-    pin = instance.get("export")
+    # Export planning discovers the same originals, aliases and session windows, then
+    # creates the requested artifacts before a normal replan resolves their bytes.
+    if options.get("_export_inputs"):
+        return {**binding, "requested_input": selector}
+    pin = selector.get("proxy")
+    profile = selector.get("profile")
+    if not profile and instance.get("export") and target not in recipe.get("inputs", {}):
+        profile = requested.get("profile")
     saved = options.get("_prepared_proxies", {}).get(row.name, {})
+    if saved and not pin:
+        from .service_exports import profile_for
+        current_profile = profile_for(desc, profile)
+        if saved.get("proxy", {}).get("profile_hash") != current_profile["sha256"]:
+            from .common import eprint
+            eprint(f"rig replay: {row.name} proxy profile changed; resolving the requested profile again")
+            saved = {}
     if (not pin and saved and all(saved.get("original", {}).get(key) == binding.get(key)
                                  for key in ("path", "recorded_as", "fingerprint")) and
+            (profile is None or saved.get("proxy", {}).get("profile") == profile) and
             set(binding.get("sessions", [])) <= set(saved.get("original", {}).get("sessions", []))):
         pin = saved.get("proxy", {}).get("export_id")
     from .service_exports import resolve_proxy_binding
     resolved = resolve_proxy_binding(source["root"], binding, service=row.service,
-                                     profile=requested.get("profile"), export_id=pin, descriptor=desc,
+                                     profile=profile, export_id=pin, descriptor=desc,
                                      verification=verification)
     resolved.setdefault("original", dict(binding))
     resolved["direct"] = True

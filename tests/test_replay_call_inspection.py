@@ -144,6 +144,56 @@ class CallInspection(unittest.TestCase):
         self.assertEqual(after["status"], "not_checked")
         self.assertNotEqual(before["cache_key"], after["cache_key"])
 
+    def multi_request(self):
+        second = self.root / "bag2"
+        second.mkdir()
+        (second / "part.mcap").write_bytes(b"second payload")
+        (second / "metadata.yaml").write_bytes(self.metadata.read_bytes())
+        self.request.pop("session")
+        self.request.update(version=2, source=str(self.root), bags=[
+            dict(logger="first", session="one", relative_path="bag", storage="mcap"),
+            dict(logger="second", session="two", relative_path="bag2", storage="mcap")])
+        return second
+
+    def test_multi_input_cache_covers_each_input_and_global_window(self):
+        second = self.multi_request()
+        before = self.populate()
+        self.assertEqual(self.invoke(), before)
+        (second / "part.mcap").write_bytes(b"changed second payload")
+        after = self.invoke()
+        self.assertEqual(after["status"], "not_checked")
+        self.assertNotEqual(before["cache_key"], after["cache_key"])
+        self.request["start_ns"] += 1
+        self.assertNotEqual(after["cache_key"], self.invoke()["cache_key"])
+
+    def test_multi_input_requests_reject_escaped_duplicate_and_nonexact_inputs(self):
+        self.multi_request()
+        for field, value in (("relative_path", "../bag"), ("relative_path", "bag"),
+                             ("session", "latest"), ("storage", "unknown")):
+            request = copy.deepcopy(self.request)
+            request["bags"][1][field] = value
+            with self.subTest(field=field, value=value), self.assertRaises(RigError):
+                inspection.validate_request(request)
+        outside = self.root.parent / (self.root.name + "-outside")
+        outside.mkdir()
+        self.addCleanup(outside.rmdir)
+        link = self.root / "escape"
+        link.symlink_to(outside, target_is_directory=True)
+        self.request["bags"][1]["relative_path"] = "escape"
+        with self.assertRaisesRegex(RigError, "escapes the source"):
+            self.invoke()
+
+    def test_multi_input_mutation_during_inspection_is_not_cached(self):
+        second = self.multi_request()
+        def process(argv, **kwargs):
+            result = self.helper_run(argv, **kwargs)
+            (second / "part.mcap").write_bytes(b"changed during inspection")
+            return result
+        with patch("subprocess.run", side_effect=process):
+            with self.assertRaisesRegex(RigError, "changed during inspection"):
+                self.invoke(execute=True)
+        self.assertFalse((self.root / "var").exists())
+
     def test_payload_replacement_sidecars_and_metadata_change_invalidate_cache(self):
         before = self.populate()["cache_key"]
         for mutate in (lambda: (self.bag / "part.mcap-wal").write_bytes(b"pending"),

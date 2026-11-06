@@ -91,7 +91,7 @@ precedence. Use an explicit path to select the legacy file in that case.
 ```yaml
 version: 1
 source: 20260827T100000Z_field
-bag: {logger: bag_logger, session: latest}
+bags: all
 instances:
   new_planner: {recorded_as: planner}
   cam_front: {recorded_as: old_camera}
@@ -142,7 +142,9 @@ An explicit `RUN` overrides the recipe source. Prepare stores the concrete local
 `var/replay/NAME/bindings.yaml`. Generated `resolved.yaml`, `report.yaml`, `provenance.yaml`,
 `config/`, and optional derived `source/` live under `var/replay/NAME/<generation>/`.
 Changed source inventories/bindings produce a new generation, preserving existing source mounts.
-Repeated preparation preserves recipes and detects edited generated files.
+Repeated preparation preserves recipes and detects edited generated files. Explicit `--input`
+overrides are saved in the recipe by a successful preparation, including inside the `replay`
+section of a version-2 recipe. Check and replay apply these overrides for that invocation only.
 To add positional instances while using a recipe, supply the source explicitly:
 `rig replay RUN planner --recipe field-test` (the first positional argument is always `RUN`).
 
@@ -207,6 +209,120 @@ Original-run fingerprints use size/mtime inventories for media and hashes for sm
 they are not full cryptographic verification of recording bytes. Selected service exports also
 verify SHA-256 inventories of their source and proxy files. Prepared inputs are revalidated.
 
+## One recipe for original and exported inputs
+
+`inputs` chooses the representation of each recorded input independently. Omitted targets use
+originals. `bags` addresses the complete selected bag set; `instance:NAME` addresses one
+destination instance's recording, after its `recorded_as`, recording directory, and sessions
+have been resolved. Each selector contains exactly one of `use: original`, `profile: NAME`, or
+`proxy: <full-export-id>`. Named profiles must be supplied by the relevant installed service.
+
+```yaml
+version: 1
+source: field-run
+bags: all
+inputs:
+  bags: {profile: sensor-conservative}
+  instance:cam_front: {profile: h264}
+  instance:thermal_camera: {use: original}
+playback:
+  image_sources:
+    cam_front: bag
+    thermal_camera: camera
+```
+
+Save this as `replay/field-review.yaml`, then use the same recipe throughout:
+
+```sh
+rig run export --recipe field-review --dry-run
+rig run export --recipe field-review
+rig replay prepare --recipe field-review
+rig replay check --recipe field-review --format json
+rig replay --recipe field-review
+
+# Repeat --input to override individual targets, including per-camera profiles.
+rig run export --recipe field-review --input bags=profile:arrival-off \
+  --input instance:cam_front=original
+rig replay prepare --recipe field-review --input bags=profile:arrival-off \
+  --input instance:cam_front=original
+```
+
+Explicit selectors do not need `--use-proxies`. Recipe export builds bags first, recomputes camera
+selection against the resulting bag timeline, then exports each selected recording using its
+own profile and exact session list. Original selectors do no conversion; exact proxy IDs verify
+existing artifacts. Missing profiles, unsupported targets, missing selected recordings, and
+conflicting selections fail rather than silently expanding the export. This version supports
+whole `bags` and `instance:NAME` targets; future sub-input syntax such as `instance:cam_front/image`
+is rejected with an upgrade diagnostic. Recipe camera exports require originals inside the run;
+direct replay can still read explicitly bound external recording directories.
+
+`rig run export --recipe` accepts an optional `RUN` override, `--input`, `--dry-run`, and `--force`.
+It cannot be combined with legacy `--service`, `--profile`, `--instance`, `--in-place`, or `--lossy`.
+It never starts the deployment. Camera conversion may acquire its native helper image as described
+below. Check, prepare, and replay never create proxies implicitly.
+
+Bag artifacts live at `RUN/exports/inputs/bags/<profile>/<export-id>/`; camera artifacts retain
+`RUN/exports/services/<service>/<profile>/<export-id>/`. Inputs and existing generations remain
+intact. Successful recipe export saves exact resolutions in the local recipe workspace's
+`export-pins.yaml`; prepare records its own immutable pins in generation provenance. Their
+recipe and original-source identities must still match before reuse. Later exports cannot
+silently replace a prepared selection. A missing or changed pinned artifact fails instead of
+switching to another generation. If a later conversion fails, completed immutable artifacts
+remain reusable, but a new completed export-pin set is not published.
+
+A changed requested profile definition or effective bag timing/deduplication policy invalidates
+its implicit pin and reports a fresh resolution. Exact `proxy` selectors remain exact and must
+still satisfy the configured timing constraints. Unpinned bag profiles also check the installed
+converter implementation identity before reusing an artifact.
+
+`playback.image_sources` chooses who publishes ROS images separately from the video input.
+`bag` retains the selected bag's owned Image/CompressedImage topics and disables that camera's
+`ros2-bridge`; the camera recording or proxy can still serve its WebRTC preview. `camera`
+enables the camera bridge and excludes its corresponding bag image topics. Other camera plugins
+remain configured as before. Bag authority requires matching image topics in the selected bags;
+both modes require a selected camera recording source. Explicit conflicts with topic keep/exclude
+choices fail, as do other selected publishers of a bag-authoritative image topic. If this field
+is absent, the ordinary graph-based topic selection policy applies.
+
+## Bag merge and timing profiles
+
+Original multi-bag playback merges the selected sessions by recorded receive time and retains
+overlapping messages. An exported bag can choose receive, middleware send, or sensor time and
+apply an explicit duplicate policy before replay. The player provider ships these profile families:
+
+| Profile family | Scheduling timestamp | Default missing-timestamp behavior |
+| --- | --- | --- |
+| `arrival-off`, `arrival-conservative`, `arrival-aggressive` | Recorded receive time | Error |
+| `sent-off`, `sent-conservative`, `sent-aggressive` | Middleware send time | Error |
+| `sensor-off`, `sensor-conservative`, `sensor-aggressive` | Message `header.stamp` | Fall back to receive time |
+
+`off` retains every message. `conservative` removes cross-input copies only when identity evidence
+proves duplication; the current identity recognizer covers service events carrying valid client
+GID, sequence, event kind, and event timestamp, with matching topic/type/payload. Ordinary topic
+messages usually lack this identity. Equal payloads, equal header stamps, or close arrival times
+alone remain ambiguous and are preserved. Thus conservative mode does not promise one copy of
+every topic message recorded by two loggers.
+
+`aggressive` additionally matches equal topic/type/payload across different input sessions within
+the receive-time window (100 ms by default). This is an explicitly lossy heuristic: independent
+publishers can emit identical data. Matching is one-to-one across inputs, and repeated messages
+within one input are preserved. Input ordering and tie breaking are deterministic. Profiles that
+remove duplicates declare themselves lossy; `off` profiles retain message payloads.
+
+The bag player's resolved `play` configuration may refine `sensor_timestamp_field`,
+`topic_timestamp_fields`, `timestamp_fallback` (`error`, `received`, or `sent`),
+`max_clock_skew_s` (default 60), and `dedup_window_ms` (default 100). An explicitly configured
+`play.time_source` must agree with the selected profile. Original playback supports received time;
+select a sent/sensor profile to use another timeline. The converter validates time ranges and
+sorts by the selected scheduling timestamp without rewriting timestamps inside message payloads.
+Provenance records the original receive/send times, effective schedule time, retained/dropped
+decisions, duplicate relationships, fallback counts, and profile identity. Metadata repair is
+separate: bag export requires valid original session indexes; it does not repair the run in place.
+
+Use an updated player bundle exposing `replay-export-bags` and the matching native ROS image.
+Native multi-input playback also requires the player's plan-v2/multi-input capability and matching
+image capability label. A legacy single-bag player does not gain those abilities from a Rig update.
+
 ## Offline camera proxies
 
 Camera-service owns the versioned `h264` export profile and its offline converter. Install a
@@ -224,7 +340,7 @@ rig run export RUN --service camera-service --instance cam_front
 # Convert again while retaining previous generations; identical output is deduplicated.
 rig run export RUN --service camera-service --profile h264 --force
 
-# Every replay/check/prepare invocation opts in separately.
+# Legacy broad proxy opt-in remains available; explicit recipe.inputs needs no flag.
 rig replay check RUN --use-proxies
 rig replay prepare RUN --recipe field-test --use-proxies
 rig replay --recipe field-test --use-proxies
@@ -275,13 +391,14 @@ verified and reused. Service-mode `--force` preserves old generations, unlike re
 existing legacy whole-run export. Service mode rejects `--in-place` and `--lossy`; the profile
 itself declares lossiness. Camera's default profile never joins legacy in-place exports.
 
-Without `--use-proxies`, replay uses originals even after proxy preparation or when recipes have
-proxy preferences. With it, every selected eligible camera needs a compatible export covering
+Without explicit `inputs` selectors or `--use-proxies`, replay uses originals even after proxy
+preparation or when recipes have legacy proxy preferences. With the legacy flag, every selected
+eligible camera needs a compatible export covering
 its exact original sessions. Skipped/live cameras and services without proxy support do not need
 one. Missing, stale, corrupt, or incompatible exports fail with a generation/upgrade diagnostic;
 check, prepare, and replay never transcode implicitly or fall back silently.
 
-Optional recipe preferences choose profiles, pin a generation, or explicitly retain originals:
+Legacy recipe preferences choose service-wide profiles, pin a generation, or retain originals:
 
 ```yaml
 proxies:
@@ -293,7 +410,10 @@ proxies:
 ```
 
 Instance names above belong to the destination deployment. Aliases still map them to original
-recorded names. Preferences take effect only with the CLI flag. Multiple compatible generations
+recorded names. These legacy preferences take effect only with the CLI flag. Explicit `inputs`
+selectors work without it and support a different profile for each camera. Contradictory legacy
+and new declarations for the same input fail; migrate that choice into `inputs` and remove the
+conflicting legacy entry. Multiple compatible generations
 require a pin; preparation retains resolved pins, and deleting a pinned generation is an error.
 The source remains the original run. Managed proxy directories cannot be supplied through
 `recordings.from` to bypass the opt-in. Exact bindings, profile identity, and lossiness travel in
@@ -415,12 +535,26 @@ recipe `playback` fields (or `--calls`) instead.
 
 ## Timing and legacy inputs
 
-One exact logger/session controls topics, clock, windows, call-script zero, and camera alignment.
-Recipe bag settings override player config. Multiple unexplained loggers require a choice.
-`latest` resolves to one concrete session; split files form one session.
+With no bag selector, replay selects every discovered logger/session in the source run.
+`bags: all` makes that default explicit. Choose a subset with a nonempty list:
+
+```yaml
+bags:
+  - {logger: bag_logger_front}                  # all sessions for this logger
+  - {logger: bag_logger_rear, session: latest}  # one lexically latest session
+  - {logger: event_logger, session: 20261105T120000Z}
+```
+
+The legacy scalar `bag: {logger: bag_logger, session: latest}` still selects exactly one session;
+its omitted fields may use the player's configured defaults. `bag` and `bags` are mutually
+exclusive. Player standalone `source.logger/session` settings do not narrow a replay that uses
+the new default or `bags` list. Split files form one session; multiple sessions are now merged
+on the shared timeline. Repeating a session or conflicting types for a shared topic fails.
+The selected set supplies the union of topics, earliest start, latest end, clock, call-script
+zero, and camera alignment. Topic overlap alone does not suppress messages.
 `--session PREFIX` retains its separate camera-recording meaning.
 
-`--from`/`--to` count seconds from the chosen bag start, including fractional offsets. The start
+`--from`/`--to` count seconds from the selected timeline start, including fractional offsets. The start
 is inclusive and the end exclusive for structured replay, matching recorded-request inspection.
 They override standalone player offsets; omitting `--to` keeps the replay window open to the bag end.
 Remaps apply to bag playback and restored

@@ -324,6 +324,10 @@ def _result_records(result, request, root):
                 if relative in all_files or not p.is_file() or p.stat().st_size == 0:
                     raise RigError(f"service export: missing, empty or duplicate helper file: {relative}")
                 all_files.add(relative)
+        requested = next(r for r in request["recordings"] if r["name"] == record["name"]).get("sessions", [])
+        selected_ids = {s["id"] if isinstance(s, dict) else s for s in requested}
+        if selected_ids and ids != selected_ids:
+            raise RigError("service export: helper returned a different session selection")
     return records
 
 
@@ -383,7 +387,7 @@ def cmd(manifest, catalog, descriptors, **options):
 
 
 def _cmd(manifest, catalog, descriptors, *, run_ref, service, profile=None, instances=None,
-         force=False, dry_run=False):
+         force=False, dry_run=False, recordings=None, return_binding=None, verification=None):
     from . import dispatch
     from .descriptor import load_descriptor
     from .export import resolve_run
@@ -395,7 +399,12 @@ def _cmd(manifest, catalog, descriptors, *, run_ref, service, profile=None, inst
     chosen = profile_for(descriptor, profile)
     _, run_root = resolve_run(manifest, run_ref)
     run_root = run_root.resolve()
-    records = _discover(run_root, descriptor, instances)
+    records = _discover(run_root, descriptor, instances) if recordings is None else recordings
+    if not records:
+        raise RigError("service export: no selected recordings")
+    for record in records:
+        safe_component(record["name"], what="recorded instance")
+        _inside(run_root, record["relative"])
     namespace = _inside(run_root, "exports/services")
     if (namespace / "manifest.yaml").exists() or (namespace / ".rig/export.yaml").exists():
         raise RigError("service export: exports/services is an existing legacy whole-run profile")
@@ -428,7 +437,7 @@ def _cmd(manifest, catalog, descriptors, *, run_ref, service, profile=None, inst
             if doc.get("reuse_sha256", doc.get("request_sha256")) in (reuse_hash, request_hash):
                 load_artifact(folder, source_root=run_root)
                 eprint(f"rig run export: reuse {folder}")
-                return 0
+                return _export_result(run_root, return_binding, descriptor, chosen, doc, verification)
     destination = _inside(run_root, f"exports/services/{service}/{chosen['id']}")
     dependencies = report.get("missing_dependencies", [])
     images = _missing_images(report, env["RIG_TARGET_ARCH"])
@@ -473,7 +482,7 @@ def _cmd(manifest, catalog, descriptors, *, run_ref, service, profile=None, inst
                 if doc.get("reuse_sha256", doc.get("request_sha256")) in (reuse_hash, request_hash):
                     load_artifact(folder, source_root=run_root)
                     eprint(f"rig run export: reuse {folder}")
-                    return 0
+                    return _export_result(run_root, return_binding, descriptor, chosen, doc, verification)
         required = report.get("required_bytes", sum(e["size"] for e in inputs) * 2)
         if not isinstance(required, int) or required < 0:
             raise RigError("service export: invalid required_bytes estimate")
@@ -519,7 +528,32 @@ def _cmd(manifest, catalog, descriptors, *, run_ref, service, profile=None, inst
                 stage.rename(final)
                 # TemporaryDirectory cleanup tolerates its now-absent original path.
             eprint(f"rig run export: created {final}")
-    return 0
+    return _export_result(run_root, return_binding, descriptor, chosen, doc, verification)
+
+
+def _export_result(run_root, binding, descriptor, chosen, artifact, verification):
+    if binding is None:
+        return 0
+    return resolve_proxy_binding(run_root, binding, service=descriptor.service,
+                                 profile=chosen["id"], export_id=artifact["export_id"],
+                                 descriptor=descriptor, verification=verification)
+
+
+def build_binding(manifest, catalog, descriptors, source, binding, *, service, profile,
+                  dry_run=False, force=False, verification=None):
+    """Export the planner's exact original identity and sessions through the service contract."""
+    root = Path(source["root"]).resolve()
+    original = binding.get("original", binding)
+    path = Path(original["path"]).resolve()
+    if not path.is_relative_to(root):
+        raise RigError(f"{original['recorded_as']}: recipe export requires recordings inside the source "
+                       "run; copy the original recording into the run and update recordings.from")
+    record = dict(name=original["recorded_as"], relative=str(path.relative_to(root)),
+                  sessions=list(original.get("sessions", [])))
+    result = cmd(manifest, catalog, descriptors, run_ref=str(root), service=service,
+                 profile=profile, recordings=[record], return_binding=original,
+                 force=force, dry_run=dry_run, verification=verification)
+    return result if isinstance(result, dict) else None
 
 
 def resolve_proxy_binding(source_root, binding, *, service, profile=None, export_id=None,
@@ -527,20 +561,29 @@ def resolve_proxy_binding(source_root, binding, *, service, profile=None, export
     """Select exact source-compatible recordings; never silently fall back to originals."""
     if descriptor is None or getattr(descriptor.replay_source, "binding", None) != "direct":
         raise RigError(f"{service}: proxy replay requires direct source binding; update the service bundle")
-    chosen = profile_for(descriptor, profile)
     if export_id is not None and not ID.fullmatch(str(export_id)):
         raise RigError("proxy export pin must be a full export ID")
     source_root = Path(source_root).resolve()
     selected_sessions = set(binding.get("sessions", []))
     candidates, rejected = [], []
     if export_id:
-        folder = _inside(source_root, f"exports/services/{service}/{chosen['id']}/{export_id}")
-        artifacts = [(folder, load_artifact(folder, verify=False))] if folder.is_dir() else []
+        if profile is None:
+            artifacts = [(folder, doc) for folder, doc in committed_artifacts(
+                source_root, service, strict=False) if doc["export_id"] == export_id]
+            if len(artifacts) > 1:
+                raise RigError("proxy pin identifies multiple artifact locations")
+            if artifacts:
+                profile = artifacts[0][1]["profile"]["id"]
+        else:
+            folder = _inside(source_root, f"exports/services/{service}/{profile}/{export_id}")
+            artifacts = [(folder, load_artifact(folder, verify=False))] if folder.is_dir() else []
+        chosen = profile_for(descriptor, profile)
         if artifacts and (artifacts[0][1]["export_id"] != export_id or
                           artifacts[0][1]["service"] != service or
                           artifacts[0][1]["profile"]["id"] != chosen["id"]):
             raise RigError("proxy pin does not match its service/profile location")
     else:
+        chosen = profile_for(descriptor, profile)
         artifacts = committed_artifacts(source_root, service, chosen["id"], strict=False)
     for folder, doc in artifacts:
         same_profile = doc["profile"]["sha256"] == chosen["sha256"]

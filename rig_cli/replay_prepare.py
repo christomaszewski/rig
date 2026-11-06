@@ -14,7 +14,8 @@ import yaml
 from . import RigError, dispatch
 from .common import load_yaml
 from .replay_recipe import digest, workspace
-from .replay_sources import inventory_fingerprint, metadata, source_fingerprint, verify_binding
+from .replay_sources import (inventory_fingerprint, metadata, source_fingerprint, verify_binding,
+                             selected_bags, bag_relative_path)
 
 
 def write_yaml(path, value):
@@ -29,6 +30,7 @@ def generation(plan):
     return digest(dict(source=plan["source"]["path"], fingerprint=plan["source"]["fingerprint"],
                        selection_version=SELECTION_VERSION,
                        recipe=plan.get("session_recipe", plan["recipe"]), recordings=plan["recordings"],
+                       bag_proxy=plan["source"].get("bag_proxy"),
                        use_proxies=bool(plan.get("use_proxies"))))[:20]
 
 
@@ -67,6 +69,9 @@ def prepared(root, recipe_path, recipe, source, *, use_proxies=False):
             verify_binding(binding)
         except RigError:
             return None
+    if doc.get("bag_proxy"):
+        from .bag_proxies import verify_binding as verify_bag_proxy
+        verify_bag_proxy(doc["bag_proxy"], source)
     for name, fingerprint in doc.get("generated", {}).items():
         path = dest / name
         if not path.is_file() or digest(path.read_bytes().hex()) != fingerprint:
@@ -98,6 +103,19 @@ def proxy_pins(root, recipe_path, recipe, source):
     return {name: binding for name, binding in doc.get("bindings", {}).items() if binding.get("proxy")}
 
 
+def bag_proxy_pin(root, recipe_path, recipe, source):
+    """An existing preparation pins its exact bag artifact, including a missing generation."""
+    dest = location(root, recipe_path, source, use_proxies=True)
+    record = dest / "provenance.yaml"
+    if not record.is_file():
+        return None
+    doc = load_yaml(record)
+    if (doc.get("recipe_sha") != digest(recipe) or
+            doc.get("source_fingerprint") != source_fingerprint(source)):
+        return None
+    return doc.get("bag_proxy")
+
+
 def save_binding(root, recipe_path, recipe, source, dest, use_proxies):
     path = workspace(root, recipe_path) / "bindings.yaml"
     saved = load_yaml(path) if path.is_file() else {}
@@ -116,6 +134,9 @@ def copy_file(source, dest):
 
 def create(root, recipe_path, recipe, plan, manifest, descriptors):
     source = plan["source"]
+    if source.get("bag_proxy"):
+        from .bag_proxies import verify_binding as verify_bag_proxy
+        verify_bag_proxy(source["bag_proxy"], source["root"])
     use_proxies = bool(plan.get("use_proxies"))
     dest = location(root, recipe_path, source["path"], key=generation(plan))
     existing = prepared(root, recipe_path, recipe, source["path"], use_proxies=use_proxies)
@@ -137,6 +158,7 @@ def create(root, recipe_path, recipe, plan, manifest, descriptors):
     dest.parent.mkdir(parents=True, exist_ok=True)
     stage = Path(tempfile.mkdtemp(prefix=".preparing-", dir=dest.parent))
     bag = source["bag"]
+    bags = selected_bags(source)
     adapted = (source["kind"] != "run" or (bag and (bag["repair"] or bag.get("requires_copy") or
                                                   bag.get("prepared_index"))) or
                any(b["adapted"] and not b.get("direct") for b in plan["recordings"].values()))
@@ -153,19 +175,19 @@ def create(root, recipe_path, recipe, plan, manifest, descriptors):
                 bytes_needed += sum(Path(p).stat().st_size for p in files)
             if shutil.disk_usage(stage).free < bytes_needed + 64 * 1024 * 1024:
                 raise RigError(f"Preparation needs at least {bytes_needed} bytes plus working space")
-            if bag:
-                target = derived / "bags" / bag["logger"] / bag["session"]
+            for selected in bags:
+                target = derived / bag_relative_path(selected)
                 target.mkdir(parents=True)
-                for path in [*[Path(p) for p in bag["files"]], Path(bag["path"]) / "metadata.yaml"]:
+                for path in [*[Path(p) for p in selected["files"]], Path(selected["path"]) / "metadata.yaml"]:
                     if path.is_file():
                         copy_file(path, target / path.name)
-                if source.get("runtime_root") and not bag["repair"]:
+                if source.get("runtime_root") and not selected["repair"]:
                     # Reuse a verified recovered index when a new recording binding needs
                     # another generation of the same formerly unindexed bag.
-                    recovered = Path(source["runtime_root"]) / "bags" / bag["logger"] / bag["session"] / "metadata.yaml"
+                    recovered = Path(source["runtime_root"]) / bag_relative_path(selected) / "metadata.yaml"
                     if recovered.is_file():
                         copy_file(recovered, target / "metadata.yaml")
-                if bag["repair"]:
+                if selected["repair"]:
                     player = next((r for r in manifest.sensors if r.name == plan["player"]), None)
                     if player is None or not plan.get("capabilities", {}).get("reindex"):
                         raise RigError("Prepare needs a current player with replay-reindex support")
@@ -210,6 +232,8 @@ def create(root, recipe_path, recipe, plan, manifest, descriptors):
             raise RigError("Source changed during preparation; stop its writer and retry")
         for binding in plan["recordings"].values():
             verify_binding(binding)
+        if source.get("bag_proxy"):
+            verify_bag_proxy(source["bag_proxy"], source["root"])
         write_yaml(stage / "resolved.yaml", plan)
         write_yaml(stage / "report.yaml", {k: plan[k] for k in
                                           ("issues", "ready_to_prepare", "ready_to_run")})
@@ -221,6 +245,7 @@ def create(root, recipe_path, recipe, plan, manifest, descriptors):
             version=1, recipe_sha=digest(recipe), source=source["path"],
             selection_version=plan["selection_version"],
             use_proxies=use_proxies, bindings=plan["recordings"],
+            bag_proxy=source.get("bag_proxy"),
             source_fingerprint=source["fingerprint"], runtime_source=str(runtime),
             recordings={b["path"]: b["fingerprint"] for b in plan["recordings"].values()},
             generated=generated,
@@ -239,6 +264,15 @@ def create(root, recipe_path, recipe, plan, manifest, descriptors):
 
 def player_document(plan, runtime):
     bag = plan["source"]["bag"]
+    bags = selected_bags(plan["source"])
+    if len(bags) > 1 or any(bag_relative_path(b) != Path("bags") / b["logger"] / b["session"] for b in bags):
+        document = dict(version=2, source=str(runtime),
+                    bags=[dict(logger=b["logger"], session=b["session"],
+                               relative_path=str(bag_relative_path(b)), storage=b.get("storage")) for b in bags],
+                    timeline={k: bag[k] for k in ("start_ns", "duration_ns")}, **plan["playback"])
+        if len(bags) == 1 and bags[0].get("proxy"):
+            document["proxy"] = bags[0]["proxy"]
+        return document
     return dict(version=1, source=str(runtime),
                 bag={k: bag[k] for k in ("logger", "session", "start_ns", "duration_ns")},
                 **plan["playback"])

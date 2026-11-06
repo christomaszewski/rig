@@ -17,6 +17,7 @@ from .manifest import project_name
 from . import replay_plan as planner, replay_prepare as prepare, replay_recipe as recipes
 from .replay_sources import source_path, source_fingerprint, binding_variables, verify_binding
 from . import session_recipe as sessions
+from . import replay_inputs
 
 
 class _PreparationNotReady(Exception):
@@ -161,6 +162,7 @@ def _command(args, root):
         # Implicit preparation creates/uses its replay-local recipe. A same-named
         # shared recipe is opt-in through --recipe, never an accidental selector.
         recipe_path, recipe = recipes.load(root, str(root / "replay" / (name + ".yaml")), create=True)
+    recipe = replay_inputs.with_overrides(recipe, getattr(args, "inputs", []))
     args = _session_arguments(args, recipe)
     options = vars(args).copy()
     options["_recipe_path"] = str(recipe_path) if recipe_path else None
@@ -174,9 +176,16 @@ def _command(args, root):
     eprint("rig replay: planning selection and verifying recorded inputs")
     ref = recipes.bound_source(root, recipe_path, recipe, args.run)
     origin = source_path(manifest, ref)
-    use_proxies = bool(options.get("use_proxies"))
+    use_proxies = replay_inputs.uses_proxies(recipe, options)
+    if recipe_path:
+        from .replay_exports import load_pins
+        pins = load_pins(root, recipe_path, recipe, origin)
+        options["_prepared_proxies"] = pins.get("recordings", {})
+        options["_prepared_bag_proxy"] = pins.get("bag")
     if recipe_path and use_proxies:
-        options["_prepared_proxies"] = prepare.proxy_pins(root, recipe_path, recipe, origin)
+        options["_prepared_proxies"].update(prepare.proxy_pins(root, recipe_path, recipe, origin))
+        options["_prepared_bag_proxy"] = (prepare.bag_proxy_pin(root, recipe_path, recipe, origin)
+                                           or options.get("_prepared_bag_proxy"))
     runtime = prepare.prepared(root, recipe_path, recipe, origin, use_proxies=use_proxies) if recipe_path else None
     options["_prepared_source"] = str(runtime) if runtime else None
     plan = _build_plan(manifest, catalog, descriptors, root, str(origin), recipe, options,
@@ -273,6 +282,7 @@ def perform_prepare(args, root, recipe_path, recipe, origin, manifest, catalog, 
     keep_backup = False
     backup = None
     created_recipe = False
+    recipe_backup = None
     try:
         if args.player and not plan["player"]:
             from .reconstruct import _enable_replay_target, wire_player
@@ -311,11 +321,18 @@ def perform_prepare(args, root, recipe_path, recipe, origin, manifest, catalog, 
             prepare.write_yaml(recipe_path, recipe)
             created_recipe = True
             plan["recipe"] = recipe
+        elif getattr(args, "inputs", []):
+            # Persist the exact CLI choices that produced this generation. Failures restore
+            # the prior recipe alongside the preparation transaction's other rollback work.
+            recipe_backup = recipe_path.read_bytes()
+            prepare.write_yaml(recipe_path, recipe)
         runtime = prepare.create(root, recipe_path, recipe, plan, manifest, descriptors)
         options["_prepared_source"] = str(runtime)
-        use_proxies = bool(options.get("use_proxies"))
+        use_proxies = replay_inputs.uses_proxies(recipe, options)
         if use_proxies:
             options["_prepared_proxies"] = prepare.proxy_pins(root, recipe_path, recipe, origin)
+            options["_prepared_bag_proxy"] = (prepare.bag_proxy_pin(root, recipe_path, recipe, origin)
+                                               or options.get("_prepared_bag_proxy"))
         plan = _build_plan(manifest, catalog, descriptors, root, str(origin), recipe, options,
                              verification=verification)
         # Recovered bag timing can narrow automatic camera session selection. Publish that
@@ -337,7 +354,7 @@ def perform_prepare(args, root, recipe_path, recipe, origin, manifest, catalog, 
         report(plan, as_json=getattr(args, "json", False))
         eprint(f"Prepared recipe: {recipe_path}")
         replay_command = ["rig", "replay", "--recipe", str(recipe_path)]
-        if use_proxies:
+        if options.get("use_proxies"):
             replay_command.append("--use-proxies")
         for flag, values in (("--skip-service", args.skip_services),
                              ("--skip-instance", args.skip_instances)):
@@ -367,6 +384,8 @@ def perform_prepare(args, root, recipe_path, recipe, origin, manifest, catalog, 
                                f"restore from it by hand") from exc
         if created_recipe:
             recipe_path.unlink(missing_ok=True)
+        elif recipe_backup is not None:
+            recipe_path.write_bytes(recipe_backup)
         if isinstance(exc, _PreparationNotReady):
             report(plan, as_json=getattr(args, "json", False))
             return 1
@@ -603,6 +622,9 @@ def _execute_inner(args, root, manifest, descriptors, plan, runtime, lifecycle):
     bag = source["bag"]
     if source_fingerprint(source["path"]) != source["fingerprint"]:
         raise RigError("Source changed since planning; check/prepare again")
+    if source.get("bag_proxy"):
+        from .bag_proxies import verify_binding as verify_bag_proxy
+        verify_bag_proxy(source["bag_proxy"], source["root"])
     for binding in plan["recordings"].values():
         verify_binding(binding)
     if not args.dry_run:
@@ -656,6 +678,8 @@ def _execute_inner(args, root, manifest, descriptors, plan, runtime, lifecycle):
                                      variables=binding_variables(variables, row, plan["recordings"].get(name)),
                                      extra_overrides=desc.replay_source.overrides
                                      if name in plan["recordings"] else None)
+        if name in plan.get("image_sources", {}):
+            config = planner.image_source_config(config, plan["image_sources"][name]["source"])
         path = session_root / "config" / (name + ".yaml")
         if not args.dry_run:
             prepare.write_yaml(path, config)
@@ -691,6 +715,8 @@ def _execute_inner(args, root, manifest, descriptors, plan, runtime, lifecycle):
                         recipe=plan.get("session_recipe", plan["recipe"]), fingerprint=plan["fingerprint"],
                         use_proxies=bool(plan.get("use_proxies")),
                         source_fingerprint=source["fingerprint"], runtime_source=str(runtime), bag=bag,
+                        bags=source.get("bags", []), bag_proxy=source.get("bag_proxy"),
+                        original_bags=source.get("original_bags"), image_sources=plan.get("image_sources", {}),
                         execution=plan.get("execution"), epoch_unix_ns=(bag or {}).get("start_ns"),
                         skipped={"services": args.skip_services, "instances": args.skip_instances},
                         not_started=plan["omitted"],
@@ -717,6 +743,8 @@ def _execute_inner(args, root, manifest, descriptors, plan, runtime, lifecycle):
             raise RigError("Source changed during replay run capture; no services started")
         for binding in plan["recordings"].values():
             verify_binding(binding)
+    if source.get("bag_proxy"):
+        verify_bag_proxy(source["bag_proxy"], source["root"])
     if not args.dry_run:
         planner.verify_recorded_call_evidence(plan, manifest, descriptors, root)
     # Capture and source verification can take minutes. Only final rendering/snapshotting
@@ -730,6 +758,8 @@ def _execute_inner(args, root, manifest, descriptors, plan, runtime, lifecycle):
             config = resolve._layered_dict(rows[row.name], root,
                 variables=binding_variables(variables, rows[row.name], plan["recordings"].get(row.name)),
                 extra_overrides=desc.replay_source.overrides if row.name in plan["recordings"] else None)
+            if row.name in plan.get("image_sources", {}):
+                config = planner.image_source_config(config, plan["image_sources"][row.name]["source"])
             prepare.write_yaml(row.config, config)
         _verify_launch_inputs(plan)
         if manifest.data_dir:

@@ -259,6 +259,13 @@ def cmd_run_import(args, manifest, catalog, descriptors) -> int:
 
 def cmd_run_export(args, manifest, catalog, descriptors) -> int:
     from . import export as export_mod
+    if getattr(args, "recipe", None):
+        from .replay_exports import command
+        return command(args, args.rig_root)
+    if getattr(args, "inputs", None):
+        raise RigError("run export: --input requires --recipe NAME")
+    if not args.run:
+        raise RigError("run export: supply RUN or --recipe NAME with a source")
     profile = args.profile
     if args.service:
         from . import service_exports
@@ -963,6 +970,9 @@ def build_parser() -> argparse.ArgumentParser:
     rp.add_argument("--use-proxies", action="store_true",
                     help="explicitly bind compatible service exports instead of original recordings; "
                          "missing/stale proxies are errors; never generates proxies")
+    rp.add_argument("--input", action="append", default=[], dest="inputs", metavar="TARGET=CHOICE",
+                    help="choose bags or instance:NAME as original, profile:NAME, or proxy:ID; "
+                         "repeatable; overrides recipe.inputs without --use-proxies")
     rp.add_argument("--selection", choices=("broad", "recorded"), default="broad",
                     help="broad bag topics (default), or recorded-graph subscription selection; "
                          "both use automatic recorded-call selection unless the recipe overrides it")
@@ -984,7 +994,7 @@ def build_parser() -> argparse.ArgumentParser:
                          "exclusive ownership; repeatable")
     rp.add_argument("--session", default=None, metavar="PREFIX",
                     help="select a camera/source recording session prefix; does not select the "
-                         "bag session (use recipe bag.logger/session or player config)")
+                         "bag sessions (use recipe bags selections or legacy bag.logger/session)")
     rp.add_argument("--startup", choices=("legacy", "coordinated"), default="legacy",
                     help="legacy timer (default), or held startup with verified consumer endpoints "
                          "and a common release; coordinated requires compatible packages and images")
@@ -1108,7 +1118,12 @@ def build_parser() -> argparse.ArgumentParser:
                                             "re-write their own data smaller (the bag logger: "
                                             "zstd_small, topics dropped), the rest is hardlinked. "
                                             "`rig fleet sync --profile` pulls it")
-    rex.add_argument("run", help="run id, label (newest), or run-dir path — sealed; never the OPEN run")
+    rex.add_argument("run", nargs="?", help="run id, label (newest), or run-dir path — sealed; never the OPEN run")
+    rex.add_argument("--recipe", metavar="NAME|YAML",
+                     help="build the bag and recording profiles selected by a replay recipe")
+    rex.add_argument("--input", action="append", default=[], dest="inputs", metavar="TARGET=CHOICE",
+                     help="with --recipe: override bags or instance:NAME using original, "
+                          "profile:NAME, or proxy:ID (repeatable)")
     rex.add_argument("--profile", default=None, metavar="NAME",
                      help="with --service: a service-defined profile (default: service's default); "
                           "otherwise a vehicle.yaml export_profiles entry")
@@ -1969,7 +1984,7 @@ def main(argv=None) -> int:
                 manifest, catalog, descriptors = _load(root)
                 return _HANDLERS[args.cmd](args, manifest, catalog, descriptors)
         manifest, catalog, descriptors = _load(root, render=not (
-            args.cmd == "run-export" and args.service))
+            args.cmd == "run-export" and (args.service or args.recipe)))
         return _HANDLERS[args.cmd](args, manifest, catalog, descriptors)
     except RigError as exc:
         eprint(f"rig: {exc}")

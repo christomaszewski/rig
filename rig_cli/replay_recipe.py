@@ -45,7 +45,7 @@ def recorded_namespaces(doc):
 
 
 def validate(doc):
-    mapping(doc, {"version", "source", "bag", "instances", "recordings", "playback", "proxies"}, "recipe")
+    mapping(doc, {"version", "source", "bag", "bags", "inputs", "instances", "recordings", "playback", "proxies"}, "recipe")
     if type(doc.get("version")) is not int or doc["version"] != 1:
         raise RigError("recipe: unsupported version (expected version: 1)")
     if "source" in doc and (not isinstance(doc["source"], str) or not doc["source"]):
@@ -54,6 +54,24 @@ def validate(doc):
     for key, value in bag.items():
         if not isinstance(value, str) or not value or "/" in value or value in (".", ".."):
             raise RigError(f"recipe.bag.{key}: expected a single name")
+    if "bag" in doc and "bags" in doc:
+        raise RigError("recipe: bag and bags are mutually exclusive; use bags for multiple sources")
+    if "bags" in doc and doc["bags"] != "all":
+        if not isinstance(doc["bags"], list) or not doc["bags"]:
+            raise RigError("recipe.bags: expected all or a nonempty list of logger/session selections")
+        seen = set()
+        for entry in doc["bags"]:
+            mapping(entry, {"logger", "session"}, "recipe.bags")
+            for key in ("logger", "session"):
+                value = entry.get(key, "all" if key == "session" else None)
+                if not isinstance(value, str) or not value or "/" in value or value in (".", ".."):
+                    raise RigError(f"recipe.bags.{key}: expected a single name")
+            identity = (entry["logger"], entry.get("session", "all"))
+            if identity in seen:
+                raise RigError("recipe.bags: duplicate logger/session selection")
+            seen.add(identity)
+    from .replay_inputs import validate as validate_inputs
+    validate_inputs(doc.get("inputs", {}))
     for kind in ("instances", "recordings"):
         values = doc.get(kind, {})
         if not isinstance(values, dict):
@@ -98,7 +116,14 @@ def validate(doc):
                     r"[A-Za-z0-9][A-Za-z0-9_.-]*", value["export"]):
                 raise RigError(f"{where}: choose either export: ID or use: original")
     play = mapping(doc.get("playback", {}), {"topics", "exclude", "keep", "remap",
-                                          "services", "calls"}, "recipe.playback")
+                                          "services", "calls", "image_sources"}, "recipe.playback")
+    image_sources = play.get("image_sources", {})
+    if not isinstance(image_sources, dict):
+        raise RigError("recipe.playback.image_sources: expected an instance mapping to bag or camera")
+    for name, authority in image_sources.items():
+        if (not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", name) or
+                authority not in ("bag", "camera")):
+            raise RigError("recipe.playback.image_sources: expected INSTANCE: bag or INSTANCE: camera")
     if play.get("topics", "all") != "all":
         names(play["topics"], "recipe.playback.topics")
     for key in ("exclude", "keep", "services"):
