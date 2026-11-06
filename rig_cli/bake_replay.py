@@ -178,6 +178,13 @@ def selected_rows(manifest, descriptors):
     return rows
 
 
+def _image_labels(value):
+    return isinstance(value, dict) and bool(value) and all(
+        isinstance(role, str) and bool(role) and isinstance(labels, dict) and bool(labels)
+        and all(isinstance(k, str) and isinstance(v, str) for k, v in labels.items())
+        for role, labels in value.items())
+
+
 def image_plan(root, staging, manifest, descriptors, *, fleet=False):
     """Use the shipped launchers with replay config patches and the vehicle's runtime/CPU.
 
@@ -214,15 +221,24 @@ def image_plan(root, staging, manifest, descriptors, *, fleet=False):
                 row, root, extra_overrides=patch), values)
             if row.service == PLAYER_SERVICE:
                 caps = capabilities(row, desc)
-                if caps.get("plan") != 1 or caps.get("inspect_calls") != 1 or not caps.get("image_labels"):
-                    raise RigError("bake --include-replay: update ros2-bag-player; replay plan v1, "
-                                   "recorded-call inspection and image capability labels are required")
-                labels = caps["image_labels"]
-                if not isinstance(labels, dict) or any(
-                        not isinstance(role, str) or not role or not isinstance(values, dict) or not values
-                        or any(not isinstance(k, str) or not isinstance(v, str) for k, v in values.items())
-                        for role, values in labels.items()):
+                if any(type(caps.get(key)) is not int or caps[key] not in (1, 2)
+                       for key in ("plan", "inspect_calls")):
+                    raise RigError("bake --include-replay: update ros2-bag-player; supported replay plan "
+                                   "and recorded-call inspection versions (v1 or v2) are required")
+                labels = caps.get("image_labels")
+                if not _image_labels(labels):
                     raise RigError("bake --include-replay: invalid player image capability labels")
+                labels = {role: dict(values) for role, values in labels.items()}
+                if caps.get("multi_input") == 1:
+                    extra = caps.get("multi_input_image_labels")
+                    if (caps["plan"] != 2 or not _image_labels(extra) or any(
+                            values.get("io.rig.rosbag2.multi_input") != "1" for values in extra.values())):
+                        raise RigError("bake --include-replay: multi-input replay requires plan v2 "
+                                       "and verified runtime image capability labels")
+                    # No recording exists at bake time. Preserve the provider's complete
+                    # replay requirements so bundled images also support later multi-bag runs.
+                    for role, values in extra.items():
+                        labels.setdefault(role, {}).update(values)
                 required[row.name] = labels
         inventory = runtime_images.inventory(query_manifest, shipped, rows, configs,
             architecture=manifest.arch, env=env, required_labels=required)

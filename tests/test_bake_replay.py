@@ -71,7 +71,7 @@ import yaml
 cfg = yaml.safe_load(open(sys.argv[1]))
 verb = sys.argv[2]
 if verb == "replay-capabilities":
-    print(json.dumps(dict(plan=1, inspect_calls=1, image_labels={{"bag-player": {{"io.rig.rosbag2.replay": "1"}}}})))
+    print(json.dumps(cfg.get("test_capabilities", dict(plan=1, inspect_calls=1, image_labels={{"bag-player": {{"io.rig.rosbag2.replay": "1"}}}}))))
     sys.exit(0)
 assert 'BENCH_IMAGE' not in os.environ
 assert os.environ['RIG_TARGET_PLATFORM'] == 'jp7'
@@ -261,6 +261,70 @@ else:
         configs = {r.name: r for r in load_manifest(tree).sensors}
         self.assertFalse(configs["player"].enabled)
         self.assertEqual(yaml.safe_load(configs["cam"].config.read_text()), dict(name="cam", service="camera"))
+
+    def v2_player(self):
+        self.write("config/player.yaml", dict(name="player", service="ros2-bag-player", test_capabilities={
+            "plan": 2, "inspect_calls": 2, "multi_input": 1,
+            "image_labels": {"bag-player": {"io.rig.rosbag2.replay": "1"}},
+            "multi_input_image_labels": {"bag-player": {"io.rig.rosbag2.multi_input": "1"}}}))
+
+    def test_v2_provider_bundle_supports_onboard_multi_bag_replay(self):
+        from test_replay_preparation import Preparation
+        self.v2_player()
+        self.docker.info["Config"]["Labels"]["io.rig.rosbag2.multi_input"] = "1"
+        _, meta = self.bake(bundle=True)
+        self.assertEqual(meta["replay"]["images"]["reg/player:v1-jp7"]["required_labels"], {
+            "io.rig.rosbag2.replay": "1", "io.rig.rosbag2.multi_input": "1"})
+        tree = bake.unbake(self.root / "var/artifacts/release.tar.gz", self.root / "v2-onboard")
+        source = self.root / "multi-run"
+        for logger in ("first", "second"):
+            Preparation.bag(self, source / "bags" / logger / "session")
+        self.write("multi-run/manifest.yaml", {"run": "multi-run", "ended": "2026-01-01T00:00:00Z"})
+        self.docker.images = {ref: dict(self.docker.info, Id=image_id)
+                              for ref, image_id in meta["bundle"]["image_ids"].items()}
+        self.docker.calls.clear()
+        with patch.dict(os.environ), patch("subprocess.run", side_effect=self.docker.run), \
+             patch("rig_cli.image_catalog.docker_arch", return_value="arm64"), \
+             patch("rig_cli.runs.running_projects", return_value=[]), \
+             patch("rig_cli.doctor.collect", return_value=[]), \
+             contextlib.redirect_stdout(io.StringIO()) as out, \
+             contextlib.redirect_stderr(io.StringIO()) as err:
+            os.environ.pop("BENCH_IMAGE")
+            code = cli.main(["--root", str(tree), "replay", "check", str(source),
+                             "--skip-service", "camera", "--json"])
+        self.assertEqual(code, 0, err.getvalue() + out.getvalue())
+        report = json.loads(out.getvalue())
+        self.assertTrue(report["ready_to_run"])
+        self.assertEqual(len(report["source"]["bags"]), 2)
+        self.assertTrue(all(c[1:3] == ["image", "inspect"] for c in self.docker.calls))
+
+    def test_v2_provider_rejects_old_runtime_before_publishing_bundle(self):
+        self.v2_player()
+        with patch("subprocess.run", side_effect=self.docker.run), \
+             patch("rig_cli.bake._resolve_digest", return_value=None), \
+             contextlib.redirect_stderr(io.StringIO()) as err:
+            code = cli.main(["--root", str(self.root), "bake", "--tag", "old-runtime",
+                             "--include-replay", "--bundle-images"])
+        self.assertEqual(code, 1)
+        self.assertIn("requires image label io.rig.rosbag2.multi_input=1", err.getvalue())
+        self.assertFalse((self.root / "var/artifacts/old-runtime.tar.gz").exists())
+
+    def test_unsupported_player_capability_versions_fail_before_publishing(self):
+        for field in ("plan", "inspect_calls"):
+            for version in (0, 3, "2", True):
+                with self.subTest(field=field, version=version):
+                    caps = dict(plan=1, inspect_calls=1,
+                                image_labels={"bag-player": {"io.rig.rosbag2.replay": "1"}})
+                    caps[field] = version
+                    self.write("config/player.yaml", dict(name="player", service="ros2-bag-player",
+                                                          test_capabilities=caps))
+                    with patch("rig_cli.bake._resolve_digest", return_value=None), \
+                         contextlib.redirect_stderr(io.StringIO()) as err:
+                        code = cli.main(["--root", str(self.root), "bake", "--tag", "unsupported",
+                                         "--include-replay"])
+                    self.assertEqual(code, 1)
+                    self.assertIn("supported replay plan", err.getvalue())
+                    self.assertFalse((self.root / "var/artifacts/unsupported.tar.gz").exists())
 
     def test_bundle_includes_native_replay_images_and_runtime_accepts_loaded_aliases(self):
         tree, meta = self.bake(bundle=True)
