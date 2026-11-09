@@ -1,9 +1,15 @@
 # rig — roadmap
 
-Current checkpoint: **v0.2.78 — concurrent lifecycle groups**, reviewed 2026-11-05.
+Released checkpoint: **v0.2.81 — faster repeat replay and sensor-time TF handling**, reviewed 2026-11-08.
 Sections retain their original design scope and versioned milestones; their proposed schema
 is not a replacement for current operator references. Use [replay](REPLAY.md),
 [simulation](SIMULATION.md), and the [preparation backlog](ISAAC_PREP_REPORT.md) for current behavior.
+
+Replay now selects multiple bag sessions and original/proxy inputs independently, with offline
+timing and deduplication policies and explicit ROS image authority. See
+[v0.2.80](releases/v0.2.80.md). [v0.2.81](releases/v0.2.81.md) adds repeat-replay hash reuse and
+support for the sensor-proxy TF scheduling fixes in rig-infra v1.20.1; see the
+[current replay reference](REPLAY.md#bag-merge-and-timing-profiles).
 
 Ordinary `rig up` and `rig down` run services sharing a tier and order concurrently, including
 newly baked artifacts. See [v0.2.78](releases/v0.2.78.md) for barriers and failure semantics.
@@ -76,11 +82,13 @@ it never interprets what `camera_id` (or anything else) means.
 ### Phasing
 - **v1 ✅**: per-sensor `overrides` (dict deep-merge, list-replace, `null`-delete) + nameless profiles +
   render-to-`var/rendered/`. Rig-only; no launcher changes. (`rig_cli/resolve.py`; tests in `tests/`.)
-- **v2**: keyed list-merge; run-level override layers (apply one patch across many sensors, for §2).
+- **Still open**: keyed list-merge. Session-level per-instance overrides shipped with
+  version-2 recipes in v0.2.73; see [shared sessions](REPLAY.md#shared-simulation-and-replay-recipes).
 
 ### Open decisions
 - ~~Confirm **list = replace** for v1~~ — confirmed and shipped in v1 (keyed-merge stays a v2 item).
-- **Layering**: single per-entry override (v1) vs a profile + shared + per-entry override stack (later).
+- **Layering, since implemented**: package pins, bound overlays, working config deltas and row
+  overrides form the deployment stack; shared session overrides add a temporary execution layer.
 - Keep **both styles** (named instance files AND profiles+overrides) indefinitely? (Recommended: yes —
   named files stay valid and are simplest for one-offs.)
 
@@ -92,7 +100,7 @@ No launcher changes; no semantic interpretation of config bodies by rig; no simu
 ## 2. SIL / HIL via per-sensor source × per-run footprint (related)
 
 **Current status:** replay includes per-source recorded input, prepared recipes, portable
-runtime images and optional coordinated readiness/release. See [replay](REPLAY.md),
+runtime images, multiple bag inputs, offline proxies and optional coordinated readiness/release. See [replay](REPLAY.md),
 [coordinated startup](replay-coordination.md) and the
 [v0.2.72 acceptance evidence](releases/coordinated-replay-readiness-2026-10-27.md).
 Version 0.2.73 adds experimental [Isaac attachment](SIMULATION.md) using version-2 recipes with an exact

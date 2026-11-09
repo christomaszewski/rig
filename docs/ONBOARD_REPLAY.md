@@ -1,129 +1,256 @@
 # Replay recorded runs on the vehicle
 
-For live Isaac input on a simulation workstation, use [offline Isaac attachment](ISAAC_OFFLINE.md).
-Its recordings become normal replay sources. A shared [version-2 recipe](REPLAY.md#shared-simulation-and-replay-recipes)
-can keep the same exact process selection and overrides for capture and playback; copy the
-recipe into the deployment explicitly. The version-1/default startup policy below remains supported.
+Build and bake the deployment on your workstation, then collect, export and replay runs on the
+vehicle. The extracted artifact contains its own Rig and service launchers; it does not need a
+source checkout or reconstructed deployment. The vehicle needs Python 3 + PyYAML and Docker
+Compose. The bare-Docker `up.sh` path alone does not provide the replay CLI.
 
-An extracted Rig artifact is already a replay deployment. It ships Rig, the service launchers,
-and all configured instances, including disabled ones. Replay can read a run directly from the
-vehicle's `data_dir`; no reconstruction, source checkout, or copy of the recordings is needed.
-The vehicle needs Python 3 + PyYAML as well as Docker Compose for replay. The bare-Docker
-`up.sh` path alone does not provide the replay CLI.
+For live Isaac input, use [offline Isaac attachment](ISAAC_OFFLINE.md). Its recordings become
+normal replay sources; Isaac does not need to be running to replay them.
 
-## Prepare the deployment before shipping
+## Build and bake on the host
 
-`--include-replay` automatically adds and configures a missing `ros2-bag-player` in the artifact.
-It creates a disabled autonomy instance at order 999, selects the latest bag session, and sets
-`play.loop: false`. With exactly one enabled ROS 2 bag logger, it also sets `source.logger` to
-that logger's instance name. Otherwise logger selection is deferred to the recorded run or a
-replay recipe. Name/config collisions get an unused name such as `bag_player_2`.
+Set the vehicle runtime and CPU in `vehicle.yaml`, independently of the build machine:
 
-The source deployment files stay unchanged, and existing player rows/configs are preserved.
-The build machine locates the player from its existing `services.yaml` route, an exact package
-pin in `rig.lock`, a nearby checkout (including a sibling of another routed infra service), or
-its configured package registries, in that order. Registry sources are fetched at their pinned
-commit and recorded in the artifact's lock. No checkout is needed onboard.
-
-If discovery is ambiguous or the player lives elsewhere, select its source in the same command:
-
-```sh
-rig bake --tag field-v1 --include-replay --replay-player /path/to/rig-infra
-# Or use a pinned package reference from a configured registry:
-rig bake --tag field-v1 --include-replay --replay-player public/ros2-bag-player@1.18.0
+```yaml
+platform: jp6m
+arch: arm64
+images:
+  registry: registry.lan:5000
+  tag: field-v1
 ```
 
-Services need the current
-`runtime-images`/image-pinning contract; the player also needs replay plan v1, recorded-call
-inspection, and advertised image capability labels. Existing recipes and service replay
-configuration continue to work. Give consumers that should start automatically
-`replay: {start: true}` on their instance rows. This also selects disabled consumers for replay.
-Infrastructure follows its replay startup policy; recording sources such as cameras use their
-recordings when available. Bag-fed hardware drivers do not need to start for their topics to play.
-
-With the release images available in the configured registry:
+For an ARM64 Mac building a Jetson deployment and native development helpers:
 
 ```sh
+rig build --scope deployment,host --tag field-v1 --dry-run
+rig build --scope deployment,host --tag field-v1
 rig bake --tag field-v1 --include-replay
 ```
 
-Registry access is the default: replay pulls missing native images when invoked. The new
-`--include-replay` option checks the resulting player and queries the vendored launchers with
-replay config overrides at bake time. It records the selected instances and image requirements
-in `metadata.yaml.replay`, also visible through `rig artifact show field-v1`. It requires a known
-deployment CPU (`arch` or `--arch`). Normal `up` keeps the player disabled.
+`deployment` builds enabled vehicle services for the declared target. `host` adds enabled
+services for the host's development runtime and Docker CPU; on an ARM64 Mac that is normally
+Linux ARM64 with the `dev` camera runtime. Both scopes include shared build providers. The image
+registry must be reachable from the vehicle; see [registry setup](BUILD_AND_REPLAY.md#targets-and-scopes)
+when the host uses `localhost` and the vehicle uses a LAN address.
 
-The image plan covers enabled infrastructure allowed by policy, possible recording sources,
-explicit `replay.start: true` instances, and the player. It uses the **vehicle's runtime and CPU**;
-a service's portable `replay.platform` default does not switch an onboard deployment to another
-runtime. Bake does not start containers or inspect a historical run. Per-run readiness is still
-checked on the vehicle. Additional instances selected later by CLI can require additional images.
-
-## Replay onboard
-
-From the extracted artifact directory:
+Add `replay` to the scope when you need disabled consumers selected by replay policy or portable
+replay variants for all supported CPUs:
 
 ```sh
-./rig down --end-run          # stop live recording and close its run
-./rig runs                    # find the recorded run ID or label
-./rig replay RUN --auto-end   # replay, then stop and close the new replay run
+rig build --scope deployment,host,replay --tag field-v1
 ```
 
-`./rig replay` is the direct entry point; `./run.sh replay` forwards to the same command.
+It is not mandatory for every onboard replay. Inspect the dry-run for the instances and image
+variants you intend to use. The replay scope follows deployment replay policy, not a particular
+recipe, so ensure optional consumers are included in that policy or build them explicitly.
+Baking never builds missing images. The bake `--tag` names the artifact; `images.tag` selects the
+image release. Keep the latter aligned with the tag you built.
 
-Startup remains `legacy` by default, including when `--include-replay` added the player.
-With coordinated-capable player/camera packages and rebuilt images, opt in per replay:
+`--include-replay` adds a missing `ros2-bag-player` only inside the baked artifact. You do not need
+to add a player to the host's `vehicle.yaml` first. The generated instance is disabled for normal
+startup, has `play.loop: false`, and uses an unused name such as `bag_player` or `bag_player_2`.
+With exactly one enabled bag logger, it also defaults to that logger's recorded instance name.
+Multiple logger inputs are selected from the run or recipe later.
+
+Player discovery checks service routes, exact lockfile pins, nearby checkouts, then configured
+package registries. If necessary, choose the source for the automatically added player:
 
 ```sh
-./rig replay check RUN --startup coordinated
-./rig replay RUN --startup coordinated --auto-end 0
+rig bake --tag field-v1 --include-replay --replay-player /path/to/rig-infra
+# Or select a pinned package from a configured registry:
+rig bake --tag field-v1 --include-replay --replay-player public/ros2-bag-player@1.20.0
 ```
 
-Only participating replay producers need the new coordination protocol: the bag player and
-selected recorded cameras. Ordinary consumers use their recorded ROS endpoint evidence and
-do not need a new service API. Existing services can keep running with legacy startup. Bake's
-basic replay capability check does not promise coordinated support; the explicit check above
-verifies the selected packages, images and run evidence. See [coordinated replay](replay-coordination.md).
-Supply `RUN`, or use `--recipe NAME` with a saved source binding.
+Existing player rows and configs are preserved; `--replay-player` does not replace them. Update
+an existing player through its service route/package before baking. Bag proxies and multi-bag
+replay require the player's plan-v2, multi-input and export capabilities plus matching images.
+The current bake check accepts supported plan/recorded-call inspection versions 1 or 2 and
+checks the extra image labels when the provider advertises multi-input support.
 
-`RUN` can also be an absolute run directory. Replay uses source recordings read-only and, when
-`data_dir` is configured, creates a new provenance-linked run for the outputs. It refuses to
-start over a running deployment. `--auto-end` waits for the player to finish and then tears down
-the replay; it does not restart live recording. Use `./run.sh up` when ready to resume live work.
+Bake queries the resulting launchers and records the default onboard replay image plan in
+`metadata.yaml.replay`, also shown by `rig artifact show field-v1`. It uses the vehicle's runtime
+and CPU, requires a known target CPU, and does not inspect a historical run. A recipe that selects
+additional consumers can require images beyond this default plan.
 
-To inspect selection first, use `./rig replay check RUN`. Check never pulls images, so a
-cold image cache may report missing images that normal replay would fetch. To omit cameras,
-add `--skip-service camera-service`. To limit the bag window, use `--from 10 --to 40`.
-If a run needs metadata repair or custom bindings, use
-`./rig replay prepare RUN --recipe field-test`, then
-`./rig replay --recipe field-test --auto-end`; see [replay preparation](REPLAY.md).
+## Collect a run and select its inputs
+
+After transferring and extracting the artifact, work from its directory:
+
+```sh
+./rig pull                  # enabled instances for normal deployment startup
+./rig up
+# Collect the run, then stop the deployment and close the run.
+./rig down --end-run
+./rig runs
+```
+
+A plain `./rig pull` does not select disabled rows such as the generated bag player. Ordinary
+replay defaults to `--pull missing` and acquires its selected runtime images. To preload the
+player explicitly, use `./rig pull bag_player`, substituting its actual instance name.
+`replay check`, `replay prepare`, and dry-run commands do not pull missing replay images.
+Export helpers have their own native image requirements; a real export can acquire missing
+camera converter images after reporting them, while an export dry-run only reports the plan.
+
+A direct replay uses default startup and original inputs:
+
+```sh
+./rig replay check RUN
+./rig replay RUN --auto-end
+```
+
+Use a version-2 recipe when you want an exact process selection and per-input proxy choices.
+Create **one file**, for example `replay/analysis.yaml`. Replace the instance names and logger
+names below with those in your deployment and recorded run:
+
+```yaml
+version: 2
+session:
+  instances: [zenoh_router, cam_front, cam_rear, feature_detector]
+  clock: source
+replay:
+  bags:
+    - {logger: bag_front, session: all}
+    - {logger: bag_rear, session: all}
+  inputs:
+    bags: {profile: sensor-conservative}
+    instance:cam_front: {profile: h264}
+    instance:cam_rear: {use: original}
+  playback:
+    exclude: [/feature_detector/output]
+```
+
+`session.instances` contains destination **instance names**, including required infrastructure,
+camera sources and consumers. The player is managed automatically and must not be listed.
+Include an output bag logger only if you want to record replay outputs. The `logger` fields refer
+to recording directories under `RUN/bags/LOGGER/`, usually the original logger instance names;
+those source loggers do not have to run in the replay deployment. Use `bags: all` for every source
+bag, or list only the sessions you want. The selected set becomes one bag proxy.
+
+Omitted input selectors use originals. `h264` is camera-service's current proxy profile;
+`inputs.instance:NAME` selects it for that camera independently. To preview proxy video while
+feeding full-quality recorded ROS images to algorithms, add this only when the selected bags
+contain the camera's matching image topics:
+
+```yaml
+# Under replay.playback:
+image_sources:
+  cam_front: bag
+```
+
+That disables the camera's ROS image bridge while keeping its video preview. `camera` instead
+selects camera-produced ROS images and suppresses their matching bag topics. See
+[replay inputs and image authority](REPLAY.md#one-recipe-for-original-and-exported-inputs).
+
+`sensor-conservative` schedules ordinary messages from their sensor headers and retains ambiguous
+cross-bag repeats. It does not collapse ordinary byte-identical IMU, SBG or point-cloud messages.
+Choose `sensor-aggressive` for equal-payload cross-bag matching within the receive-time window,
+or `arrival-conservative` to preserve recorded receive-time scheduling. Original multi-bag
+playback performs no live deduplication. See [bag timing profiles](REPLAY.md#bag-merge-and-timing-profiles),
+including TF handling and timestamp caveats.
+
+## Export, prepare and replay with the same recipe
+
+```sh
+RUN=your-recorded-run-id
+./rig run export "$RUN" --recipe replay/analysis.yaml --dry-run
+./rig run export "$RUN" --recipe replay/analysis.yaml
+./rig replay prepare "$RUN" --recipe replay/analysis.yaml
+./rig replay check --recipe replay/analysis.yaml --format json
+./rig replay --recipe replay/analysis.yaml --auto-end
+```
+
+The recipe is your editable configuration. Export creates immutable proxy generations inside
+the original run's `exports/` tree. Prepare saves the resolved source path, selected generations
+and derived state under `var/replay/`; edit the recipe, not those generated files. No second recipe
+or `sessions/` directory is required. Using the explicit path also avoids ambiguity if a
+same-named file exists under `sessions/`.
+
+Each recipe keeps its own prepared source binding. Preparing another recipe for another run does
+not change this one; preparing this same recipe again replaces its current binding. An explicit
+`RUN` on a check or replay command overrides the source for that invocation without changing the
+saved preparation. After changing topic exclusions, process selection or input selectors, prepare
+that recipe again. Topic exclusions do not require re-exporting a bag; a changed proxy profile or
+conversion policy does. Changing an exact proxy ID requires selecting the new generation explicitly.
+
+For repeated unchanged replays, Rig v0.2.81 adds `--fast`:
+
+```sh
+./rig replay --recipe replay/analysis.yaml --fast --auto-end
+```
+
+This reuses previously computed hashes when the files' identities and timestamps still match.
+Normal prepare/replay warms the local cache; missing or changed entries are hashed normally.
+Runtime images, recipe/config changes and startup checks still run. Omit the flag for fresh byte
+verification. See [faster repeated replays](REPLAY.md#faster-repeated-replays) for the scope and
+limits; the separate legacy startup delay is still controlled by `--start-delay`.
+
+The first positional argument to `rig replay` is always the run. With a version-2 recipe, select
+processes by editing `session.instances`; `--include-service` and `--skip-service` are rejected.
+Version-1/default workflows also support repeated `--include-service SERVICE`, where `SERVICE`
+is the `service:` package name and selects all matching instances, not one `name:` value.
+See [process selection](REPLAY.md).
+
+`RUN` may be a catalog ID or an absolute directory, including a run collected with another
+artifact. Replay uses the **current deployment's** service configs, launchers and image catalog;
+the source run supplies recordings and provenance. Compatible message types, topic names and
+recording formats are still required. Code/config changes can change algorithm results even when
+the data is compatible. Reconstruct the source deployment when you instead need its captured
+configuration and source/image provenance; see [reconstruction](BUILD_AND_REPLAY.md#reconstruction-and-selection).
+
+The camera converter likewise uses the current deployment's image selection. Its native `cam-dev`
+image is a separate requirement even on Jetson. Inspect `vehicle.yaml` `images.registry` /
+`images.tag`, effective `CAM_DEV_IMAGE` overrides, and the `rig.lock.build_catalog` entry when an
+export proposes an unexpected image. `metadata.yaml.image_tag` identifies the deployment's image
+release; the artifact's own `tag` is not an image tag.
+
+## Startup, windows and teardown
+
+Replay refuses to start over a running deployment. It mounts source recordings read-only and,
+when `data_dir` is configured, opens a new provenance-linked run for outputs. `--auto-end` waits
+for the player to finish, then tears down replay and closes that new run. It does not restart
+live collection; use `./rig up` when ready to resume it. `./run.sh replay` also forwards to Rig.
+
+Startup remains `legacy` by default. With coordinated-capable player/camera packages and images,
+opt in with the same recipe:
+
+```sh
+./rig replay check --recipe replay/analysis.yaml --startup coordinated
+./rig replay --recipe replay/analysis.yaml --startup coordinated --auto-end 0
+```
+
+Only participating replay producers need the coordination protocol; ordinary consumers use their
+recorded ROS endpoint evidence. The explicit check verifies selected packages, images and source
+run evidence. Bake's basic replay capability check alone does not promise coordinated support.
+See [coordinated replay](replay-coordination.md).
+
+Use `--from 10 --to 40` to select a window. A cold image cache may make check report missing images
+that a normal replay would fetch. For TF-dependent analysis, allow preceding dynamic transform
+data to warm the buffer when starting inside a recording.
 
 ## Optional offline replay
+
+On the build host:
 
 ```sh
 rig bake --tag field-offline --include-replay --bundle-images
 ```
 
-This exports the union of normal startup and onboard replay images for the deployment CPU.
-Replay-mode camera images and the disabled player are included even when normal startup does
-not use them. Required replay reader capability labels are checked before publishing the archive.
-The same option works with templated fleet artifacts; identity remains unresolved until the
-vehicle runs it. Their normal image queries need `verbs.images`; replay queries need
-`verbs.runtime-images` that can plan images without resolving vehicle-specific identity fields.
+This bundles the union of normal startup and default onboard replay images for the deployment
+CPU, including the disabled player and replay-mode cameras. Required replay image labels are
+checked before publication. A plain `--bundle-images` artifact covers only normal startup.
+The bundle does not include arbitrary later recipe/config changes, other runtimes/CPUs, or every
+proxy conversion helper. Prepare proxies beforehand or provision those helper images separately
+before going offline. Templated fleet artifacts support the same options when their launchers
+can plan image requirements without resolved vehicle identity.
 
-Normal startup loads the bundled images. On a fresh vehicle that will replay before its first
-`up`, or after its image cache has been cleared, load them explicitly:
+Normal startup loads bundled images. For replay before the first `up`, or after clearing the cache:
 
 ```sh
 ./run.sh load
-./rig replay RUN --pull never --auto-end
+./rig replay --recipe replay/analysis.yaml --pull never --auto-end
 ```
 
-Bundled replay verifies the recorded image identities and never fetches missing images from
-the registry. A plain `--bundle-images` artifact still bundles only normal startup images;
-it may lack replay requirements. Re-bake with both flags for offline replay. The bundle does
-not include other runtimes/CPUs, arbitrary later config changes, or camera proxy conversion
-helpers. Compatible proxies can be prepared separately and selected with `--use-proxies`.
-
-Existing extracted artifacts retain their bundled Rig and launcher versions. Ship a newly
-baked artifact to gain these checks and optional replay image payloads.
+Bundled replay requires the recorded image identities and never fetches replacements. Existing
+artifacts retain their bundled Rig and launcher versions; bake and ship a new artifact to adopt
+updated replay behavior.

@@ -6,6 +6,10 @@ and section 9 B records what changed from this plan and what was verified. Phase
 Scope: Rig, rig-infra (`base/`, `msgs/`), sbg_driver and novatel. camera-service, ouster and
 mavlink-router are deferred (section 10).
 
+This is the dated implementation/design record. Use
+[BUILD_AND_REPLAY.md](BUILD_AND_REPLAY.md) for current build commands, scope selection and
+image delivery. Unchecked phase-2 proposals below are not implemented command contracts.
+
 Goal: on a development box with a local registry, `rig build --offline` rebuilds every image
 the deployment builds without reaching a remote git host, a public registry, or a package
 mirror. That covers a code edit and a local message change. The vehicle then pulls from that

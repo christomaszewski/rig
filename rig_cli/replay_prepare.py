@@ -48,7 +48,7 @@ def location(root, recipe_path, source, *, key=None, use_proxies=False):
     return folder / (key or digest(str(Path(source).resolve()))[:16])
 
 
-def prepared(root, recipe_path, recipe, source, *, use_proxies=False):
+def prepared(root, recipe_path, recipe, source, *, use_proxies=False, verification=None):
     """Return a verified generated source, or None; never consume stale host bindings."""
     source = Path(source).resolve()
     dest = location(root, recipe_path, source, use_proxies=use_proxies)
@@ -71,7 +71,7 @@ def prepared(root, recipe_path, recipe, source, *, use_proxies=False):
             return None
     if doc.get("bag_proxy"):
         from .bag_proxies import verify_binding as verify_bag_proxy
-        verify_bag_proxy(doc["bag_proxy"], source)
+        verify_bag_proxy(doc["bag_proxy"], source, verification=verification)
     for name, fingerprint in doc.get("generated", {}).items():
         path = dest / name
         if not path.is_file() or digest(path.read_bytes().hex()) != fingerprint:
@@ -132,14 +132,15 @@ def copy_file(source, dest):
     shutil.copy2(source, dest)
 
 
-def create(root, recipe_path, recipe, plan, manifest, descriptors):
+def create(root, recipe_path, recipe, plan, manifest, descriptors, *, verification=None):
     source = plan["source"]
     if source.get("bag_proxy"):
         from .bag_proxies import verify_binding as verify_bag_proxy
-        verify_bag_proxy(source["bag_proxy"], source["root"])
+        verify_bag_proxy(source["bag_proxy"], source["root"], verification=verification)
     use_proxies = bool(plan.get("use_proxies"))
     dest = location(root, recipe_path, source["path"], key=generation(plan))
-    existing = prepared(root, recipe_path, recipe, source["path"], use_proxies=use_proxies)
+    existing = prepared(root, recipe_path, recipe, source["path"], use_proxies=use_proxies,
+                        verification=verification)
     if existing and location(root, recipe_path, source["path"], use_proxies=use_proxies) == dest:
         return existing
     # Refuse to replace modified generated files even when a recipe/source change invalidated it.
@@ -233,7 +234,7 @@ def create(root, recipe_path, recipe, plan, manifest, descriptors):
         for binding in plan["recordings"].values():
             verify_binding(binding)
         if source.get("bag_proxy"):
-            verify_bag_proxy(source["bag_proxy"], source["root"])
+            verify_bag_proxy(source["bag_proxy"], source["root"], verification=verification)
         write_yaml(stage / "resolved.yaml", plan)
         write_yaml(stage / "report.yaml", {k: plan[k] for k in
                                           ("issues", "ready_to_prepare", "ready_to_run")})

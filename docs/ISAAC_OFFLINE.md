@@ -343,6 +343,10 @@ workflow's ownership and successful-completion checks.
 
 The common selection and logger override are reused. Isaac supplied the first clock; the
 bag player supplies the replay clock. Recorded `/clock` is not replayed as a second clock.
+This example records ROS images in bags; it creates no camera-service video recordings.
+Optional bag proxies can be selected through the same recipe's `replay.inputs.bags`, following
+[the input and export workflow](REPLAY.md#one-recipe-for-original-and-exported-inputs).
+Camera video proxy selection applies only when the source run contains those camera recordings.
 Replaying the sensors follows the recorded trajectory. A new controller command cannot
 change those past images. To run the world again, prepare/reset Isaac and attach a new
 simulation session instead. Scene version and seed are provenance, not deterministic replay.

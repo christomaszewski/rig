@@ -14,5 +14,8 @@ An omitted physical camera does not create that video during simulation.
 Copy the file to `sessions/camera-record.yaml` inside the deployment. Adapt ROS settings,
 instance names, topics, scene provenance and the Python interpreter together. Add actual
 autonomy instances and command bindings only after the camera recording round trip works.
+Keep one shared file: its `simulation` and `replay` sections supply the two input sources,
+while `session.instances` selects the same consumers. An explicit `--recipe PATH.yaml` also
+works for both commands if the file lives elsewhere.
 The walkthrough includes that extension and an acceptance checklist. No GPU or live Isaac
 result is implied by the checked-in example.

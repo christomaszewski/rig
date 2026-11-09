@@ -1,10 +1,12 @@
 # rig — deployment cheat sheet
 
-> The whole workflow on one page (rig ≥ v0.2.74; older features name the version that introduced
-> them). Long-form: `RUNBOOK.md` (worked Orin example),
-> `README.md` (concepts + install), `STATE.md` (current live state). Mental model: **services own their
-> bring-up** (launcher + `rigging.yaml`); **rig owns the vehicle** (manifest, env, ordering, artifacts).
-> The vehicle runs the baked artifact — no source, no internet (fleet artifacts render on-vehicle, §1.6).
+> A command reference for the current checkout; see the [index](README.md) for release requirements.
+> Long-form: [Runbook](RUNBOOK.md) (worked Orin example),
+> [Project README](../README.md) (concepts + install), [State](STATE.md) (development status).
+> **Services own their bring-up** (launcher + `rigging.yaml`); **rig owns the vehicle**
+> (manifest, env, ordering, artifacts).
+> The vehicle runs the baked artifact without source checkouts. Offline operation requires the
+> selected runtime/export images to be bundled or cached; fleet artifacts render on-vehicle (§1.6).
 > Install rig itself via deb/brew/pipx (README "Install"); `rig setup` once per user.
 
 For the full documentation map see the [index](README.md). Isaac attachment and offline
@@ -327,6 +329,8 @@ rig fleet sync --into fleet-runs      # harvest SEALED runs (ended: = safe) into
 rig fleet sync --into fleet-runs --include-service-exports
                                       # include verified sparse generations at exports/services/;
                                       # default sync excludes them; incompatible with --profile
+                                      # bag proxies under exports/inputs/bags are not included:
+                                      # copy the complete run or regenerate them at the destination
 rig fleet sync --profile review --export   # the SLIM version instead: each run's exports/review/
                                       #   (vehicle.yaml export_profiles — video omitted, bags
                                       #   re-written small by the logger), made ON the vehicle
@@ -348,8 +352,8 @@ export_profiles:
 
 The SIL network is create/teardown + env only: `RIG_NETWORK`/`RIG_VEHICLE_IP` are exported to
 every stack; services JOIN it in their own composes (external network + ipv4_address) — rig
-never writes compose config. Vehicles never read fleet.yaml; `fleet up` pushes it beside each
-deployment so the run snapshot records the roster the run was launched under.
+never writes compose config. `fleet up` pushes fleet.yaml beside each deployment, where Rig
+uses it to render fleet variables and include the launch roster in the run snapshot.
 
 `rig bake` detects markers automatically (no flag): a templated deployment bakes a **fleet
 artifact** — unresolved configs, no compose-only form, rendered on-vehicle by the bundled rig
@@ -398,6 +402,7 @@ rig build sbg novatel                         # only these services (service or 
                                               #   command that retries only the services that failed
                                               #   or never ran
 rig build --scope host --tag iteration-1       # this machine's runtime and Docker CPU
+rig build --scope deployment,host             # vehicle target plus this host's native runtime
 rig build --scope deployment,replay --dry-run  # vehicle target plus replay companion build plan
 rig build --no-cache                          # FULL rebuild: RIG_BUILD_NO_CACHE=1 to every build command;
                                               #   every building service must declare
@@ -466,9 +471,15 @@ rig bake --tag v1                             # -> var/artifacts/v1.tar.gz  (sha
 rig bake --tag v1 --bundle-images             # + docker-saves the image set INTO the artifact (multi-GB):
                                               #   zero registry at deploy time; up.sh loads missing/different images
 rig bake --tag laptop-test --platform dev --arch amd64 --bundle-images
-rig build --scope deployment,replay          # vehicle target + replay companions; bare build stays full matrix
-rig build --scope host --tag bench-1         # machine provisioned runtime + Docker engine CPU
+rig bake --tag v1 --include-replay            # add a missing disabled player in the artifact;
+                                              # validate replay support, leaving the author's rows unchanged
+rig bake --tag v1 --include-replay --bundle-images  # bundle deployment AND selected replay images
 ```
+
+`--include-replay` does not require a player row in the authoring `vehicle.yaml`. Use
+`--replay-player PATH|PINNED_REF` only to choose the source for an automatically added player;
+an existing player row keeps its source. Build scopes choose image targets; this bake flag
+packages replay support. [Onboard replay](ONBOARD_REPLAY.md) covers the complete workflow.
 
 An explicit `--tag` wins; otherwise the artifact name comes from literal `images.tag` in
 `vehicle.yaml`, not host-local overrides. Missing or templated tags require `--tag`.
@@ -493,7 +504,8 @@ rig artifact prune --keep 3 --yes              # remove older archives and match
 
 The artifact = resolved configs + complete vehicle.yaml + vendored launch surfaces + rig + a **compose-only**
 form (build-stripped; built images digest-pinned, mirrored images by tag). It runs on bare Docker.
-Bundled artifacts contain only the deployment runtime/CPU images and use content-specific aliases
+Bundled artifacts contain the deployment runtime/CPU images, plus selected replay images when
+`--include-replay` is supplied, and use content-specific aliases
 with recorded image IDs; the full companion catalog stays in `rig.lock`. Target selection comes from
 explicit bake flags, then `vehicle.yaml`, then unambiguous service declarations. No local overrides
 enter the bake. Bundling requires Docker API 1.48+; templated fleet bundles also require a declared
@@ -515,7 +527,9 @@ ssh $VEHICLE 'cd ~/ws/v1 && ./run.sh status'  # or: ./run.sh logs <name> · ./ru
 
 Quick verification: containers up (`docker ps`), dashboard at `http://<vehicle>:8080`, recordings growing
 under `data_dir`, camera log shows `health: frames=N, no drops`. After the first pull the vehicle runs
-**offline** — the registry is only needed for updates.
+**offline** once every image needed by the selected workflow is cached. Plain `./rig pull`
+selects enabled instances; explicitly pull disabled replay instances such as `./rig pull bag_player`
+and acquire any native export helpers before disconnecting.
 
 **Operational states** (rig ≥ v0.2.35; services declaring `standby`/`activate`/`state` in rigging
 `verbs:` — e.g. ouster ≥ v0.2.0. Others are always-active and skipped):
@@ -595,19 +609,61 @@ rig replay <stamp>_dock-test planner --from 120 --to 300   # a SECTION of the ru
                                                            #   bag start; --auto-end for sweeps)
 rig replay check RUN --format json                         # read-only readiness and resolved selection
 rig replay prepare RUN --recipe demo                       # source-preserving local preparation
-rig replay prepare RUN --recipe demo --player public/ros2-bag-player@1.18.0
+rig replay prepare RUN --recipe demo --player /path/to/rig-infra/ros2-bag-player
                                                            # add a missing player row, route and config
 rig replay --recipe demo                                   # replay using that recipe and local binding
 rig replay check RUN --startup coordinated                 # opt-in held producers + consumer readiness
 rig replay RUN --startup coordinated --auto-end            # supported producer packages/images required
-rig replay check RUN --use-proxies                          # require compatible camera proxies
-rig replay prepare RUN --recipe demo --use-proxies           # bind existing proxies, never transcode
-rig replay --recipe demo --use-proxies                      # explicit every time; originals by default
+rig run export RUN --recipe replay/analysis.yaml --dry-run  # author the recipe below first
+rig run export RUN --recipe replay/analysis.yaml             # build only its selected proxies
+rig replay prepare RUN --recipe replay/analysis.yaml         # bind exact inputs; never transcode
+rig replay --recipe replay/analysis.yaml                     # repeatable service/input selection
+rig replay --recipe replay/analysis.yaml --fast              # v0.2.81: reuse unchanged-file hashes
 rig replay RUN planner --selection recorded                # previous recorded-subscription selector
 rig swap planner ../planner                                # in a reconstructed tree: same rows +
 rig swap planner public/planner@2.1.0                      #   configs, DIFFERENT code (drift named)
 ```
 (bare-Docker hosts: `./new-run.sh dock-test && ./up.sh` — the flagged forms need the bundled rig.)
+
+Use one version-2 recipe to choose exact destination instances and source inputs. This example
+assumes the named instances exist in `vehicle.yaml`; list required infrastructure and any output
+logger explicitly. Rig adds the bag player automatically.
+
+```yaml
+# replay/analysis.yaml
+version: 2
+session:
+  instances: [zenoh_router, dashboard, bag_logger, cam_front, planner]
+replay:
+  bags: all
+  inputs:
+    bags: {profile: arrival-conservative}
+    instance:cam_front: {profile: h264}
+  playback:
+    image_sources: {cam_front: bag}
+    exclude: [/planner/result]
+```
+
+`image_sources: bag` requires image topics from that camera in the selected bags; it disables the
+camera's ROS image bridge while keeping its proxy video available for preview. Omit that entry
+to use the ordinary ownership policy. Replace `bags: all` with logger/session rows to select
+a subset; `logger` is the recorded instance directory under `RUN/bags/`, not a service key.
+`arrival-conservative` preserves ambiguous duplicate sensor messages; use an aggressive profile
+only when deliberately collapsing likely matches. See [Replay](REPLAY.md) for the full schema.
+
+Each recipe keeps its own prepared run binding. An explicit `RUN` overrides it for that command;
+re-running `prepare` updates that recipe's binding. After editing a recipe, prepare it again.
+Both recipe versions can live under `replay/`; no second file in `sessions/` is needed. An explicit
+path avoids a same-named `sessions/` recipe taking precedence.
+
+`--fast` reuses the local hash cache populated by normal prepare/replay, with fresh file identity
+checks; changed or uncached files are hashed normally. It does not skip runtime or startup checks,
+and it does not remove the legacy 20-second delay (`--start-delay 0` controls that separately).
+Omit `--fast` for fresh byte verification. See [repeat replay](REPLAY.md#faster-repeated-replays).
+
+Recipe `inputs` and repeatable `--input bags=profile:NAME` / `--input instance:NAME=original`
+select proxies directly. The older `--use-proxies` / `proxies` mechanism is still supported for
+service exports; it is not required by the unified selectors above.
 
 `rig run replay` also accepts every `rig replay` option. `--skip-service` matches the service
 key in `vehicle.yaml`, across enabled and disabled instances, for ordinary/version-1 replay.
@@ -618,6 +674,12 @@ eligible; without graph evidence, use exact recipe `playback.exclude` entries fo
 The new run records `replay.skipped` for provenance. A skipped
 instance cannot also be named under test or requested with `--live`. With no data topics, an
 available bag can still drive a clock-only timeline. See [Replay preparation](REPLAY.md).
+
+For ordinary/version-1 replay, positional names select `name:` instances; repeat
+`--include-service SERVICE` to start every instance with that `service:` key. For example,
+`name: x, service: x-pipeline-ros2` means `rig replay RUN x` or
+`rig replay RUN --include-service x-pipeline-ros2`. When supplying positional names with a
+recipe, include `RUN` first; otherwise the first name is parsed as the run.
 
 Recorded ROS calls default to unambiguous servers in the started set, excluding targets with a
 known selected client. Prepare/run inspect request contents in the chosen bag window; check

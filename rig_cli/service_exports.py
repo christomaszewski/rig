@@ -20,6 +20,9 @@ from .common import eprint, load_yaml, safe_component
 
 KIND = "rig-service-export"
 ID = re.compile(r"[0-9a-f]{64}")
+_VERIFICATION_CACHE_VERSION = 1
+_VERIFICATION_CACHE_MAX_BYTES = 16 * 1024 * 1024
+_VERIFICATION_CACHE_MAX_ENTRIES = 20_000
 
 
 def digest(value):
@@ -42,15 +45,157 @@ def _file_identity(path):
 
 
 class VerificationContext:
-    """Hashes shared only within one replay invocation, with fresh stat checks on reuse.
+    """Share hashes within an invocation; optionally reuse local facts from an earlier one.
 
     This is not an artifact-validation cache: callers still validate manifests, expected
-    hashes, path containment and the complete inventory each time.
+    hashes, path containment and the complete inventory each time. Persistent reuse relies
+    on local file identity and timestamps; it is not a fresh media-integrity scan.
     """
 
-    def __init__(self, *, progress=eprint):
+    def __init__(self, *, progress=eprint, cache_path=None, reuse=False, writable=False):
         self._checksums = {}
         self._progress = progress
+        self._cache_path = Path(cache_path) if cache_path is not None else None
+        self._reuse = bool(reuse)
+        self._writable = bool(writable)
+        self._scope = _verification_cache_scope() if self._cache_path is not None else None
+        self._previous = self._read_cache() if self._reuse else {}
+        self._invalidated = set()
+        self._persistent_hits = {}
+        self._hashed_files = 0
+        self._hashed_bytes = 0
+
+    def _read_cache(self):
+        if self._cache_path is None or self._scope is None:
+            return {}
+        try:
+            with self._cache_path.open("rb") as stream:
+                data = stream.read(_VERIFICATION_CACHE_MAX_BYTES + 1)
+            if len(data) > _VERIFICATION_CACHE_MAX_BYTES:
+                return {}
+            doc = json.loads(data)
+            if (not isinstance(doc, dict) or set(doc) != {"version", "scope", "checksums"}
+                    or type(doc["version"]) is not int or doc["version"] != _VERIFICATION_CACHE_VERSION
+                    or doc["scope"] != self._scope or not isinstance(doc["checksums"], dict)
+                    or len(doc["checksums"]) > _VERIFICATION_CACHE_MAX_ENTRIES):
+                return {}
+            entries = {}
+            for path, entry in doc["checksums"].items():
+                if (not isinstance(path, str) or not Path(path).is_absolute() or "\0" in path
+                        or not isinstance(entry, dict) or set(entry) != {"identity", "sha256"}):
+                    return {}
+                identity, checksum = entry["identity"], entry["sha256"]
+                if (not isinstance(identity, list) or len(identity) != 6 or identity[0] != path
+                        or any(type(value) is not int for value in identity[1:])
+                        or any(value < 0 for value in identity[1:4])
+                        or not isinstance(checksum, str) or not ID.fullmatch(checksum)):
+                    return {}
+                entries[path] = (tuple(identity), checksum)
+            return entries
+        except (OSError, ValueError, TypeError, UnicodeError, RecursionError):
+            return {}  # An unavailable or stale performance cache never authorizes skipping a hash.
+
+    def _cached(self, identity):
+        key = identity[0]
+        cached = self._checksums.get(key)
+        if cached is not None and cached[0] == identity:
+            return cached
+        self._checksums.pop(key, None)
+        previous = self._previous.get(key)
+        if key not in self._invalidated and previous is not None and previous[0] == identity:
+            self._persistent_hits[key] = identity[3]
+            return previous
+        return None
+
+    def _invalidate(self, key):
+        self._checksums.pop(key, None)
+        self._invalidated.add(key)
+
+    def summary(self):
+        return dict(mode="cached" if self._reuse else "full", hashed_files=self._hashed_files,
+                    hashed_bytes=self._hashed_bytes, cached_files=len(self._persistent_hits),
+                    cached_bytes=sum(self._persistent_hits.values()))
+
+    def revalidate(self):
+        """Refuse launch if any file used in this invocation changed since verification."""
+        for key, (identity, _) in list(self._checksums.items()):
+            try:
+                unchanged = _file_identity(Path(key)) == identity
+            except OSError:
+                unchanged = False
+            if not unchanged:
+                self._invalidate(key)
+                raise RigError(f"Replay input changed since verification: {key}; check/prepare again")
+
+    def save(self):
+        """Atomically publish hash facts; failure only loses the next invocation's speedup."""
+        if (not self._writable or self._cache_path is None or self._scope is None
+                or not (self._checksums or self._invalidated)):
+            return
+        temporary = None
+        try:
+            entries = self._read_cache()
+            for key in self._invalidated:
+                entries.pop(key, None)
+            for key, value in self._checksums.items():
+                entries.pop(key, None)  # Keep the most recently used entries when bounding the cache.
+                entries[key] = value
+            entries = dict(list(entries.items())[-_VERIFICATION_CACHE_MAX_ENTRIES:])
+            while True:
+                doc = dict(version=_VERIFICATION_CACHE_VERSION, scope=self._scope, checksums={
+                    path: dict(identity=list(value[0]), sha256=value[1]) for path, value in entries.items()})
+                payload = json.dumps(doc, separators=(",", ":")).encode()
+                if len(payload) <= _VERIFICATION_CACHE_MAX_BYTES:
+                    break
+                entries = dict(list(entries.items())[max(1, len(entries) // 2):])
+            self._cache_path.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(prefix=".verification-cache-", suffix=".tmp", mode="wb",
+                                             dir=self._cache_path.parent, delete=False) as stream:
+                temporary = Path(stream.name)
+                stream.write(payload)
+            # Concurrent writers can lose cache entries, but cannot publish a partial file.
+            os.replace(temporary, self._cache_path)
+        except OSError as exc:
+            if self._progress is not None:
+                self._progress(f"rig replay: could not save verification cache; next run may rehash: {exc}")
+        finally:
+            if temporary is not None:
+                try:
+                    temporary.unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+
+def _verification_cache_scope():
+    """Bind cached inode evidence to this host boot, without launching a subprocess."""
+    try:
+        hostname = os.uname().nodename
+        boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+        if re.fullmatch(r"[0-9a-f-]{36}", boot):
+            return f"{hostname}:{boot}"
+    except (OSError, AttributeError):
+        pass
+    try:
+        if os.uname().sysname != "Darwin":
+            return None
+        import ctypes
+
+        class Timeval(ctypes.Structure):
+            _fields_ = [("seconds", ctypes.c_long), ("microseconds", ctypes.c_int)]
+
+        boot = Timeval()
+        size = ctypes.c_size_t(ctypes.sizeof(boot))
+        sysctl = ctypes.CDLL(None).sysctlbyname
+        sysctl.argtypes = [ctypes.c_char_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_size_t),
+                          ctypes.c_void_p, ctypes.c_size_t]
+        sysctl.restype = ctypes.c_int
+        if (sysctl(b"kern.boottime", ctypes.byref(boot), ctypes.byref(size), None, 0) == 0
+                and size.value == ctypes.sizeof(boot) and boot.seconds > 0
+                and 0 <= boot.microseconds < 1_000_000):
+            return f"{os.uname().nodename}:{boot.seconds}:{boot.microseconds}"
+    except (OSError, AttributeError):
+        pass
+    return None  # Unknown host/boot identity: use ordinary in-process reuse only.
 
 
 def _relative(value):
@@ -77,19 +222,22 @@ def _inventory(root, paths, *, verification=None):
             raise RigError(f"service export: missing file {p}")
         before = _file_identity(p)
         key = before[0]
-        cached = verification._checksums.get(key) if verification is not None else None
+        cached = verification._cached(before) if verification is not None else None
         if cached is not None and cached[0] == before:
             checksum = cached[1]
         else:
             if verification is not None:
-                verification._checksums.pop(key, None)
+                verification._invalidate(key)
                 if verification._progress is not None:
                     verification._progress(f"rig replay: verifying {p} ({before[3]} bytes)")
             checksum = file_sha256(p)
+            if verification is not None:
+                verification._hashed_files += 1
+                verification._hashed_bytes += before[3]
         after = _file_identity(_inside(root, relative))
         if before != after:
             if verification is not None:
-                verification._checksums.pop(key, None)
+                verification._invalidate(key)
             raise RigError(f"service export: source changed while hashing: {p}")
         if verification is not None:
             verification._checksums[key] = (after, checksum)

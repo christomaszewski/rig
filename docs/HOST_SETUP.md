@@ -10,9 +10,10 @@ a substitute for the simulator release's host requirements.
 
 ## Installing rig
 
-- **Ubuntu/Debian (incl. the Jetson)**: `sudo dpkg -i rig_<v>_all.deb` from the
-  [latest release](https://github.com/christomaszewski/rig/releases/latest) — pulls in
-  `python3` + `python3-yaml`, so the Python prerequisite below is satisfied automatically.
+- **Ubuntu/Debian (incl. the Jetson)**: download `rig_<v>_all.deb` from the
+  [latest release](https://github.com/christomaszewski/rig/releases/latest), then
+  `sudo apt install ./rig_<v>_all.deb`. It requires `python3` + `python3-yaml`; install or cache
+  those dependencies before disconnecting for an offline installation.
 - **macOS dev box**: `brew install christomaszewski/rig/rig-cli` (formula `rig-cli`, binary `rig` — core's unrelated `rig` formula shadows the bare name).
 - **pipx/uv**: `pipx install git+https://github.com/christomaszewski/rig`.
 - **from a checkout** (developing rig itself): `./rig …`, or `rig setup --shell` for PATH.
@@ -81,13 +82,16 @@ the containers that need it. Separate unrelated experiments with distinct domain
 ## Deploying a baked artifact (local registry / offline)
 
 The vehicle pulls images from a registry it can reach (e.g. a local registry on your dev box) and runs a
-baked, digest-pinned artifact — no driver source, no internet.
+baked, digest-pinned artifact without driver source. Public internet is unnecessary once all
+required images and host dependencies are available locally or in that registry.
 
 **Dev box:**
 1. Get every image into the registry (build-from-source + mirror third-party). For services that declare
    `build:` / `mirror:` in their `rigging.yaml`:
    ```
    rig build --registry devbox:5000        # runs each service's build+push command + mirrors its 3rd-party images
+   # Add --scope deployment,host for the vehicle target plus this host's native runtime.
+   # Add replay to the scope when other supported replay CPUs/disabled consumers are needed.
    ```
    For a service that declares neither, push its (arm64) image yourself:
    `docker tag <local> devbox:5000/<repo>:<tag> && docker push devbox:5000/<repo>:<tag>`
@@ -101,6 +105,9 @@ baked, digest-pinned artifact — no driver source, no internet.
    rig bake --registry devbox:5000 --tag <name>      # -> var/artifacts/<name>.tar.gz
    ```
    (Or set `images.registry: devbox:5000` in vehicle.yaml and just `rig bake --tag <name>`.)
+   For replay on the vehicle, add `--include-replay`. It adds a missing disabled player to the
+   artifact and validates replay support. Add `--bundle-images` too if its deployment and replay
+   images must travel with it. See [Onboard replay](ONBOARD_REPLAY.md).
 3. `scp var/artifacts/<name>.tar.gz  orin:/tmp/`
 
 **Orin, one-time:**
@@ -120,7 +127,9 @@ cd /opt/rig/<name>
 ./run.sh status
 ```
 Images pull from `devbox:5000` by digest on first `up`, then cache locally → the vehicle runs offline
-thereafter. To tweak on the vehicle, edit the unbaked tree and `./run.sh up`; `rig bake` again to capture a
+thereafter for those instances. Plain `./rig pull` covers enabled instances; explicitly pull a
+disabled player with `./rig pull bag_player` (use its actual name), and acquire native export
+helper images before disconnecting. To tweak on the vehicle, edit the unbaked tree and `./run.sh up`; `rig bake` again to capture a
 new tagged artifact.
 
 **Fleet artifacts** (the deployment references `{{var}}` values — CHEATSHEET §1.6): the artifact

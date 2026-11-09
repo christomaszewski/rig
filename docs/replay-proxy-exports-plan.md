@@ -1,7 +1,10 @@
 # Service exports and opt-in replay proxies implementation plan
 
 Historical checkpoint: retain the dated performance measurements and their limits below.
-Use [REPLAY.md](REPLAY.md) for current behavior and the
+This describes the original camera-only export design. Its global `--use-proxies` workflow
+has been superseded by the unified `inputs`/`--input` selection released in v0.2.80, including
+bag proxies and independent camera choices. Explicit input selectors enable proxies directly;
+the legacy flag remains supported. Use [REPLAY.md](REPLAY.md) for current behavior and the
 [v0.2.72 readiness report](releases/coordinated-replay-readiness-2026-10-27.md) for subsequent
 native replay acceptance; those results do not establish a general proxy performance gain.
 
@@ -19,10 +22,10 @@ CPU improvement. Representative footage, full WebRTC deployment performance, and
 native AMD64 execution remain unmeasured. Revision 1 is an opt-in lossy profile,
 not a promise of lower CPU for every workload.
 
-Camera-service will define a default `h264` recording proxy profile. Rig will
-generate reusable, service-only exports beneath the original run and use them
-for replay only when the caller supplies `--use-proxies`. Bags and other unchanged
-run contents stay in their original locations.
+At that checkpoint, camera-service defined the default `h264` recording proxy profile, and
+Rig generated reusable service-only exports beneath the original run. Proxy playback was
+opt-in through `--use-proxies`; bags were not yet an export provider. The historical design
+and examples below describe that initial interface.
 
 ## 1 Agreed behavior
 

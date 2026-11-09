@@ -108,8 +108,10 @@ rig sim down --end-run
 ```
 
 `--attach` explicitly selects the supported attach mode on `check` or `up`. A bare recipe
-name resolves to `sessions/NAME.yaml`; an explicit YAML path also works. Check and dry-run
-inspect and report without starting deployment services or writing generated session state.
+name resolves to `sessions/NAME.yaml`; an explicit YAML path also works. To reuse the same
+version-2 file for simulation and replay when it is stored under `replay/`, pass
+`--recipe replay/NAME.yaml` explicitly to both commands. A second recipe file is unnecessary.
+Check and dry-run inspect and report without starting deployment services or writing generated session state.
 Execution may acquire missing selected images; `--pull always` refreshes them and
 `--pull never` requires the local image cache. Selected launchers must support the same
 `runtime-images` inventory and immutable image pinning used by replay. Rig validates the

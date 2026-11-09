@@ -1,11 +1,15 @@
 # Isaac compatibility preparation report
 
 Preparation checkpoint: **2026-10-28 UTC**, originally tested against Rig **v0.2.72 plus the
-shared-session/Isaac changes**, now selected for **v0.2.73**. This is an engineering preparation
+shared-session/Isaac changes**, subsequently released in **v0.2.73**. This is an engineering preparation
 record, not a certified simulator support matrix or a live simulation test
 report. Operator instructions are in [SIMULATION.md](SIMULATION.md) and
 [ISAAC_OFFLINE.md](ISAAC_OFFLINE.md); the [documentation index](README.md) separates current
 guides from historical plans.
+
+The evidence, audit counts and release decisions below belong to that checkpoint. Later replay
+input/proxy changes are documented in [REPLAY.md](REPLAY.md); they do not establish live Isaac
+acceptance or complete the still-pending machine checks here.
 
 ## Prepared scope
 

@@ -1,9 +1,25 @@
 # rig — project state & handoff (resume here)
 
-Current checkpoint: **v0.2.78 — concurrent lifecycle groups**,
-reviewed **2026-11-05**. Use the [documentation index](README.md) to choose an operator
+Released checkpoint: **v0.2.81 — faster repeat replay and sensor-time TF handling**,
+reviewed **2026-11-08**. Use the [documentation index](README.md) to choose an operator
 workflow. The dated entries below are historical observations, not the current host state.
 
+- Replay selects all bag sessions by default, with explicit logger/session subsets available.
+  One player merges original inputs by receive time and preserves overlaps. Offline bag proxies
+  select arrival, send or sensor timing with an explicit deduplication policy; camera instances
+  independently select original recordings or proxy profiles. Use one recipe's `inputs` and
+  `playback.image_sources` to choose playback inputs and ROS image authority. See
+  [v0.2.80](releases/v0.2.80.md) and [the replay workflow](REPLAY.md). These features require
+  rig-infra v1.20.0 and compatible rebuilt runtime images, not only a new Rig CLI.
+- **v0.2.81 with rig-infra v1.20.1:** sensor proxies schedule TF from nested
+  transform timestamps with a configurable lead, preload constant static transforms, and
+  restore all static frames during windowed replay. Existing proxies stay immutable and must
+  be re-exported to adopt the change. See [v0.2.81](releases/v0.2.81.md) and the
+  [current timing reference](REPLAY.md#bag-merge-and-timing-profiles).
+- **v0.2.81 replay startup improvement:** `--fast` reuses previously verified hashes when
+  the local file identity and timestamps still match. Full verification remains the default;
+  all modes share hashes within one invocation to avoid repeated scans. Runtime/startup checks
+  remain active. See [faster repeated replays](REPLAY.md#faster-repeated-replays).
 - Ordinary `rig up` and `rig down` run equal `(tier, order)` groups concurrently by default;
   down reverses the group sequence. Newly baked artifacts carry the behavior in their bundled
   Rig and generated scripts. Unique orders remain serial, and saved replay/simulation sessions
@@ -51,10 +67,10 @@ workflow. The dated entries below are historical observations, not the current h
   deployment when every bound topic's REP-2016 type hash matches (and flags mismatched hashes
   on one distro too), and `rig image adopt` records a hand-built tag in the build catalog from
   its registry manifest, marked adopted (audit warns, bake refuses without `--allow-local`).
-  Still open from that feedback: hybrid replay + simulation sessions, infra build context in
-  reconstructed trees (bake does not record a checkout-routed service's git origin), and
-  linked-run recordings in camera replay (camera-service should mount `RIG_REPLAY_SOURCE`
-  read-only like the bag player).
+  Still open from that feedback: hybrid replay + simulation sessions and infra build context in
+  reconstructed trees (bake does not record a checkout-routed service's git origin). Current
+  camera replay uses explicit read-only input bindings, including linked original recordings
+  and selected proxies; use a compatible camera-service launcher and image.
 - v0.2.77 makes local GitHub/GitLab checkouts used as registries honest about reproducibility:
   lock rows record the last commit that touched each package, installs warn about uncommitted
   or unpushed package bytes, a positional local clone source is stored absolutely, and sync/list

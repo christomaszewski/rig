@@ -1,6 +1,6 @@
 # rig — vehicle-level stack orchestrator (infra · sensors · autonomy)
 
-`rig` brings up and manages every stack on a single robot/vehicle computer (an NVIDIA Jetson) —
+`rig` brings up and manages every stack on a robot/vehicle computer or replay host —
 shared **infra** (zenoh router, bag loggers, dashboard), **sensors** (cameras, GNSS/INS, lidar), and
 **autonomy** (planners, SLAM, perception) — driven by config. It is **"a loop + a manifest"**: it
 reads a vehicle manifest and *delegates* the bring-up of each stack to that service's own launcher
@@ -55,9 +55,10 @@ workflows, current validation status, and the historical design notes.
 
 ## Install
 
-- **Ubuntu/Debian** (incl. Jetson, works offline): download `rig_<v>_all.deb` from the
+- **Ubuntu/Debian** (incl. Jetson): download `rig_<v>_all.deb` from the
   [latest release](https://github.com/christomaszewski/rig/releases/latest) →
-  `sudo dpkg -i rig_<v>_all.deb` (pulls in `python3` + `python3-yaml`; nothing else)
+  `sudo apt install ./rig_<v>_all.deb` (requires `python3` + `python3-yaml`). For offline
+  installation, have those dependencies installed/cached first.
 - **macOS**: `brew install christomaszewski/rig/rig-cli` (formula `rig-cli`, binary `rig`; the tap tracks releases automatically)
 - **anywhere with pipx/uv**: `pipx install git+https://github.com/christomaszewski/rig`
 - **from a checkout**: `./rig …` works as-is; `rig setup --shell` puts it on PATH
@@ -111,7 +112,8 @@ python3 -m venv .venv && .venv/bin/pip install pyyaml
 ./rig certify             # launcher-contract conformance under a poisoned fleet env (see below)
 ./rig up --dry-run        # print the exact launcher invocations + fleet ROS env, run nothing
 ./rig up                  # infra → sensors → autonomy; equal order within a tier starts concurrently
-./rig pull                # pre-pull every stack's images, NO container changes (prime a cache, then run offline)
+./rig pull                # pre-pull enabled stacks' images, NO container changes
+./rig pull bag_player     # explicitly pull a disabled replay player (use its actual instance name)
 ./rig status             # one rolled-up row per sensor (state + health from compose ps; OP =
                           #   observed operational state for services declaring the state verbs —
                           #   read OP and HEALTH as a pair)
@@ -187,17 +189,22 @@ python3 -m venv .venv && .venv/bin/pip install pyyaml
                           #   --purge also GCs external volumes after teardown
 ./rig replay check <run>   # inspect a hand-built deployment's readiness, without writes
 ./rig replay prepare <run> --recipe field-test
-                          # --player public/ros2-bag-player@1.18.0 adds a missing player row,
+                          # --player /path/to/rig-infra/ros2-bag-player adds a missing player row,
                           # route and config; kept disabled for ordinary up, selected by replay
 ./rig replay --recipe field-test
-./rig replay --recipe field-test --use-proxies  # explicit opt-in, also on check/prepare; originals
-                          #   remain the default. Missing/incompatible proxies are errors
+# Author replay/analysis.yaml using the recipe example in docs/REPLAY.md, then:
+./rig run export <run> --recipe replay/analysis.yaml --dry-run
+./rig run export <run> --recipe replay/analysis.yaml
+./rig replay prepare <run> --recipe replay/analysis.yaml
+./rig replay --recipe replay/analysis.yaml
+                          # one recipe selects bags, per-camera originals/proxies and exact services;
+                          # recipe inputs need no --use-proxies. Missing proxies fail explicitly
 ./rig sim check --recipe warehouse  # inspect an already running Isaac ROS graph and /clock
 ./rig sim up --recipe warehouse     # attach selected infra/autonomy using sessions/warehouse.yaml
 ./rig sim down --end-run            # stop the saved Rig session; its recording replays normally
 ./rig fleet sync --into fleet-runs --include-service-exports
-                          #   include committed proxy generations at their nested paths; default
-                          #   sync excludes exports. Cannot combine with legacy --profile
+                          #   include committed camera/service exports; default sync excludes exports.
+                          #   Bag proxies under exports/inputs/bags need a complete run copy or re-export
 ./rig swap <svc> <path|ref>  # re-point an INSTALLED service at different code — a local checkout
                           #   (routed live: edit, rebuild, re-up) or a registry ref (vendored +
                           #   pinned). Rows, working configs and overlays are KEPT; config-key
@@ -221,6 +228,7 @@ vendor` step) and digest-pins images against the registry from `vehicle.yaml` (`
 ```bash
 rig build                                   # all declared runtimes and CPU architectures, build/push
 rig build --scope host --tag iteration-1      # this machine's provisioned runtime + Docker CPU
+rig build --scope deployment,host            # vehicle target plus this host's native runtime
 rig build --scope deployment,replay          # vehicle target plus supported replay companions
 rig build --platform dev --arch amd64 --tag iteration-1   # faster targeted iteration
 rig build --no-cache                         # disable instruction caching in every participating build
@@ -232,7 +240,7 @@ rig image audit                             # inspect what the stacks will RUN: 
                                             #   images; warns on images built from local checkouts
 rig bake --tag v1                           # -> var/artifacts/v1.tar.gz (auto-vendored + digest-pinned)
 # rig bake --tag v1 --include-replay         # auto-wire a missing player + validate onboard replay
-# add --bundle-images for offline startup AND replay images
+# combine --include-replay --bundle-images for offline startup AND replay images
 # rig bake                                 # same when vehicle.yaml has images.tag: v1
 scp var/artifacts/v1.tar.gz vehicle:~/      # on the vehicle: `tar xzf v1.tar.gz && cd v1 && ./run.sh up`
 ```
@@ -285,7 +293,8 @@ missing values are inferred only when the service matrices have one common choic
 
 The artifact bundles the resolved configs + vendored surfaces + rig + a **compose-only** form that runs on
 just Docker (graceful fallback when Python/PyYAML are absent). `--bundle-images` additionally docker-saves
-only the deployment runtime/CPU image set into the artifact (multi-GB) for **zero-registry deploys**
+the deployment runtime/CPU image set into the artifact (multi-GB) for **zero-registry deploys**;
+with `--include-replay`, it also includes the selected replay image set
 (Docker API 1.48+). The complete release catalog remains metadata. Content aliases preserve identity
 across save/load. `up.sh` checks the target and compares local image
 IDs with the bundle, reloads missing or different images, verifies the result, and starts Compose
@@ -355,6 +364,9 @@ services.yaml           # catalog: service routing key -> where its repo lives
 config/sensors/*.yaml   # one config per sensor (the single source of truth for that stack)
 config/infra/*.yaml     # one config per shared infra service (zenoh router, bag logger, …)
 config/autonomy/*.yaml  # one config per autonomy stack (planner, SLAM, perception, …)
+replay/analysis.yaml    # authored replay recipe; version 2 can select exact session.instances
+sessions/*.yaml         # optional location for recipes shared by replay and simulation
+var/replay/<recipe>/    # generated local bindings/plans; re-prepare after changing a recipe
 services/               # VENDORED launch surfaces (`rig vendor`; bake auto-vendors; `rig add
                         #   public/<svc>` vendors at the registry pin) — for dev, point services.yaml
                         #   at sibling checkouts instead. Never source/submodules.
@@ -365,7 +377,7 @@ rig.lock                # GENERATED pins: registries@commit, packages+hashes, in
                         #   image digests (bake). Commit it; `rig add <ref> --locked` reproduces.
 rig, rig_cli/           # the CLI (thin shim + package: manifest/catalog/dispatch/status/doctor/certify/
                         #   build/bake/init/rigify/runs/…)
-docs/                   # CHEATSHEET (1-page flow) · RUNBOOK (worked example) · DESIGN/ROADMAP · STATE · HOST_SETUP
+docs/                   # index · command reference · worked workflows · design/history
 ```
 
 ### `vehicle.yaml` (per machine)

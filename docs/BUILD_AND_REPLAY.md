@@ -3,8 +3,10 @@
 Command help includes target rules and examples: `rig image build -h`, `rig artifact bake -h`,
 `rig reconstruct -h`, and `rig provision -h`. `--platform` means a runtime variant; `--arch`
 means a Linux CPU architecture. Replay input preparation is documented by `rig replay prepare -h`.
+For a complete workstation-to-vehicle workflow, including one editable replay recipe, see
+[Replay recorded runs on the vehicle](ONBOARD_REPLAY.md).
 
-`rig build` builds every declared runtime variant and supported CPU architecture for the deployment's
+Without narrower scopes or target filters, `rig build` builds every declared runtime variant and supported CPU architecture for the deployment's
 services, regardless of the build machine's provisioned platform. `platform: jp6m` and optional
 `arch: arm64` choose the deployment target. They do not narrow a release build. Services with only the legacy build contract
 must adopt the portable contract before joining a portable release; Rig reports which service needs
@@ -15,6 +17,7 @@ rig build --dry-run
 rig build --no-cache -j 2
 rig build --scope deployment --tag vehicle-iteration
 rig build --scope host --tag laptop-iteration
+rig build --scope deployment,host --tag vehicle-and-host
 rig build --scope deployment,replay --tag release-1
 rig build --platform jp6m --arch arm64 --tag bench-1
 rig build --platform dev --arch amd64 --tag bench-2
@@ -103,6 +106,14 @@ prints selected targets and build outputs. Using either override with narrower s
 including `deployment`; `all` cannot be combined with narrower scopes. The `replay` scope is a
 conservative build superset and does not inspect a particular run or recipe. Full-matrix builds
 remain the release default.
+
+For an ARM64 Mac preparing an ARM64 vehicle, `deployment,host` commonly covers the enabled vehicle
+services and native development helpers, including camera-service's software converter image.
+Adding `replay` is useful for disabled consumers selected by replay policy and portable companions
+on other supported CPUs; it is not required just because replay will run on the vehicle. Check
+`--dry-run` against the intended consumers. `--include-replay` is a separate **bake** option: it can
+add a missing player to the artifact and plan onboard replay images, but does not build them or
+modify the source `vehicle.yaml`.
 
 Provision a developer machine once with `sudo rig provision --platform dev`. An optional
 `--arch amd64` asserts the expected Docker engine architecture; it does not enable cross compilation.
@@ -346,7 +357,7 @@ When reconstructing a retrofitted deployment bundle, frozen startup scripts, ima
 metadata move to `var/source-deployment/` for provenance. The replay workspace uses its selected host
 target and companion catalog; the archived source artifact is unchanged.
 
-Replay startup is independent of bag-data exclusion. In a deployment or `vehicle.local.yaml`:
+For default/version-1 replay, startup policy can be set in the deployment or `vehicle.local.yaml`:
 
 ```yaml
 replay:
@@ -361,6 +372,9 @@ Descriptor `replay.start` controls automatic eligibility. Deployment service or 
 `replay: {start: true|false}` as an alias of top-level instance policy. Local files merge over
 deployment entries. Explicit instance names, `--live NAME`,
 and `--include-service SERVICE` override startup defaults. The player cannot be disabled this way.
+`SERVICE` is the value of a row's `service:` field, not its `name:`; repeat the option for multiple
+services, and all matching instances are selected. Positional names select individual instances,
+but the first positional argument is always the run: use `rig replay RUN planner_a planner_b`.
 Startup omission preserves the service's recorded bag topics. Use `--skip-service SERVICE` or
 `--skip-instance NAME` to omit startup, source recordings, and bag topics whose recorded publishers
 belong exclusively to the skipped instances. Conflicting include/skip requests fail. Broad replay
@@ -368,6 +382,13 @@ never infers topic ownership from a topic namespace alone; shared or unknown pub
 eligible, and exact `playback.exclude` entries remove known outputs when graph evidence is absent.
 Automatic suppression and skips preserve eligibility for `/tf`, `/tf_static`, and `/diagnostics`;
 explicit topic lists, recorded subscriber selection, or `playback.exclude` can still omit them.
+
+For an exact saved process list, use a version-2 recipe with `session.instances`. The same file
+can live at `replay/analysis.yaml`; put input bindings and topic policy under its `replay` section.
+Include required infrastructure, cameras and consumers, but not the automatically managed player.
+Version 2 rejects `--include-service` and `--skip-service`; edit the list instead. The `instances`
+mapping inside a version-1 recipe (or version-2 `replay` section) maps recorded identities and is
+not a process selection list. See [shared recipes](REPLAY.md#shared-simulation-and-replay-recipes).
 
 Recorded ROS requests now default to automatic selection, independently of broad/recorded topic
 mode. Rig selects unambiguous historical servers mapped to the entire effective started set and
@@ -393,16 +414,47 @@ broad playback defaults, exact-session timing, and source-preserving legacy adap
 Recipe packaging with suites remains deferred.
 
 Camera-service defines a default `h264` profile for `rig run export RUN --service camera-service`.
-Its dedicated offline helper uses the service's native CPU image; install the updated launch
-surface and explicitly build/pull that image first. Outputs live under
+Its offline helper uses the current deployment's native `cam-dev` image, including on Jetson;
+install the matching launch surface and build/publish that image. A real export can pull missing
+converter images after reporting them; dry-run only reports those requirements. The current
+deployment's image settings and catalog select the converter, not the source run's captured
+deployment. Outputs live under
 `RUN/exports/services/camera-service/h264/<export-id>/`, with only transformed recordings and
 their manifest. Existing originals and bags are preserved; no vehicle export profile is needed.
-Replay/check/prepare use these generations only with `--use-proxies` on that invocation. Exact
-camera paths and session lists bind directly, including renamed instances, while the bag retains
-its original or independently repaired path. A compatible current reader can reuse another
-machine's generation without the producer's deployment. See [Offline camera proxies](REPLAY.md#offline-camera-proxies)
-for lossiness, regeneration, pinning, and transfer semantics. H.264 still decodes to normal camera
-frames; this does not add hardware decoding or encoded WebRTC passthrough.
+
+Use explicit recipe `inputs` to select originals, a named export profile, or an exact proxy ID
+for the complete bag set and for each recorded instance independently. For example, under a
+version-2 recipe's `replay` section:
+
+```yaml
+bags: all
+inputs:
+  bags: {profile: sensor-conservative}
+  instance:cam_front: {profile: h264}
+  instance:cam_rear: {use: original}
+```
+
+Run export, prepare, check and replay with that same recipe. These selectors do not need
+`--use-proxies`; that flag remains a legacy service-export shortcut. Bag proxies live under
+`RUN/exports/inputs/bags/PROFILE/<export-id>/` and merge the selected original bag sessions
+offline. Originals replay at receive time with no live deduplication. Bag profiles explicitly
+choose timing and duplicate policy; conservative mode preserves ambiguous ordinary sensor copies.
+See [input selection](REPLAY.md#one-recipe-for-original-and-exported-inputs) and
+[bag timing profiles](REPLAY.md#bag-merge-and-timing-profiles).
+
+Exact camera paths and session lists bind directly, including renamed instances. A compatible
+current reader can reuse another machine's generation without the producer's deployment.
+See [Offline camera proxies](REPLAY.md#offline-camera-proxies) for lossiness, regeneration, pinning,
+and transfer semantics. H.264 still decodes to normal camera frames; this does not add hardware
+decoding or encoded WebRTC passthrough. `replay.playback.image_sources` can retain camera proxy
+previews while selecting full-quality ROS image messages from a matching bag.
+
+An existing deployment can replay a run collected by a different artifact without reconstruction.
+Its current configs, service implementations and image catalog govern execution, while the run
+provides recordings and source provenance. Verify message types, topics and recording formats;
+compatible data does not promise identical algorithm results after code or config changes.
+Preparation binds a recipe to its run under `var/replay/`, independently of other recipes.
+Re-prepare that recipe after edits; re-export only when its chosen proxy or conversion policy changes.
 
 Doodle's descriptor sets `replay.start: false`. When explicitly started, its launcher waits up to
 `DOODLE_CONNECT_TIMEOUT` (10 seconds by default) for reachability, then up to `DOODLE_SETTLE_TIMEOUT`

@@ -5,7 +5,18 @@ import argparse
 import textwrap
 
 
-_REPLAY_POLICY = """Startup policy (vehicle.yaml instance rows):
+_REPLAY_POLICY = """Recipes and instance selection:
+  Version 2 uses session.instances for the exact processes to start, including
+  infrastructure, cameras and consumers. The bag player is added automatically;
+  do not list it. Put source, bags, inputs and playback fields under replay.
+  Keep one file in replay/ or sessions/. --recipe NAME checks sessions/NAME.yaml
+  first, then replay/NAME.yaml; an explicit YAML path avoids name collisions.
+  Version 1 remains supported; its input fields are at the document root and
+  its instances mapping binds recorded identities, not process selection.
+  --include-service/--skip-service are not accepted with version 2; edit
+  session.instances. Its positional names/--live cannot add unlisted instances.
+
+Startup policy without a version-2 recipe (vehicle.yaml instance rows):
   replay: {start: true}   start even when enabled: false
   replay: {start: false}  omit the process; keep its recorded inputs eligible
   Unset: enabled infrastructure, detected recording sources, and the player.
@@ -14,6 +25,8 @@ _REPLAY_POLICY = """Startup policy (vehicle.yaml instance rows):
   Descriptor start: true permits selection; only an explicit instance/service
   true forces a normally disabled consumer to start. The player is managed by Rig.
   Explicit names, --live and --include-service override startup policy.
+  --include-service takes service: keys, not name: values, and starts all their
+  instances. Repeat it for several services; positional NAMEs select instances.
   --skip-instance/--skip-service also remove proven exclusive recorded outputs and cannot conflict
   with explicit inclusions. Recording-capable instances need recordings or --live.
   Skip all camera feeds with --skip-service camera-service, or one destination
@@ -26,9 +39,9 @@ _REPLAY_POLICY = """Startup policy (vehicle.yaml instance rows):
 Inputs and recipes:
   Broad playback is the default; graph epochs and pub/sub declarations are
   optional. --selection recorded uses the historical subscription selector.
-  Recipes use version: 1. Edit replay/NAME.yaml for bag.logger/session,
-  instances.NAME.recorded_as/recorded_namespace, recordings.NAME.from/sessions, and
-  playback.topics/exclude/keep/remap/services/calls.
+  Fields below are under replay in version 2, or at the root in version 1:
+  bags, instances.NAME.recorded_as/recorded_namespace, recordings.NAME.from/sessions,
+  inputs, and playback.topics/exclude/keep/remap/services/calls/image_sources.
   recorded_as selects the recorded instance/files and defaults to NAME.
   recorded_namespace independently binds recorded ROS nodes, e.g. /control/relay;
   a namespace-only entry is valid and overrides the service's rigging.yaml.
@@ -44,9 +57,14 @@ Inputs and recipes:
   Use playback.remap for topic changes; service targets keep their recorded names.
   Recording paths are source-run-relative or absolute; call-script paths are
   recipe-relative. Topic names are exact absolute ROS names.
-  Recipe bag selection overrides player config. --session selects camera
-  recordings, not the bag. Windows and call times use that exact bag's start.
+  bags: all is the default. A bags list selects logger/session pairs; logger is
+  the recorded instance name beneath RUN/bags/, not a service package name.
+  Legacy bag.logger/session selects one session. --session selects camera
+  recordings. Windows/call times use the selected aggregate bag timeline start.
+  Originals merge by receive time with duplicates intact; no live deduplication.
   An explicit RUN overrides the recipe's source; omit RUN to reuse its binding.
+  Bindings belong to each recipe, not the globally last-prepared run. Re-prepare
+  after edits; topic-only filters do not require re-exporting proxies.
   To add positional NAMEs with --recipe, supply RUN before the instance names.
   Graph evidence excludes outputs owned exclusively by selected instances,
   including custom status topics. Shared outputs remain eligible. Without graph
@@ -75,15 +93,24 @@ Inputs and recipes:
   Broad playback does not discover the new deployment's subscriptions.
   Recipes remain local files; registry/suite packaging is deferred.
 
-Service proxies:
-  Originals are used unless --use-proxies is supplied on THIS invocation.
-  Generate offline with: rig run export RUN --service camera-service
-  Camera-service defines its default h264 profile; vehicle profiles are separate.
-  Exports live under RUN/exports/services/SERVICE/PROFILE/EXPORT_ID/ and contain
-  only transformed recordings plus provenance. Bags stay in the original run.
+Originals and proxies:
+  inputs selects bags or instance:NAME independently, using exactly one of
+  {use: original}, {profile: NAME}, or {proxy: FULL_EXPORT_ID}. Omitted targets
+  use originals. --input TARGET=original|profile:NAME|proxy:ID overrides a target;
+  repeat for several targets. Explicit selectors do not need --use-proxies.
+  Generate selected profiles with: rig run export RUN --recipe analysis
+  Bag profiles combine arrival/sent/sensor timing with off/conservative/aggressive
+  deduplication. Conservative retains ordinary byte-identical sensor repeats;
+  aggressive collapses likely cross-bag matches within its receive-time window.
+  Camera-service defines h264; each camera can choose a proxy or its original.
+  playback.image_sources.CAMERA: bag keeps bag ROS images while the camera's
+  selected video provides preview; camera instead uses that camera's ROS bridge.
+  Bag proxies: RUN/exports/inputs/bags/PROFILE/EXPORT_ID/.
+  Camera proxies: RUN/exports/services/SERVICE/PROFILE/EXPORT_ID/.
   Check/prepare/replay never generate proxies or fall back when a requested
   proxy is missing, stale or incompatible. Live/skipped instances need none.
-  Optional recipe proxies.services.SERVICE.profile selects a profile;
+  Legacy --use-proxies enables broad service-export selection for that invocation.
+  Legacy recipe proxies.services.SERVICE.profile selects a profile;
   proxies.instances.NAME.export pins an export ID, or use: original excludes
   that instance. Preferences do not enable proxies without --use-proxies.
 """
@@ -93,19 +120,26 @@ _REPLAY_WORKFLOW = """Workflow (also available as rig run replay ...):
   rig replay prepare RUN --recipe bench
   rig replay check --recipe bench --format json
   rig replay --recipe bench --auto-end
+  rig replay --recipe bench --fast
   rig replay RUN planner --from 120 --to 300 --dry-run
   rig replay check RUN --skip-service camera-service
   rig replay prepare RUN --recipe no-cameras --skip-service camera-service
   rig replay --recipe no-cameras --skip-service camera-service
+
+  --fast reuses local hashes from an earlier replay/prepare when file identity,
+  size and timestamps are unchanged. New/changed files are hashed normally;
+  recipes, inventories, images and startup checks still run. Omit --fast for a
+  fresh integrity scan. Check and dry-run can read the cache but never write it.
+  The separate legacy startup delay can be shortened with --start-delay 0.
 
   Use `rig replay check -h` and `rig replay prepare -h` for readiness and import.
   For a source literally named check or prepare, use: rig replay -- check
 """
 
 _DESCRIPTIONS = {
-    "run-export": "Export recorded service data offline. --service uses a service-defined "
-                  "profile and creates reusable sparse artifacts under the original run; "
-                  "without --service, preserve the existing deployment-profile whole-run export.",
+    "run-export": "Export recorded inputs offline. --recipe builds the selected bag and "
+                  "per-instance proxies; --service exports one service's recordings. Both "
+                  "preserve originals. Without either selector, use the legacy whole-run export.",
     "replay": "Replay recorded inputs into the current deployment's services and configs. "
               "Hand-built deployments, renamed instances and new consumers are supported; "
               "a captured deployment is not required. With data_dir configured, execution "
@@ -127,7 +161,24 @@ _DESCRIPTIONS = {
 }
 
 _EPILOGS = {
-    "run-export": """Service-only exports:
+    "run-export": """Recipe-selected inputs (recommended):
+  rig run export RUN --recipe replay/analysis.yaml --dry-run
+  rig run export RUN --recipe replay/analysis.yaml
+  rig replay prepare RUN --recipe replay/analysis.yaml
+  rig replay --recipe replay/analysis.yaml
+
+  The same recipe chooses processes, bag inputs and per-camera representations.
+  Version 2 puts inputs under replay; version 1 puts them at the root.
+  Use --input bags=profile:sensor-conservative or
+  --input instance:cam_front=profile:h264 to override a target; repeatable.
+  Omit RUN when the recipe supplies a source or has a prepared local binding.
+  Original targets need no conversion; exact proxy IDs verify existing artifacts.
+  Recipe export accepts --force and --dry-run, but not --service, --profile,
+  --instance, --in-place or --lossy. It never starts deployment services.
+  Bag proxies go under RUN/exports/inputs/bags/PROFILE/EXPORT_ID/.
+  Check/prepare/replay do not create proxies; export first, then prepare.
+
+Service-only exports:
   rig run export RUN --service camera-service
   rig run export RUN --service camera-service --profile h264 --instance cam_front
   rig run export RUN --service camera-service --dry-run
@@ -147,20 +198,22 @@ _EPILOGS = {
   --in-place/--lossy cannot be combined with --service.
 
 Legacy whole-run exports:
-  Without --service, --profile selects vehicle.yaml export_profiles (implicit
+  Without --recipe or --service, --profile selects vehicle.yaml export_profiles (implicit
   when exactly one exists), under RUN/exports/PROFILE/. --force replaces that
   directory. --in-place explicitly rewrites originals with existing safeguards.
   The service-export namespace 'services' is reserved for new writes.
 
 Sharing:
   rig fleet sync --include-service-exports
-  Transfers committed artifacts beneath the original run, preserving nesting.
+  Transfers committed camera/service exports, preserving nesting. This flag
+  does not transfer bag proxies; copy the full run or regenerate them there.
   Existing fleet sync --profile remains for whole-run exports only.
 """,
     "replay": _REPLAY_POLICY + """
 Execution:
-  Bag playback requires a plan-v1 player (rig-infra >= 1.17.0) and local images
-  compatible with this machine's Docker CPU. Check/prepare do not build or pull.
+  Multiple bags/proxies require a plan-v2/multi-input player and matching native
+  images (released baseline: rig-infra 1.20.0). Newer profile revisions need their
+  matching provider bundle. Check/prepare do not build or pull.
   Recorded calls default to automatic selected-server policy; explicitly set
   playback.services: [] to disable them. Source-only replay uses wall time; bag replay
   publishes /clock by default, including when no data topics remain selected.
@@ -181,9 +234,11 @@ Execution:
 
 """ + _REPLAY_POLICY + "\n" + _REPLAY_WORKFLOW,
     "replay-prepare": """Files and legacy support:
-  --recipe NAME loads/creates replay/NAME.yaml; a YAML path also works. Without
+  --recipe NAME checks sessions/NAME.yaml then replay/NAME.yaml; an explicit path
+  also works. New recipes default to version 1 under replay/. Without
   --recipe, prepare chooses a source-derived name and prints the replay command.
-  Local source bindings live in var/replay/NAME/bindings.yaml. Generated plans,
+  Local source bindings live in var/replay/NAME/bindings.yaml (with a path suffix
+  for recipes outside replay/). Generated plans,
   configs, reports and derived sources live in var/replay/NAME/<generation>/.
   Existing recipes are preserved; changed inputs produce a new generation.
   Accepts canonical runs without captures/epochs, standalone ROS 2 MCAP/SQLite
@@ -194,13 +249,13 @@ Execution:
   Split bags must be supplied as a directory. No ROS 1/schema conversion.
 
 Adding a player:
-  rig replay prepare RUN --recipe bench --player public/ros2-bag-player@1.17.0
-  rig replay prepare RUN --recipe bench --player /path/to/rig-infra
+  rig replay prepare RUN --recipe bench --player public/ros2-bag-player@1.20.0
+  rig replay prepare RUN --recipe bench --player /path/to/rig-infra/ros2-bag-player
   Only --player requests wiring: adds bag_player to vehicle.yaml with
   enabled: false, order: 999, its services.yaml route and player config (plus
   vendoring/lock state for a registry ref). Path wiring may print a manual
   snippet for YAML layouts it cannot safely edit. Existing rows are preserved;
-  upgrade an old player with rig swap. Plan-v1 support is required.
+  upgrade an old player with rig swap. Multiple bags need plan-v2/multi-input.
   Normal rig up leaves the player off; replay starts it when a bag is selected.
 
 Readiness:
@@ -261,15 +316,17 @@ Examples:
   Uses vehicle.yaml platform/arch unless explicitly overridden. Missing values
   are inferred only when service matrices have one common choice; the builder's
   CPU never chooses the vehicle CPU. Local identity/target overrides are excluded.
-  --bundle-images exports only enabled deployment stacks at that runtime/CPU,
-  with verified image IDs. Cross-CPU export requires Docker API >= 1.48.
-  Replay companions remain in catalog metadata; their bytes must be available
-  from the release registry/mirror when replay uses another runtime or CPU.
+  --bundle-images exports enabled deployment stacks at that runtime/CPU.
+  --include-replay adds replay service bundles and a missing disabled player to
+  the artifact; --replay-player selects only the source for that added player.
+  With both flags, replay companion images for the baked CPU are bundled too.
+  Cross-CPU export requires Docker API >= 1.48. Other companion CPUs remain in
+  catalog metadata; pull/load their images separately when replaying there.
   Build/publish needed companions first; baking does not build them.
 
 Examples:
   rig image build --scope deployment,replay --tag release-1
-  rig artifact bake --tag release-1 --bundle-images
+  rig artifact bake --tag release-1 --include-replay --bundle-images
   rig artifact bake --platform dev --arch amd64 --tag bench-1
   rig artifact show release-1 --format json
   --tag names the artifact; set vehicle.yaml images.tag to choose image versions.

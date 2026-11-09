@@ -84,12 +84,16 @@ def load_context(root):
 
 
 def command(args, root):
+    from .service_exports import VerificationContext
+    verification = VerificationContext(cache_path=Path(root) / "var/replay/verification-cache.json",
+        reuse=bool(getattr(args, "fast", False)),
+        writable=args.cmd in ("replay", "replay-prepare") and not args.dry_run)
     if args.start_delay is None:
         args.start_delay = 0.0 if getattr(args, "startup", "legacy") == "coordinated" else 20.0
     if getattr(args, "format", None) == "json":
         args.json = True
     try:
-        return _command(args, root)
+        return _command(args, root, verification=verification)
     except (RigError, OSError) as exc:
         if getattr(args, "json", False):
             print(json.dumps(dict(version=1, ready_to_prepare=False, ready_to_run=False,
@@ -97,6 +101,10 @@ def command(args, root):
                                                phase="prepare")])))
             return 1
         raise
+    finally:
+        # The cache contains hash facts, not permission to replay. Each use still
+        # checks the current identity and expected manifest checksum.
+        verification.save()
 
 
 def _session_arguments(args, recipe):
@@ -135,7 +143,19 @@ def _build_plan(manifest, catalog, descriptors, root, ref, recipe, options, **kw
                 message="session.clock: source requires a bag timeline for replay; choose wall "
                         "for a recordings-only replay"))
             planner.finish(plan)
+    _verification_report(plan, kwargs.get("verification"))
     return plan
+
+
+def _verification_report(plan, verification, *, announce=False):
+    if verification is None:
+        return
+    evidence = verification.summary()
+    plan["verification"] = evidence
+    if announce and (evidence["hashed_files"] or evidence["cached_files"]):
+        eprint(f"rig replay: {evidence['mode']} input verification: "
+               f"hashed {evidence['hashed_files']} file(s) ({evidence['hashed_bytes']} bytes), "
+               f"reused {evidence['cached_files']} cached hash(es) ({evidence['cached_bytes']} bytes)")
 
 
 def _session_environment(manifest, descriptors):
@@ -148,9 +168,13 @@ def _session_environment(manifest, descriptors):
     return env
 
 
-def _command(args, root):
+def _command(args, root, *, verification=None):
     from .service_exports import VerificationContext
-    verification = VerificationContext()
+    if verification is None:
+        verification = VerificationContext()
+    if getattr(args, "fast", False):
+        eprint("rig replay: --fast reuses verified hashes for unchanged files; "
+               "uncached or changed files are hashed normally")
     planning_started = time.monotonic()
     action = args.cmd.removeprefix("replay-") if args.cmd != "replay" else "run"
     recipe_path, recipe = recipes.load(root, args.recipe, create=action == "prepare")
@@ -186,7 +210,8 @@ def _command(args, root):
         options["_prepared_proxies"].update(prepare.proxy_pins(root, recipe_path, recipe, origin))
         options["_prepared_bag_proxy"] = (prepare.bag_proxy_pin(root, recipe_path, recipe, origin)
                                            or options.get("_prepared_bag_proxy"))
-    runtime = prepare.prepared(root, recipe_path, recipe, origin, use_proxies=use_proxies) if recipe_path else None
+    runtime = prepare.prepared(root, recipe_path, recipe, origin, use_proxies=use_proxies,
+                               verification=verification) if recipe_path else None
     options["_prepared_source"] = str(runtime) if runtime else None
     plan = _build_plan(manifest, catalog, descriptors, root, str(origin), recipe, options,
                          verification=verification)
@@ -237,6 +262,7 @@ def _command(args, root):
         plan["call_inspection_s"] = time.monotonic() - started
         plan["fingerprint"] = recipes.digest(dict(planned=plan["fingerprint"],
             playback=plan["playback"], call_inspection=plan.get("call_inspection"), startup=plan.get("startup")))
+    _verification_report(plan, verification, announce=True)
     if action != "prepare" or args.dry_run or not plan["ready_to_prepare"]:
         report(plan, as_json=getattr(args, "json", False))
     if action == "check":
@@ -263,7 +289,7 @@ def _command(args, root):
             return 0
         raise RigError("Source needs preparation; run rig replay prepare RUN --recipe NAME first")
     runtime = runtime or Path(plan["source"]["root"])
-    return execute(args, root, manifest, descriptors, plan, runtime)
+    return execute(args, root, manifest, descriptors, plan, runtime, verification=verification)
 
 
 def perform_prepare(args, root, recipe_path, recipe, origin, manifest, catalog, descriptors, plan, options,
@@ -326,7 +352,8 @@ def perform_prepare(args, root, recipe_path, recipe, origin, manifest, catalog, 
             # the prior recipe alongside the preparation transaction's other rollback work.
             recipe_backup = recipe_path.read_bytes()
             prepare.write_yaml(recipe_path, recipe)
-        runtime = prepare.create(root, recipe_path, recipe, plan, manifest, descriptors)
+        runtime = prepare.create(root, recipe_path, recipe, plan, manifest, descriptors,
+                                 verification=verification)
         options["_prepared_source"] = str(runtime)
         use_proxies = replay_inputs.uses_proxies(recipe, options)
         if use_proxies:
@@ -339,7 +366,8 @@ def perform_prepare(args, root, recipe_path, recipe, origin, manifest, catalog, 
         # selection now, so the first successful prepare is already reusable by check/run.
         if (plan["ready_to_prepare"] and
                 prepare.location(root, recipe_path, origin, use_proxies=use_proxies).name != prepare.generation(plan)):
-            runtime = prepare.create(root, recipe_path, recipe, plan, manifest, descriptors)
+            runtime = prepare.create(root, recipe_path, recipe, plan, manifest, descriptors,
+                                     verification=verification)
             options["_prepared_source"] = str(runtime)
             plan = _build_plan(manifest, catalog, descriptors, root, str(origin), recipe, options,
                                  verification=verification)
@@ -350,6 +378,7 @@ def perform_prepare(args, root, recipe_path, recipe, origin, manifest, catalog, 
                                            verification=verification)
             plan["fingerprint"] = recipes.digest(dict(planned=plan["fingerprint"],
                 playback=plan["playback"], call_inspection=plan.get("call_inspection")))
+        _verification_report(plan, verification)
         prepare.refresh(root, recipe_path, plan)
         report(plan, as_json=getattr(args, "json", False))
         eprint(f"Prepared recipe: {recipe_path}")
@@ -557,7 +586,10 @@ def _check_owned_health(container_ids, *, allow_player_exit=False, completed_ids
         raise RigError(f"Replay participant container health lost: {exc}") from exc
 
 
-def execute(args, root, manifest, descriptors, plan, runtime):
+def execute(args, root, manifest, descriptors, plan, runtime, *, verification=None):
+    if verification is None:
+        from .service_exports import VerificationContext
+        verification = VerificationContext()
     if args.start_delay is None:
         args.start_delay = 0.0 if plan.get("startup", {}).get("mode") == "coordinated" else 20.0
     from .replay_coordinator import project_locks
@@ -571,11 +603,11 @@ def execute(args, root, manifest, descriptors, plan, runtime):
                     if _project_container_ids(manifest, rows[name]):
                         mode = "shared session" if shared else "coordinated"
                         raise RigError(f"{name}: {mode} startup requires an empty project; stop it first")
-            return _execute(args, root, manifest, descriptors, plan, runtime)
-    return _execute(args, root, manifest, descriptors, plan, runtime)
+            return _execute(args, root, manifest, descriptors, plan, runtime, verification=verification)
+    return _execute(args, root, manifest, descriptors, plan, runtime, verification=verification)
 
 
-def _execute(args, root, manifest, descriptors, plan, runtime):
+def _execute(args, root, manifest, descriptors, plan, runtime, *, verification=None):
     """Keep v2 replay lifecycle evidence even when startup or auto-end raises."""
     from . import session_runtime
     lifecycle = {}
@@ -585,7 +617,8 @@ def _execute(args, root, manifest, descriptors, plan, runtime):
         if plan.get("session_recipe", {}).get("version") == 2:
             lifecycle["engine_id"] = session_runtime.engine_id(_session_environment(manifest, descriptors))
     try:
-        return _execute_inner(args, root, manifest, descriptors, plan, runtime, lifecycle)
+        return _execute_inner(args, root, manifest, descriptors, plan, runtime, lifecycle,
+                              verification=verification)
     except BaseException as exc:
         lifecycle["error"] = str(exc) or type(exc).__name__
         raise
@@ -609,7 +642,7 @@ def _execute(args, root, manifest, descriptors, plan, runtime):
                 eprint(f"rig replay: could not save session outcome: {exc}")
 
 
-def _execute_inner(args, root, manifest, descriptors, plan, runtime, lifecycle):
+def _execute_inner(args, root, manifest, descriptors, plan, runtime, lifecycle, *, verification=None):
     coordinated = plan.get("startup", {}).get("mode") == "coordinated"
     timings = {"planning_s": plan.get("planning_s", 0), "images_s": plan.get("image_acquisition_s", 0),
                "call_inspection_s": plan.get("call_inspection_s", 0)}
@@ -624,15 +657,18 @@ def _execute_inner(args, root, manifest, descriptors, plan, runtime, lifecycle):
         raise RigError("Source changed since planning; check/prepare again")
     if source.get("bag_proxy"):
         from .bag_proxies import verify_binding as verify_bag_proxy
-        verify_bag_proxy(source["bag_proxy"], source["root"])
+        verify_bag_proxy(source["bag_proxy"], source["root"], verification=verification)
     for binding in plan["recordings"].values():
         verify_binding(binding)
     if not args.dry_run:
-        planner.verify_recorded_call_evidence(plan, manifest, descriptors, root)
+        planner.verify_recorded_call_evidence(plan, manifest, descriptors, root, verification=verification)
     if plan["playback"]["calls"] and replay.validate_calls(
             Path(plan["playback"]["calls"])) != plan["calls_sha"]:
         raise RigError("Call script changed since planning; check again")
+    if verification is not None:
+        verification.revalidate()
     timings["verify_s"] = time.monotonic() - phase_started
+    _verification_report(plan, verification)
     gate = None
     variables = dict(manifest.vars or {})
     variables.update(replay_source=str(runtime), replay_session=args.session,
@@ -718,6 +754,7 @@ def _execute_inner(args, root, manifest, descriptors, plan, runtime, lifecycle):
                         bags=source.get("bags", []), bag_proxy=source.get("bag_proxy"),
                         original_bags=source.get("original_bags"), image_sources=plan.get("image_sources", {}),
                         execution=plan.get("execution"), epoch_unix_ns=(bag or {}).get("start_ns"),
+                        verification=plan.get("verification"),
                         skipped={"services": args.skip_services, "instances": args.skip_instances},
                         not_started=plan["omitted"],
                         playback=plan["playback"], window=plan["window"],
@@ -744,9 +781,12 @@ def _execute_inner(args, root, manifest, descriptors, plan, runtime, lifecycle):
         for binding in plan["recordings"].values():
             verify_binding(binding)
     if source.get("bag_proxy"):
-        verify_bag_proxy(source["bag_proxy"], source["root"])
+        verify_bag_proxy(source["bag_proxy"], source["root"], verification=verification)
     if not args.dry_run:
-        planner.verify_recorded_call_evidence(plan, manifest, descriptors, root)
+        planner.verify_recorded_call_evidence(plan, manifest, descriptors, root, verification=verification)
+    if verification is not None:
+        verification.revalidate()
+    _verification_report(plan, verification)
     # Capture and source verification can take minutes. Only final rendering/snapshotting
     # remains after the legacy deadline is chosen. Zero delay still releases paused sources.
     gate = None if coordinated else round(time.time() + args.start_delay, 3)
@@ -766,6 +806,7 @@ def _execute_inner(args, root, manifest, descriptors, plan, runtime, lifecycle):
             runs.snapshot(execution_manifest, root, stacks=plan["selected"])
     state = dict(session=session_root.name, run_id=run_id, status="starting",
                  startup_mode="coordinated" if coordinated else "legacy",
+                 verification=plan.get("verification"),
                  start_at_unix_s=gate, timings=timings, attempted=[])
     lifecycle["execution"] = state
     if "engine_id" in lifecycle:

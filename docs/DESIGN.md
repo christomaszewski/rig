@@ -136,8 +136,10 @@ template — it adapts to each via `rigging.yaml`'s `verbs` map (e.g. cam-up tak
 - **shm is host-level**: an external named volume (`cam_<name>_sock`, the socket/*address*) + `--ipc=host`
   (the `/dev/shm` frame *data*). A consumer needs both. Rejected: podman/k8s pods (pod-scoped IPC walls shm
   off from other stacks).
-- **Host networking** for sensor discovery; per-instance ports/topics namespaced by `name`.
-- **One ROS distro fleet-wide** (Lyrical) + one RMW, so all stacks interoperate on one graph.
+- **Network mode belongs to the service runtime.** Hardware sensor discovery may require host
+  networking; software replay can use bridge networking. Ports/topics remain instance-scoped.
+- **One declared ROS distro and RMW per deployment** (Lyrical + Zenoh in the repository example).
+  External simulator compatibility is checked separately by the attach provider.
 
 ## The package-registry layer (v0.1.35–v0.1.44)
 
@@ -271,8 +273,9 @@ cam-up carried the scar tissue ("is RIG_IMAGE_TAG a platform name?"). Now the tw
   still need different tags because they share a CPU architecture. `rig build` passes the
   composed tag as the existing `<cmd> <registry> [tag]` second arg plus the platform env
   (`--platform` overrides, like `--registry`/`--tag`).
-- **Bundles select runtime payloads.** The full release catalog remains in the artifact, but only
-  enabled vehicle images for its target CPU are saved. Content aliases plus exact image IDs bridge
+- **Bundles select runtime payloads.** The full release catalog remains in the artifact; ordinary
+  bundles save enabled vehicle images for its target CPU, and `--include-replay` additionally
+  selects the replay runtime images. Content aliases plus exact image IDs bridge
   registry digests to Docker save/load. Fleet templates require an explicit service `verbs.images`
   planner; runtime Compose must use only its planned image set. Reconstruction retains the source
   bundle as provenance and selects companion images for the replay host independently.
@@ -291,7 +294,7 @@ Version-2 recipes separate common execution intent (`session.instances`, service
 `overrides`, and `clock`) from provider input descriptions (`replay` and `simulation`). Selection
 is exact, including infrastructure. Replay owns its managed player; Isaac attachment starts
 only selected infrastructure/autonomy and substitutes declared sensor outputs. A shared file
-can carry either provider or both, while existing version-1 replay remains unchanged.
+can carry either provider or both, while existing version-1 replay recipes remain supported.
 
 Clock policy is common; the authority is provider-specific. Isaac must already publish one
 advancing simulation clock, while replay generates its clock from the selected bag timeline.
@@ -304,6 +307,29 @@ operator. Rig verifies the declared ROS contract, runtime images and session own
 configuration and Docker connection/ownership evidence govern status, logs, rollback and down.
 It does not configure QoS, remap frames or divide authority inside a shared TF topic. See
 [the operator contract](SIMULATION.md) and [acceptance limits](ISAAC_PREP_REPORT.md).
+
+## Replay inputs and offline proxies (v0.2.80)
+
+A replay recipe describes its source run and its exact data choices independently of the
+process selection. All bag sessions are selected by default; `bag`/`bags` can narrow that set
+by recorded logger instance and session. One player merges originals by receive time and
+retains overlapping messages. There is no live deduplication.
+
+`inputs.bags` selects original bags or an offline bag proxy; an `instance:NAME` key under `inputs`
+selects that recording-capable instance's original recording or proxy independently. The CLI's repeatable
+`--input TARGET=original|profile:NAME|proxy:ID` expresses the same choices. The selector model
+does not depend on a media type, while each provider owns its profiles and conversion.
+
+Export produces immutable artifacts with exact source, policy and output evidence. Preparation
+binds a recipe to a source run and selected artifacts; replay consumes that binding. Editing
+a recipe invalidates its prepared identity. Neither preparation nor replay performs implicit
+conversion. Original bag message payloads are preserved by timing conversion; lossy duplicate
+policies and camera encoding are explicit choices.
+
+Video preview input and ROS image authority are independent. `playback.image_sources` can use
+a camera proxy for preview while algorithms receive recorded bag images. Graph ownership is
+evidence for suppressing regenerated topics, not proof of duplicate message identity. See
+[the replay reference](REPLAY.md) for recipe syntax, selection conflicts and migration.
 
 ## Offline and local-source builds (v0.2.74)
 

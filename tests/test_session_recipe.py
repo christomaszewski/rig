@@ -280,7 +280,7 @@ class SessionRecipes(unittest.TestCase):
                 yield
             finally:
                 events.append("unlocked")
-        def execute(*args):
+        def execute(*args, verification=None):
             self.assertEqual(events[-1], "locked")
             events.append("executed")
             return 0

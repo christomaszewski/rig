@@ -1,17 +1,65 @@
-# Replay on a hand-built deployment
+# Replay recorded runs
 
 Replay uses the destination deployment's services and configs. A historical deployment capture,
-graph epochs, and publisher/subscriber declarations in service riggings are optional.
+graph epochs, and publisher/subscriber declarations in service riggings are optional. A run from
+a different deployment artifact is supported when its message types, topic names, and recording
+formats are compatible with the current consumers. Changed algorithms or configs can change
+their results; replay does not silently restore the source deployment's code.
+
+For building on a host and replaying on the vehicle, start with
+[onboard replay](ONBOARD_REPLAY.md). This page describes recipe authoring and replay behavior.
+
+## Start with one recipe
+
+Create `replay/analysis.yaml` in the deployment. Replace the example instance names with the
+`name:` values in your `vehicle.yaml`; include the infrastructure and consumers you need.
+The player is managed automatically and must not be listed.
+
+```yaml
+version: 2
+session:
+  instances: [zenoh_router, dashboard, cam_front, planner]
+  clock: source
+replay:
+  source: field-run
+  bags: all
+  inputs:
+    bags: {profile: arrival-conservative}
+    instance:cam_front: {profile: h264}
+  playback:
+    services: []  # Disable recorded service requests for this analysis.
+```
+
+This example merges all original bags into one arrival-time proxy and uses a video proxy for
+`cam_front`. Omit `inputs`, or set a target to `{use: original}`, to replay its originals.
+`session.instances` chooses processes; `replay.bags` and `replay.inputs` choose recorded inputs.
+An original bag can be selected even when its original logger instance is absent here.
+Below, input field names such as `bags`, `inputs`, `instances`, and `playback` refer to fields
+under `replay` in version 2, or at the document root in version 1.
 
 ```sh
-rig replay check RUN
-rig replay prepare RUN --recipe field-test
-rig replay check --recipe field-test --format json
-rig replay --recipe field-test --auto-end
+rig run export RUN --recipe replay/analysis.yaml --dry-run
+rig run export RUN --recipe replay/analysis.yaml
+rig replay prepare RUN --recipe replay/analysis.yaml
+rig replay check --recipe replay/analysis.yaml --format json
+rig replay --recipe replay/analysis.yaml --auto-end
+```
+
+Skip export when every input uses originals. Export creates reusable derived files; prepare
+binds this recipe to a local run and resolves its replay plan; replay starts the selected
+processes. Neither check nor prepare generates proxies. They do not pull images, so cache the
+required images first when the readiness report calls for them. Normal replay pulls missing
+native images by default. Stop a running replay with `rig down --end-run`.
+
+An existing version-1 recipe remains supported. To make its process selection explicit, change
+`version` to `2`, add `session.instances`, and move its old fields under `replay` in the same file.
+You do not need another recipe or a second directory.
+
+```sh
 # Add a missing player from a checkout or an explicitly pinned registry reference:
-rig replay prepare RUN --recipe field-test --player /path/to/rig-infra/ros2-bag-player
-# Or install a pinned registry version:
-rig replay prepare RUN --recipe field-test --player public/ros2-bag-player@1.18.0
+rig replay prepare RUN --recipe replay/analysis.yaml --player /path/to/rig-infra/ros2-bag-player
+# Released multi-bag/proxy baseline; newer profile revisions need their matching bundle:
+rig replay prepare RUN --recipe replay/analysis.yaml --player public/ros2-bag-player@1.20.0
 ```
 
 Use `rig replay -h`, `rig replay check -h`, and `rig replay prepare -h` for startup policy,
@@ -20,8 +68,12 @@ selection flags, recipe locations, readiness exit codes, and examples.
 `RUN` accepts a run ID/label, run directory, standalone ROS 2 bag directory, or a single
 bag file. Split bags must be supplied as a directory. `rig run replay ...` is equivalent.
 For a source literally named `check` or `prepare`, use `rig replay -- check`.
-Use rig-infra 1.18.0 or later: plan-v1 alone (introduced in 1.17.0) is insufficient;
-this replay workflow also requires runtime image pinning and recorded-call inspection. Plain prepare reports a
+The multi-bag and bag-proxy workflow requires a plan-v2/multi-input player and native images;
+rig-infra 1.20.0 is the multi-bag baseline. The sensor-profile revision-2 TF changes described
+below require Rig 0.2.81 and the rig-infra 1.20.1 player bundle. The `--fast` replay option
+requires Rig 0.2.81 and works with existing compatible proxies.
+Plan-v1 alone is insufficient for multiple bags. Runtime image pinning and recorded-call
+inspection are also required. Plain prepare reports a
 missing player without choosing one. `--player` requests a `bag_player` row in `vehicle.yaml`
 with `enabled: false, order: 999`, its `services.yaml` route, and
 `config/autonomy/bag_player.yaml`; registry installation also vendors and pins the service.
@@ -31,6 +83,9 @@ update old launchers explicitly with `rig swap`. Prepare does not pull/build ima
 deployment services.
 
 ## Startup policy
+
+This policy applies without a version-2 recipe. Version 2 instead uses the exact
+`session.instances` list shown above, including normally disabled instances.
 
 ```yaml
 infra:
@@ -55,6 +110,14 @@ which beats descriptor defaults. Row `replay.start` and top-level `replay.instan
 are aliases; contradictions in one deployment fail. Local instance policy overrides deployment
 policy; local service policy does not erase an explicit instance choice.
 
+Service selectors use the `service:` key, not the instance's `name:`. For example, a row with
+`name: x` and `service: x-pipeline-ros2` is selected by `--include-service x-pipeline-ros2`.
+That starts every instance of the service. Repeat the flag for several services:
+`rig replay RUN --include-service x-pipeline-ros2 --include-service dashboard`.
+To select particular instances, use `session.instances: [x, y]` in a version-2 recipe, or
+positional names such as `rig replay RUN x y` without version 2. The first positional argument
+is always the run: `rig replay --recipe analysis x` treats `x` as the source, not as an instance.
+
 `--skip-service` / `--skip-instance` omit processes, source recordings, and bag topics proved
 to belong exclusively to the skipped instances. They cannot conflict
 with explicit inclusions. The player cannot be disabled. A selected recording-capable service
@@ -68,6 +131,8 @@ rig replay prepare RUN --recipe no-cameras --skip-service camera-service
 rig replay --recipe no-cameras --skip-service camera-service
 ```
 
+These skip examples use version 1 or no recipe. In version 2, omit the camera from
+`session.instances` instead; omission does not automatically exclude its recorded bag topics.
 Repeat skip flags on every check, prepare, and replay invocation; they are not saved as recipe
 defaults. Use `--skip-instance cam_front` to omit only one destination camera. Skipped cameras
 are not started and their recordings/proxies are not selected or validated, even with
@@ -83,10 +148,14 @@ also preserve eligibility for `/tf`, `/tf_static`, and `/diagnostics`.
 
 ## Recipes and generated state
 
-Version-1 recipes live at `replay/NAME.yaml`; explicit YAML paths also work. Without `--recipe`,
-prepare chooses a source-derived name and prints it. Shared version-2 recipes live at
-`sessions/NAME.yaml`; when both directories contain the same name, the shared file takes
-precedence. Use an explicit path to select the legacy file in that case.
+Keep the file you edit under `replay/NAME.yaml`, `sessions/NAME.yaml`, or another explicit YAML
+path. Either recipe version works at either location. `--recipe NAME` checks `sessions/NAME.yaml`
+first, then `replay/NAME.yaml`; an explicit path avoids that name lookup. Without `--recipe`,
+prepare creates a version-1 recipe with a source-derived name and prints it.
+
+The following version-1 example documents input bindings. In version 2, put these fields under
+`replay` and use `session.instances` for process selection. The `instances` mapping below only
+binds historical identities; it does not select processes.
 
 ```yaml
 version: 1
@@ -139,7 +208,8 @@ targets remain their recorded names. `recordings.from` is source-run-relative or
 Auxiliary `playback.calls` paths are recipe-relative. Topic selections use exact absolute names.
 
 An explicit `RUN` overrides the recipe source. Prepare stores the concrete local path in
-`var/replay/NAME/bindings.yaml`. Generated `resolved.yaml`, `report.yaml`, `provenance.yaml`,
+`var/replay/NAME/bindings.yaml` for a file under `replay/`; recipes elsewhere add a path-derived
+suffix to the workspace name to avoid collisions. Generated `resolved.yaml`, `report.yaml`, `provenance.yaml`,
 `config/`, and optional derived `source/` live under `var/replay/NAME/<generation>/`.
 Changed source inventories/bindings produce a new generation, preserving existing source mounts.
 Repeated preparation preserves recipes and detects edited generated files. Explicit `--input`
@@ -147,6 +217,17 @@ overrides are saved in the recipe by a successful preparation, including inside 
 section of a version-2 recipe. Check and replay apply these overrides for that invocation only.
 To add positional instances while using a recipe, supply the source explicitly:
 `rig replay RUN planner --recipe field-test` (the first positional argument is always `RUN`).
+
+Each recipe has its own source binding. Preparing `analysis` for run A and `comparison` for run B
+does not create a global last-prepared source: `rig replay --recipe analysis` uses A, while
+`--recipe comparison` uses B. Preparing `analysis` again for B changes only that recipe's binding.
+An explicit `RUN` on replay overrides the source for that invocation without rebinding the recipe.
+Changing the recipe's `source` invalidates a binding saved against its previous source value.
+
+Edit the recipe, not generated files under `var/`. After changing selection, topic exclusions,
+input profiles, or configuration overrides, prepare that recipe again and check it. Topic-only
+filter changes do not require another export. Profile/timing changes do require a matching export
+before preparation; previously prepared generations are not reused after their recipe changes.
 
 ## Shared simulation and replay recipes
 
@@ -164,7 +245,9 @@ replay:
     exclude: [/planner/cmd_vel]
 ```
 
-Save this at `sessions/warehouse.yaml` and use the existing commands:
+For a recipe shared with simulation, `sessions/warehouse.yaml` lets both commands use the same
+short name. A version-2 file under `replay/` works too; pass its explicit path to `rig sim`.
+For the `sessions/` example, use:
 
 ```sh
 rig replay check --recipe warehouse
@@ -208,6 +291,8 @@ those experiments; it does not promise identical generated data.
 Original-run fingerprints use size/mtime inventories for media and hashes for small control files;
 they are not full cryptographic verification of recording bytes. Selected service exports also
 verify SHA-256 inventories of their source and proxy files. Prepared inputs are revalidated.
+By default those hashes are recomputed on each invocation; `--fast` can reuse prior hashes for
+unchanged files as described below.
 
 ## One recipe for original and exported inputs
 
@@ -218,17 +303,21 @@ have been resolved. Each selector contains exactly one of `use: original`, `prof
 `proxy: <full-export-id>`. Named profiles must be supplied by the relevant installed service.
 
 ```yaml
-version: 1
-source: field-run
-bags: all
-inputs:
-  bags: {profile: sensor-conservative}
-  instance:cam_front: {profile: h264}
-  instance:thermal_camera: {use: original}
-playback:
-  image_sources:
-    cam_front: bag
-    thermal_camera: camera
+version: 2
+session:
+  instances: [zenoh_router, dashboard, cam_front, thermal_camera, planner]
+  clock: source
+replay:
+  source: field-run
+  bags: all
+  inputs:
+    bags: {profile: sensor-conservative}
+    instance:cam_front: {profile: h264}
+    instance:thermal_camera: {use: original}
+  playback:
+    image_sources:
+      cam_front: bag
+      thermal_camera: camera
 ```
 
 Save this as `replay/field-review.yaml`, then use the same recipe throughout:
@@ -294,7 +383,7 @@ apply an explicit duplicate policy before replay. The player provider ships thes
 | --- | --- | --- |
 | `arrival-off`, `arrival-conservative`, `arrival-aggressive` | Recorded receive time | Error |
 | `sent-off`, `sent-conservative`, `sent-aggressive` | Middleware send time | Error |
-| `sensor-off`, `sensor-conservative`, `sensor-aggressive` | Message `header.stamp` | Fall back to receive time |
+| `sensor-off`, `sensor-conservative`, `sensor-aggressive` | Message `header.stamp`; TF handling below | Fall back to receive time |
 
 `off` retains every message. `conservative` removes cross-input copies only when identity evidence
 proves duplication; the current identity recognizer covers service events carrying valid client
@@ -302,6 +391,9 @@ GID, sequence, event kind, and event timestamp, with matching topic/type/payload
 messages usually lack this identity. Equal payloads, equal header stamps, or close arrival times
 alone remain ambiguous and are preserved. Thus conservative mode does not promise one copy of
 every topic message recorded by two loggers.
+For example, byte-identical SBG sensor messages and PointCloud2 messages are preserved by
+`conservative`; their timestamps do not prove publisher/message identity. Choose `aggressive`
+if collapsing those likely cross-bag matches is appropriate for the analysis.
 
 `aggressive` additionally matches equal topic/type/payload across different input sessions within
 the receive-time window (100 ms by default). This is an explicitly lossy heuristic: independent
@@ -311,7 +403,8 @@ remove duplicates declare themselves lossy; `off` profiles retain message payloa
 
 The bag player's resolved `play` configuration may refine `sensor_timestamp_field`,
 `topic_timestamp_fields`, `timestamp_fallback` (`error`, `received`, or `sent`),
-`max_clock_skew_s` (default 60), and `dedup_window_ms` (default 100). An explicitly configured
+`max_clock_skew_s` (default 60), `dedup_window_ms` (default 100), and `tf_lead_time_ms`
+(default 100). An explicitly configured
 `play.time_source` must agree with the selected profile. Original playback supports received time;
 select a sent/sensor profile to use another timeline. The converter validates time ranges and
 sorts by the selected scheduling timestamp without rewriting timestamps inside message payloads.
@@ -319,13 +412,43 @@ Provenance records the original receive/send times, effective schedule time, ret
 decisions, duplicate relationships, fallback counts, and profile identity. Metadata repair is
 separate: bag export requires valid original session indexes; it does not repair the run in place.
 
+Sensor profile revision 2 handles `tf2_msgs/msg/TFMessage` using its nested transform stamps.
+A dynamic TF message is scheduled `tf_lead_time_ms` before its earliest transform stamp,
+clamped at time zero. Static TF on `/tf_static` (including namespaced topics) is preloaded
+before sensor data; zero static stamps are allowed. TF takes priority over ordinary messages
+at equal schedule times. The complete TF payload is retained without splitting or rewriting
+transforms. Every dynamic transform stamp must pass the clock-domain check, and explicit
+`topic_timestamp_fields` overrides for TFMessage topics are rejected. Static transforms that
+change parent or geometry during the run cannot be safely preloaded and fail conversion.
+For selected static TF topics with recorded transient-local QoS, windowed replay restores
+the latest transform for every child frame across all pre-window messages.
+
+The lead is measured in recorded time and is scaled by the playback rate. It should cover the
+transform sampling interval needed for interpolation and delivery/processing delay. It gives TF
+publication a head start; it cannot guarantee that a separate subscriber has already processed
+the transform. Consumers should use a TF message filter or bounded wait, and windowed replay
+needs enough preceding dynamic TF data to warm its buffer. Excessively large leads can publish
+future transforms far enough ahead to evict needed history from the consumer's TF cache.
+
+Sensor scheduling preserves each retained message's serialized bytes, including PointCloud2
+fields, point order, per-point timestamps, and padding. It still changes delivery order across
+topics: snapshot triggers, consumers that select the latest cloud, and arrival-based windows
+can select different data. Conservative mode retains overlapping copies of ordinary clouds,
+which sensor scheduling can place at the same instant. To isolate timing effects, compare
+`arrival-conservative` with `sensor-conservative` using the same inputs and consumers; compare
+cloud payloads and counts independently of order.
+
+Existing proxies are immutable. To adopt the TF scheduling fix, select a sensor profile, export
+it again with an updated player bundle, and prepare that recipe again. An explicit proxy ID keeps
+selecting its original generation and must be replaced to use the new behavior.
+
 Use an updated player bundle exposing `replay-export-bags` and the matching native ROS image.
 Native multi-input playback also requires the player's plan-v2/multi-input capability and matching
 image capability label. A legacy single-bag player does not gain those abilities from a Rig update.
 
 ## Offline camera proxies
 
-Camera-service owns the versioned `h264` export profile and its offline converter. Install a
+Camera-service currently provides one profile, `h264`, and owns its offline converter. Install a
 camera-service bundle/image that supports service exports and direct replay input bindings.
 No `export_profiles` entry or codec settings are needed in `vehicle.yaml`.
 
@@ -339,11 +462,6 @@ rig run export RUN --service camera-service --instance cam_front
 
 # Convert again while retaining previous generations; identical output is deduplicated.
 rig run export RUN --service camera-service --profile h264 --force
-
-# Legacy broad proxy opt-in remains available; explicit recipe.inputs needs no flag.
-rig replay check RUN --use-proxies
-rig replay prepare RUN --recipe field-test --use-proxies
-rig replay --recipe field-test --use-proxies
 ```
 
 The service must be installed in `services.yaml`; its recorded instances need not be enabled or
@@ -356,22 +474,32 @@ incompatible cached images. Registry authentication uses the usual Docker config
 downloading images. Reusing an existing export also needs no pull. A writable source run
 and space for the conversion are required for generation. Source recordings and bags stay intact.
 
+Export resolves converter images from the current deployment's service routes, image settings,
+and image catalog, not from the deployment captured with the source run. Camera conversion uses
+the native `cam-dev` helper even when the vehicle normally runs a Jetson camera image. Inspect
+the proposed reference with `rig run export RUN --recipe analysis --dry-run`; the deployment's
+`rig.lock` build catalog records its release image references and digests.
+
 H.264 proxies are lossy. They preserve frame count/order/IDs, capture timestamps, session gaps,
-and geometry; pixel values change. Camera-service's profile revision 2 keeps the existing
-8-bit mono, Bayer, and color conversions and adds `GRAY16_LE`, `GRAY16_BE`, and `Mono16`.
+and image dimensions; pixel values change. There are no separate resolution presets. The current
+profile definition is revision 3 and supports 8-bit mono, Bayer, and color inputs plus
+`GRAY16_LE`, `GRAY16_BE`, and `Mono16`.
 These 16-bit mono inputs use WebRTC's auto normalization: a 1st–99th percentile contrast
 stretch with exponential smoothing (previous range weight 0.9), reset per recording session.
 Their proxy headers describe the actual `GRAY8` output, stored as I420 H.264, and provenance
 retains the original pixel format and bit depth. These are visual intensity previews, not
 thermal/radiometric counts; use originals for measurements or consumers requiring 16-bit data.
 Packed/high-bit-depth Bayer, other unsupported high-bit-depth formats, and invalid geometry
-still fail preflight. The supported 8-bit paths retain their logical camera format.
+still fail preflight. Bayer inputs are debayered to color; the proxy is not a raw Bayer recording.
+The revision-3 encoder uses constrained-baseline H.264 without B-frames or CABAC to reduce decode
+complexity. To preview proxy video while algorithms receive original-quality bag images, set
+`playback.image_sources.CAMERA_NAME: bag` in the recipe as described above.
 Proxies target lower decoding cost; the normal consumer/WebRTC conversion and encoding still run.
 Measure representative footage before assuming a particular CPU or storage improvement.
 
 Update the installed camera-service checkout/bundle and its native images together before
-generating revision 2 proxies. The usual export command uses the new profile hash to create a
-new export identity; `--force` is not needed. Revision 1 generations remain on disk and can
+generating proxies from a newer profile revision. The usual export command uses the new profile
+hash to create a new export identity; `--force` is not needed. Earlier generations remain on disk and can
 still be selected with an explicit recipe generation pin.
 
 Only transformed camera data and provenance are written:
@@ -390,6 +518,17 @@ Each export ID identifies an immutable, validated generation. Existing matching 
 verified and reused. Service-mode `--force` preserves old generations, unlike replacement of an
 existing legacy whole-run export. Service mode rejects `--in-place` and `--lossy`; the profile
 itself declares lossiness. Camera's default profile never joins legacy in-place exports.
+
+### Legacy camera proxy opt-in
+
+For new recipes, use `inputs` to select each camera independently. The older broad flag remains
+supported for existing workflows:
+
+```sh
+rig replay check RUN --use-proxies
+rig replay prepare RUN --recipe legacy-camera --use-proxies
+rig replay --recipe legacy-camera --use-proxies
+```
 
 Without explicit `inputs` selectors or `--use-proxies`, replay uses originals even after proxy
 preparation or when recipes have legacy proxy preferences. With the legacy flag, every selected
@@ -423,11 +562,14 @@ Camera inputs bind directly to the selected original/proxy directories and sessi
 read-only. Selecting proxies or renaming a camera does not copy the bag into another run tree.
 Independent legacy bag repairs still use their prepared copy.
 
-Copy the run with its `exports/services` directory to share its generations. Fleet sync excludes
-exports by default; opt in with `rig fleet sync --into fleet-runs --include-service-exports`.
+Copy the complete original run, including `exports/services` for camera proxies and
+`exports/inputs/bags` for bag proxies, to share both kinds. Proxies retain source identities and
+do not replace the original run. Fleet sync excludes exports by default; opt in to camera/service
+exports with `rig fleet sync --into fleet-runs --include-service-exports`.
 This retains nested paths, transfers only committed generations, and verifies each before making
-it available. It cannot be combined with legacy `--profile` sync. Import/archive preserve the
-artifacts; catalog treats them as part of their run, and size reporting includes their bytes.
+it available. That flag does not transfer bag proxies; copy the full run or regenerate its bag
+proxy at the destination. It cannot be combined with legacy `--profile` sync. Catalog and size
+reporting include export files within their run.
 
 ## Topics and recorded calls
 
@@ -450,6 +592,18 @@ Use exact `playback.exclude` entries to suppress recorded status or other output
 running instance will publish again. Broad mode never suppresses topics by namespace alone,
 including for skipped sources. Unknown new consumer namespaces stay eligible.
 
+For a version-2 recipe, edit this part of the same file, then prepare it again:
+
+```yaml
+replay:
+  playback:
+    exclude: [/planner/trajectory, /planner/status]
+```
+
+These are exact original topic names before remapping; wildcards and prefixes are not expanded.
+Exclusions filter bag playback only. A running service can still publish those topics. Changing
+this filter does not require regenerating a bag or video proxy.
+
 `--selection recorded` limits topics to the named instances' observed subscriptions when
 available. Its legacy fallback may use a namespace heuristic, reported as such. Topic selection
 does not change the recorded-call policy and that fallback never establishes service ownership.
@@ -462,7 +616,7 @@ client is known to issue the request, automatic injection is excluded to avoid r
 calls as well. Unassigned clients leave duplicate-call risk unknown and produce a warning.
 Missing graph evidence never establishes automatic service ownership.
 
-This is a default change for existing recipes. Use an explicit empty list to disable recorded
+Use an explicit empty list to disable recorded
 requests, or a nonempty list to choose exact targets manually:
 
 ```yaml
@@ -545,6 +699,12 @@ bags:
   - {logger: event_logger, session: 20261105T120000Z}
 ```
 
+`logger` is the **recorded instance name**, matching `RUN/bags/LOGGER/SESSION`; it is not the
+service package key and does not require a matching instance in the replay deployment. Use one
+list entry to select one logger, or several entries to merge a subset. Put this `bags` list under
+`replay` in version 2. Selecting original bags retains overlapping messages; there is no live
+deduplication during replay.
+
 The legacy scalar `bag: {logger: bag_logger, session: latest}` still selects exactly one session;
 its omitted fields may use the player's configured defaults. `bag` and `bags` are mutually
 exclusive. Player standalone `source.logger/session` settings do not narrow a replay that uses
@@ -580,6 +740,38 @@ in place; services without that capability retain the prepared layout adapter. S
 CSV timestamps, and video segments identify complete sessions. Automatic selection uses observed
 time overlap; missing timing requires explicit sessions. No historical identity, epochs, or
 capture times are fabricated. Player and camera inputs mount read-only; new outputs stay writable.
+
+## Faster repeated replays
+
+Use `--fast` when repeating an unchanged replay:
+
+```sh
+rig replay prepare RUN --recipe replay/analysis.yaml
+rig replay --recipe replay/analysis.yaml --fast --auto-end
+rig replay check --recipe replay/analysis.yaml --fast
+```
+
+Normal preparation and replay save completed file hashes in the deployment-local
+`var/replay/verification-cache.json`. `--fast` permits reuse when the resolved path, device,
+inode, size, and nanosecond modification/change timestamps still match. It applies to replay,
+check, and prepare; no recipe edit, proxy export, or new preparation is required just to enable
+it. A missing cache or changed file falls back to hashing, so the first fast invocation may
+take as long as a normal one. Cache write failures do not bypass verification.
+The cache is bound to the current host boot: a restart requires fresh hashing. If Rig cannot
+read the host's boot identity, it falls back to full verification.
+
+This avoids rereading large proxy files and their original-source evidence. Manifests, expected
+hashes, path containment, inventories, recipe/configuration changes, runtime images, host guards,
+and startup readiness are still checked. Modified files are rehashed and rejected if they no
+longer match the selected artifact. Check and dry-run can read an existing cache but never create
+or update it. Remove the flag for fresh byte verification; fast mode does not detect corruption
+that leaves all cached filesystem identity fields unchanged.
+
+Fast mode does not remove image pulls, run capture, camera timestamp parsing, directory scans,
+or the intentional startup delay. In legacy startup the default delay is 20 seconds; use
+`--start-delay 0` separately when that settling interval is unnecessary. Coordinated startup
+still waits for its readiness checks. Verification mode and cache/hash counts accompany the
+replay report, while `.rig/replay/execution.yaml` records startup phase timings.
 
 ## Runtime images
 
@@ -631,14 +823,9 @@ player; `replay prepare --player ...` only supplies a missing player. It does no
 For vendored registry services, swap to the compatible release while preserving instance configs:
 
 ```sh
-rig swap ros2-bag-player public/ros2-bag-player@1.18.0
-rig swap ros2-bag-logger public/ros2-bag-logger@1.18.0
-rig swap zenoh-router public/zenoh-router@1.18.0
-rig swap camera-service public/camera-service@1.11.0
-# If installed: rig swap ros1-bag-logger public/ros1-bag-logger@1.18.0
-# If explicitly started during replay:
-# rig swap sbg public/sbg@0.9.1
-# rig swap ouster public/ouster@0.5.2
+rig swap ros2-bag-player public/ros2-bag-player@1.20.1
+# Pin the corresponding release of other installed services, or use updated checkouts:
+rig swap camera-service /path/to/camera-service
 # For locally routed dashboard code, point at its updated checkout:
 rig swap dashboard /path/to/dashboard
 ```
@@ -646,12 +833,13 @@ rig swap dashboard /path/to/dashboard
 Swap only installed services; names above are service keys, not instance names. Check local
 routes in `services.yaml` and registry pins in `rig.lock` before rebuilding. The dashboard
 launcher must include `runtime-images` support even if its Docker images were already built.
-For locally routed services, the first compatible commits are dashboard `c88b07f`,
-Doodle `45dae9d`, and NovAtel `8bc8172`; update the routed checkout or swap to a checkout
-containing that commit. Supporting image pins does not make a hardware driver a recording
+The example player version includes the sensor-TF fixes and requires Rig 0.2.81 for the new
+export policy. Verify each service's advertised capabilities and image labels rather than
+assuming a historical minimum version supports every newer feature.
+Supporting image pins does not make a hardware driver a recording
 source: explicit live-start rules still apply.
-MAVLink router is outside this release's supported replay set; deployments using it must omit
-it from replay with `replay: {start: false}` or `--skip-service mavlink-router`.
+Any selected service must implement the runtime image contract. Omit unsupported services from
+`session.instances`, or use `replay: {start: false}` / `--skip-service` in version-1 workflows.
 
 Build/publish the deployment's base and messages overlay from updated sources with its normal
 `rig build --registry REGISTRY --tag TAG` workflow. The overlay must retain the fleet's custom
@@ -688,7 +876,8 @@ The run remains open with a failed/cancelled startup outcome. Startup timings, a
 instances, the release deadline, and cleanup results are saved in `.rig/replay/execution.yaml`
 and the session directory. Proxy verification prints each file and its byte count before
 hashing. Shared exports and originals are hashed once per invocation, with fresh file-identity
-checks before reuse; a later invocation verifies them again.
+checks before reuse. A later invocation hashes them again unless `--fast` can reuse a matching
+entry from the local verification cache.
 
 Ordinary replay returns after startup: exit 0 means the launchers succeeded, not that playback
 finished. With `--auto-end`, Rig inspects the exact bag-player container and any required call

@@ -943,7 +943,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sim = sub.add_parser("sim", help="attach a deployment to an existing Isaac Sim ROS graph",
                          description="Use rig sim check/up --recipe NAME, or rig sim down --end-run. "
-                                     "Shared version-2 recipes live in sessions/NAME.yaml.")
+                                     "Version-2 recipes use sessions/NAME.yaml or an explicit YAML path.")
     sim.set_defaults(sim_help=True)
     for verb in ("check", "up"):
         sp = sub.add_parser("sim-" + verb, prog=f"{parser.prog} sim {verb}",
@@ -965,10 +965,10 @@ def build_parser() -> argparse.ArgumentParser:
     rp.add_argument("run", nargs="?", metavar="RUN",
                     help="source run ID/label, run directory, ROS 2 bag directory or single bag file; "
                          "required unless --recipe provides a source")
-    rp.add_argument("--recipe", metavar="NAME|YAML", help="replay/NAME.yaml or explicit YAML path; "
+    rp.add_argument("--recipe", metavar="NAME|YAML", help="sessions/NAME.yaml, then replay/NAME.yaml, or an explicit path; "
                     "reuses the prepared local source binding unless RUN overrides it")
     rp.add_argument("--use-proxies", action="store_true",
-                    help="explicitly bind compatible service exports instead of original recordings; "
+                    help="legacy broad service-proxy opt-in; prefer recipe inputs or --input per target; "
                          "missing/stale proxies are errors; never generates proxies")
     rp.add_argument("--input", action="append", default=[], dest="inputs", metavar="TARGET=CHOICE",
                     help="choose bags or instance:NAME as original, profile:NAME, or proxy:ID; "
@@ -979,7 +979,7 @@ def build_parser() -> argparse.ArgumentParser:
     rp.add_argument("names", nargs="*", metavar="NAME",
                     help="additional destination instances to start despite replay.start policy; "
                          "recording-capable instances still use recordings unless --live. "
-                         "Omit to use startup policy (see below)")
+                         "Version 2 uses session.instances and cannot add unlisted names")
     rp.add_argument("--live", action="append", default=[], metavar="NAME",
                     help="force an instance LIVE although the run holds its recordings (HIL: "
                          "replay the rest, run the real device); repeatable")
@@ -988,7 +988,8 @@ def build_parser() -> argparse.ArgumentParser:
                          "with proven exclusive ownership; repeatable. "
                          "Use --skip-service camera-service to replay without cameras/video")
     rp.add_argument("--include-service", action="append", default=[], dest="include_services", metavar="SERVICE",
-                    help="start every instance of a service despite its replay startup policy; repeatable")
+                    help="start every instance with this service: key (not name:); repeatable; "
+                         "version 2 uses session.instances instead")
     rp.add_argument("--skip-instance", action="append", default=[], dest="skip_instances", metavar="NAME",
                     help="omit one instance, its source recordings and bag topics with proven "
                          "exclusive ownership; repeatable")
@@ -1016,8 +1017,8 @@ def build_parser() -> argparse.ArgumentParser:
                          "recipe calls and recorded requests before event-content validation; "
                          "bootstrap one with --export-calls")
     rp.add_argument("--from", dest="window_from", default=None, metavar="S",
-                    help="start the replay S seconds into the recording (from BAG START — the "
-                         "same zero as call-script t). The plan-v1 player seeks "
+                    help="start S seconds from the selected bag timeline start (the "
+                         "same zero as call-script t). The player seeks "
                          "there AND restores the latched topics (/tf_static…) the seek would skip")
     rp.add_argument("--to", dest="window_to", default=None, metavar="S",
                     help="stop the replay at S seconds from bag start (exclusive; past the bag "
@@ -1029,6 +1030,9 @@ def build_parser() -> argparse.ArgumentParser:
     rp.add_argument("--force", action="store_true",
                     help="override ordinary deployment preflight and the clean-host guard; "
                          "does not bypass recipe, input, image or player-capability errors")
+    rp.add_argument("--fast", action="store_true",
+                    help="reuse previous file hashes when path, identity, size and timestamps are unchanged; "
+                         "hash changed/uncached files normally; keep plan, image and startup checks")
     rp.add_argument("--auto-end", nargs="?", type=int, const=10, default=None, metavar="GRACE_S",
                     dest="auto_end",
                     help="wait for the player to finish the bag, breathe GRACE_S seconds "
@@ -1093,7 +1097,7 @@ def build_parser() -> argparse.ArgumentParser:
                           "stay, only the host swaps (machine-wide instead: provision --registry)")
     rec.add_argument("--enable-replay", dest="enable_replay", default=None, metavar="PATH|REF",
                      help="wire a missing SIL player: the ros2-bag-player dir or a rig-infra "
-                          "checkout, or a registry ref (public/ros2-bag-player@1.17.0) — adds the "
+                          "checkout, or a registry ref (public/ros2-bag-player@1.20.0) — adds the "
                           "route, config/autonomy/bag_player.yaml and the enabled: false, order: 999 "
                           "row; no-op when the tree already carries the player")
 
@@ -1955,7 +1959,7 @@ def main(argv=None) -> int:
             return command(args, root)
         if args.cmd == "sim":
             print("Use rig sim check/up --recipe NAME, or rig sim down --end-run. "
-                  "Recipes: sessions/NAME.yaml (version 2).")
+                  "Recipes: sessions/NAME.yaml or an explicit YAML path (version 2).")
             return 0
         if args.cmd in ("sim-check", "sim-up", "sim-down"):
             from .sim_workflow import command

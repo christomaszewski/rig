@@ -131,6 +131,32 @@ class BagProxies(unittest.TestCase):
         self.assertEqual((self.f.source / "bags/logger/session-1/data.mcap").read_bytes(), original)
         self.assertFalse(list((self.f.source / "exports/inputs/bags/arrival-conservative").glob(".stage-*")))
 
+    def test_tf_lead_refines_policy_without_rewriting_legacy_artifact_identity(self):
+        binding = self.build()
+        original = copy.deepcopy(binding["manifest"])
+        self.assertNotIn("tf_lead_time_ms", original["profile"]["definition"]["policy"])
+        self.assertEqual(original["profile"]["sha256"], bp.artifacts.digest(self.definition))
+        self.assertEqual(bp.load_artifact(binding["path"]), original)
+        self.f.write("player.yaml", {"name": "player", "service": "ros2-bag-player",
+                                    "play": {"tf_lead_time_ms": 25}})
+        # The old artifact does not attest any TF lead; an explicit pin must not claim it does.
+        with self.assertRaisesRegex(RigError, "tf_lead_time_ms conflicts"):
+            bp.resolve(self.source, {"proxy": binding["export_id"]}, self.row, self.descriptor)
+        replacement = self.build()
+        self.assertEqual(replacement["profile"]["definition"]["policy"]["tf_lead_time_ms"], 25)
+        self.assertNotEqual(replacement["export_id"], binding["export_id"])
+        self.assertEqual(bp.load_artifact(binding["path"]), original)
+
+    def test_tf_lead_policy_rejects_invalid_values_and_preserves_missing_setting(self):
+        legacy = copy.deepcopy(self.definition["policy"])
+        self.assertEqual(bp._policy(legacy), self.definition["policy"])
+        self.assertNotIn("tf_lead_time_ms", legacy)
+        for lead in (0, 100, 12.5):
+            self.assertEqual(bp._policy({**legacy, "tf_lead_time_ms": lead})["tf_lead_time_ms"], lead)
+        for lead in (-1, True, "100", None, float("nan"), float("inf")):
+            with self.subTest(lead=lead), self.assertRaisesRegex(RigError, "tf_lead_time_ms"):
+                bp._policy({**legacy, "tf_lead_time_ms": lead})
+
     def test_changed_converter_requires_new_profile_resolution_but_exact_pin_remains_valid(self):
         binding = self.build()
         (self.repo / "tools").mkdir()

@@ -821,14 +821,14 @@ def inspect_recorded_calls(plan, manifest, descriptors, root, *, execute=False, 
     return finish(plan)
 
 
-def verify_recorded_call_evidence(plan, manifest, descriptors, root):
+def verify_recorded_call_evidence(plan, manifest, descriptors, root, *, verification=None):
     """Fail if evidence changed after inspection, including files with restored mtime."""
     import copy
     if not plan.get("service_selection", {}).get("candidates"):
         return
     expected = plan.get("call_inspection")
     current = copy.deepcopy(plan)
-    inspect_recorded_calls(current, manifest, descriptors, root)
+    inspect_recorded_calls(current, manifest, descriptors, root, verification=verification)
     if (not expected or expected.get("status") != "ready" or current.get("call_inspection") != expected
             or current["playback"] != plan["playback"]
             or any(i["status"] in ("error", "not_checked") and i["code"] == "recorded_calls"

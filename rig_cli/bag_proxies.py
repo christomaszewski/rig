@@ -21,7 +21,8 @@ KIND = "rig-bag-proxy"
 FORMAT = "rosbag2-proxy/v1"
 POLICY_KEYS = {"time_source", "deduplication", "sensor_timestamp_field", "timestamp_fallback",
                "topic_timestamp_fields", "max_clock_skew_s", "dedup_window_ms"}
-CONFIG_KEYS = POLICY_KEYS - {"deduplication"}
+OPTIONAL_POLICY_KEYS = {"tf_lead_time_ms"}
+CONFIG_KEYS = (POLICY_KEYS | OPTIONAL_POLICY_KEYS) - {"deduplication"}
 
 
 class MissingProxy(RigError):
@@ -29,7 +30,9 @@ class MissingProxy(RigError):
 
 
 def _policy(value):
-    if not isinstance(value, dict) or set(value) != POLICY_KEYS:
+    # Validate old immutable manifests without adding defaults or changing their hashes.
+    if (not isinstance(value, dict) or not POLICY_KEYS <= set(value)
+            or set(value) - POLICY_KEYS - OPTIONAL_POLICY_KEYS):
         raise RigError("bag proxy: policy must explicitly specify timing, fallback, and deduplication settings")
     if value["time_source"] not in ("received", "sent", "sensor"):
         raise RigError("bag proxy: unsupported time_source")
@@ -43,7 +46,9 @@ def _policy(value):
     for field in [value["sensor_timestamp_field"], *fields.values()]:
         if not isinstance(field, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z_0-9]*(?:\.[A-Za-z_][A-Za-z_0-9]*)*", field):
             raise RigError("bag proxy: invalid sensor timestamp field")
-    for key in ("max_clock_skew_s", "dedup_window_ms"):
+    for key in ("max_clock_skew_s", "dedup_window_ms", *OPTIONAL_POLICY_KEYS):
+        if key not in value:
+            continue
         if type(value[key]) not in (int, float) or not math.isfinite(value[key]) or value[key] < 0:
             raise RigError(f"bag proxy: {key} must be finite and nonnegative")
     return value
@@ -239,7 +244,8 @@ def resolve(source, selector, row, descriptor, *, pin=None, root=None, verificat
         config = _config(row, root)
         settings = doc["profile"]["definition"]["policy"]
         for key in CONFIG_KEYS:
-            if key in config and config[key] != settings[key]:
+            # An older artifact without an optional setting does not attest that setting.
+            if key in config and config[key] != settings.get(key):
                 raise RigError(f"bag proxy {doc['export_id']}: {key} conflicts with the player configuration")
         load_artifact(folder, source_root=source_root, verification=verification)
         compatible.append(_binding(folder, doc))
