@@ -183,6 +183,60 @@ def tag_architectures(ref, raw, *, access=None):
     return set()
 
 
+def linux_children(raw):
+    """architecture -> image manifest digest for an index's linux members (attestations excluded)."""
+    return {m['platform']['architecture']: m['digest'] for m in raw.get('manifests', [])
+            if (m.get('platform') or {}).get('os') == 'linux' and m.get('digest')}
+
+
+def keep_identity(row, catalog, *, access=None):
+    """Keep a re-published image's earlier index digest when its content did not change.
+
+    A build whose every step is cached publishes byte-identical per-architecture images, but a new
+    index each time: the provenance attestation in it is unique to the build. Dependents build
+    FROM the index digest and BuildKit keys their steps on it, so a base that only changed its
+    index digest would rebuild every image above it (and give each new layers) with nothing
+    changed. When ``row``'s linux members are exactly those of a publication of the same repository
+    that ``catalog`` (rig.lock's build catalog before this build) already records, and that index
+    is still in the registry, the tag is pointed back at it and its digest is returned for the
+    caller to record and hand to dependents. Returns None when the content is new, or when the
+    earlier index cannot be confirmed or re-tagged — the fresh publication then stands.
+    """
+    repo, children = row['ref'].rsplit(':', 1)[0], row.get('children')
+    if not children:
+        return None
+    # The same tag first: re-tagging it changes nothing a consumer of that tag can observe.
+    for key in sorted(catalog, key=lambda k: (k != row['ref'], k)):
+        prior = catalog[key]
+        if not isinstance(prior, dict) or key.rsplit(':', 1)[0] != repo:
+            continue
+        digest = prior.get('digest')
+        if (prior.get('adopted') or prior.get('children') != children
+                or not isinstance(digest, str) or not re.fullmatch(r'sha256:[0-9a-f]{64}', digest)):
+            continue
+        if digest == row['digest']:
+            return None  # already that publication
+        earlier = f'{repo}@{digest}'
+        try:
+            raw = inspect_raw(earlier, access=access)
+            if raw is None or linux_children(raw) != children:
+                continue  # collected from the registry, or not what the catalog recorded
+            result = docker_registry.imagetools(['create', '-t', row['ref'], earlier],
+                                                [row['ref'], earlier], access=access,
+                                                capture_output=True, text=True, timeout=120)
+        except (RigError, OSError, subprocess.TimeoutExpired) as exc:
+            eprint(f'rig build: {row["ref"]} is unchanged, but its earlier index could not be '
+                   f'kept ({exc}); publishing {row["digest"][:19]}…')
+            return None
+        if result.returncode:
+            eprint(f'rig build: {row["ref"]} is unchanged, but its tag could not be pointed back '
+                   f'at {digest[:19]}… ({(result.stderr or "").strip()[-200:]}); publishing '
+                   f'{row["digest"][:19]}…')
+            return None
+        return digest
+    return None
+
+
 def _builder_platforms(access):
     import os
     env = dict(os.environ, **access.build_env) if access else dict(os.environ)
@@ -327,6 +381,9 @@ def run(manifest, descriptors, *, registry, tag, dry_run, jobs=1, root=None,
     preflight(tasks, reg, access=access)
     results = []
     completed_refs = {}
+    # The catalog as it stood before this build: what each re-published image is compared with.
+    earlier = dict(load_lock(root).get('build_catalog') or {}) if root is not None else {}
+    unchanged = set()
     with contextlib.ExitStack() as stack:
         temp = Path(stack.enter_context(tempfile.TemporaryDirectory(prefix='rig-build-')))
         exported = {key: build_sources.export(reqs, temp / f'sources-{key[0]}-{key[1]}')
@@ -412,6 +469,14 @@ def run(manifest, descriptors, *, registry, tag, dry_run, jobs=1, root=None,
                                      for m in raw.get('manifests', [])
                                      if m.get('platform', {}).get('os') == 'linux'},
                            no_cache=no_cache)
+                kept = keep_identity(row, earlier, access=access)
+                if kept:
+                    # Same images as before: dependents keep building FROM the same digest, so
+                    # their own cached steps (and published layers) stay valid.
+                    row['digest'] = kept
+                    unchanged.add(row['ref'])
+                    with step.progress.lock:
+                        step.progress.write(f'rig build: {row["ref"]} is unchanged; kept {kept[:19]}…')
             return rows
 
         for stage in (0, 1, 2):
@@ -440,6 +505,7 @@ def run(manifest, descriptors, *, registry, tag, dry_run, jobs=1, root=None,
             record(last_build=False)
             raise RigError(f'{exc}\n{retry_hint(mirror_owners, retry_flags or [])}') from exc
         record(last_build=True)
-        eprint(f'rig build: published and verified {len(results)} images; '
-               f'{"complete matrix" if complete else "targeted build"}')
+        eprint(f'rig build: published and verified {len(results)} images'
+               + (f' ({len(unchanged)} unchanged)' if unchanged else '')
+               + f'; {"complete matrix" if complete else "targeted build"}')
     return 0

@@ -217,7 +217,15 @@ context are preserved. Old managed builders can be listed with `docker buildx ls
 name with `docker buildx rm` when their caches are no longer needed.
 
 Rig publishes the shared base first, then its messages overlay, then service images. Consumers receive
-the freshly published base **digest**. Shared build contexts are deduplicated. Every published output
+the published base **digest**. A build whose steps were all cached publishes the same
+per-architecture images under a new index digest, because the provenance attestation in the index
+is unique to each build. BuildKit keys a dependent's steps on the digest it builds `FROM`, so
+handing on that new digest would rebuild every image above an unchanged base. When an image's
+published architecture members equal those of an earlier publication of the same repository in
+`rig.lock`, and that index is still in the registry, Rig points the tag back at it and keeps its
+digest: dependents stay cached, their layers and digests do not churn, and `rig.lock` does not
+change. The output marks such images `unchanged`; a new tag of unchanged content resolves to the
+same index. Shared build contexts are deduplicated. Every published output
 must report its digest and expose every requested architecture in its registry index. Only verified
 results are saved in `rig.lock.build_catalog`; `last_build` records whether the request covered the
 whole matrix or was targeted. A failure can leave partial registry uploads but never records them as

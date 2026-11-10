@@ -388,6 +388,142 @@ Path(a[a.index('--metadata-file')+1]).write_text(json.dumps({'containerimage.dig
             self.assertTrue(all(r['digest'] == DIGEST and r['no_cache']
                                 for r in lock['build_catalog'].values()))
 
+    def test_unchanged_publication_keeps_its_digest_for_dependents_and_the_catalog(self):
+        """A cached rebuild publishes the same images under a NEW index digest (its attestation is
+        per build). Dependents build FROM that digest, so handing it on would rebuild every image
+        above an unchanged base. The earlier index is kept instead, until the content changes."""
+        base = self.service('base', '  provides: base\n', '[fleet-ros]')
+        consumer = self.service('consumer', images='[core]')
+        descs = {'consumer': consumer, 'base': base}
+        for d, image in ((base, 'fleet-ros'), (consumer, 'core')):
+            shutil.copy2(HELPER, d.repo / 'helper.sh')
+            (d.repo / 'build.sh').write_text(f'''#!/bin/sh
+set -eu
+. ./helper.sh
+rig_build "$1/{image}:$2" --build-arg "BASE=${{RIG_BASE_IMAGE:-none}}" .
+''')
+        bin_dir = self.root / 'bin'
+        bin_dir.mkdir()
+        (bin_dir / 'docker').write_text('''#!/usr/bin/env python3
+import hashlib, json, os, sys
+from pathlib import Path
+a = sys.argv[1:]
+with open(os.environ['BUILD_LOG'], 'a') as f: f.write(json.dumps(a)+'\\n')
+digest = 'sha256:' + hashlib.sha256(os.urandom(16)).hexdigest()  # a new index every publication
+Path(a[a.index('--metadata-file')+1]).write_text(json.dumps({'containerimage.digest': digest}))
+''')
+        (bin_dir / 'docker').chmod(0o755)
+        log = self.root / 'build.log'
+        content = {'fleet-ros': 'sha256:' + 'b' * 64, 'core': 'sha256:' + 'c' * 64}
+        registry, retags = {}, []  # index digest -> its members; (tag, earlier index) re-tags
+
+        def inspect(ref, **kw):
+            image, digest = ref.split('/')[-1].split('@')
+            if digest not in registry:  # first sight = the publication: freeze today's content
+                registry[digest] = {'manifests': [
+                    {'platform': {'os': 'linux', 'architecture': a}, 'digest': content[image]}
+                    for a in ('arm64', 'amd64')] + [
+                    {'platform': {'os': 'unknown', 'architecture': 'unknown'}, 'digest': digest}]}
+            return registry[digest]
+
+        def imagetools(args, refs, **kw):
+            retags.append((args[2], args[3]))
+            return subprocess.CompletedProcess(args, 0, '', '')
+
+        def run_build():
+            log.write_text('')
+            err = io.StringIO()
+            with patch.dict(os.environ, PATH=f'{bin_dir}:{os.environ["PATH"]}', BUILD_LOG=str(log)), \
+                    patch.object(matrix.docker_registry, 'prepare', return_value=matrix.docker_registry.Access()), \
+                    patch.object(matrix.docker_registry, 'imagetools', side_effect=imagetools), \
+                    patch.object(matrix, 'preflight'), patch.object(matrix, 'inspect_raw', side_effect=inspect), \
+                    contextlib.redirect_stderr(err):
+                self.assertEqual(build(self.manifest(*descs), descs, registry=None, tag=None,
+                                       dry_run=False, root=self.root), 0)
+            calls = [json.loads(x) for x in log.read_text().splitlines()]
+            parent = next(arg for arg in calls[1] if arg.startswith('BASE='))[len('BASE='):]
+            catalog = load_lock(self.root)['build_catalog']
+            return parent, {ref.split('/')[-1]: row['digest'] for ref, row in catalog.items()}, err.getvalue()
+
+        parent1, digests1, _ = run_build()
+        self.assertEqual(parent1, 'registry.test:5000/fleet-ros@' + digests1['fleet-ros:v1'])
+        self.assertEqual(retags, [])
+
+        parent2, digests2, output = run_build()  # nothing changed: a different index, same images
+        self.assertEqual(parent2, parent1)
+        self.assertEqual(digests2, digests1)
+        self.assertEqual(retags, [
+            ('registry.test:5000/fleet-ros:v1', 'registry.test:5000/fleet-ros@' + digests1['fleet-ros:v1']),
+            ('registry.test:5000/core:v1', 'registry.test:5000/core@' + digests1['core:v1'])])
+        self.assertIn('fleet-ros:v1 is unchanged', output)
+        self.assertIn('published and verified 2 images (2 unchanged)', output)
+
+        content['fleet-ros'] = 'sha256:' + 'd' * 64  # the base really changed: its new digest goes on
+        del retags[:]
+        parent3, digests3, output = run_build()
+        self.assertNotEqual(digests3['fleet-ros:v1'], digests1['fleet-ros:v1'])
+        self.assertEqual(parent3, 'registry.test:5000/fleet-ros@' + digests3['fleet-ros:v1'])
+        self.assertEqual([tag for tag, _ in retags], ['registry.test:5000/core:v1'])
+        self.assertNotIn('fleet-ros:v1 is unchanged', output)
+
+    def test_identity_is_kept_only_for_a_confirmed_identical_earlier_publication(self):
+        new, old, other = ('sha256:' + c * 64 for c in '123')
+        members = {'arm64': 'sha256:' + 'a' * 64, 'amd64': 'sha256:' + 'b' * 64}
+        repo = 'registry.test:5000/fleet-ros'
+
+        def row(digest, tag='v1', **extra):
+            return dict(ref=f'{repo}:{tag}', digest=digest, children=dict(members), **extra)
+
+        def raw(children):
+            return {'manifests': [{'platform': {'os': 'linux', 'architecture': a}, 'digest': d}
+                                  for a, d in children.items()]}
+
+        def keep(candidate, catalog, *, present=members, status=0):
+            ok = subprocess.CompletedProcess([], status, '', 'denied')
+            with patch.object(matrix, 'inspect_raw', return_value=None if present is None else raw(present)), \
+                    patch.object(matrix.docker_registry, 'imagetools', return_value=ok) as tools, \
+                    contextlib.redirect_stderr(io.StringIO()) as err:
+                return matrix.keep_identity(candidate, catalog), tools, err.getvalue()
+
+        kept, tools, _ = keep(row(new), {f'{repo}:v1': row(old)})
+        self.assertEqual(kept, old)
+        self.assertEqual(tools.call_args.args[0], ['create', '-t', f'{repo}:v1', f'{repo}@{old}'])
+
+        # A new tag of unchanged content joins the earlier publication rather than forking it.
+        kept, tools, _ = keep(row(new, tag='v2'), {f'{repo}:v1': row(old)})
+        self.assertEqual(kept, old)
+        self.assertEqual(tools.call_args.args[0], ['create', '-t', f'{repo}:v2', f'{repo}@{old}'])
+
+        # The tag's own earlier publication wins over another tag's.
+        kept, _, _ = keep(row(new), {f'{repo}:v0': row(other, tag='v0'), f'{repo}:v1': row(old)})
+        self.assertEqual(kept, old)
+
+        changed = dict(members, amd64='sha256:' + 'e' * 64)
+        for label, catalog, opts in (
+                ('first publication', {}, {}),
+                ('different images', {f'{repo}:v1': dict(row(old), children=changed)}, {}),
+                ('fewer architectures', {f'{repo}:v1': dict(row(old), children={'arm64': members['arm64']})}, {}),
+                ('another repository', {'registry.test:5000/other:v1': row(old)}, {}),
+                ('another registry', {'elsewhere.test/fleet-ros:v1': row(old)}, {}),
+                ('adopted row', {f'{repo}:v1': row(old, adopted={'at': 'now'})}, {}),
+                ('same publication', {f'{repo}:v1': row(new)}, {}),
+                ('no recorded members', {f'{repo}:v1': dict(row(old), children=None)}, {}),
+                ('collected from the registry', {f'{repo}:v1': row(old)}, {'present': None}),
+                ('registry disagrees with the catalog', {f'{repo}:v1': row(old)}, {'present': changed})):
+            with self.subTest(label):
+                kept, tools, _ = keep(row(new), catalog, **opts)
+                self.assertIsNone(kept)
+                tools.assert_not_called()
+
+        kept, tools, warning = keep(row(new), {f'{repo}:v1': row(old)}, status=1)
+        self.assertIsNone(kept)  # the fresh publication stands; never a failed build
+        tools.assert_called_once()
+        self.assertIn('could not be pointed back', warning)
+        with patch.object(matrix, 'inspect_raw', side_effect=RigError('registry down')), \
+                contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertIsNone(matrix.keep_identity(row(new), {f'{repo}:v1': row(old)}))
+        self.assertIn('could not be kept', err.getvalue())
+
 
     def test_selected_services_plan_only_their_tasks_from_the_published_base(self):
         base = self.service('base', '  provides: base\n  msgs_overlay: {command: msgs.sh, image: fleet-msgs}\n',
