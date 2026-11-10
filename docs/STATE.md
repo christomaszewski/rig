@@ -1,7 +1,7 @@
 # rig — project state & handoff (resume here)
 
-Released checkpoint: **v0.2.81 — faster repeat replay and sensor-time TF handling**,
-reviewed **2026-11-08**. Use the [documentation index](README.md) to choose an operator
+Released checkpoint: **v0.2.82 — unchanged images keep their digest across builds**,
+reviewed **2026-11-10**. Use the [documentation index](README.md) to choose an operator
 workflow. The dated entries below are historical observations, not the current host state.
 
 - Replay selects all bag sessions by default, with explicit logger/session subsets available.
@@ -20,6 +20,11 @@ workflow. The dated entries below are historical observations, not the current h
   the local file identity and timestamps still match. Full verification remains the default;
   all modes share hashes within one invocation to avoid repeated scans. Runtime/startup checks
   remain active. See [faster repeated replays](REPLAY.md#faster-repeated-replays).
+- **v0.2.82 build reuse:** an image whose content a build did not change keeps its earlier
+  published digest. The messages overlay and the service images above an unchanged base then
+  stay cached, and `rig.lock` keeps its digests. Only the Rig CLI changes. See
+  [v0.2.82](releases/v0.2.82.md) and
+  [builder and publication](BUILD_AND_REPLAY.md#builder-and-publication).
 - Ordinary `rig up` and `rig down` run equal `(tier, order)` groups concurrently by default;
   down reverses the group sequence. Newly baked artifacts carry the behavior in their bundled
   Rig and generated scripts. Unique orders remain serial, and saved replay/simulation sessions

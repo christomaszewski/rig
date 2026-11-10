@@ -1,6 +1,6 @@
 # rig — roadmap
 
-Released checkpoint: **v0.2.81 — faster repeat replay and sensor-time TF handling**, reviewed 2026-11-08.
+Released checkpoint: **v0.2.82 — unchanged images keep their digest across builds**, reviewed 2026-11-10.
 Sections retain their original design scope and versioned milestones; their proposed schema
 is not a replacement for current operator references. Use [replay](REPLAY.md),
 [simulation](SIMULATION.md), and the [preparation backlog](ISAAC_PREP_REPORT.md) for current behavior.
@@ -10,6 +10,9 @@ timing and deduplication policies and explicit ROS image authority. See
 [v0.2.80](releases/v0.2.80.md). [v0.2.81](releases/v0.2.81.md) adds repeat-replay hash reuse and
 support for the sensor-proxy TF scheduling fixes in rig-infra v1.20.1; see the
 [current replay reference](REPLAY.md#bag-merge-and-timing-profiles).
+[v0.2.82](releases/v0.2.82.md) keeps the published digest of an image that a build did not
+change, so the images above an unchanged base stay cached; see
+[builder and publication](BUILD_AND_REPLAY.md#builder-and-publication).
 
 Ordinary `rig up` and `rig down` run services sharing a tier and order concurrently, including
 newly baked artifacts. See [v0.2.78](releases/v0.2.78.md) for barriers and failure semantics.
