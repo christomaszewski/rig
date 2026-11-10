@@ -223,9 +223,11 @@ is unique to each build. BuildKit keys a dependent's steps on the digest it buil
 handing on that new digest would rebuild every image above an unchanged base. When an image's
 published architecture members equal those of an earlier publication of the same repository in
 `rig.lock`, and that index is still in the registry, Rig points the tag back at it and keeps its
-digest: dependents stay cached, their layers and digests do not churn, and `rig.lock` does not
-change. The output marks such images `unchanged`; a new tag of unchanged content resolves to the
-same index. Shared build contexts are deduplicated. Every published output
+digest: dependents stay cached, their layers and digests do not churn, and the digests recorded
+in `rig.lock` stay as they were. The kept index carries the attestation of the build that first
+published it; the index of the build that changed nothing is left untagged in the registry. The
+output marks such images `unchanged`; a new tag of unchanged content resolves to the same index.
+Shared build contexts are deduplicated. Every published output
 must report its digest and expose every requested architecture in its registry index. Only verified
 results are saved in `rig.lock.build_catalog`; `last_build` records whether the request covered the
 whole matrix or was targeted. A failure can leave partial registry uploads but never records them as
@@ -325,6 +327,12 @@ digest references reach Compose.
 `--no-cache` disables Docker instruction-result reuse, not source pins, package-download caches,
 or existing containers. These builders also request parent refresh with `--pull`; the messages
 overlay deliberately omits it and consumes the just-built base digest. Nothing prunes Docker caches.
+BuildKit cache mounts (`RUN --mount=type=cache`) are the exception: BuildKit deletes the ones a
+`--no-cache` build uses before it starts
+([moby/buildkit#7088](https://github.com/moby/buildkit/issues/7088); measured on BuildKit 0.34),
+so a compiler or download cache a service keeps there begins that build empty. A build command
+should not change a build argument for a `--no-cache` build: the argument is part of the cache key
+of the steps after it, so the next ordinary build would not reuse what the clean build produced.
 
 `rig certify --repo SOURCE --require-build-check` executes the build entrypoint in temporary staging,
 with Docker command capture and network/daemon access denied. It checks every expected image,
