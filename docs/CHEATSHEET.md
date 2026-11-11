@@ -656,6 +656,12 @@ re-running `prepare` updates that recipe's binding. After editing a recipe, prep
 Both recipe versions can live under `replay/`; no second file in `sessions/` is needed. An explicit
 path avoids a same-named `sessions/` recipe taking precedence.
 
+Real `replay prepare` now pulls missing recipe-selected runtime images by default, including
+disabled players and replay camera variants. Use `--pull always` to refresh selected references
+or `--pull never` for cached images only. It starts no deployment services; check and all dry-run
+forms remain read-only. Preparation pulls require Rig v0.2.83 or later. See
+[runtime images](REPLAY.md#runtime-images).
+
 `--fast` reuses the local hash cache populated by normal prepare/replay, with fresh file identity
 checks; changed or uncached files are hashed normally. It does not skip runtime or startup checks,
 and it does not remove the legacy 20-second delay (`--start-delay 0` controls that separately).

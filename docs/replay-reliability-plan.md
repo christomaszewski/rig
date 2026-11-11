@@ -5,6 +5,8 @@ v0.2.72. See [REPLAY.md](REPLAY.md), [the startup contract](replay-coordination.
 [release readiness](releases/coordinated-replay-readiness-2026-10-27.md). Coordinated startup
 remains opt-in; a default switch is not part of the released contract. The checkpoint notes
 below preserve historical test counts and then-pending publication/acceptance items.
+The historical prepare-without-pulls contract below is superseded by preparation image
+acquisition in v0.2.83; see [current runtime images](REPLAY.md#runtime-images).
 
 Original scope: Rig, the bag player in rig-infra, camera-service,
 and the launch surfaces used by replay-selected services.

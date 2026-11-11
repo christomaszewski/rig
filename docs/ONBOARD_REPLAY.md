@@ -85,10 +85,12 @@ After transferring and extracting the artifact, work from its directory:
 ./rig runs
 ```
 
-A plain `./rig pull` does not select disabled rows such as the generated bag player. Ordinary
-replay defaults to `--pull missing` and acquires its selected runtime images. To preload the
-player explicitly, use `./rig pull bag_player`, substituting its actual instance name.
-`replay check`, `replay prepare`, and dry-run commands do not pull missing replay images.
+A plain `./rig pull` does not select disabled rows such as the generated bag player and uses
+normal deployment configuration. Real replay and prepare acquire the recipe's selected runtime
+images with `--pull missing` by default, including replay-specific camera variants and the player.
+**Preparation pulls require Rig v0.2.83 or later**; older Rig versions only report them.
+To preload just the player explicitly, use `./rig pull bag_player`, substituting its actual name.
+`replay check` and dry-run commands never pull missing replay images.
 Export helpers have their own native image requirements; a real export can acquire missing
 camera converter images after reporting them, while an export dry-run only reports the plan.
 
@@ -165,6 +167,16 @@ the original run's `exports/` tree. Prepare saves the resolved source path, sele
 and derived state under `var/replay/`; edit the recipe, not those generated files. No second recipe
 or `sessions/` directory is required. Using the explicit path also avoids ambiguity if a
 same-named file exists under `sessions/`.
+
+Real prepare pulls missing selected runtime images, validates them, and may run bounded repair
+or recorded-call inspection helpers. It does not start deployment services. To refresh cached
+references, add `--pull always`; to prohibit image downloads, use `--pull never`. A preparation
+preview stays read-only with either policy:
+
+```sh
+./rig replay prepare "$RUN" --recipe replay/analysis.yaml --pull never
+./rig replay prepare "$RUN" --recipe replay/analysis.yaml --dry-run --pull always
+```
 
 Each recipe keeps its own prepared source binding. Preparing another recipe for another run does
 not change this one; preparing this same recipe again replaces its current binding. An explicit

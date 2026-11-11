@@ -67,6 +67,11 @@ class RuntimeImagesWorkflow(unittest.TestCase):
                 code = 1
         return code, execute, out.getvalue(), err.getvalue(), arch
 
+    def tree(self):
+        return {str(path.relative_to(self.f.root.parent)):
+                None if path.is_dir() else path.read_bytes()
+                for path in self.f.root.parent.rglob("*")}
+
     def test_cold_cache_pulls_once_before_execution_and_pins_disabled_player(self):
         code, execute, _, _, arch = self.invoke(str(self.f.source))
         self.assertEqual(code, 0)
@@ -113,9 +118,13 @@ class RuntimeImagesWorkflow(unittest.TestCase):
         execute.assert_called_once()
         self.assertEqual(len(self.pulls), 1)
 
-    def test_check_prepare_and_dry_run_never_pull(self):
+    def test_check_and_all_dry_run_forms_never_pull_or_write(self):
+        before = self.tree()
         for flags in (("check", str(self.f.source), "--json"),
-                      ("prepare", str(self.f.source), "--recipe", "offline", "--json"),
+                      ("check", str(self.f.source), "--dry-run", "--json"),
+                      ("prepare", str(self.f.source), "--recipe", "offline", "--dry-run", "--json"),
+                      ("prepare", str(self.f.source), "--recipe", "offline", "--dry-run", "--json",
+                       "--player", str(self.f.root / "services/ros2-bag-player")),
                       (str(self.f.source), "--dry-run")):
             with self.subTest(flags=flags):
                 code, execute, out, err, _ = self.invoke(*flags, "--pull", "always")
@@ -128,6 +137,136 @@ class RuntimeImagesWorkflow(unittest.TestCase):
                     self.assertEqual(code, 0, err)
                 self.assertEqual(self.pulls, [])
                 self.assertEqual(self.local, {})
+                self.assertEqual(self.tree(), before)
+
+    def test_prepare_default_pulls_recipe_images_without_starting_deployment(self):
+        self.f.reader_label_camera()
+        self.labels = {"io.rig.camera.replay-bindings": "1"}
+        self.f.write("replay/analysis.yaml", {"version": 2,
+            "session": {"instances": ["router", "cam", "new"], "clock": "source"},
+            "replay": {"source": str(self.f.source), "playback": {"services": []}}})
+        with patch("rig_cli.runs.new_run") as capture, patch("rig_cli.dispatch.run_verb") as launch:
+            code, execute, out, err, _ = self.invoke("prepare", "--recipe", "analysis", "--json")
+        self.assertEqual(code, 0, err)
+        plan = json.loads(out)
+        self.assertTrue(plan["ready_to_run"], plan["issues"])
+        self.assertEqual({argv[-1] for argv in self.pulls},
+                         {"fixture/runtime:latest", "example.test/cam-dev:v1-dev"})
+        self.assertEqual(len(self.pulls), 2)
+        self.assertTrue(all(argv[:4] == ["docker", "pull", "--platform", "linux/arm64"]
+                            for argv in self.pulls))
+        self.assertEqual(set(plan["image_pins"]), {"router", "new", "cam", "player"})
+        self.assertTrue((self.f.root / "var/replay/analysis/bindings.yaml").is_file())
+        self.assertTrue((Path(plan["preparation"]) / "provenance.yaml").is_file())
+        execute.assert_not_called()
+        capture.assert_not_called()
+        launch.assert_not_called()
+
+    def test_prepare_warm_cache_and_never_preserve_cached_images(self):
+        self.cache()
+        for flags in ((), ("--pull", "never")):
+            with self.subTest(flags=flags):
+                code, execute, out, err, _ = self.invoke("prepare", str(self.f.source),
+                    "--recipe", "warm", "--json", *flags)
+                self.assertEqual(code, 0, err)
+                self.assertTrue(json.loads(out)["ready_to_run"])
+                execute.assert_not_called()
+                self.assertEqual(self.pulls, [])
+
+    def test_prepare_never_missing_refuses_before_saving_recipe(self):
+        code, execute, out, err, _ = self.invoke("prepare", str(self.f.source),
+            "--recipe", "uncached", "--pull", "never", "--json")
+        self.assertEqual(code, 1, err)
+        plan = json.loads(out)
+        self.assertFalse(plan["ready_to_run"])
+        self.assertIn("missing with --pull never", str(plan["issues"]))
+        self.assertEqual(self.pulls, [])
+        self.assertFalse((self.f.root / "replay/uncached.yaml").exists())
+        self.assertFalse((self.f.root / "var/replay/uncached/bindings.yaml").exists())
+        execute.assert_not_called()
+
+    def test_prepare_always_refreshes_once_across_replans(self):
+        self.cache()
+        code, execute, out, err, _ = self.invoke("prepare", str(self.f.source),
+            "--recipe", "refresh", "--pull", "always", "--json")
+        self.assertEqual(code, 0, err)
+        self.assertTrue(json.loads(out)["ready_to_run"])
+        self.assertEqual(self.pulls, [["docker", "pull", "--platform", "linux/arm64", "fixture/runtime:latest"]])
+        self.assertGreater(len(self.inspections), 2)  # Preparation really did re-inspect its replanned inventory.
+        execute.assert_not_called()
+
+    def test_prepare_failed_pull_does_not_capture_launch_or_publish(self):
+        self.pull_error = True
+        with patch("rig_cli.runs.new_run") as capture, patch("rig_cli.dispatch.run_verb") as launch:
+            code, execute, out, err, _ = self.invoke("prepare", str(self.f.source),
+                "--recipe", "failed", "--json")
+        self.assertEqual(code, 1, err)
+        self.assertIn("could not pull", str(json.loads(out)))
+        self.assertEqual(len(self.pulls), 1)
+        self.assertFalse((self.f.root / "replay/failed.yaml").exists())
+        self.assertFalse((self.f.root / "var/replay/failed/bindings.yaml").exists())
+        self.assertFalse(list((self.f.root / "var/replay/failed").glob("*/provenance.yaml")))
+        execute.assert_not_called()
+        capture.assert_not_called()
+        launch.assert_not_called()
+
+    def test_prepare_late_image_change_restores_previous_binding(self):
+        from rig_cli import replay_prepare
+        self.cache()
+        code, _, out, err, _ = self.invoke("prepare", str(self.f.source),
+            "--recipe", "stable", "--json")
+        self.assertEqual(code, 0, err)
+        old_plan = json.loads(out)
+        binding = self.f.root / "var/replay/stable/bindings.yaml"
+        saved_binding = binding.read_bytes()
+        recipe = self.f.root / "replay/stable.yaml"
+        updated = yaml.safe_load(recipe.read_text())
+        updated["playback"] = {"exclude": ["/result"]}
+        recipe.write_text(yaml.safe_dump(updated))
+        create = replay_prepare.create
+        staged = []
+
+        def change_image_after_generation(*args, **kwargs):
+            result = create(*args, **kwargs)
+            staged.append(binding.read_bytes())
+            self.local["fixture/runtime:latest"]["Id"] = "sha256:" + "8" * 64
+            return result
+
+        with patch("rig_cli.replay_prepare.create", side_effect=change_image_after_generation), \
+                patch("rig_cli.runs.new_run") as capture, patch("rig_cli.dispatch.run_verb") as launch:
+            code, execute, out, err, _ = self.invoke("prepare", str(self.f.source),
+                "--recipe", "stable", "--json")
+        self.assertEqual(code, 1, err)
+        self.assertIn("runtime image changed during preparation", str(json.loads(out)))
+        self.assertTrue(staged)
+        self.assertNotEqual(staged[0], saved_binding)  # A new generation was selected before failure.
+        self.assertEqual(binding.read_bytes(), saved_binding)
+        self.assertEqual(yaml.safe_load(recipe.read_text()), updated)
+        self.assertTrue((Path(old_plan["preparation"]) / "provenance.yaml").is_file())
+        self.assertEqual(self.pulls, [])
+        execute.assert_not_called()
+        capture.assert_not_called()
+        launch.assert_not_called()
+
+    def test_prepare_config_change_during_pull_refuses_stale_plan(self):
+        docker = self.docker
+        def process(argv, **kwargs):
+            result = docker(argv, **kwargs)
+            if argv[:2] == ["docker", "pull"]:
+                self.f.write("new.yaml", {"name": "new", "service": "app", "gain": 17})
+            return result
+        self.docker = process
+        with patch("rig_cli.runs.new_run") as capture, patch("rig_cli.dispatch.run_verb") as launch:
+            code, execute, out, err, _ = self.invoke("prepare", str(self.f.source),
+                "--recipe", "changed", "--json")
+        self.assertEqual(code, 1, err)
+        self.assertIn("Deployment changed since planning", str(json.loads(out)))
+        self.assertEqual(len(self.pulls), 1)
+        self.assertFalse((self.f.root / "replay/changed.yaml").exists())
+        self.assertFalse((self.f.root / "var/replay/changed/bindings.yaml").exists())
+        execute.assert_not_called()
+        capture.assert_not_called()
+        launch.assert_not_called()
 
     def test_failed_pull_cannot_capture_or_start_run(self):
         self.pull_error = True
@@ -146,10 +285,10 @@ class RuntimeImagesWorkflow(unittest.TestCase):
         self.assertIn("player [ros2-bag-player]", err)
         self.assertEqual(self.pulls, [])
 
-    def test_prepare_repair_requires_verified_helper_without_pulling(self):
+    def test_prepare_repair_never_requires_verified_helper_without_pulling(self):
         (self.f.source / "bags/logger/session-1/metadata.yaml").unlink()
         code, execute, out, _, _ = self.invoke("prepare", str(self.f.source),
-                                               "--recipe", "repair", "--json")
+                                               "--recipe", "repair", "--pull", "never", "--json")
         plan = json.loads(out)
         self.assertEqual(code, 1)
         self.assertEqual(plan["source"]["path"], str(self.f.source.resolve()))
@@ -159,7 +298,7 @@ class RuntimeImagesWorkflow(unittest.TestCase):
         execute.assert_not_called()
         self.assertEqual(self.pulls, [])
 
-    def test_cold_repair_rolls_back_new_player_wiring_and_reports_once(self):
+    def test_never_repair_rolls_back_new_player_wiring_and_reports_once(self):
         self.f.rows["autonomy"] = [r for r in self.f.rows["autonomy"] if r["name"] != "player"]
         self.f.vehicle()
         (self.f.source / "bags/logger/session-1/metadata.yaml").unlink()
@@ -167,7 +306,7 @@ class RuntimeImagesWorkflow(unittest.TestCase):
                   for name in ("vehicle.yaml", "services.yaml")}
         code, execute, out, _, _ = self.invoke(
             "prepare", str(self.f.source), "--recipe", "repair",
-            "--player", str(self.f.root / "services/ros2-bag-player"), "--json")
+            "--player", str(self.f.root / "services/ros2-bag-player"), "--pull", "never", "--json")
         plan = json.loads(out)  # Exactly one detailed report, not a second generic error document.
         self.assertEqual(code, 1)
         self.assertFalse(plan["ready_to_prepare"])
@@ -179,6 +318,78 @@ class RuntimeImagesWorkflow(unittest.TestCase):
         self.assertFalse((self.f.source / "bags/logger/session-1/metadata.yaml").exists())
         execute.assert_not_called()
         self.assertEqual(self.pulls, [])
+
+    def prepare_cold_repair(self, *, add_player):
+        if add_player:
+            self.f.rows["autonomy"] = [r for r in self.f.rows["autonomy"] if r["name"] != "player"]
+            self.f.vehicle()
+        (self.f.source / "bags/logger/session-1/metadata.yaml").unlink()
+        seen = []
+        docker = self.docker
+        def process(argv, **kwargs):
+            if "replay-reindex" in argv:
+                self.assertEqual(len(self.pulls), 1)  # Pull and image validation must precede repair.
+                seen.append(kwargs["env"])
+                self.f.bag(Path(argv[-1]), topic="/repaired")
+                return subprocess.CompletedProcess(argv, 0, "", "")
+            return docker(argv, **kwargs)
+        self.docker = process
+        flags = ("--player", str(self.f.root / "services/ros2-bag-player")) if add_player else ()
+        with patch("rig_cli.runs.new_run") as capture, patch("rig_cli.dispatch.run_verb") as launch:
+            code, execute, out, err, _ = self.invoke("prepare", str(self.f.source),
+                "--recipe", "cold-repair", "--json", *flags)
+        self.assertEqual(code, 0, err)
+        plan = json.loads(out)
+        self.assertTrue(plan["ready_to_run"], plan["issues"])
+        self.assertEqual(self.pulls, [["docker", "pull", "--platform", "linux/arm64", "fixture/runtime:latest"]])
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(seen[0]["RIG_TARGET_ARCH"], "arm64")
+        self.assertEqual(json.loads(seen[0]["RIG_RUNTIME_IMAGE_PINS"]),
+                         {"version": 1, "images": {"fixture/runtime:latest": IMAGE_ID}})
+        self.assertIn(plan["player"], plan["image_pins"])
+        self.assertFalse((self.f.source / "bags/logger/session-1/metadata.yaml").exists())
+        self.assertTrue((self.f.root / "var/replay/cold-repair/bindings.yaml").is_file())
+        if add_player:
+            self.assertEqual(plan["player"], "bag_player")
+            self.assertTrue((self.f.root / "config/autonomy/bag_player.yaml").is_file())
+        execute.assert_not_called()
+        capture.assert_not_called()
+        launch.assert_not_called()
+
+    def test_prepare_pulls_helper_before_cold_metadata_repair(self):
+        self.prepare_cold_repair(add_player=False)
+
+    def test_prepare_added_player_pulls_helper_before_cold_metadata_repair(self):
+        self.prepare_cold_repair(add_player=True)
+
+    def test_prepare_pull_failure_rolls_back_new_player(self):
+        self.f.rows["autonomy"] = [r for r in self.f.rows["autonomy"] if r["name"] != "player"]
+        self.f.vehicle()
+        before = {name: (self.f.root / name).read_bytes()
+                  for name in ("vehicle.yaml", "services.yaml")}
+        self.pull_error = True
+        code, execute, out, err, _ = self.invoke("prepare", str(self.f.source),
+            "--recipe", "failed-player", "--json",
+            "--player", str(self.f.root / "services/ros2-bag-player"))
+        self.assertEqual(code, 1, err)
+        self.assertIn("could not pull", str(json.loads(out)))
+        self.assertEqual(len(self.pulls), 1)
+        self.assertEqual(before, {name: (self.f.root / name).read_bytes() for name in before})
+        self.assertFalse((self.f.root / "config/autonomy/bag_player.yaml").exists())
+        self.assertFalse((self.f.root / "replay/failed-player.yaml").exists())
+        self.assertFalse((self.f.root / "var/replay/failed-player/bindings.yaml").exists())
+        self.assertFalse(list((self.f.root / "var/replay/failed-player").glob("*/provenance.yaml")))
+        execute.assert_not_called()
+
+    def test_prepare_invalid_topic_selection_does_not_pull(self):
+        self.f.write("replay/invalid.yaml", {"version": 1, "source": str(self.f.source),
+            "playback": {"exclude": ["/not_recorded"]}})
+        code, execute, out, err, _ = self.invoke("prepare", "--recipe", "invalid", "--json")
+        self.assertEqual(code, 1, err)
+        self.assertIn("missing_topics", {item["code"] for item in json.loads(out)["issues"]})
+        self.assertEqual(self.pulls, [])
+        self.assertFalse((self.f.root / "var/replay/invalid/bindings.yaml").exists())
+        execute.assert_not_called()
 
     def test_reindex_helper_uses_verified_engine_architecture_and_image_id(self):
         from rig_cli import replay_prepare as prepare

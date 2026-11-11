@@ -1,7 +1,7 @@
 """Session runtime images: launcher inventory, local validation, and explicit acquisition.
 
 The inventory is the launcher's active image set, never its build outputs. Querying and
-inspection are read-only; acquisition is a separate operation used only by execution.
+inspection are read-only; acquisition is a separate operation used by preparation and execution.
 """
 from __future__ import annotations
 
@@ -199,7 +199,7 @@ def _fingerprint(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
-def plan_pulls(inventory, inspection, policy="missing", *, offline=False):
+def plan_pulls(inventory, inspection, policy="missing", *, offline=False, verified=None):
     """Proposed network mutations; callers may display these without executing them."""
     if policy not in ("missing", "always", "never"):
         raise RigError("Replay image pull policy must be missing, always, or never")
@@ -208,11 +208,11 @@ def plan_pulls(inventory, inspection, policy="missing", *, offline=False):
     if policy == "never" or offline or inventory["bundled"]:
         return []
     return sorted({item["source"] for ref, item in inventory["images"].items()
-                   if not _ID.fullmatch(item["source"]) and (
+                   if item["source"] not in (verified or {}) and not _ID.fullmatch(item["source"]) and (
                        policy == "always" or inspection["images"][ref]["status"] == "missing")})
 
 
-def _report(inventory, observed, *, policy, offline):
+def _report(inventory, observed, *, policy, offline, verified=None):
     report = dict(ready=False, missing=[], errors=[], validation_errors={}, images={},
                   proposed_pulls=[], pins={}, observed=observed,
                   inventory_fingerprint=_fingerprint(inventory))
@@ -230,6 +230,10 @@ def _report(inventory, observed, *, policy, offline):
                 status = "invalid" if errors else "ready"
         elif status == "unavailable":
             errors.append(value["message"])
+        if item["source"] in (verified or {}) and (
+                status != "ready" or value.get("image_id") != verified[item["source"]]):
+            errors.append("runtime image changed during preparation; retry prepare")
+            status = "invalid"
         if status == "missing":
             report["missing"].append(ref)
             if inventory["bundled"]:
@@ -246,7 +250,7 @@ def _report(inventory, observed, *, policy, offline):
                                       image_id=value.get("image_id"), labels=value.get("labels", {}))
         if errors:
             report["validation_errors"][ref] = errors
-    report["proposed_pulls"] = plan_pulls(inventory, report, policy, offline=offline)
+    report["proposed_pulls"] = plan_pulls(inventory, report, policy, offline=offline, verified=verified)
     for ref, errors in report["validation_errors"].items():
         # An explicit refresh may repair cached labels/identity, but an inaccessible
         # Docker daemon cannot be treated as cache absence and does not authorize pulls.
@@ -272,12 +276,19 @@ def inspect_images(inventory, *, policy="missing", offline=False):
     return _report(inventory, observed, policy=policy, offline=offline)
 
 
-def acquire_images(inventory, *, policy="missing", inspection=None, offline=False):
-    """Pull the proposed native refs, then validate identities/labels before issuing pins."""
+def acquire_images(inventory, *, policy="missing", inspection=None, offline=False, verified=None):
+    """Pull native refs, validate and pin; optionally retain identities across preparation replans.
+
+    verified is an invocation-local source-to-image-ID map. Replans validate these sources
+    again but never refresh them twice, including under --pull always. New sources still use
+    the requested policy; a previously verified source changing or disappearing is an error.
+    """
     if inspection is not None and inspection.get("inventory_fingerprint") != _fingerprint(inventory):
         raise RigError("Runtime image inventory changed since inspection; inspect again before pulling")
-    report = (_report(inventory, inspection["observed"], policy=policy, offline=offline)
-              if inspection is not None else inspect_images(inventory, policy=policy, offline=offline))
+    if inspection is None:
+        inspection = inspect_images(inventory, policy=policy, offline=offline)
+    report = _report(inventory, inspection["observed"], policy=policy, offline=offline,
+                     verified=verified)
     if report["errors"]:
         return report
     pulled, observed = [], dict(report["observed"])
@@ -293,6 +304,8 @@ def acquire_images(inventory, *, policy="missing", inspection=None, offline=Fals
                            "check registry access and credentials")
         pulled.append(source)
         observed[source] = _inspect(source)
-    result = _report(inventory, observed, policy="never", offline=offline)
+    result = _report(inventory, observed, policy="never", offline=offline, verified=verified)
     result["pulled"] = pulled
+    if verified is not None and result["ready"]:
+        verified.update({source: value["image_id"] for source, value in observed.items()})
     return result

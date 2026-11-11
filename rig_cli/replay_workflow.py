@@ -168,6 +168,41 @@ def _session_environment(manifest, descriptors):
     return env
 
 
+def _acquire_runtime_images(plan, *, verified=None):
+    """Acquire this plan's frozen native inventory without rebuilding its source evidence."""
+    from . import runtime_images
+    _verify_launch_inputs(plan)
+    started = time.monotonic()
+    eprint("rig replay: acquiring and verifying runtime images")
+    inspected = runtime_images.acquire_images(plan["image_inventory"],
+                    policy=plan["pull_policy"], inspection=plan["image_inspection"], verified=verified)
+    _verify_launch_inputs(plan)
+    planner.apply_image_report(plan, inspected)
+    plan["image_acquisition_s"] = time.monotonic() - started
+    plan["fingerprint"] = recipes.digest(dict(planned=plan["fingerprint"],
+                                             images=plan["execution"]["images"]))
+    return plan["image_acquisition_s"]
+
+
+def _prepare_images(plan, verified):
+    """Resolve images after wiring/replanning, before publishing or running preparation helpers."""
+    if not plan["ready_to_prepare"]:
+        raise _PreparationNotReady
+    elapsed = 0
+    if plan.get("image_inventory") and plan.get("image_inspection"):
+        elapsed = _acquire_runtime_images(plan, verified=verified)
+    if (((plan.get("source") or {}).get("bag") or {}).get("repair")
+            and not plan.get("image_pins", {}).get(plan["player"])):
+        plan["issues"].append(dict(status="error", code="repair_image", phase="prepare",
+            message="Metadata repair needs a locally verified player image; resolve the runtime "
+                    "image errors and allow --pull missing, or load the required image"))
+        planner.finish(plan)
+        raise _PreparationNotReady
+    if plan.get("image_inventory") and not plan.get("image_inspection", {}).get("ready"):
+        raise _PreparationNotReady
+    return elapsed
+
+
 def _command(args, root, *, verification=None):
     from .service_exports import VerificationContext
     if verification is None:
@@ -237,16 +272,7 @@ def _command(args, root, *, verification=None):
             and not any(i["status"] == "not_checked" and i["code"] not in
                         ("runtime_images", "normalization", "stale_preparation", "recorded_calls",
                          "coordination_readiness") for i in plan["issues"])):
-        from . import runtime_images
-        _verify_launch_inputs(plan)
-        started = time.monotonic()
-        eprint("rig replay: acquiring and verifying runtime images")
-        inspected = runtime_images.acquire_images(plan["image_inventory"],
-                        policy=plan["pull_policy"], inspection=plan["image_inspection"])
-        planner.apply_image_report(plan, inspected)
-        plan["image_acquisition_s"] = time.monotonic() - started
-        plan["fingerprint"] = recipes.digest(dict(planned=plan["fingerprint"],
-                                                   images=plan["execution"]["images"]))
+        _acquire_runtime_images(plan)
     if (action == "run" and not args.dry_run and
             not any(i["status"] == "error" or
                     (i["status"] == "not_checked" and i["code"] not in ("recorded_calls", "coordination_readiness"))
@@ -309,6 +335,10 @@ def perform_prepare(args, root, recipe_path, recipe, origin, manifest, catalog, 
     backup = None
     created_recipe = False
     recipe_backup = None
+    verified_images = {}
+    image_acquisition_s = 0
+    binding_path = folder / "bindings.yaml"
+    binding_backup = binding_path.read_bytes() if binding_path.is_file() else None
     try:
         if args.player and not plan["player"]:
             from .reconstruct import _enable_replay_target, wire_player
@@ -335,13 +365,7 @@ def perform_prepare(args, root, recipe_path, recipe, origin, manifest, catalog, 
             manifest = sessions.apply_session(manifest, recipe)
             plan = _build_plan(manifest, catalog, descriptors, root, str(origin), recipe, options,
                                  verification=verification)
-        if ((plan["source"].get("bag") or {}).get("repair")
-                and not plan.get("image_pins", {}).get(plan["player"])):
-            plan["issues"].append(dict(status="error", code="repair_image", phase="prepare",
-                message="Metadata repair needs a locally verified player image; prepare never pulls. "
-                        "Acquire the reported player image before preparing this source"))
-            planner.finish(plan)
-            raise _PreparationNotReady
+        image_acquisition_s += _prepare_images(plan, verified_images)
         if not recipe_path.exists():
             recipe = {**recipe, "source": plan["source"]["id"]}
             prepare.write_yaml(recipe_path, recipe)
@@ -362,6 +386,7 @@ def perform_prepare(args, root, recipe_path, recipe, origin, manifest, catalog, 
                                                or options.get("_prepared_bag_proxy"))
         plan = _build_plan(manifest, catalog, descriptors, root, str(origin), recipe, options,
                              verification=verification)
+        image_acquisition_s += _prepare_images(plan, verified_images)
         # Recovered bag timing can narrow automatic camera session selection. Publish that
         # selection now, so the first successful prepare is already reusable by check/run.
         if (plan["ready_to_prepare"] and
@@ -371,11 +396,17 @@ def perform_prepare(args, root, recipe_path, recipe, origin, manifest, catalog, 
             options["_prepared_source"] = str(runtime)
             plan = _build_plan(manifest, catalog, descriptors, root, str(origin), recipe, options,
                                  verification=verification)
+            image_acquisition_s += _prepare_images(plan, verified_images)
         plan["preparation"] = str(prepare.location(root, recipe_path, origin, use_proxies=use_proxies))
+        plan["image_acquisition_s"] = image_acquisition_s
         if plan["ready_to_prepare"]:
             _verify_launch_inputs(plan)
             planner.inspect_recorded_calls(plan, manifest, descriptors, root, execute=True,
                                            verification=verification)
+            from .replay_coordinator import refresh_requirements
+            refresh_requirements(plan, manifest, descriptors,
+                                 [r for r in manifest.sensors if r.name in plan["selected"]])
+            planner.finish(plan)
             plan["fingerprint"] = recipes.digest(dict(planned=plan["fingerprint"],
                 playback=plan["playback"], call_inspection=plan.get("call_inspection")))
         _verification_report(plan, verification)
@@ -415,6 +446,18 @@ def perform_prepare(args, root, recipe_path, recipe, origin, manifest, catalog, 
             recipe_path.unlink(missing_ok=True)
         elif recipe_backup is not None:
             recipe_path.write_bytes(recipe_backup)
+        # Repair can publish an intermediate immutable generation before a replan
+        # discovers another runtime image. A failed acquisition must not switch the
+        # recipe's current binding; completed generations remain available for retry.
+        if binding_backup is None:
+            binding_path.unlink(missing_ok=True)
+        elif not binding_path.is_file() or binding_path.read_bytes() != binding_backup:
+            temporary = binding_path.with_name(binding_path.name + ".tmp")
+            try:
+                temporary.write_bytes(binding_backup)
+                os.replace(temporary, binding_path)
+            finally:
+                temporary.unlink(missing_ok=True)
         if isinstance(exc, _PreparationNotReady):
             report(plan, as_json=getattr(args, "json", False))
             return 1

@@ -1045,8 +1045,8 @@ def build_parser() -> argparse.ArgumentParser:
                          "launcher commands once required source preparation is available")
     rp.add_argument("--pull", choices=("missing", "always", "never"), default="missing",
                     help="runtime image policy: fetch missing native images (default), refresh "
-                         "selected references, or require cached images. Check, prepare and "
-                         "dry-run only report proposed pulls")
+                         "selected references, or require cached images. Replay and real prepare "
+                         "acquire images; check and dry-run only report proposed pulls")
     for verb in ("check", "prepare"):
         check = sub.add_parser("replay-" + verb, parents=[rp], add_help=False,
                                prog=f"{parser.prog} replay {verb}",

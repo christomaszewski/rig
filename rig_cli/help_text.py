@@ -84,7 +84,8 @@ Inputs and recipes:
   Prepare/execute inspect actual request contents in the selected bag/window
   with a bounded read-only helper in the pinned native player image. Check and
   dry-run only read cached evidence; a cache miss reports not_checked. Prepare
-  never pulls images. Metadata-only, response-only, wrong-origin, unsupported,
+  acquires the required image according to --pull before inspection.
+  Metadata-only, response-only, wrong-origin, unsupported,
   missing and empty-window requests are excluded in auto mode, errors if manual.
   Player play.services_source chooses service (default) or client origin and is
   frozen for inspection/playback. Only that origin plays; repeated events within
@@ -148,7 +149,9 @@ _DESCRIPTIONS = {
                     "writing files or starting containers. Uses the same plan as prepare and replay.",
     "replay-prepare": "Prepare a run for replay on this deployment without starting deployment "
                       "services. Save a local recipe/binding, adapt legacy inputs and optionally "
-                      "add a missing bag player. Original recordings are preserved.",
+                      "add a missing bag player. Pull missing selected runtime images by default; "
+                      "--pull always refreshes them and --pull never requires cached images. "
+                      "Original recordings are preserved.",
     "build": "Build and publish service images, or mirror declared upstream images, into the "
              "registry. The default release build covers all declared runtime variants and "
              "supported CPU architectures, including disabled deployment rows.",
@@ -213,7 +216,8 @@ Sharing:
 Execution:
   Multiple bags/proxies require a plan-v2/multi-input player and matching native
   images (released baseline: rig-infra 1.20.0). Newer profile revisions need their
-  matching provider bundle. Check/prepare do not build or pull.
+  matching provider bundle. Prepare and replay acquire selected runtime images
+  according to --pull; neither builds images. Check and dry-run never pull.
   Recorded calls default to automatic selected-server policy; explicitly set
   playback.services: [] to disable them. Source-only replay uses wall time; bag replay
   publishes /clock by default, including when no data topics remain selected.
@@ -228,7 +232,7 @@ Execution:
   Review recorded namespace bindings, service call targets, skipped service
   events and regenerated output exclusions before execution.
   Request inspection uses valid cached evidence only; a cache miss is not_checked.
-  Use prepare or execute with local native images to inspect request contents.
+  Use prepare or replay to acquire required native images and inspect requests.
   Execution flags are assessed only; no run is opened and no calls are sent.
   This checks available evidence, not compatibility with every new subscriber.
 
@@ -248,6 +252,13 @@ Execution:
   are rebuilt on the copy using a bounded, network-disabled local ROS container.
   Split bags must be supplied as a directory. No ROS 1/schema conversion.
 
+Runtime images:
+  Default --pull missing acquires absent native images from this recipe's runtime
+  inventory before image-dependent preparation. --pull always refreshes selected
+  references; --pull never requires cached images. No deployment services start.
+  --dry-run only reports proposed pulls and writes nothing, even with --pull always.
+  Offline bundles use their recorded local images and never pull from a registry.
+
 Adding a player:
   rig replay prepare RUN --recipe bench --player public/ros2-bag-player@1.20.0
   rig replay prepare RUN --recipe bench --player /path/to/rig-infra/ros2-bag-player
@@ -259,10 +270,10 @@ Adding a player:
   Normal rig up leaves the player off; replay starts it when a bag is selected.
 
 Readiness:
-  Does not pull/build images. May finish preparation but exit 1 when runtime
+  Does not build images. May finish preparation but exit 1 when runtime
   prerequisites remain missing; inspect ready_to_prepare and ready_to_run.
   Exit 0: ready to run, or a valid --dry-run preview. CLI errors: exit 2.
-  --dry-run writes nothing and starts no containers. Other execution flags are
+  --dry-run writes nothing and starts no containers. Startup flags are
   assessed only; no output run is opened and no deployment services are started.
 
 """ + _REPLAY_POLICY,
@@ -338,7 +349,8 @@ Examples:
   independently of the recorded CPU. Catalog companions allow native replay on
   another CPU/runtime; legacy captures without a catalog cannot verify them.
   Registry overrides change the endpoint, not release digests or source pins.
-  Pull/build compatible images separately, then use replay check/prepare.
+  Build/publish compatible images first. Replay prepare pulls selected missing
+  runtime images by default; replay check only reports readiness.
   Existing player rows are preserved; upgrade old launchers with rig swap.
 
 Examples:

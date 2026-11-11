@@ -9,6 +9,10 @@ their results; replay does not silently restore the source deployment's code.
 For building on a host and replaying on the vehicle, start with
 [onboard replay](ONBOARD_REPLAY.md). This page describes recipe authoring and replay behavior.
 
+**Since v0.2.83:** real `replay prepare` acquires runtime images
+according to `--pull missing|always|never`, defaulting to `missing`. Rig v0.2.82 and
+earlier only report proposed pulls during preparation. Check and dry-run remain read-only.
+
 ## Start with one recipe
 
 Create `replay/analysis.yaml` in the deployment. Replace the example instance names with the
@@ -47,9 +51,9 @@ rig replay --recipe replay/analysis.yaml --auto-end
 
 Skip export when every input uses originals. Export creates reusable derived files; prepare
 binds this recipe to a local run and resolves its replay plan; replay starts the selected
-processes. Neither check nor prepare generates proxies. They do not pull images, so cache the
-required images first when the readiness report calls for them. Normal replay pulls missing
-native images by default. Stop a running replay with `rig down --end-run`.
+processes. Neither check nor prepare generates proxies. Real prepare and replay pull missing
+selected native images by default; use `--pull never` to require cached images. Check and
+dry-run only report proposed pulls. Stop a running replay with `rig down --end-run`.
 
 An existing version-1 recipe remains supported. To make its process selection explicit, change
 `version` to `2`, add `session.instances`, and move its old fields under `replay` in the same file.
@@ -79,8 +83,8 @@ with `enabled: false, order: 999`, its `services.yaml` route, and
 `config/autonomy/bag_player.yaml`; registry installation also vendors and pins the service.
 Normal `rig up` leaves this row off; replay starts it when a bag is selected. Path wiring prints
 a manual snippet when the YAML layout cannot be safely edited. Existing rows are preserved;
-update old launchers explicitly with `rig swap`. Prepare does not pull/build images or start
-deployment services.
+update old launchers explicitly with `rig swap`. Prepare acquires the resulting selection's
+runtime images according to `--pull`; it does not build images or start deployment services.
 
 ## Startup policy
 
@@ -666,8 +670,8 @@ matching native rosbag2 playback; inspection reports duplicates but does not ded
 Recorded response events are not issued as calls.
 
 Check and dry-run read valid cached inspection evidence only: they write nothing and start no
-helper containers. A cache miss reports `not_checked`; prepare or execute with the required
-local image to inspect the calls. Prepare never pulls images. The cache binds the session,
+helper containers. A cache miss reports `not_checked`; real prepare or replay acquires the
+required image according to `--pull`, then inspects the calls. The cache binds the session,
 window, origin, player configuration, image pins, helper files, and source-file identities.
 Its media identity checks detect ordinary changes; they are not a cryptographic verification
 of every bag byte.
@@ -775,22 +779,30 @@ replay report, while `.rig/replay/execution.yaml` records startup phase timings.
 
 ## Runtime images
 
-Execution defaults to `--pull missing`. Rig asks each selected launcher for its active images
-using the resolved replay configuration, including the replay-only player and enabled
+Real preparation and execution default to `--pull missing`. Rig asks each selected launcher
+for its active images using the resolved replay configuration, including the replay-only player and enabled
 sidecars. It fetches missing Linux images for the Docker engine's native CPU before checking
 image capabilities or creating a replay run. A cached image for another CPU counts as missing.
-A warm cache needs no pull. Downloads print Docker's progress.
+A warm cache needs no pull. Downloads print Docker's progress. Preparation acquires this
+recipe-specific inventory without starting deployment services; ordinary `rig pull` uses normal
+deployment configuration and can select different camera/runtime variants.
 
 ```sh
 rig replay RUN                         # pull missing native images, then validate and start
 rig replay RUN --pull always           # explicitly refresh the selected registry references
 rig replay RUN --pull never            # require locally cached images
 rig replay check RUN --json            # report exact images and proposed pulls; never download
+rig replay prepare RUN --recipe analysis                # pull missing images, then prepare
+rig replay prepare RUN --recipe analysis --pull always   # refresh selected image references
+rig replay prepare RUN --recipe analysis --pull never    # prepare using cached images only
+rig replay prepare RUN --recipe analysis --dry-run       # preview without writes or downloads
 ```
 
-`check`, `prepare`, and `--dry-run` never pull. Missing images prevent `ready_to_run` but do
-not imply a source recording is incompatible. Metadata repair during preparation requires
-an already verified local player image. A cached native image lacking a required capability
+`check` and every replay `--dry-run` remain read-only, even with `--pull always`; they report
+the proposed pulls without downloading. Missing images prevent `ready_to_run` but do not imply
+a source recording is incompatible. Real prepare verifies acquired images before its bounded
+metadata-repair and recorded-call inspection helpers run. With `--pull never`, supply the
+required local images first. A cached native image lacking a required capability
 fails under `missing`; use an updated release or explicitly refresh with `always`. The
 player image must carry `io.rig.rosbag2.replay=1`, applied only after the fleet-ros build
 verifies the replay CLI, ROS Python APIs, service-event types, and MCAP/SQLite readers and
@@ -849,8 +861,8 @@ through the build workflow and rebake offline bundles. `--pull always` refreshes
 but cannot replace a pinned catalog digest with different contents.
 
 After changing service routes or image catalogs, rerun `rig replay prepare` to regenerate the
-plan and request evidence, then inspect `rig replay check --format json`. Ordinary execution
-acquires missing images; prepare/check need them cached already. Review automatic call targets
+plan and request evidence, then inspect `rig replay check --format json`. Real prepare and
+replay acquire missing images by default; check only inspects the local cache. Review automatic call targets
 before the first replay: an absent recipe `playback.services` now enables automatic selection,
 while `playback.services: []` keeps recorded requests disabled. Full vehicle acceptance and
 coordinated startup readiness are separate from the packaged replay tests.

@@ -157,10 +157,13 @@ and its supported architectures. `replay.start` and deployment `replay.services`
 select the default replay services. Use `all` to include every optional live/replay service in a release.
 
 Replay acquires the **active runtime images**, independently of the build-output inventory.
-`rig replay RUN` defaults to `--pull missing`, including for a replay-only disabled player;
-`--pull always` refreshes selected references and `--pull never` requires a local cache.
-Check, prepare, and dry-run only report proposed pulls. Catalog-backed replay pulls recorded
-native child digests from the selected registry, then pins launch to inspected image IDs.
+`rig replay RUN` and real `rig replay prepare` default to `--pull missing`, including for a
+replay-only disabled player; `--pull always` refreshes selected references and `--pull never`
+requires a local cache.
+Check and dry-run only report proposed pulls. Preparation pulls require Rig v0.2.83 or later;
+older Rig versions only report them. Prepare does not start deployment services.
+Catalog-backed replay pulls recorded native child digests from the selected registry, then
+pins launch to inspected image IDs.
 A custom player image must be covered by the catalog when one exists. Bundled replay remains
 offline and requires its recorded image identities. See [runtime images](REPLAY.md#runtime-images)
 for service launcher compatibility and offline preparation details.

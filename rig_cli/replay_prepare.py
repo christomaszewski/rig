@@ -196,7 +196,7 @@ def create(root, recipe_path, recipe, plan, manifest, descriptors, *, verificati
                     pins = plan.get("image_pins", {}).get(player.name)
                     if not pins:
                         raise RigError("Metadata repair requires a locally verified player image; "
-                                       "prepare never pulls images. Acquire the reported image first")
+                                       "rerun prepare with --pull missing or load the required image")
                     fleet_env = dispatch.fleet_env(manifest, descriptors)
                     if plan.get("execution", {}).get("architecture"):
                         fleet_env["RIG_TARGET_ARCH"] = plan["execution"]["architecture"]

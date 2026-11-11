@@ -1,9 +1,13 @@
 # rig — project state & handoff (resume here)
 
-Released checkpoint: **v0.2.82 — unchanged images keep their digest across builds**,
+Released checkpoint: **v0.2.83 — preparation acquires replay runtime images**,
 reviewed **2026-11-10**. Use the [documentation index](README.md) to choose an operator
 workflow. The dated entries below are historical observations, not the current host state.
 
+- **v0.2.83 preparation improvement:** real `replay prepare` acquires the recipe's runtime
+  images using `--pull missing|always|never`, defaulting to `missing`, before image-dependent
+  helpers. It starts no deployment services; check and all dry-run forms remain read-only.
+  See [v0.2.83](releases/v0.2.83.md) and [runtime images](REPLAY.md#runtime-images).
 - Replay selects all bag sessions by default, with explicit logger/session subsets available.
   One player merges original inputs by receive time and preserves overlaps. Offline bag proxies
   select arrival, send or sensor timing with an explicit deduplication policy; camera instances

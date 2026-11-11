@@ -7,6 +7,8 @@ TF scheduling fixes in rig-infra **v1.20.1**. Check both installed versions befo
 features.
 Rig **v0.2.82** keeps the published digest of an image that a build did not change, so a repeated
 `rig build` no longer rebuilds the images above an unchanged base.
+Rig **v0.2.83** makes real `replay prepare` pull missing recipe-selected runtime
+images by default, honoring `--pull missing|always|never`; check and dry-run remain read-only.
 Use the Rig executable shipped with your deployment; updating another installation does not
 upgrade a baked artifact. Isaac attachment remains explicitly **experimental**.
 
@@ -51,6 +53,7 @@ totals should not be read as current operator requirements:
 - [v0.2.80 release notes](releases/v0.2.80.md) (multiple bags and per-input proxies)
 - [v0.2.81 release notes](releases/v0.2.81.md) (faster repeat replay and sensor-time TF handling)
 - [v0.2.82 release notes](releases/v0.2.82.md) (unchanged images keep their digest across builds)
+- [v0.2.83 release notes](releases/v0.2.83.md) (preparation acquires replay runtime images)
 - [Coordinated replay readiness, 2026-10-27](releases/coordinated-replay-readiness-2026-10-27.md)
 
 The release readiness report establishes replay evidence on its stated machines/versions.

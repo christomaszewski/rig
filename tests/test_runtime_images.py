@@ -279,6 +279,51 @@ class RuntimeImages(unittest.TestCase):
             images.inspect_images(inventory, policy="always", offline=True)
         self.assertEqual(self.docker_calls("pull"), [])
 
+    def test_preparation_replans_refresh_each_source_once_and_acquire_new_sources(self):
+        verified = {}
+        inventory = self.inventory()
+        first = images.acquire_images(inventory, policy="always", verified=verified)
+        self.assertTrue(first["ready"], first)
+        self.assertEqual(verified, {"localhost:5000/cam:v1": IMAGE_ID})
+        self.second_instance(ref="localhost:5000/second:v1")
+        inventory = self.inventory()
+        for _ in range(2):
+            inspected = images.inspect_images(inventory, policy="always")
+            report = images.acquire_images(inventory, policy="always", inspection=inspected,
+                                           verified=verified)
+            self.assertTrue(report["ready"], report)
+            self.assertEqual(set(report["pins"]), {"cam", "cam2"})
+            self.assertEqual(report["proposed_pulls"], [])
+        self.assertEqual([argv[-1] for argv in self.docker_calls("pull")],
+                         ["localhost:5000/cam:v1", "localhost:5000/second:v1"])
+
+    def test_preparation_replans_reject_changed_or_removed_verified_sources(self):
+        inventory = self.inventory()
+        verified = {}
+        self.assertTrue(images.acquire_images(inventory, verified=verified)["ready"])
+        for changed in (None, image_info(image_id=OTHER_ID), image_info(architecture="amd64")):
+            with self.subTest(changed=changed):
+                if changed is None:
+                    self.local.pop("localhost:5000/cam:v1", None)
+                else:
+                    self.local["localhost:5000/cam:v1"] = changed
+                report = images.acquire_images(inventory, policy="always", verified=verified)
+                self.assertFalse(report["ready"])
+                self.assertTrue(any("changed during preparation" in error for error in report["errors"]))
+                self.assertEqual(report["pins"], {})
+                self.assertEqual(verified, {"localhost:5000/cam:v1": IMAGE_ID})
+        self.assertEqual(len(self.docker_calls("pull")), 1)
+
+    def test_preparation_replans_check_new_requirements_on_verified_images(self):
+        verified = {}
+        self.assertTrue(images.acquire_images(self.inventory(), verified=verified)["ready"])
+        inventory = self.inventory(required_labels={"cam": {"cam-dev": {LABEL: "1"}}})
+        report = images.acquire_images(inventory, policy="always", verified=verified)
+        self.assertFalse(report["ready"])
+        self.assertTrue(any(LABEL in error for error in report["errors"]))
+        self.assertEqual(report["pins"], {})
+        self.assertEqual(len(self.docker_calls("pull")), 1)
+
     def test_docker_errors_and_malformed_inspection_never_authorize_pulls(self):
         inventory = self.inventory()
         for problem in ("permission denied", "cannot connect to Docker", "unrecognized image response",
