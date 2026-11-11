@@ -79,7 +79,8 @@ Grow the deployment later with `rig add <name|path>` (routes + config + manifest
 sensor/autonomy a commented menu row; `--tier` overrides the service's declared tier for THIS vehicle —
 placement + enabled-vs-menu follow); make NON-rig software compatible first with `rig rigify <dir>`
 (descriptor + launcher skeleton + example, analysis-seeded; `--tier` declares it in the generated
-rigging.yaml) → `rig certify --repo` until green.
+rigging.yaml) → `rig certify --repo` until green. The [rigification guide](RIGIFICATION.md) walks
+through the whole conversion; the [service contract](SERVICE_CONTRACT.md) is the reference.
 
 ## 1.5 — the package registry (rig ≥ v0.1.44): install, tune, promote
 
@@ -382,7 +383,8 @@ unique names + unique host-facing ports (declare `host_ports` in the service's r
 ```bash
 rig doctor                 # vehicle composition: names, one distro, port clashes, zenoh guardrail
 rig certify                # launcher contract per service (poison env): project-name, registry/tag,
-                           #   ros-env, determinism, identity, discipline   [= doctor --deep for both]
+                           #   build-images, ros-env, determinism, identity, fixed-names, discipline
+                           #   [= doctor --deep for both]
 rig up --dry-run           # the exact launcher invocations + fleet env, runs nothing
 ```
 

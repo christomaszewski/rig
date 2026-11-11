@@ -13,3 +13,8 @@ See [host setup](../docs/HOST_SETUP.md), [runtime image requirements](../docs/RE
 and [offline Isaac attachment](../docs/ISAAC_OFFLINE.md). Attaching a selected service requires
 its launcher to inventory and pin its active images; a copied Compose file alone does not
 establish that contract.
+
+What a service must ship for its launch surface to work here is in the
+[service contract](../docs/SERVICE_CONTRACT.md#19-distribution); the
+[rigification guide](../docs/RIGIFICATION.md#11-prove-it-survives-vendoring) shows how to test a
+vendored copy.

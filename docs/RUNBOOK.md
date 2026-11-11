@@ -145,7 +145,7 @@ EOF
 ## 4 — Validate (dev box)
 ```bash
 rig doctor          # -> rig doctor: orin-test — 2 sensors + 2 infra, 0 error(s); no zenoh warning (router present)
-rig certify         # each launcher honors the contract: project name, registry/tag, ROS env, determinism, identity
+rig certify         # each launcher honors the contract: project name, registry/tag, ROS env, determinism, identity, no fixed names
 rig up --dry-run    # zenoh-router -> dashboard -> cam_usb -> cam_rtsp; VEHICLE_ID=7 on each;
                     #   RIG_TARGET_PLATFORM=jp7 fleet-wide, CAM_PLATFORM=jp7 + composed RIG_IMAGE_TAG=jp7
                     #   on the camera stacks (tag-less: the platform IS the moving head)

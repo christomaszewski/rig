@@ -24,6 +24,9 @@ not by changing rig.
 
 ## The launcher contract (rig-compatible)
 
+This is the original statement and its rationale. The complete, current requirements are in the
+[service contract](SERVICE_CONTRACT.md).
+
 A launcher must: expose `up/down/status/logs/config` on **one** config; accept a config at an **arbitrary
 host path**; derive **all identity from the config's `name`**; **honor** `ROS_DOMAIN_ID`/`RMW_IMPLEMENTATION`
 from the environment; observe **stdout/stderr discipline** (machine output — `status`→`ps --format json`,

@@ -339,10 +339,13 @@ refreshes. CHEATSHEET §1.5 is the daily loop; `docs/DESIGN.md` has the decision
 launcher's `config` verb under poison env values (`certify.invalid:5000`, `certify-tag-x`, instance
 `certifyname0`) and asserts the contract held: project name honored (no `-p`), images pulled from
 `RIG_IMAGE_REGISTRY`, built images pulled as `:RIG_IMAGE_TAG` (build/pull agreement; composed
-`<tag>-<platform>` for services declaring a `build.platforms` matrix), the declared platform honored
+`<tag>-<platform>` for services declaring a `build.platforms` matrix), the declared `build.images`
+being the images the compose actually pulls, the declared platform honored
 (`RIG_TARGET_PLATFORM`/override env — every matrix entry must render on any host, never host-probe),
-fleet ROS env reaching containers unmangled, deterministic output, identity fully derived from the config
-`name`, clean stdout, parseable `status`. Run it in a deployment (`rig certify [name…]`, or
+fleet ROS env reaching containers unmangled (a hard-coded value fails with or without `ros_distro`),
+deterministic output, identity fully derived from the config `name`, no host-global name that survives
+a rename (a fixed `container_name`, or a fixed `name:` on a non-external network or volume), clean
+stdout, parseable `status`. Run it in a deployment (`rig certify [name…]`, or
 `rig doctor --deep`) or in a service repo's CI with no deployment at all:
 
 ```bash
@@ -490,12 +493,17 @@ CI runs `rig certify` against every one.
 
 ## The contract: `rigging.yaml`
 
+The [service contract](docs/SERVICE_CONTRACT.md) is the full list of what a service must provide, with
+how each requirement is checked. The [rigification guide](docs/RIGIFICATION.md) walks through converting
+existing software, with a worked example. This section is the summary and an annotated descriptor.
+
 A repo is rig-compatible when its launcher exposes `up/down/status/logs/config` on one config, accepts a
 config at any host path, honors fleet ROS env, observes **stdout/stderr discipline** (machine output on
 stdout, human lines on stderr), and ships a `rigging.yaml` (the legacy name `deploy.yaml` is still accepted).
 Optionally it also implements the **operational-state trio** — `standby`/`activate`/`state`, declared in
-`verbs:` all-three-or-none (the declaration is the support claim; contract + reference adoption: the
-service-state adoption prompt in `~/ws/infra`, ouster ≥ v0.2.0) — and honors `RIG_TARGET_STATE` at `up`.
+`verbs:` all-three-or-none (the declaration is the support claim; see the
+[contract](docs/SERVICE_CONTRACT.md#15-capability-operational-states); reference adoption: ouster
+≥ v0.2.0) — and honors `RIG_TARGET_STATE` at `up`.
 **Start from `rig rigify <dir>`**: it generates the descriptor + a contract-correct launcher skeleton +
 an example config in an existing software dir, pre-wired from a read-only analysis (found composes get
 `-f`-wired; ports/volumes/images/Dockerfiles become commented `host_ports`/`external_volumes`/`mirror`/

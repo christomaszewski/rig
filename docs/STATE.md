@@ -1,7 +1,7 @@
 # rig — project state & handoff (resume here)
 
-Released checkpoint: **v0.2.83 — preparation acquires replay runtime images**,
-reviewed **2026-11-10**. Use the [documentation index](README.md) to choose an operator
+Released checkpoint: **v0.2.84 — service contract, rigification guide and stricter certify**,
+reviewed **2026-11-11**. Use the [documentation index](README.md) to choose an operator
 workflow. The dated entries below are historical observations, not the current host state.
 
 - **v0.2.83 preparation improvement:** real `replay prepare` acquires the recipe's runtime
@@ -29,6 +29,17 @@ workflow. The dated entries below are historical observations, not the current h
   stay cached, and `rig.lock` keeps its digests. Only the Rig CLI changes. See
   [v0.2.82](releases/v0.2.82.md) and
   [builder and publication](BUILD_AND_REPLAY.md#builder-and-publication).
+- **v0.2.84 certify closes three blind spots:** a new `fixed-names`
+  check fails a `container_name` that survives an instance rename and warns on a fixed `name:`
+  on a non-external network or volume; a new `build-images` check reports declared
+  `build.images` the rendered compose never pulls, and `tag` no longer passes without having
+  seen a built image; a built image pulled from a hard-coded registry or namespace now fails
+  `registry`; and a hard-coded `ROS_DOMAIN_ID` or `RMW_IMPLEMENTATION` fails `ros-env` with or
+  without `ros_distro`. A service that passed only because of these gaps now fails. The
+  requirements for a compliant service are now one document, the
+  [service contract](SERVICE_CONTRACT.md), with a step-by-step
+  [rigification guide](RIGIFICATION.md). Only the Rig CLI changes. See
+  [v0.2.84](releases/v0.2.84.md).
 - Ordinary `rig up` and `rig down` run equal `(tier, order)` groups concurrently by default;
   down reverses the group sequence. Newly baked artifacts carry the behavior in their bundled
   Rig and generated scripts. Unique orders remain serial, and saved replay/simulation sessions
@@ -819,6 +830,9 @@ the launcher CLI). rig owns the cross-cutting concerns: name-uniqueness, orderin
 deployment artifacts. See `DESIGN.md`.
 
 ## The fleet env rig injects into every launcher (the contract)
+
+The complete, current variable list is in the [service contract](SERVICE_CONTRACT.md#7-environment);
+the summary below predates the session, pin and state variables.
 
 `ROS_DOMAIN_ID`, `RMW_IMPLEMENTATION`, `VEHICLE_ID`, `RIG_IMAGE_REGISTRY`, `RIG_IMAGE_TAG` (a VERSION,
 e.g. `v1.3.0` — composed per-service to `<tag>-<platform>` for build-matrix services, v0.2.14),
