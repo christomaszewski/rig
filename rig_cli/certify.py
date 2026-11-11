@@ -8,18 +8,31 @@ that cannot occur in real life (``certify.invalid:5000``, ``certify-tag-x``, ins
   - discipline       `config` exits 0 and stdout is clean compose YAML (human lines belong on stderr)
   - project-name     the compose project is COMPOSE_PROJECT_NAME (a launcher must not pass `-p`)
   - registry         images are pulled from RIG_IMAGE_REGISTRY (ERROR for images the service builds or
-                     mirrors; WARN otherwise — upstream pulls work only on an internet-connected vehicle)
+                     mirrors — including a built image pulled from a hard-coded registry or
+                     namespace; WARN otherwise — upstream pulls work only on an internet-connected
+                     vehicle)
   - tag              any image the service *builds* is pulled as `:RIG_IMAGE_TAG` (build/pull agreement;
                      for a service declaring `build.platforms` the expected tag is the COMPOSED
-                     `<RIG_IMAGE_TAG>-<platform>` — the same env rig exports at up time)
+                     `<RIG_IMAGE_TAG>-<platform>` — the same env rig exports at up time). Reported
+                     OK only when a built image was actually seen
+  - build-images     the declared `build.images` are the images the compose pulls: `registry` and
+                     `tag` prove nothing about an image they never saw (WARN when NONE is pulled —
+                     a name mismatch between build and compose; INFO when this config selects only
+                     some of them)
   - platform         a service declaring a build matrix must honor the DECLARED platform
                      (RIG_TARGET_PLATFORM / its `platform.override_env`): every matrix entry renders
                      on THIS host, pulls built images as the composed per-platform tag, and two
                      different entries render differently (identical output = host-probing)
-  - ros-env          ROS_DOMAIN_ID / RMW_IMPLEMENTATION reach some container (ROS services only)
+  - ros-env          ROS_DOMAIN_ID / RMW_IMPLEMENTATION reach containers unmodified. A WRONG value
+                     is an ERROR for every service (declaring `ros_distro` or not — hard-coding
+                     is hard-coding); their ABSENCE is a WARN only for a declared ROS service
   - volumes          rigging.yaml `external_volumes` patterns match the compose's external volumes
   - determinism      same config + same env -> byte-identical output (no timestamps, no host probing)
   - identity         rename the instance and the old name vanishes (nothing about identity is hardcoded)
+  - fixed-names      rename the instance and every host-global name changes with it: a constant
+                     `container_name` stops a second instance from starting (ERROR); a constant
+                     `name:` on a non-external network or volume is silently shared by every
+                     instance (WARN). `identity` cannot see these — a constant holds neither name
   - binds            warn on bind mounts into the service repo (recordings belong under RIG_DATA_DIR;
                      bake would freeze a repo-relative dir into the artifact)
   - status           the `status` verb emits parseable `ps --format json` output (a failure with NO
@@ -204,6 +217,32 @@ def _external_volume_names(compose: dict) -> set[str]:
     return names
 
 
+def _owned_resource_names(compose: dict, kind: str) -> set[str]:
+    """Explicit `name:`s of the networks/volumes this project OWNS. External ones are shared on
+    purpose (and `external_volumes` governs them); a name compose derived from the project
+    (`<project>_<key>`) follows the project, which the project-name check already judges."""
+    project = str(compose.get("name", ""))
+    return {str(res["name"]) for key, res in (compose.get(kind) or {}).items()
+            if isinstance(res, dict) and res.get("name") and not res.get("external")
+            and str(res["name"]) != f"{project}_{key}"}
+
+
+def _fixed_names(compose_a: dict, compose_b: dict) -> tuple[list[str], list[str]]:
+    """Host-global names that survived an instance rename: (container names, network/volume
+    names). Compared as sets across the two renders, so a constant is caught whatever compose
+    key it hangs off."""
+    names_b = {str(svc["container_name"]) for _, svc in _services(compose_b)
+               if isinstance(svc, dict) and svc.get("container_name")}
+    containers = [f"{sname}: container_name={svc['container_name']}"
+                  for sname, svc in _services(compose_a)
+                  if isinstance(svc, dict) and svc.get("container_name")
+                  and str(svc["container_name"]) in names_b]
+    shared = [f"{kind[:-1]} '{name}'" for kind in ("networks", "volumes")
+              for name in sorted(_owned_resource_names(compose_a, kind)
+                                 & _owned_resource_names(compose_b, kind))]
+    return containers, shared
+
+
 # --- the check suite ---------------------------------------------------------------------------------
 
 def check_image_overrides(desc: Descriptor, config: Path, env: dict[str, str], compose: dict):
@@ -285,18 +324,36 @@ def certify_target(desc: Descriptor, config_path: Path, base_env: dict[str, str]
                                  f" ('{want}') — is the launcher passing -p?")
 
         # registry / tag: where images come from, and build/pull tag agreement.
-        owned = set(desc.build_images) | {_repo_of(m) for m in desc.mirror}
+        # `examined` is every declared build image some render actually pulled — the registry and
+        # tag verdicts below speak for those and for nothing else (see build-images, after the
+        # platform renders have had their say).
+        built = set(desc.build_images)
+        owned = built | {_repo_of(m) for m in desc.mirror}
+        refs = list(_service_images(compose).values())
+        examined = {_ref_parts(ref)[0] for ref in refs} & built
+        # A declared image that is never pulled as `<registry>/<image>`, while a ref ending in
+        # `/<image>` IS: the build's own image, fetched from a hard-coded registry or namespace.
+        # `rig build` pushes `<RIG_IMAGE_REGISTRY>/<image>`, so the vehicle pulls something else.
+        relocated = {ref: image for ref in refs for image in sorted(built - examined)
+                     if _ref_parts(ref)[0].endswith("/" + image)}
         unprefixed_owned, unprefixed_other, mistagged = [], [], []
-        for ref in _service_images(compose).values():
+        for ref in refs:
             repo, tag = _ref_parts(ref)
+            if ref in relocated:
+                continue
             if not ref.startswith(POISON_REGISTRY + "/"):
                 (unprefixed_owned if repo in owned else unprefixed_other).append(ref)
-            if repo in set(desc.build_images) and tag != want_tag:
+            if repo in built and tag != want_tag:
                 mistagged.append(ref)
         if unprefixed_owned:
             fail("registry", f"images the service builds/mirrors are not pulled from RIG_IMAGE_REGISTRY: "
                              f"{unprefixed_owned}")
-        else:
+        if relocated:
+            fail("registry", "declared build image(s) pulled from somewhere other than "
+                             "<RIG_IMAGE_REGISTRY>/<image> — `rig build` pushes what the compose "
+                             "won't find: " + ", ".join(f"{image} as {ref}"
+                                                        for ref, image in relocated.items()))
+        if not unprefixed_owned and not relocated:
             ok("registry")
         if unprefixed_other:
             checks.append(Check(WARN, "registry", f"upstream image(s) not under RIG_IMAGE_REGISTRY (needs "
@@ -305,8 +362,8 @@ def certify_target(desc: Descriptor, config_path: Path, base_env: dict[str, str]
             composed = f" (composed as <RIG_IMAGE_TAG>-{plat} for this build matrix)" if plat else ""
             fail("tag", f"built image(s) pulled with a tag other than RIG_IMAGE_TAG ('{want_tag}')"
                         f"{composed} — `rig build` pushes what the compose won't find: {mistagged}")
-        elif desc.build_images:
-            ok("tag")
+        elif examined:
+            ok("tag")  # never vacuously: with no built image in the render, build-images reports
         checks.extend(check_image_overrides(desc, cfg_a, env_a, compose))
 
         # ros-env: a ROS service must pass the fleet DDS/zenoh graph env into its containers — but WHICH
@@ -314,26 +371,30 @@ def certify_target(desc: Descriptor, config_path: Path, base_env: dict[str, str]
         # RMW), and rig is schema-opaque. The poison values still give a sharp rule: a WRONG value anywhere
         # is hardcoding (ERROR); both vars arriving somewhere is conformance (OK); total absence is only
         # suspicious (WARN — fine when this config runs no ROS node).
-        if desc.ros_distro:
-            wrong, seen = [], {"ROS_DOMAIN_ID": False, "RMW_IMPLEMENTATION": False}
-            poison = {"ROS_DOMAIN_ID": POISON_VID, "RMW_IMPLEMENTATION": POISON_RMW}
-            for sname, svc in _services(compose):
-                env = _env_of(svc)
-                for var, want in poison.items():
-                    if var in env:
-                        if env[var] == want:
-                            seen[var] = True
-                        else:
-                            wrong.append(f"{sname}: {var}={env[var]!r}")
-            if wrong:
-                fail("ros-env", f"fleet ROS env reaches containers with the wrong value (hardcoded, not "
-                                f"taken from the env): {wrong}")
-            elif all(seen.values()):
-                ok("ros-env")
-            else:
-                checks.append(Check(WARN, "ros-env", "no container env carries the fleet "
-                                                     "ROS_DOMAIN_ID/RMW_IMPLEMENTATION — fine only if this "
-                                                     "config runs no ROS node"))
+        # The WRONG-value rule holds whether or not the service declares `ros_distro`: a compose
+        # that pins ROS_DOMAIN_ID is off the fleet graph either way, and a service is most likely
+        # to hard-code it BEFORE anyone has declared it a ROS service. Only the absence WARN needs
+        # the declaration — without it, carrying no ROS env is simply a non-ROS service.
+        wrong, seen = [], {"ROS_DOMAIN_ID": False, "RMW_IMPLEMENTATION": False}
+        poison = {"ROS_DOMAIN_ID": POISON_VID, "RMW_IMPLEMENTATION": POISON_RMW}
+        for sname, svc in _services(compose):
+            env = _env_of(svc)
+            for var, want in poison.items():
+                if var in env:
+                    if env[var] == want:
+                        seen[var] = True
+                    else:
+                        wrong.append(f"{sname}: {var}={env[var]!r}")
+        if wrong:
+            fail("ros-env", f"fleet ROS env reaches containers with the wrong value (hardcoded, not "
+                            f"taken from the env): {wrong}")
+        elif all(seen.values()) or (not desc.ros_distro and any(seen.values())):
+            ok("ros-env")  # undeclared: whatever it does pass through (a zenoh client may want
+            #                just the domain id) arrived unmodified
+        elif desc.ros_distro:
+            checks.append(Check(WARN, "ros-env", "no container env carries the fleet "
+                                                 "ROS_DOMAIN_ID/RMW_IMPLEMENTATION — fine only if this "
+                                                 "config runs no ROS node"))
 
         # volumes: the rigging.yaml external_volumes patterns must match reality (down --purge relies on them).
         if desc.external_volumes:
@@ -387,6 +448,33 @@ def certify_target(desc: Descriptor, config_path: Path, base_env: dict[str, str]
                              f"somewhere, not derived from the config name: {lines[:3]}")
         else:
             ok("identity")
+
+        # fixed-names: the other half of identity. A CONSTANT holds neither instance name, so the
+        # scan above passes it — but docker's container, network and volume names are host-global,
+        # and a name that survives the rename is one two instances fight over. A fixed
+        # container_name is proof (the second `up` dies on a name conflict): ERROR. A fixed
+        # network/volume name still starts — the instances silently share it and each believes it
+        # owns it — so that is a WARN, with `external: true` the way to say sharing is meant.
+        if run_b.returncode == 0:
+            try:
+                compose_b = yaml.safe_load(run_b.stdout)
+            except yaml.YAMLError:
+                compose_b = None
+            if isinstance(compose_b, dict) and compose_b.get("services"):
+                containers, shared = _fixed_names(compose, compose_b)
+                if containers:
+                    fail("fixed-names", f"container_name does not change with the instance name — "
+                                        f"container names are host-global, so a second instance "
+                                        f"cannot start (drop it; compose names containers after "
+                                        f"the project): {containers}")
+                if shared:
+                    checks.append(Check(WARN, "fixed-names",
+                                        f"name(s) that do not change with the instance name — every "
+                                        f"instance shares one, and each project treats it as its own "
+                                        f"(derive the name from the instance, or mark it `external: "
+                                        f"true` if sharing is meant): {shared}"))
+                if not containers and not shared:
+                    ok("fixed-names")
 
         # status: rig parses `status` as `docker compose ps --format json` (empty = no containers, fine).
         run_s = _run_launcher(desc, cfg_a, [*desc.verb_args("status"), "--format", "json"], env_a)
@@ -468,6 +556,7 @@ def certify_target(desc: Descriptor, config_path: Path, base_env: dict[str, str]
                     continue
                 checks.extend(check_image_overrides(desc, cfg_a,
                               _poison_env(base_env, NAME_A, desc, alt), compose_p))
+                examined |= {_ref_parts(ref)[0] for ref in _service_images(compose_p).values()} & built
                 bad = _mistagged(compose_p, desc, f"{POISON_TAG}-{alt}")
                 if bad:
                     plat_fail = True
@@ -480,6 +569,27 @@ def certify_target(desc: Descriptor, config_path: Path, base_env: dict[str, str]
                                      f"launcher ignores RIG_TARGET_PLATFORM{hint} (host-probing?)")
             if not plat_fail:
                 ok("platform")
+
+        # build-images: registry/tag/platform judged only the declared images a render pulled.
+        # One that NO render pulls was never judged at all. Absence is suspicion, not proof (the
+        # ros-env rule): an image may sit behind a config option this config leaves off, so
+        # "some unseen" is INFO. But when NOT ONE declared image is pulled, the build and the
+        # compose do not agree on what this service runs — the build/pull agreement the
+        # declaration exists for — and that is a WARN that names what IS pulled.
+        if built:
+            unseen = sorted(built - examined - set(relocated.values()))
+            if unseen and not examined and not relocated:
+                checks.append(Check(WARN, "build-images",
+                                    f"no declared build.images entry is pulled by the rendered "
+                                    f"compose, so `registry` and `tag` checked nothing — declared "
+                                    f"{sorted(built)}, pulled {sorted(set(refs)) or 'nothing'} (a "
+                                    f"name `rig build` does not push? an option this config "
+                                    f"leaves off?)"))
+            elif unseen:
+                checks.append(Check(INFO, "build-images", f"declared but not pulled with this config, "
+                                                          f"so not checked: {unseen}"))
+            elif not relocated:  # a relocated image already failed `registry`; nothing to add
+                ok("build-images")
 
         if emit is not None:
             normalized = run_a.stdout.replace(str(desc.repo), "${REPO}").replace(str(tmp), "${TMP}")

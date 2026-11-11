@@ -112,8 +112,8 @@ def test_conformant_fixture_is_green():
     checks, errors, warns, oks = run_certify(make_service())
     assert not errors, f"conformant fixture failed: {[(c.name, c.detail) for c in checks if c.level == 'ERROR']}"
     assert not warns, f"conformant fixture warned: {warns}"
-    assert {"discipline", "project-name", "registry", "tag", "ros-env",
-            "volumes", "determinism", "identity", "status"} <= oks
+    assert {"discipline", "project-name", "registry", "tag", "build-images", "ros-env",
+            "volumes", "determinism", "identity", "fixed-names", "status"} <= oks
 
 
 def test_declared_image_override_must_reach_compose():
@@ -251,6 +251,151 @@ def test_hardcoded_identity_fails_rename():
     literal = DEFAULTS["@VOLBLOCK@"].replace("${NAME}", NAME_A)
     _, errors, _, _ = run_certify(make_service(**{"@VOLBLOCK@": literal}))
     assert errors == {"identity"}
+
+
+# --- fixed-names: host-global names that survive a rename ----------------------------------------
+# `identity` greps the renamed render for the OLD name, so a constant — which holds neither name —
+# passes it. These mutants are all identity-green and must trip fixed-names instead.
+
+def _with_service_key(line: str) -> dict:
+    return {"@ENVBLOCK@": DEFAULTS["@ENVBLOCK@"] + "\n" + line}
+
+
+def test_fixed_container_name_fails():
+    checks, errors, _, oks = run_certify(make_service(**_with_service_key("    container_name: fak_core")))
+    assert errors == {"fixed-names"}, [(c.name, c.detail) for c in checks if c.level == "ERROR"]
+    assert "identity" in oks  # the blind spot: the rename scan alone calls this conformant
+    assert any("fak_core" in c.detail for c in checks if c.name == "fixed-names")
+
+
+def test_instance_derived_container_name_passes():
+    # Not the fleet convention (compose already names containers after the project), but it
+    # cannot collide — certify fails proof of a collision, not a style choice.
+    for line in ("    container_name: fak_${NAME}_core",
+                 "    container_name: ${COMPOSE_PROJECT_NAME}-core"):
+        checks, errors, warns, oks = run_certify(make_service(**_with_service_key(line)))
+        assert not errors and not warns, [(c.name, c.detail) for c in checks if c.level != "OK"]
+        assert "fixed-names" in oks
+
+
+def test_fixed_network_and_volume_names_warn():
+    # These still START — the instances silently share the resource — so a WARN, not an ERROR.
+    block = DEFAULTS["@VOLBLOCK@"] + ("\n  cache:\n    name: fak_cache\n"
+                                      "networks:\n  bus:\n    name: fak_bus")
+    checks, errors, warns, _ = run_certify(make_service(**{"@VOLBLOCK@": block}))
+    assert not errors and warns == {"fixed-names"}
+    detail = " ".join(c.detail for c in checks if c.name == "fixed-names")
+    assert "volume 'fak_cache'" in detail and "network 'fak_bus'" in detail
+
+
+def test_external_and_instance_scoped_names_are_not_fixed_names():
+    # `external: true` says sharing is meant (a fleet network every stack joins); a name carrying
+    # the instance name or the project is per-instance. Neither is a finding.
+    block = DEFAULTS["@VOLBLOCK@"] + ("\n  cache:\n    name: fak_${NAME}_cache\n"
+                                      "networks:\n"
+                                      "  fleet:\n    name: fleet_bus\n    external: true\n"
+                                      "  default:\n    name: ${COMPOSE_PROJECT_NAME}_default")
+    checks, errors, warns, oks = run_certify(make_service(**{"@VOLBLOCK@": block}))
+    assert not errors and not warns, [(c.name, c.detail) for c in checks if c.level != "OK"]
+    assert "fixed-names" in oks
+
+
+def test_hardcoded_project_reports_project_name_not_its_derived_names():
+    # A launcher passing `-p` makes every compose-derived `<project>_<key>` name constant too.
+    # That is ONE defect — project-name's — not a second finding per network.
+    block = DEFAULTS["@VOLBLOCK@"] + "\nnetworks:\n  default:\n    name: hardcoded-project_default"
+    _, errors, warns, _ = run_certify(make_service(**{"@PROJECT@": "hardcoded-project",
+                                                      "@VOLBLOCK@": block}))
+    assert errors == {"project-name"} and not warns
+
+
+# --- build-images: the declared images are the ones the compose pulls ----------------------------
+# `registry` and `tag` judge a ref only when its repo IS a declared build image. Pulled under any
+# other name, nothing judged it — and `tag` used to report OK anyway.
+
+def test_declared_build_image_pulled_under_another_name_warns():
+    checks, errors, warns, oks = run_certify(make_service(
+        **{"@IMAGE@": "$RIG_IMAGE_REGISTRY/fak-runtime:$RIG_IMAGE_TAG"}))
+    assert not errors and warns == {"build-images"}
+    assert "tag" not in oks  # no built image was seen: an OK here would be vacuous
+    detail = " ".join(c.detail for c in checks if c.name == "build-images")
+    assert "fak-core" in detail and "fak-runtime" in detail  # declared AND what is pulled instead
+
+
+def test_built_image_from_a_hardcoded_registry_fails_registry():
+    # Same image name, wrong place: before, this was only the "upstream image" WARN.
+    for image in ("ghcr.io/acme/fak-core:$RIG_IMAGE_TAG",            # another registry
+                  "$RIG_IMAGE_REGISTRY/acme/fak-core:$RIG_IMAGE_TAG"):  # a namespace rig build never pushes
+        checks, errors, warns, oks = run_certify(make_service(**{"@IMAGE@": image}))
+        assert errors == {"registry"}, (image, [(c.name, c.detail) for c in checks if c.level != "OK"])
+        assert not warns  # one finding: not also "upstream image", not also build-images
+        assert "tag" not in oks and "build-images" not in oks
+
+
+def test_same_basename_upstream_image_beside_the_built_one_only_warns():
+    # The relocation rule fires only while the declared image is otherwise unpulled. With the
+    # real one present, `vendor/fak-core` is just an upstream image that shares a basename.
+    _, errors, warns, oks = run_certify(make_service(
+        **{"@EXTRASVC@": "  helper:\n    image: docker.io/vendor/fak-core:1.0"}))
+    assert not errors and warns == {"registry"}
+    assert {"tag", "build-images"} <= oks
+
+
+def test_partly_pulled_build_images_is_info_not_a_warning():
+    # An image behind a config option this config leaves off is unseen, not wrong. Say so (the
+    # checks did not cover it) without a warning every such service would learn to ignore.
+    rigging = RIGGING.replace("images: [fak-core]", "images: [fak-core, fak-plugin]")
+    checks, errors, warns, oks = run_certify(make_service(rigging))
+    assert not errors and not warns
+    assert "tag" in oks and "build-images" not in oks
+    assert any(c.name == "build-images" and c.level == "INFO" and "fak-plugin" in c.detail
+               for c in checks)
+
+
+def test_build_image_pulled_only_on_another_platform_counts_as_seen():
+    # A matrix service may select an image on one platform only (camera-service's cam-dev). The
+    # suite renders AS alpha; beta's render must still count toward what was examined.
+    rigging = RIGGING_MATRIX.replace("images: [fak-core]", "images: [fak-core, fak-beta]")
+    prelude = ('    EXTRA=""\n'
+               '    if [ "$FAK_PLATFORM" = "beta" ]; then\n'
+               '      EXTRA="$(printf \'  extra:\\n    image: %s/fak-beta:%s\' '
+               '"$RIG_IMAGE_REGISTRY" "$RIG_IMAGE_TAG")"\n'
+               '    fi')
+    checks, errors, warns, oks = run_certify(make_service(rigging, **{
+        "@ENVBLOCK@": MATRIX_ENV, "@PRELUDE@": prelude, "@EXTRASVC@": "$EXTRA"}))
+    assert not errors and not warns, [(c.name, c.detail) for c in checks if c.level != "OK"]
+    assert {"build-images", "platform"} <= oks
+
+
+# --- ros-env without `ros_distro` ------------------------------------------------------------------
+# The wrong-value rule used to run only for a DECLARED ROS service — so the service most likely to
+# hard-code its domain id (one nobody has declared yet) was the one never checked.
+
+RIGGING_NO_ROS = RIGGING.replace("ros_distro: lyrical\n", "")
+
+
+def test_hardcoded_ros_env_fails_without_ros_distro():
+    for block in ("    environment:\n      ROS_DOMAIN_ID: \"7\"",
+                  "    environment:\n      RMW_IMPLEMENTATION: rmw_fastrtps_cpp\n"
+                  "      ROS_DOMAIN_ID: \"$ROS_DOMAIN_ID\""):
+        checks, errors, _, _ = run_certify(make_service(RIGGING_NO_ROS, **{"@ENVBLOCK@": block}))
+        assert errors == {"ros-env"}, [(c.name, c.detail) for c in checks if c.level == "ERROR"]
+
+
+def test_non_ros_service_without_ros_env_reports_nothing():
+    # No declaration and no ROS env is simply a non-ROS service (mavlink-router): the absence
+    # WARN belongs to declared ROS services only.
+    checks, errors, warns, _ = run_certify(make_service(RIGGING_NO_ROS,
+                                                        **{"@ENVBLOCK@": "    environment: {}"}))
+    assert not errors and not warns
+    assert not [c for c in checks if c.name == "ros-env"]
+
+
+def test_undeclared_service_passing_fleet_ros_env_through_is_ok():
+    # e.g. a zenoh client that needs only the domain id: what it carries arrived unmodified.
+    for block in (DEFAULTS["@ENVBLOCK@"], "    environment:\n      ROS_DOMAIN_ID: \"$ROS_DOMAIN_ID\""):
+        _, errors, warns, oks = run_certify(make_service(RIGGING_NO_ROS, **{"@ENVBLOCK@": block}))
+        assert not errors and not warns and "ros-env" in oks
 
 
 def test_stdout_chatter_fails_discipline():
