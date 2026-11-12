@@ -190,9 +190,20 @@ def _compare_lock(report: _Report, a: dict, b: dict) -> None:
                        {key: la.get(key)}, {key: lb.get(key)})
 
 
+def _lock_names(lock: dict, ref: str, held) -> bool:
+    """Does this run's rig.lock record the very digest its daemon held for `ref`? Only then do
+    the lock's per-architecture digests describe the image that ran: the daemon is asked
+    independently of the lock, and a lock can be left behind by an image replaced after it."""
+    entry = (lock.get("build_catalog") or {}).get(ref)
+    digest = entry.get("digest") if isinstance(entry, dict) else None
+    return isinstance(held, str) and isinstance(digest, str) and held.rsplit("@", 1)[-1] == digest
+
+
 def _compare_images(report: _Report, a: dict, b: dict) -> None:
     """.rig/images.yaml: the digest the docker daemon held for each ref when the run opened —
-    an INDEX digest for a multi-architecture image."""
+    an INDEX digest for a multi-architecture image. Two different digests are the same image
+    only where the record shows it: each run's lock names the digest its daemon held, and the
+    two locks list the same per-architecture digests. Anything less is a difference."""
     if not a["images"] and not b["images"]:
         return
     report.section("images")
@@ -201,13 +212,25 @@ def _compare_images(report: _Report, a: dict, b: dict) -> None:
         if va == vb:
             continue
         kids_a, kids_b = _children(a["lock"], ref), _children(b["lock"], ref)
-        if kids_a and kids_b:
-            if kids_a == kids_b:
-                report.index_only[ref] = {"section": "images", "key": ref,
-                                          "a": None if va is _MISSING else va,
-                                          "b": None if vb is _MISSING else vb}
-            continue  # a per-architecture change is already reported, from the lock
-        report.change("images", ref, va, vb)
+        unnamed = [name for name, run, held in (("A", a, va), ("B", b, vb))
+                   if not _lock_names(run["lock"], ref, held)]
+        if not isinstance(va, str) or not isinstance(vb, str) or not (kids_a and kids_b) or unnamed:
+            # What the two LOCKS say about this ref is no longer a statement about what ran.
+            report.index_only.pop(ref, None)
+            report.change("images", ref, va, vb)
+        if not isinstance(va, str) or not isinstance(vb, str):  # a run with no digest for it
+            continue
+        if not (kids_a and kids_b):  # nothing recorded says what is under either index
+            continue
+        if unnamed:
+            who = " and ".join(unnamed)
+            report.notes.append(
+                f"{ref}: {who}'s rig.lock records another digest for it than the daemon held "
+                f"when the run opened, so the lock's per-architecture record does not describe "
+                f"the image that ran — counted as a difference")
+        elif kids_a == kids_b:
+            report.index_only[ref] = {"section": "images", "key": ref, "a": va, "b": vb}
+        # else: a per-architecture change, already reported from the lock
 
 
 def compare(run_a: Path, run_b: Path) -> dict:
