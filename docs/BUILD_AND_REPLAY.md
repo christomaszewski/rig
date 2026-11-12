@@ -210,7 +210,7 @@ a network change: when they differ from what the builder was created with, Rig r
 the same name with `docker buildx rm --keep-state`. A build step that fails on name resolution
 ends with a hint saying so.
 
-**One builder for every Rig home on an engine.** The builder is named for the Docker daemon and
+**One builder for every Rig home on an engine (v0.2.86).** The builder is named for the Docker daemon and
 the registry policy, not for `RIG_HOME`, so every Rig home on one engine uses the same builder
 and the same cache. The builder carries a digest of the settings it was created with, as the
 driver option `env.RIG_BUILDER_SETTINGS` that `docker buildx inspect` shows, and each home

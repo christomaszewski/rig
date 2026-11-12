@@ -274,7 +274,8 @@ session and leave the simulator running.
 not under `(unassigned)`. A node is taken to be the simulator's when it is outside every
 instance namespace and is on a topic the recipe declares for the simulator, or publishes
 `/clock`. The heading says that the name is the recipe's statement and the nodes are inferred:
-Rig has verified neither.
+Rig has verified neither. Rig's own probe node, which the logger can record while Rig checks
+the graph after startup, is listed as Rig's.
 
 Four arrangements from live use:
 

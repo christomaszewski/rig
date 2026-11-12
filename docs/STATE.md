@@ -85,8 +85,9 @@ workflow. The dated entries below are historical observations, not the current h
   changed by this. See the
   [reference](SIMULATION.md#an-external-simulator),
   [example](../examples/external-attach/README.md) and [v0.2.85](releases/v0.2.85.md).
-- **After v0.2.85, not yet released:** fixes for what the second simulator and the second host
-  showed, each with a test that fails on v0.2.85. The Rig CLI only.
+- **v0.2.86 simulation attach fixes (prepared 2026-11-12; not tagged):** fixes for what the
+  second simulator and the second host showed, each with a test that fails on v0.2.85. The
+  Rig CLI only.
   - *The probe's result survives the middleware.* The failed startups above had two causes,
     both in the probe and both reproduced against Gazebo with the probe's streams kept.
     `rmw_zenoh`'s Zenoh writes its own log to standard output, so a line of it ahead of the
@@ -109,7 +110,9 @@ workflow. The dated entries below are historical observations, not the current h
     Docker engine no longer re-create it on each other.
 
   These apply to Isaac sessions as well; a healthy Isaac session prints and writes what it
-  did. See the [reference](SIMULATION.md#check-start-and-stop).
+  did. Verified live against Gazebo on 2026-11-12, beside v0.2.85 on the same deployment; not
+  on the Orin and not on Isaac. See the [reference](SIMULATION.md#check-start-and-stop) and
+  [v0.2.86](releases/v0.2.86.md).
 - A session's run is sealed against the deployment's own var context (v0.2.85). Until then
   `rig sim down --end-run`, and `rig down --end-run` on a recipe
   session, marked every run `config_dirty_at_seal` and warned that the config had changed
