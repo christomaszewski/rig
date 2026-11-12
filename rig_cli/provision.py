@@ -422,6 +422,12 @@ def _chosen(values: dict, only: str | None, except_names: str | None) -> set[str
     return chosen
 
 
+def _identical(a, b) -> bool:
+    """The same YAML, type and all. Python calls True and 1 equal, and 1.0 and 1; a config that
+    takes the value whole (`flag: "{{use_sensor}}"`) and a typed consumer do not."""
+    return yaml.safe_dump(a, sort_keys=True) == yaml.safe_dump(b, sort_keys=True)
+
+
 def apply_record(root: Path | None, source: str, *, only: str | None, except_names: str | None,
                  with_identity: bool, force: bool, dry_run: bool) -> int:
     """`sudo rig provision --apply SOURCE`: merge a record's values into this machine's file.
@@ -443,19 +449,19 @@ def apply_record(root: Path | None, source: str, *, only: str | None, except_nam
                 lines.append(f"  {bucket}.{name}: not applied (the record has {new!r}{kept})")
             elif old is _UNSET:
                 lines.append(f"  {bucket}.{name}: (unset) -> {new!r}")
-            elif old == new:
+            elif _identical(old, new):
                 lines.append(f"  {bucket}.{name}: {new!r} (unchanged)")
             else:
                 lines.append(f"  {bucket}.{name}: {old!r} -> {new!r}")
             if name in chosen:
                 merged[name] = new
-        if merged != have:
+        if not _identical(merged, have):
             data[bucket] = merged
     if with_identity:
         for key, new in machine.items():
             old = existing.get(key, _UNSET)
             lines.append(f"  {key}: " + (f"(unset) -> {new!r}" if old is _UNSET else
-                                         f"{new!r} (unchanged)" if old == new else
+                                         f"{new!r} (unchanged)" if _identical(old, new) else
                                          f"{old!r} -> {new!r}"))
             data[key] = new
     elif machine:
@@ -470,7 +476,7 @@ def apply_record(root: Path | None, source: str, *, only: str | None, except_nam
     if dry_run:
         eprint("rig provision: (dry-run) nothing written")
         return 0
-    if data == existing:
+    if _identical(data, existing):
         eprint(f"rig provision: nothing to change — {target} left as it is")
         return 0
     _write(target, data)
