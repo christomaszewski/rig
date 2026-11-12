@@ -553,7 +553,10 @@ def _push_roster(fleet: Fleet, vehicles: list[Vehicle], *, dry_run: bool) -> set
     for v in vehicles:
         try:
             if v.is_local:
-                shutil.copyfile(fleet.path, Path(v.path).expanduser() / "fleet.yaml")
+                dest = Path(v.path).expanduser() / "fleet.yaml"
+                if dest.exists() and os.path.samefile(fleet.path, dest):
+                    continue  # the roster IS this deployment's own file: nothing to deliver
+                shutil.copyfile(fleet.path, dest)
             else:
                 scp = subprocess.run(["scp", "-q", *_SSH_OPTS, str(fleet.path),
                                       f"{v.host}:{v.path}/fleet.yaml"],
@@ -567,17 +570,28 @@ def _push_roster(fleet: Fleet, vehicles: list[Vehicle], *, dry_run: bool) -> set
     return missed
 
 
-def _too_old(fleet: Fleet, vehicles: list[Vehicle], *, jobs: int) -> dict[str, str]:
-    """{vehicle: why it must not be sent this roster}, from asking each vehicle's own entry
-    point for its version — before anything is pushed. A roster with per-vehicle values is only
-    understood from ROSTER_VALUES_SINCE on; an entry point that does not say which rig it is
-    gets the same caution. An unreachable vehicle is left to the sweep, which reports it."""
+def _too_old(fleet: Fleet, vehicles: list[Vehicle], *, jobs: int) -> tuple[dict[str, str], set[str]]:
+    """({vehicle: why it must not be sent this roster}, the names among them that gave no
+    answer), from asking each vehicle's own entry point for its version — before anything is
+    pushed. A roster with per-vehicle values is only understood from ROSTER_VALUES_SINCE on,
+    and it goes only to a rig KNOWN to read it: an entry point that does not say which rig it
+    is, and a vehicle that could not be asked, are held like an old one. The link that dropped
+    the question may carry the copy a moment later, and an old rig holding this roster refuses
+    every verb."""
     since = ".".join(str(n) for n in ROSTER_VALUES_SINCE)
     held: dict[str, str] = {}
+    silent: set[str] = set()
     answers = _fan_out(vehicles, lambda v: _chooser(v, ["--version"], _vehicle_env(fleet, v, {})),
                        jobs=jobs, timeout=30)
     for o in answers:
         if not o.reachable:
+            why = ((o.err or o.out).strip().splitlines() or ["no answer"])[-1][:100]
+            silent.add(o.vehicle.name)
+            held[o.vehicle.name] = (
+                f"not started and not sent the roster: could not ask this vehicle which rig it "
+                f"runs ({why}). A roster with per-vehicle values goes only to a rig known to "
+                f"read it ({since} or later). The vehicle keeps the roster it holds — restore "
+                f"the link and run fleet up again")
             continue
         said = re.search(r"\brig (\d+)\.(\d+)\.(\d+)", o.out + o.err)
         if said is None:
@@ -592,7 +606,7 @@ def _too_old(fleet: Fleet, vehicles: list[Vehicle], *, jobs: int) -> dict[str, s
                 f"{'.'.join(said.groups())}, and a roster with per-vehicle values needs {since} or "
                 f"later. It would ignore its row, and once it held this roster it could not "
                 f"run `down` either — re-bake and redeploy it")
-    return held
+    return held, silent
 
 
 def _identity_file(fleet: Fleet, vehicle: Vehicle) -> Path | None:
@@ -707,7 +721,7 @@ def cmd_up(fleet: Fleet, names: list[str], *, run_label: str | None, set_vars: l
         eprint("fleet up: (dry-run) the roster is not pushed — each vehicle previews with the "
                "roster it already holds")
     # A vehicle whose rig predates this roster's keys is neither sent it nor started.
-    old = _too_old(fleet, vehicles, jobs=jobs) if row_values else {}
+    old, silent = _too_old(fleet, vehicles, jobs=jobs) if row_values else ({}, set())
     _ensure_network(fleet, dry_run=dry_run)
     missed = _push_roster(fleet, [v for v in vehicles if v.name not in old], dry_run=dry_run)
     for v in vehicles:  # simulated machine identities (SIL rows) — needed even for dry-run render
@@ -734,7 +748,7 @@ def cmd_up(fleet: Fleet, names: list[str], *, run_label: str | None, set_vars: l
         v, 1, "", old.get(v.name) or
         "not started: the roster did not reach this vehicle, and its row values would be those "
         "of the roster it already holds. Restore the link and run fleet up again",
-        reachable=True) for v in vehicles]
+        reachable=v.name not in silent) for v in vehicles]
     problems = _print_outcomes(outcomes)
     if not dry_run:
         _fleet_view(fleet, [o.vehicle for o in outcomes if o.rc == 0 and o.reachable], run_label)
