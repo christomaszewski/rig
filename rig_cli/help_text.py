@@ -364,6 +364,27 @@ preserves the originals). It is not required for replay on a hand-built tree.
 Use rig replay prepare with a recipe for source-preserving legacy bag/camera
 adaptation without a historical deployment capture.
 """,
+    "run-diff": """Compares what two runs RECORDED about themselves, and writes nothing:
+  manifest.yaml (rig version, vehicle, stacks, the simulation block), the config
+  snapshot of each run's last up (vehicle.yaml, vars.yaml and each value's source,
+  the machine file, rig.lock packages and images, rendered configs) and
+  .rig/images.yaml.
+
+  differs            a difference of substance, by section and key
+  index digest only  an image whose multi-architecture index digest differs while
+                     its per-architecture digests (rig.lock build_catalog children)
+                     are the same: a build or push made a new index over the same
+                     image. Reported, not counted.
+  per run            id, label, times, snapshot name, capture hash: different for
+                     any two runs. Reported, not counted.
+
+  Recorded data (bags, recordings, graph, logs, probes) is not compared.
+  Exit status: 0 no difference of substance, 1 a difference, 2 trouble.
+
+Examples:
+  rig run diff baseline candidate
+  rig run diff ~/fleet-runs/dock/skiff-07/20260301T101500Z_dock ~/fleet-runs/dock/skiff-09/20260301T101502Z_dock --json
+""",
     "provision": """Target roles:
   --platform is this machine's runtime, used by host builds and reconstruction.
   --arch asserts the Docker execution CPU; it does not enable cross compilation.

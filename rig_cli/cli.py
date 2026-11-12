@@ -793,7 +793,8 @@ _GROUP_VERBS: dict[str, dict[str, str]] = {
     "config": {"show": "config", "render": "config-render", "diff": "config-diff"},
     "run": {"new": "new-run", "end": "end-run", "list": "runs", "retrofit": "run-retrofit",
             "rm": "run-rm", "import": "run-import", "export": "run-export",
-            "tag": "run-tag", "untag": "run-untag", "archive": "run-archive", "replay": "replay"},
+            "tag": "run-tag", "untag": "run-untag", "archive": "run-archive", "replay": "replay",
+            "diff": "run-diff"},
     "catalog": {"search": "catalog-search", "list": "catalog-search", "add": "catalog-add",
                 "remove": "catalog-remove", "rm": "catalog-remove", "roots": "catalog-roots"},
     "artifact": {"bake": "bake", "unbake": "unbake", "list": "artifact-list",
@@ -1185,6 +1186,13 @@ def build_parser() -> argparse.ArgumentParser:
     rut = sub.add_parser("run-untag", help="remove tag(s) from a run (canonical: run untag)")
     rut.add_argument("run", help="run id, label (newest), or run-dir path")
     rut.add_argument("tags", nargs="+", help="tag(s) to remove")
+    rdf = sub.add_parser("run-diff", help="what differs between two runs' RECORDS (canonical: "
+                                          "run diff) — packages, images by per-architecture "
+                                          "digest, simulation, values and rendered configs; "
+                                          "read-only; exits 0 same, 1 differs, 2 trouble")
+    rdf.add_argument("a", help="run id, label (newest), or run-dir path")
+    rdf.add_argument("b", help="the run to compare it with")
+    rdf.add_argument("--json", action="store_true", dest="as_json", help="the report as JSON")
 
     cs = sub.add_parser("catalog-search", help="every run rig knows about (registries, harvest "
                                                "trees), searchable (canonical: `rig catalog "
@@ -1956,6 +1964,10 @@ def main(argv=None) -> int:
                 run_ref=args.run, into=args.into, config=args.config,
                 copy_run=args.copy_run, no_import=args.no_import,
                 registry=args.registry, enable_replay=args.enable_replay, platform=args.platform)
+        if args.cmd == "run-diff":  # two run dirs, read only — a deployment only to look up ids
+            from . import rundiff
+            return rundiff.cmd(root if (root / "vehicle.yaml").exists() else None,
+                               args.a, args.b, as_json=args.as_json)
         if args.cmd == "run-retrofit":  # reads run dirs + var/artifacts, not the manifest
             from . import reconstruct as reconstruct_mod
             return reconstruct_mod.cmd_retrofit(root, run_refs=args.runs,

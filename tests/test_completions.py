@@ -83,8 +83,8 @@ def test_global_flags():
 
 def test_group_menus():
     assert _c("image", "") == ["adopt", "audit", "build", "pull"]
-    assert _c("run", "") == ["archive", "end", "export", "import", "list", "new", "replay", "retrofit",
-                             "rm", "tag", "untag"]
+    assert _c("run", "") == ["archive", "diff", "end", "export", "import", "list", "new", "replay",
+                             "retrofit", "rm", "tag", "untag"]
     assert _c("artifact", "") == ["bake", "list", "prune", "rm", "show", "unbake"]
     assert _c("service", "") == ["certify", "rigify", "vendor"]
 

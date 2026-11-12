@@ -702,6 +702,8 @@ _POSITIONAL_SOURCES: dict = {
     (("run-rm",), "runs"): _local_run_ids,
     (("run-archive",), "runs"): _local_run_ids,
     (("run-export",), "run"): _run_ids,
+    (("run-diff",), "a"): _run_ids,
+    (("run-diff",), "b"): _run_ids,
     (("run-tag",), "run"): _run_ids,
     (("run-tag",), "tags"): _run_tags,
     (("run-untag",), "run"): _run_ids,
