@@ -72,6 +72,13 @@ workflow. The dated entries below are historical observations, not the current h
   still pending and is not changed by this. See the
   [reference](SIMULATION.md#an-external-simulator) and
   [example](../examples/external-attach/README.md).
+- A session's run is sealed against the deployment's own var context (after v0.2.84, not yet
+  released). Until then `rig sim down --end-run`, and `rig down --end-run` on a recipe
+  session, marked every run `config_dirty_at_seal` and warned that the config had changed
+  after the last `up`, whether or not anything had: the teardown compared the run's snapshot
+  with a manifest rebuilt from the saved session, which holds no vars. Found on the first
+  live use of `rig sim`; covered by `tests/test_session_seal.py`, and confirmed live on
+  2026-11-12 (an untouched session now seals without the flag).
 - The [offline Isaac walkthrough](ISAAC_OFFLINE.md) and [example](../examples/isaac-attach/README.md)
   cover preparation and capture→replay. The repository's Lyrical default requires a compatibility
   decision: NVIDIA 6.0.0 documents tested Humble/Jazzy, including Linux Jazzy/Zenoh. Since
