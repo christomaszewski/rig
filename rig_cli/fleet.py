@@ -59,6 +59,10 @@ from .common import eprint, load_yaml, print_table
 FLEET_KEYS = {"fleet", "mode", "gcs_ip", "sil", "vehicles", "vars", "unique"}
 ROW_KEYS = {"id", "name", "host", "path", "data_dir", "ip", "vars"}
 _VAR_NAME = re.compile(r"[a-z][a-z0-9_]*\Z")  # provision's and the shell tier's rule
+# The first rig that reads a roster row's `vars:` and accepts `unique:`. An older one ignores
+# its row, and refuses EVERY verb, `down` included, once its deployment root holds a roster
+# with `unique:` — so such a roster is never pushed to it (cmd_up asks first).
+ROSTER_VALUES_SINCE = (0, 2, 86)
 # A row's identity is its `id` and `name` keys: a var of either name would be outranked by the
 # vehicle's own identity and do nothing.
 _ROW_RESERVED = {"vehicle", "vehicle_id"}
@@ -95,6 +99,8 @@ class Fleet:
     unique: tuple[str, ...] = ()  # var names no two vehicles may share a value for
     vars: dict = field(default_factory=dict)  # the fleet-level values (a row's own outrank them)
     digest: str = ""              # sha256 of the roster file as it was read and checked here
+    per_vehicle: bool = False     # rows carry values, or `unique:` is there: a roster only a
+    #                               rig from ROSTER_VALUES_SINCE on can read
 
 
 def find_fleet(explicit: str | None) -> Path:
@@ -200,7 +206,7 @@ def load_fleet(explicit: str | None) -> Fleet:
                   data_root=(str(sil["data_root"]) if sil.get("data_root") else None),
                   network=network, vehicles=tuple(vehicles), path=path,
                   unique=_unique_names(data.get("unique"), path), vars=dict(data.get("vars") or {}),
-                  digest=digest)
+                  digest=digest, per_vehicle="unique" in data or any(v.vars for v in vehicles))
     for name in fleet.unique:
         if not any(name in v.vars for v in vehicles):
             raise RigError(f"{path}: unique: no vehicle row sets '{name}' (a typo?) — rows set: "
@@ -556,9 +562,37 @@ def _push_roster(fleet: Fleet, vehicles: list[Vehicle], *, dry_run: bool) -> set
                     raise OSError((scp.stderr or "").strip()[:120] or "scp failed")
         except (OSError, subprocess.TimeoutExpired) as exc:
             missed.add(v.name)
-            eprint(f"  {v.name}: warning — roster push failed ({exc}); the run snapshot will "
-                   f"miss fleet.yaml")
+            eprint(f"  {v.name}: warning — roster push failed ({exc}); this vehicle keeps the "
+                   f"roster it already holds, if any")
     return missed
+
+
+def _too_old(fleet: Fleet, vehicles: list[Vehicle], *, jobs: int) -> dict[str, str]:
+    """{vehicle: why it must not be sent this roster}, from asking each vehicle's own entry
+    point for its version — before anything is pushed. A roster with per-vehicle values is only
+    understood from ROSTER_VALUES_SINCE on; an entry point that does not say which rig it is
+    gets the same caution. An unreachable vehicle is left to the sweep, which reports it."""
+    since = ".".join(str(n) for n in ROSTER_VALUES_SINCE)
+    held: dict[str, str] = {}
+    answers = _fan_out(vehicles, lambda v: _chooser(v, ["--version"], _vehicle_env(fleet, v, {})),
+                       jobs=jobs, timeout=30)
+    for o in answers:
+        if not o.reachable:
+            continue
+        said = re.search(r"\brig (\d+)\.(\d+)\.(\d+)", o.out + o.err)
+        if said is None:
+            first = ((o.out + o.err).strip().splitlines() or ["nothing"])[0][:80]
+            held[o.vehicle.name] = (
+                f"not started and not sent the roster: could not tell which rig this vehicle "
+                f"runs (`--version` answered: {first}). A roster with per-vehicle values needs "
+                f"rig {since} or later there")
+        elif tuple(int(n) for n in said.groups()) < ROSTER_VALUES_SINCE:
+            held[o.vehicle.name] = (
+                f"not started and not sent the roster: this vehicle runs rig "
+                f"{'.'.join(said.groups())}, and a roster with per-vehicle values needs {since} or "
+                f"later. It would ignore its row, and once it held this roster it could not "
+                f"run `down` either — re-bake and redeploy it")
+    return held
 
 
 def _identity_file(fleet: Fleet, vehicle: Vehicle) -> Path | None:
@@ -668,12 +702,14 @@ def cmd_up(fleet: Fleet, names: list[str], *, run_label: str | None, set_vars: l
         if rows:
             eprint(f"fleet up: note — --var {key}={extra[key]} overrides the roster's own values "
                    f"for this invocation ({', '.join(rows)})")
-    row_values = any(v.vars for v in fleet.vehicles)
+    row_values = fleet.per_vehicle
     if dry_run and row_values:
         eprint("fleet up: (dry-run) the roster is not pushed — each vehicle previews with the "
                "roster it already holds")
+    # A vehicle whose rig predates this roster's keys is neither sent it nor started.
+    old = _too_old(fleet, vehicles, jobs=jobs) if row_values else {}
     _ensure_network(fleet, dry_run=dry_run)
-    missed = _push_roster(fleet, vehicles, dry_run=dry_run)
+    missed = _push_roster(fleet, [v for v in vehicles if v.name not in old], dry_run=dry_run)
     for v in vehicles:  # simulated machine identities (SIL rows) — needed even for dry-run render
         _ensure_identity(fleet, v)
     argv = ["up"] + (["--run", run_label] if run_label else []) \
@@ -685,7 +721,7 @@ def cmd_up(fleet: Fleet, names: list[str], *, run_label: str | None, set_vars: l
     # between the check and the push). A dry run pushed nothing, so it has nothing to match.
     if row_values and not dry_run:
         argv += ["--roster", fleet.digest]
-    held = {name for name in missed if row_values}
+    held = {name for name in missed if row_values} | set(old)
     started = _fan_out([v for v in vehicles if v.name not in held],
                        lambda v: _chooser(v, argv, _vehicle_env(fleet, v, extra)),
                        jobs=jobs, timeout=600)
@@ -695,9 +731,10 @@ def cmd_up(fleet: Fleet, names: list[str], *, run_label: str | None, set_vars: l
                       "know `up --roster`) and would ignore its row — re-bake and redeploy it")
     by_name = {o.vehicle.name: o for o in started}
     outcomes = [by_name.get(v.name) or Outcome(
-        v, 1, "", "not started: the roster did not reach this vehicle, and its row values would "
-                  "be those of the roster it already holds. Restore the link and run fleet up "
-                  "again", reachable=True) for v in vehicles]
+        v, 1, "", old.get(v.name) or
+        "not started: the roster did not reach this vehicle, and its row values would be those "
+        "of the roster it already holds. Restore the link and run fleet up again",
+        reachable=True) for v in vehicles]
     problems = _print_outcomes(outcomes)
     if not dry_run:
         _fleet_view(fleet, [o.vehicle for o in outcomes if o.rc == 0 and o.reachable], run_label)
