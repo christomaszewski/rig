@@ -53,6 +53,75 @@ def test_rm_sealed_reports_freed_and_refuses_unsealed_without_force():
     assert not (data / "runs" / "b_open_less").exists()
 
 
+def _someone_elses(run_dir):
+    """A recording as the stock logger leaves it: a directory this user cannot change, with a
+    bag in it. The logger writes as root; a read-only directory refuses removal the same way."""
+    bag = run_dir / "bags" / "bag_logger" / "session"
+    bag.mkdir(parents=True)
+    (bag / "data.mcap").write_bytes(b"recorded")
+    (run_dir / ".rig").mkdir()
+    (run_dir / ".rig" / "images.yaml").write_text("{}\n")
+    bag.chmod(0o555)
+    return bag
+
+
+def test_rm_refuses_before_removing_anything_when_part_of_the_run_is_not_the_users():
+    if os.geteuid() == 0:
+        print("     (skipped: root can remove anything)")
+        return
+    data = pathlib.Path(tempfile.mkdtemp())
+    run = _run(data, "a_rooted")
+    _run(data, "b_plain")
+    bag = _someone_elses(run)
+    m = _manifest(data)
+    try:
+        before = sorted(str(p.relative_to(run)) for p in run.rglob("*"))
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = runs.remove_runs(m, ["a_rooted", "b_plain"])  # v0.2.85: PermissionError, half removed
+        said = err.getvalue()
+        assert rc == 1
+        # nothing of the run was removed, so it still lists as what it is
+        assert sorted(str(p.relative_to(run)) for p in run.rglob("*")) == before
+        assert [r.state for r in runs.registry_rows(data) if r.run == "a_rooted"] == ["sealed"]
+        assert "a_rooted" in said and "nothing was removed" in said, said
+        assert str(bag) in said, said                       # where the trouble is
+        assert f"chown -R {os.getuid()}:{os.getgid()} {run}" in said, said  # and what to do
+        assert "Traceback" not in said
+        # the other run named in the same command is still removed
+        assert not (data / "runs" / "b_plain").exists() and "removed b_plain" in said
+        # --force is for unsealed runs: it does not get past ownership either
+        with contextlib.redirect_stderr(io.StringIO()):
+            assert runs.remove_runs(m, ["a_rooted"], force=True) == 1
+        assert (run / "manifest.yaml").exists()
+    finally:
+        bag.chmod(0o755)
+    with contextlib.redirect_stderr(io.StringIO()):
+        assert runs.remove_runs(m, ["a_rooted"]) == 0      # once it is the user's, it removes
+    assert not run.exists()
+
+
+def test_rm_reports_a_removal_that_stops_part_way_without_a_traceback():
+    """Whatever the check before removal could not foresee is still reported, not raised."""
+    from unittest.mock import patch
+    data = pathlib.Path(tempfile.mkdtemp())
+    _run(data, "a_sealed")
+    _run(data, "b_sealed")
+    m = _manifest(data)
+    real = runs.shutil.rmtree
+
+    def stops(path, *args, **kwargs):
+        if pathlib.Path(path).name == "a_sealed":
+            raise PermissionError(13, "Permission denied", str(pathlib.Path(path) / "bags"))
+        return real(path, *args, **kwargs)
+    err = io.StringIO()
+    with patch.object(runs.shutil, "rmtree", side_effect=stops), contextlib.redirect_stderr(err):
+        rc = runs.remove_runs(m, ["a_sealed", "b_sealed"])
+    assert rc == 1
+    assert "a_sealed" in err.getvalue() and "stopped part-way" in err.getvalue(), err.getvalue()
+    assert not (data / "runs" / "b_sealed").exists()        # the next run is still attempted
+
+
 def test_rm_never_removes_the_open_run_even_forced():
     data = pathlib.Path(tempfile.mkdtemp())
     run = _run(data, "x_open", sealed=False)
