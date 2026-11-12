@@ -571,6 +571,86 @@ def test_roster_refuses_a_shared_unique_value_and_a_shared_id():
     assert "altitude_bnad" in said, said                            # a name no row sets: a typo
 
 
+def _refusal(rows: list, **top) -> str:
+    """What load_fleet says about a roster with `unique: [altitude_band]` ('' when it loads)."""
+    from rig_cli import RigError
+    from rig_cli.fleet import load_fleet
+    p = pathlib.Path(tempfile.mkdtemp()) / "fleet.yaml"
+    p.write_text(yaml.safe_dump({"fleet": "swarm", "unique": ["altitude_band"], **top,
+                                 "vehicles": rows}))
+    try:
+        load_fleet(str(p))
+    except RigError as exc:
+        return str(exc)
+    return ""
+
+
+def _row(vid: int, name: str, **values) -> dict:
+    return {"id": vid, "name": name, "path": "/x", **({"vars": values} if values else {})}
+
+
+def test_unique_compares_what_each_vehicle_would_render():
+    """`unique:` is about the values the roster tells vehicles to use, resolved as a vehicle
+    resolves them: fleet-level vars, then its row, with its own name and id."""
+    said = _refusal([_row(3, "uav-03", altitude_band="{{band}}", band=30),
+                     _row(7, "uav-07", altitude_band=30)])          # two spellings of one value
+    assert all(part in said for part in ("altitude_band", "30", "uav-03", "uav-07")), said
+    said = _refusal([_row(3, "uav-03", altitude_band="{{band}}", band="{{base}}", base=30),
+                     _row(7, "uav-07", altitude_band=30)])          # through two steps
+    assert "uav-03" in said and "uav-07" in said, said
+    built = {"altitude_band": "{{vehicle_id}}0"}                    # one spelling, a value each
+    assert _refusal([_row(3, "uav-03"), _row(7, "uav-07")], vars=built) == ""
+    said = _refusal([_row(3, "uav-03"), _row(7, "uav-07", altitude_band=30)], vars=built)
+    assert all(part in said for part in ("30", "uav-03", "uav-07")), said
+    spaced = {"altitude_band": "{{spacing}}", "spacing": 10}        # a fleet default…
+    said = _refusal([_row(3, "uav-03"), _row(7, "uav-07")], vars=spaced)
+    assert "uav-03" in said and "uav-07" in said, said
+    assert _refusal([_row(3, "uav-03", spacing=5), _row(7, "uav-07")], vars=spaced) == ""  # …a row changes
+    assert _refusal([_row(3, "uav-03"), _row(7, "uav-07")],
+                    vars={"altitude_band": "ns-{{vehicle}}"}) == ""
+    assert _refusal([_row(3, "uav-03"), _row(7, "uav-07")],
+                    vars={"altitude_band": "{{fleet_mode}}-{{vehicle_id}}"}) == ""  # roster facts
+    for other in (30.0, "30", "30.0"):                              # one number, however written
+        said = _refusal([_row(3, "uav-03", altitude_band=30), _row(7, "uav-07", altitude_band=other)])
+        assert "uav-03" in said and "uav-07" in said, (other, said)
+    assert _refusal([_row(3, "uav-03", altitude_band=30), _row(7, "uav-07", altitude_band=40)]) == ""
+
+
+def test_unique_refuses_a_value_it_cannot_resolve_and_leaves_unrelated_ones_alone():
+    said = _refusal([_row(3, "uav-03", altitude_band="{{mount_height}}"),
+                     _row(7, "uav-07", altitude_band=30)])          # only the vehicle could know
+    assert all(part in said for part in ("uav-03", "altitude_band", "mount_height")), said
+    said = _refusal([_row(3, "uav-03", altitude_band="{{band}}", band="{{mount_height}}"),
+                     _row(7, "uav-07", altitude_band=30)])
+    assert "mount_height" in said and "uav-03" in said, said       # names what is missing
+    said = _refusal([_row(3, "uav-03", altitude_band="{{ros_domain_id}}0"),
+                     _row(7, "uav-07", altitude_band=30)])          # derived on the vehicle
+    assert "ros_domain_id" in said and "uav-03" in said, said
+    said = _refusal([_row(3, "uav-03", altitude_band="{{step}}", step="{{altitude_band}}"),
+                     _row(7, "uav-07", altitude_band=30)])
+    assert "cycle" in said and "uav-03" in said, said
+    assert _refusal([_row(3, "uav-03", altitude_band=30, mast="{{mount_height}}"),
+                     _row(7, "uav-07", altitude_band=40)]) == ""     # not this check's business
+
+
+def test_fleet_up_var_is_applied_before_unique_values_are_resolved():
+    trees = {name: _band_tree(name) for name in ("uav-03", "uav-07")}
+    data_root = pathlib.Path(tempfile.mkdtemp()) / "sil-data"
+    fy = _swarm([{"id": 3, "name": "uav-03", "path": str(trees["uav-03"]),
+                  "vars": {"altitude_band": "{{band}}", "band": 30}},
+                 {"id": 7, "name": "uav-07", "path": str(trees["uav-07"]),
+                  "vars": {"altitude_band": 40}}], data_root=data_root)
+    rc, _, err = _run("fleet", "up", "uav-03", "--fleet", str(fy), "--var", "band=40",
+                      "--run", "v", "-j", "1")                      # changes what a unique value is built from
+    assert rc == 1 and "altitude_band" in err and "uav-07" in err and "--var" in err, err
+    assert not (trees["uav-03"] / "fleet.yaml").exists() and not (data_root / "uav-03").exists()
+    rc, _, err = _run("fleet", "up", "uav-03", "--fleet", str(fy), "--var", "band=50",
+                      "--run", "v", "-j", "1")
+    assert rc == 0, err
+    snap = _last_snapshot(data_root, "uav-03")
+    assert str(yaml.safe_load((snap / "rendered" / "sim.yaml").read_text())["band"]) == "50"
+
+
 def test_unique_check_covers_rows_fleet_up_did_not_select():
     tree = _band_tree("uav-03")
     data_root = pathlib.Path(tempfile.mkdtemp()) / "sil-data"
@@ -802,6 +882,56 @@ def test_fleet_up_does_not_push_a_roster_an_older_rig_cannot_read():
     assert (old / "fleet.yaml").exists() and (old / "started").exists()
 
 
+def test_fleet_up_holds_a_vehicle_whose_rig_version_it_could_not_ask():
+    """The version question is what keeps a roster with per-vehicle values off a rig that cannot
+    read it. When the question gets no answer the roster is not sent and the vehicle is not
+    started, even if the copy a moment later would have gone through."""
+    old = _old_rig_tree("uav-03", "rig 0.2.85")
+    (old / "fleet.yaml").write_text("fleet: earlier\nvehicles: [{id: 3, name: uav-03, path: /x}]\n")
+    before = (old / "fleet.yaml").read_bytes()
+    fy = _swarm([{"id": 3, "name": "uav-03", "host": "farhost", "path": str(old),
+                  "vars": {"altitude_band": 3}}], mode="field")
+    with _env(SHIM_SSH_FAIL_CMD="--version"):                       # only that hop drops
+        rc, _, err = _run("fleet", "up", "--fleet", str(fy), "-j", "1")
+    assert rc == 1 and "fleet up: 0/1 ok" in err, err
+    assert (old / "fleet.yaml").read_bytes() == before              # it keeps the roster it held
+    assert not (old / "started").exists()
+    assert "which rig" in err and "not sent the roster" in err, err
+    # a vehicle that could have read it is held the same way, and comes up once the link answers
+    tree = _remote_band_tree("uav-07", 7)
+    fy = _swarm([{"id": 7, "name": "uav-07", "host": "farhost", "path": str(tree),
+                  "vars": {"altitude_band": 4}}], mode="field")
+    with _env(SHIM_SSH_FAIL_CMD="--version"):
+        rc, _, err = _run("fleet", "up", "--fleet", str(fy), "-j", "1")
+    assert rc == 1 and not (tree / "fleet.yaml").exists(), err
+    assert not (tree.parent / "data" / "runs").exists()
+    rc, _, err = _run("fleet", "up", "--fleet", str(fy), "-j", "1")
+    assert rc == 0 and (tree / "fleet.yaml").read_bytes() == fy.read_bytes(), err
+
+
+def test_fleet_up_from_a_roster_kept_in_the_deployment_it_names():
+    """A local row may name the directory that holds the roster itself. The file is already where
+    the push would put it: nothing to copy, and the vehicle still checks its digest. A copy that
+    really fails is still a failure."""
+    tree = _band_tree("uav-03")
+    data_root = pathlib.Path(tempfile.mkdtemp()) / "sil-data"
+    rows = [{"id": 3, "name": "uav-03", "path": str(tree), "vars": {"altitude_band": 3}}]
+    own = tree / "fleet.yaml"
+    own.write_bytes(_swarm(rows, data_root=data_root).read_bytes())
+    rc, _, err = _run("fleet", "up", "--fleet", str(own), "--run", "inplace", "-j", "1")
+    assert rc == 0 and "fleet up: 1/1 ok" in err, err
+    assert "same file" not in err and "push failed" not in err, err
+    snap = _last_snapshot(data_root, "uav-03")
+    assert yaml.safe_load((snap / "rendered" / "sim.yaml").read_text())["band"] == 3
+    other = _band_tree("uav-07")
+    (other / "fleet.yaml").mkdir()                                  # nothing can be copied onto this
+    own.write_bytes(_swarm(rows + [{"id": 7, "name": "uav-07", "path": str(other),
+                                    "vars": {"altitude_band": 4}}], data_root=data_root).read_bytes())
+    rc, _, err = _run("fleet", "up", "--fleet", str(own), "--run", "inplace", "-j", "1")
+    assert rc == 1 and "fleet up: 1/2 ok" in err and "push failed" in err, err
+    assert not (data_root / "uav-07" / "runs").exists()
+
+
 def test_fleet_up_says_when_a_vehicles_rig_rejects_the_roster_check():
     """The second line: an entry point that claims a new enough version and still does not
     know `up --roster` fails on the flag, and the ground station says what that means."""
@@ -845,6 +975,47 @@ def test_a_vehicle_whose_value_was_moved_away_can_still_be_brought_down():
     assert rendered["band"] == 3                                    # torn down as it was started
     rc, _, err = _run("fleet", "up", "uav-03", "--fleet", str(swapped), "--run", "three", "-j", "1")
     assert rc == 1 and "altitude_band" in err, err                  # and `up` is still refused
+
+
+def test_a_moved_value_another_var_is_built_from_does_not_block_teardown():
+    """vehicle.yaml builds a var from the roster value and the config uses the built one. When the
+    value moves away, the built var no longer resolves. That fails while the manifest loads,
+    before any config is rendered: `down`, `status` and `logs` must still work, and `up` not."""
+    def tree_for(name: str) -> pathlib.Path:
+        tree = _band_tree(name)
+        with (tree / "vehicle.yaml").open("a") as fh:
+            fh.write('vars:\n  derived_band: "{{altitude_band}}"\n')
+        (tree / "config" / "infra" / "sim.yaml").write_text(
+            'service: simsvc\nname: sim\nrate: 1\nband: "{{derived_band}}"\n')
+        return tree
+    trees = {name: tree_for(name) for name in ("uav-03", "spare-1")}
+    data_root = pathlib.Path(tempfile.mkdtemp()) / "sil-data"
+
+    def roster(holder: str) -> pathlib.Path:
+        rows = [{"id": 3, "name": "uav-03", "path": str(trees["uav-03"])},
+                {"id": 9, "name": "spare-1", "path": str(trees["spare-1"])}]
+        next(r for r in rows if r["name"] == holder)["vars"] = {"altitude_band": 3}
+        return _swarm(rows, data_root=data_root)
+
+    rc, _, err = _run("fleet", "up", "uav-03", "--fleet", str(roster("uav-03")), "--run", "one", "-j", "1")
+    assert rc == 0, err
+    swapped = roster("spare-1")
+    rc, _, err = _run("fleet", "up", "--fleet", str(swapped), "--run", "two", "-j", "1")
+    assert rc == 1 and "fleet up: 1/2 ok" in err, err               # the spare is up; uav-03 is not
+    with _env(RIG_VEHICLE_LOCAL=str(data_root / ".identity" / "uav-03.yaml"),
+              RIG_VEHICLE_ID="3", RIG_VEHICLE_NAME="uav-03"):
+        for verb in ("status", "logs"):
+            rc, _, err = _run("--root", str(trees["uav-03"]), verb)
+            assert rc == 0, (verb, err)
+            assert "derived_band" in err and "last" in err, (verb, err)   # says why, and what it used
+        rc, _, err = _run("--root", str(trees["uav-03"]), "up")
+        assert rc == 1 and "derived_band" in err, err               # `up` stays strict
+    rc, _, err = _run("fleet", "down", "uav-03", "--fleet", str(swapped), "--end-run", "-j", "1")
+    assert rc == 0 and "fleet down: 1/1 ok" in err, err
+    run_dir = next((data_root / "uav-03" / "runs").iterdir())
+    assert "ended:" in (run_dir / "manifest.yaml").read_text()
+    rendered = yaml.safe_load((trees["uav-03"] / "var" / "rendered" / "sim.yaml").read_text())
+    assert rendered["band"] == 3                                    # torn down as it was started
 
 
 def test_fleet_list_shows_row_values():

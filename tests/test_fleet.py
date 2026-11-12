@@ -361,6 +361,39 @@ def test_apply_by_default_moves_values_and_leaves_the_machine_alone():
     assert "run_capture" not in got and "replay" not in got             # the donor's own
 
 
+def test_apply_writes_a_value_that_differs_only_in_its_yaml_type():
+    # true is not 1 and 1.0 is not 1: a whole-marker reference keeps the type, and a typed
+    # consumer (a ROS parameter) refuses the wrong one.
+    from rig_cli.interpolate import substitute_scalar
+    from rig_cli.manifest import load_manifest
+    record, _ = _export({"vehicle": "uav-03", "vehicle_id": 3,
+                         "vars": {"use_sensor": True, "scale": 1.0, "nested": {"on": True}},
+                         "env": {"FEATURE": True}})
+    spare = _machine_file({"vehicle": "uav-09", "vehicle_id": 9,
+                           "vars": {"use_sensor": 1, "scale": 1, "nested": {"on": 1}},
+                           "env": {"FEATURE": 1}})
+    before = spare.read_text()
+    with _env(RIG_VEHICLE_LOCAL=str(spare)):
+        rc, _, err = _run("provision", "--apply", str(record), "--dry-run")
+        assert rc == 0 and spare.read_text() == before, err
+        for line in ("vars.use_sensor: 1 -> True", "vars.scale: 1 -> 1.0", "env.FEATURE: 1 -> True"):
+            assert line in err, err
+        assert "unchanged" not in err, err
+        rc, _, err = _run("provision", "--apply", str(record))
+        assert rc == 0 and "written" in err, err
+        stored = yaml.safe_load(spare.read_text())
+        assert stored["vars"]["use_sensor"] is True and stored["env"]["FEATURE"] is True
+        assert type(stored["vars"]["scale"]) is float and stored["vars"]["nested"] == {"on": True}
+        assert stored["vars"]["nested"]["on"] is True
+        root = pathlib.Path(tempfile.mkdtemp())
+        (root / "vehicle.yaml").write_text("vehicle: t\nvehicle_id: 9\nsensors: []\n")
+        ctx = load_manifest(root).vars
+        assert substitute_scalar("{{use_sensor}}", ctx, where="t") is True       # as rendered
+        assert type(substitute_scalar("{{scale}}", ctx, where="t")) is float
+        rc, _, err = _run("provision", "--apply", str(record))      # and now there is nothing to do
+        assert rc == 0 and "nothing to change" in err and "1 ->" not in err, err
+
+
 def test_apply_only_and_except_select_by_name():
     record, _ = _export(_DONOR)
     spare = _machine_file(_SPARE)

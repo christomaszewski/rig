@@ -420,6 +420,71 @@ def _machine(body: str) -> pathlib.Path:
     return path
 
 
+_SWARM_BUILT = """\
+fleet: swarm
+unique: [altitude_band]
+vars: {altitude_band: "{{spacing}}{{vehicle_id}}", spacing: 1}
+vehicles:
+  - {id: 3, name: uav-03, path: /x}
+  - {id: 7, name: uav-07, path: /y}
+"""
+
+
+def _preflight(root: pathlib.Path) -> tuple[int, str]:
+    import io
+    from rig_cli.cli import main
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+        rc = main(["--root", str(root), "up", "--dry-run"])
+    return rc, err.getvalue()
+
+
+def test_a_vehicle_file_may_not_change_what_a_unique_value_is_built_from():
+    # The ground station checks the values the roster hands out. A vehicle's own file that sets
+    # a `unique:` name, or a var it is built from, takes the vehicle off that check: refused
+    # at preflight, whichever roster level supplies the value.
+    root = _deployment("vehicle: t\nvehicle_id: 3\nsensors: []\n",
+                       files={"services.yaml": "services: {}\n"})
+    (root / "fleet.yaml").write_text(_SWARM_BUILT)
+    clean = dict(RIG_VEHICLE_ID=None, RIG_VAR_altitude_band=None, RIG_VAR_spacing=None)
+    with _env(RIG_VEHICLE_LOCAL=_NO_MACHINE, **clean):
+        rc, err = _preflight(root)
+        assert rc == 0 and "preflight" not in err, err
+    machine = _machine("vars: {altitude_band: 17}\n")               # the name itself
+    with _env(RIG_VEHICLE_LOCAL=str(machine), **clean):
+        rc, err = _preflight(root)
+        assert rc == 1 and "preflight failed" in err, err
+        assert "altitude_band" in err and "17" in err and str(machine) in err, err
+        machine.write_text("vars: {spacing: 2}\n")                  # what it is built from
+        rc, err = _preflight(root)
+        assert rc == 1 and "spacing" in err and "altitude_band" in err, err
+        machine.write_text("vars: {spacing: 1}\n")                  # the roster's own value
+        rc, err = _preflight(root)
+        assert rc == 0, err
+        machine.write_text("vars: {mast: 4}\n")                     # nothing unique depends on it
+        rc, err = _preflight(root)
+        assert rc == 0, err
+    with _env(RIG_VEHICLE_LOCAL=_NO_MACHINE, **{**clean, "RIG_VAR_spacing": "2"}):
+        rc, err = _preflight(root)                                  # the shell: said, not blocked
+        assert rc == 0, err
+        assert any("spacing" in ln and "shell" in ln for ln in err.splitlines()), err
+
+
+def test_a_unique_value_built_from_the_vehicle_name_needs_the_rosters_name():
+    # A vehicle finds its row by id, so the id always agrees. Its name is its own.
+    root = _deployment("vehicle: t\nvehicle_id: 3\nsensors: []\n",
+                       files={"services.yaml": "services: {}\n"})
+    (root / "fleet.yaml").write_text(_SWARM_BUILT.replace(
+        '"{{spacing}}{{vehicle_id}}"', '"band-{{vehicle}}"'))
+    with _env(RIG_VEHICLE_LOCAL=_NO_MACHINE, RIG_VEHICLE_ID=None, RIG_VEHICLE_NAME=None):
+        rc, err = _preflight(root)
+        assert rc == 1 and "preflight failed" in err, err
+        assert "uav-03" in err and "'t'" in err and "altitude_band" in err, err
+        (root / "vehicle.yaml").write_text("vehicle: uav-03\nvehicle_id: 3\nsensors: []\n")
+        rc, err = _preflight(root)
+        assert rc == 0, err
+
+
 def test_var_sources_names_the_tier_that_supplied_each_value():
     machine = pathlib.Path(tempfile.mkdtemp()) / "vehicle.local.yaml"
     root = _deployment("vehicle: t\nvehicle_id: 1\nvars: {band: 1, only_here: base}\nsensors: []\n")

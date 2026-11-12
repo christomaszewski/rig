@@ -233,6 +233,45 @@ def test_an_image_with_no_per_architecture_record_counts_as_changed():
     assert report["index_only"] == []
 
 
+def _held(run: pathlib.Path, ref: str, value="(no entry)") -> None:
+    """Rewrite what the daemon held for `ref` when the run opened."""
+    path = run / ".rig" / "images.yaml"
+    doc = yaml.safe_load(path.read_text())
+    if value == "(no entry)":
+        doc["images"].pop(ref, None)
+    else:
+        doc["images"][ref] = value
+    path.write_text(yaml.safe_dump(doc, sort_keys=True))
+
+
+def test_an_image_its_lock_does_not_describe_is_not_called_the_same():
+    """The per-architecture record lives in rig.lock; what ran is what the daemon held. The lock
+    vouches for an image only when it records the very digest the daemon held. A lock left
+    behind by a replaced image, or a ref with no digest at all, is a difference."""
+    registry = pathlib.Path(tempfile.mkdtemp()) / "data"
+    a = _write_run(registry, _spec())
+    b = _write_run(registry, _spec(stamp="20260301T100400Z", label="b", config="aaa000000004"))
+    rc, doc = _diff(a, b)
+    assert rc == 0 and not _found(doc, "index_only"), doc             # as recorded: the same
+    _held(b, PLANNER, f"localhost:5000/planner@{_sha('f9')}")        # another image; B's lock is stale
+    rc, doc = _diff(a, b)
+    assert rc == 1 and ("images", PLANNER) in _found(doc, "differs"), doc
+    assert ("images", PLANNER) not in _found(doc, "index_only"), doc
+    assert any("rig.lock" in note and PLANNER in note for note in doc["notes"]), doc["notes"]
+    for nothing in (None, "(no entry)"):                             # no digest recorded for it
+        _held(b, PLANNER, nothing)
+        rc, doc = _diff(a, b)
+        assert rc == 1 and ("images", PLANNER) in _found(doc, "differs"), (nothing, doc)
+        assert ("images", PLANNER) not in _found(doc, "index_only"), (nothing, doc)
+    registry, a, _, a2 = _three_runs()                               # each lock names what ran:
+    rc, doc = _diff(a, a2)                                           # a rebuild is still index-only
+    assert rc == 0 and ("images", PLANNER) in _found(doc, "index_only"), doc
+    _held(a, PLANNER, f"localhost:5000/planner@{_sha('f8')}")        # the locks still agree with
+    rc, doc = _diff(a, a2)                                           # each other; A ran something else
+    assert rc == 1 and ("images", PLANNER) in _found(doc, "differs"), doc
+    assert ("images", PLANNER) not in _found(doc, "index_only"), doc
+
+
 def test_runs_resolve_by_path_anywhere_and_by_id_or_label_inside_a_deployment():
     registry, a, b, _ = _three_runs()
     root = pathlib.Path(tempfile.mkdtemp())
