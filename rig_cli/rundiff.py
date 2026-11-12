@@ -126,6 +126,7 @@ def _read_run(run_dir: Path) -> dict:
         "last_stacks": ups[-1].get("stacks") if ups else None,
         "lock": (_load(snap / "rig.lock") if snap else None) or {},
         "images": images.get("images") or {},
+        "held": images.get("held") if isinstance(images.get("held"), dict) else {},
     }
 
 
@@ -199,11 +200,37 @@ def _lock_names(lock: dict, ref: str, held) -> bool:
     return isinstance(held, str) and isinstance(digest, str) and held.rsplit("@", 1)[-1] == digest
 
 
+def _held(run: dict, ref: str) -> dict:
+    got = run["held"].get(ref)
+    return got if isinstance(got, dict) else {}
+
+
+def _ran_manifest(run: dict, ref: str) -> str | None:
+    """The per-platform manifest digest this run's daemon held for `ref`, when it recorded one."""
+    digest = _held(run, ref).get("manifest")
+    return digest if isinstance(digest, str) and digest else None
+
+
+def _vouched(run: dict, ref: str, held) -> bool:
+    """Does this run's rig.lock describe the image that ran? Yes when it records the very digest
+    the daemon held, or when the manifest the daemon held is one the lock lists for its
+    platform: a build that keeps an unchanged image's earlier index leaves the lock one index
+    behind the daemon, over the same image."""
+    if _lock_names(run["lock"], ref, held):
+        return True
+    manifest = _ran_manifest(run, ref)
+    arch = str(_held(run, ref).get("platform") or "").rsplit("/", 1)[-1]
+    return manifest is not None and _children(run["lock"], ref).get(arch) == manifest
+
+
 def _compare_images(report: _Report, a: dict, b: dict) -> None:
     """.rig/images.yaml: the digest the docker daemon held for each ref when the run opened —
     an INDEX digest for a multi-architecture image. Two different digests are the same image
-    only where the record shows it: each run's lock names the digest its daemon held, and the
-    two locks list the same per-architecture digests. Anything less is a difference."""
+    only where the record shows it, by the first of these that applies: both runs recorded the
+    per-platform manifest the daemon held (`held:`), and it is one manifest; both recorded
+    docker's image id, and it is one id; each run's lock describes the image that ran (see
+    _vouched) and the two locks list the same per-architecture digests. Anything less is a
+    difference."""
     if not a["images"] and not b["images"]:
         return
     report.section("images")
@@ -211,9 +238,25 @@ def _compare_images(report: _Report, a: dict, b: dict) -> None:
         va, vb = a["images"].get(ref, _MISSING), b["images"].get(ref, _MISSING)
         if va == vb:
             continue
+        if isinstance(va, str) and isinstance(vb, str):
+            ran_a, ran_b = _ran_manifest(a, ref), _ran_manifest(b, ref)
+            same_platform = _held(a, ref).get("platform") == _held(b, ref).get("platform")
+            id_a, id_b = _held(a, ref).get("id"), _held(b, ref).get("id")
+            if ran_a and ran_b and same_platform:  # the image itself, as each daemon held it
+                report.index_only.pop(ref, None)
+                if ran_a == ran_b:
+                    report.index_only[ref] = {"section": "images", "key": ref, "a": va, "b": vb}
+                else:
+                    report.change("images", ref, va, vb)
+                    report.change("images", f"{ref} manifest held ({_held(a, ref)['platform']})",
+                                  ran_a, ran_b)
+                continue
+            if isinstance(id_a, str) and id_a and id_a == id_b:  # one image id: one image
+                report.index_only[ref] = {"section": "images", "key": ref, "a": va, "b": vb}
+                continue
         kids_a, kids_b = _children(a["lock"], ref), _children(b["lock"], ref)
         unnamed = [name for name, run, held in (("A", a, va), ("B", b, vb))
-                   if not _lock_names(run["lock"], ref, held)]
+                   if not _vouched(run, ref, held)]
         if not isinstance(va, str) or not isinstance(vb, str) or not (kids_a and kids_b) or unnamed:
             # What the two LOCKS say about this ref is no longer a statement about what ran.
             report.index_only.pop(ref, None)

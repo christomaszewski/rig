@@ -160,6 +160,47 @@ def _resolve_digest(ref: str, *, local_only: bool = False) -> str | None:
     return None
 
 
+def _held_image(ref: str) -> dict | None:
+    """What the local daemon holds under ``ref`` beyond an index digest, or None when it holds
+    nothing or cannot say: docker's image ``id``, the ``platform`` it would run, and — where the
+    image store keeps manifests (the containerd image store, docker 28 or later) — the digest of
+    that platform's ``manifest``. The manifest digest is the image: it is what rig.lock's
+    ``children`` record, and it does not change when a build or a push makes a new index over
+    the same image. With the classic store the id is the image config's digest, which says as
+    much. Two local calls, bounded like the digest lookup; never raises."""
+    def ask(*argv: str) -> str | None:
+        proc = subprocess.run(["docker", "image", "inspect", *argv, ref], capture_output=True,
+                              text=True, timeout=_digest_timeout())
+        return proc.stdout.strip() if proc.returncode == 0 else None
+    try:
+        said = (ask("--format", "{{.Id}} {{.Os}}/{{.Architecture}}") or "").split()
+        if len(said) != 2 or not said[0].startswith("sha256:") or "/" not in said[1]:
+            return None
+        held = {"id": said[0], "platform": said[1]}
+        descriptor = json.loads(ask("--platform", said[1], "--format", "{{json .Descriptor}}") or "null")
+        if isinstance(descriptor, dict):
+            kind, digest = str(descriptor.get("mediaType") or ""), descriptor.get("digest")
+            if "manifest" in kind and "list" not in kind and "index" not in kind \
+                    and isinstance(digest, str) and digest.startswith("sha256:"):
+                held["manifest"] = digest
+        return held
+    except Exception:  # noqa: BLE001 — evidence is best-effort
+        return None
+
+
+def image_record(refs) -> dict:
+    """The ``.rig/images.yaml`` document for a run: under ``images`` the digest the local daemon
+    holds for each ref (an INDEX digest for a multi-architecture image; null when it holds
+    none), and under ``held`` what is behind that digest (see _held_image) for the refs it does
+    hold. ``held`` is absent when the daemon said nothing more; readers treat it as optional."""
+    images = {ref: _resolve_digest(ref, local_only=True) for ref in sorted(refs)}
+    doc: dict = {"schema": 1, "images": images}
+    held = {ref: got for ref, digest in images.items() if digest and (got := _held_image(ref))}
+    if held:
+        doc["held"] = held
+    return doc
+
+
 def _local_build_keys(ref: str) -> str | None:
     """The LOCAL_BUILD_LABEL value of a pinned image ref, or None when absent or unverifiable. The
     local store answers first; otherwise every platform member's config in the registry, bounded
@@ -1065,9 +1106,9 @@ def capture_run(root: Path, manifest, run_dir: Path) -> dict:
                 composed = _service_tag(desc, manifest.image_tag, manifest.platform) or "latest"
                 refs.update(f"{prefix}{img}:{composed}" for img in desc.build_images)
                 refs.update(desc.mirror)
-            images = {ref: _resolve_digest(ref, local_only=True) for ref in sorted(refs)}
-            (rig_dir / "images.yaml").write_text(yaml.safe_dump(
-                {"schema": 1, "images": images}, sort_keys=True))
+            record = image_record(refs)
+            images = record["images"]
+            (rig_dir / "images.yaml").write_text(yaml.safe_dump(record, sort_keys=True))
         except Exception:  # noqa: BLE001 — identity capture is best-effort, never blocks
             pass
 
