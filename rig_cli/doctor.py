@@ -15,7 +15,7 @@ from . import RigError
 from .catalog import ServiceEntry
 from .common import load_yaml
 from .descriptor import Descriptor, resolve_ros_namespace
-from .manifest import Manifest, stack_summary
+from .manifest import Manifest, stack_summary, values_by_tier
 
 ERROR, WARN, INFO, OK = "ERROR", "WARN", "INFO", "OK"
 _SYMBOL = {ERROR: "✗", WARN: "!", INFO: "·", OK: "✓"}
@@ -55,6 +55,11 @@ def _get_path(data: dict, path: str):
     return cur
 
 
+def _brief(value, limit: int = 48) -> str:
+    text = str(value)
+    return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
 def collect(
     manifest: Manifest, catalog: dict[str, ServiceEntry], descriptors: dict[str, Descriptor],
     *, configs: dict | None = None,
@@ -72,6 +77,27 @@ def collect(
                             f"({origin}) · {manifest.ros.rmw}"))
     if manifest.ros.domain_warning:
         issues.append(Issue(WARN, manifest.ros.domain_warning))
+
+    # Where each value came from, one line per tier, most specific first: the provisioning this
+    # machine actually runs under, readable without opening five files.
+    for tier, values in values_by_tier(manifest):
+        head = f"{tier} values" if tier in ("derived", "default") else f"values from {tier}"
+        issues.append(Issue(INFO, f"{head}: "
+                                  + ", ".join(f"{k}={_brief(v)}" for k, v in values.items())))
+    # A roster row's value outranked by this vehicle's own files: the roster says one thing and
+    # the vehicle would run on another, which nobody reading the roster can see. The machine
+    # file and the tree-local file block; the shell is one invocation's explicit choice.
+    for clash in manifest.row_overrides:
+        if clash.tier == "shell":
+            issues.append(Issue(WARN, f"{clash.name}: the shell (RIG_VAR_{clash.name}) sets "
+                                      f"{clash.value!r} over {clash.row}'s {clash.row_value!r}, "
+                                      f"for this invocation only"))
+        else:
+            issues.append(Issue(ERROR, f"{clash.name}: {clash.tier} sets {clash.value!r}, but "
+                                       f"{clash.row} sets {clash.row_value!r} — the vehicle's own "
+                                       f"file outranks the roster, so it would run on "
+                                       f"{clash.value!r}. Delete `{clash.name}` from {clash.tier} "
+                                       f"(or set it to the roster's value), or change the roster"))
 
     # rmw_zenoh needs a shared zenoh router (one per vehicle) in the infra tier — and the converse:
     # a router on a NON-zenoh fleet is a runtime failure waiting to happen. The router runs `rmw_zenohd`

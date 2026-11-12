@@ -23,14 +23,18 @@ that seals the wrong run. ``manifest.yaml`` is the machine contract: ``ended:`` 
 
 Config snapshots: every non-dry-run `up` captures the EFFECTIVE config (vehicle.yaml + lock + resolved
 vars + rendered per-instance configs) into ``runs/<id>/.rig/config/<digest12>/`` — content-addressed,
-so an unchanged config writes nothing — and appends an ``ups:`` event to the manifest. The capture
+so an unchanged config writes nothing — and appends an ``ups:`` event to the manifest. The generated
+``vars.yaml`` holds the resolved values and, under ``sources``, the tier that supplied each one. The capture
 point is `up`, not open/seal: every config that governed recorded data was live at some `up`, while the
 tree at seal time may contain edits that never ran — so sealing only DIRTY-CHECKS (flags, never copies).
 The check is gated on a per-deployment-INSTANCE id (``var/deployment-id``, minted lazily; var/ is never
 staged by bake, so every untar/clone is a fresh instance): sealing run A from a different deployment
 tree must not read as "A's config was edited". Snapshot writes fail SOFT — provenance must never wedge
 `up`. Compose-only up.sh does not snapshot (resolved artifacts are tag-determined; fleet artifacts
-route every verb through the bundled rig anyway).
+route every verb through the bundled rig anyway). What a snapshot holds has grown over time, so each
+``ups:`` entry is stamped with the capture set it was taken under (``capture_set``); the dirty-check
+compares digests only when that matches the running rig's: an entry written by an older rig
+describes a smaller set, and a different digest there means an upgrade, not an edit.
 
 Docker log capture: ``down --end-run`` saves every container's ``docker logs`` into the sealing run
 (``.rig/logs/<sensor>/<container>.log``) BEFORE the down verb dispatches — ``compose down`` REMOVES
@@ -56,6 +60,10 @@ from .lock import sha256_bytes
 from .manifest import Manifest, project_name
 
 _LABEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+# What _collect_config gathers, as a number: bump it whenever the set (or the content of a
+# generated member) changes. 1 (unstamped entries, rig <= 0.2.85): the tree's files, vars.yaml
+# with values only, rendered configs. 2: vars.yaml names each value's source tier.
+CAPTURE_SET = 2
 
 
 def _remember(data: Path) -> None:
@@ -314,16 +322,19 @@ def deployment_id(root: Path) -> str | None:
 def _collect_config(manifest: Manifest, root: Path) -> dict[str, bytes]:
     """The effective-config capture set, relpath -> bytes. vehicle.yaml is mandatory (no deployment
     tree ⇒ a snapshot is meaningless); the rest joins when present. vars.yaml is generated: the
-    RESOLVED var/env context, which is the only place machine-local identity (/etc/rig) and RIG_VAR_*
-    shell contributions — sources outside the tree — leave a trace. Rendered configs come off the
-    MATERIALIZED manifest rows, never a var/rendered glob (stale files linger for removed instances)."""
+    RESOLVED var/env context and, under `sources`, the tier each var came from — the trace of the
+    contributions from outside the tree (machine-local identity in /etc/rig, RIG_VAR_* from the
+    shell, a roster row). Rendered configs come off the MATERIALIZED manifest rows, never a
+    var/rendered glob (stale files linger for removed instances). Changing what this returns
+    changes every digest: bump CAPTURE_SET with it."""
     files = {"vehicle.yaml": (root / "vehicle.yaml").read_bytes()}
     for name in ("vehicle.local.yaml", "services.yaml", "rig.lock",
                  "fleet.yaml"):  # `fleet up` pushes the roster here — the run records its fleet
         if (path := root / name).is_file():
             files[name] = path.read_bytes()
     files["vars.yaml"] = yaml.safe_dump(
-        {"vars": manifest.vars, "env": manifest.extra_env}, sort_keys=True).encode()
+        {"vars": dict(manifest.vars), "env": manifest.extra_env,
+         "sources": manifest.var_sources}, sort_keys=True).encode()
     for sensor in manifest.sensors:
         if sensor.enabled:
             files[f"rendered/{sensor.name}.yaml"] = Path(sensor.config).read_bytes()
@@ -371,7 +382,8 @@ def snapshot(manifest: Manifest, root: Path, *, stacks: list[str]) -> str | None
             snap_dir.parent.mkdir(parents=True, exist_ok=True)
             tmp.replace(snap_dir)
             eprint(f"rig: run {run_id}: captured config snapshot {digest}")
-        entry: dict = {"at": _iso_now(), "stacks": list(stacks), "config": digest}
+        entry: dict = {"at": _iso_now(), "stacks": list(stacks), "config": digest,
+                       "capture_set": CAPTURE_SET}
         if (dep := deployment_id(root)) is not None:
             entry["deployment"] = dep
         entry["root"] = str(root.resolve())
@@ -511,6 +523,7 @@ def _seal(run_dir: Path, status_text: str | None, *, live_digest: str | None = N
     last = ups[-1] if isinstance(ups, list) and ups and isinstance(ups[-1], dict) else None
     if (last is not None and live_digest and live_deployment
             and last.get("deployment") == live_deployment
+            and last.get("capture_set", 1) == CAPTURE_SET  # like with like: see CAPTURE_SET
             and last.get("config") and last.get("config") != live_digest):
         doc["config_dirty_at_seal"] = True
         eprint("rig: warning: config changed after this run's last `up` — those edits never "

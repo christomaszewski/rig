@@ -635,6 +635,73 @@ def test_row_vars_are_validated_and_plain_rosters_load_as_before():
         "peer_endpoint": "tcp/10.0.0.{}:7447"}
 
 
+def test_fleet_up_var_may_not_give_two_vehicles_one_unique_value():
+    """--var is the shell tier on every selected vehicle: it outranks the rows, so the check is
+    on what each vehicle will be told, not only on what the roster says."""
+    tree = _band_tree("uav-03")
+    data_root = pathlib.Path(tempfile.mkdtemp()) / "sil-data"
+    fy = _swarm([{"id": 3, "name": "uav-03", "path": str(tree), "vars": {"altitude_band": 3}},
+                 {"id": 7, "name": "uav-07", "path": "/nope/a", "vars": {"altitude_band": 4}}],
+                data_root=data_root)
+    rc, _, err = _run("fleet", "up", "--fleet", str(fy), "--var", "altitude_band=5", "-j", "1")
+    assert rc == 1 and "uav-03" in err and "uav-07" in err and "altitude_band" in err, err
+    rc, _, err = _run("fleet", "up", "uav-03", "--fleet", str(fy), "--var", "altitude_band=4",
+                      "-j", "1")
+    assert rc == 1 and "uav-07" in err, err                         # uav-07's row says 4 already
+    assert not (tree / "fleet.yaml").exists() and not (data_root / "uav-03").exists()
+    rc, _, err = _run("fleet", "up", "uav-03", "--fleet", str(fy), "--run", "one-off",
+                      "--var", "altitude_band=5", "-j", "1")
+    assert rc == 0, err
+    assert "overrides the roster" in err and "uav-03: 3" in err     # said where it was typed
+    snap = _last_snapshot(data_root, "uav-03")
+    vars_doc = yaml.safe_load((snap / "vars.yaml").read_text())
+    assert str(vars_doc["vars"]["altitude_band"]) == "5"
+    assert vars_doc["sources"]["altitude_band"] == "shell"          # and where it was recorded
+
+
+def _remote_band_tree(name: str, vid: int) -> pathlib.Path:
+    """A tree reached over the ssh shim: no simulated machine file, so it names itself."""
+    tree = _band_tree(name)
+    (tree / "vehicle.local.yaml").write_text(
+        f"vehicle: {name}\nvehicle_id: {vid}\ndata_dir: {tree.parent / 'data'}\n")
+    return tree
+
+
+def test_fleet_up_holds_a_vehicle_the_roster_did_not_reach():
+    near, far = _band_tree("uav-03"), _remote_band_tree("uav-07", 7)
+    data_root = pathlib.Path(tempfile.mkdtemp()) / "sil-data"
+
+    def roster(band_07):
+        return _swarm([{"id": 3, "name": "uav-03", "path": str(near), "vars": {"altitude_band": 3}},
+                       {"id": 7, "name": "uav-07", "host": "farhost", "path": str(far),
+                        "vars": {"altitude_band": band_07}}], data_root=data_root)
+
+    def far_ups() -> list:
+        run_dir = sorted((far.parent / "data" / "runs").iterdir())[-1]
+        return yaml.safe_load((run_dir / "manifest.yaml").read_text())["ups"]
+
+    rc, _, err = _run("fleet", "up", "--fleet", str(roster(4)), "--run", "link", "-j", "1")
+    assert rc == 0, err
+    assert len(far_ups()) == 1
+    with _env(SHIM_SCP_FAIL="farhost"):                             # the band moves; the push fails
+        rc, _, err = _run("fleet", "up", "--fleet", str(roster(5)), "--run", "link", "-j", "1")
+    assert rc == 1 and "fleet up: 1/2 ok" in err, err
+    assert "not started" in err
+    assert len(far_ups()) == 1                                      # no `up` on the old band
+    assert yaml.safe_load((far / "fleet.yaml").read_text())["vehicles"][1]["vars"] == \
+        {"altitude_band": 4}
+    # a roster without row values keeps the older posture: warned, and brought up all the same
+    plain_near, plain_far = _sil_tree("veh_a"), _sil_tree("veh_b")
+    (plain_far / "vehicle.local.yaml").write_text(
+        f"vehicle: veh_b\nvehicle_id: 2\ndata_dir: {plain_far.parent / 'data'}\n")
+    fy = _fleet_yaml([{"id": 1, "name": "veh_a", "path": str(plain_near)},
+                      {"id": 2, "name": "veh_b", "host": "farhost", "path": str(plain_far)}],
+                     data_root=pathlib.Path(tempfile.mkdtemp()) / "sil-data")
+    with _env(SHIM_SCP_FAIL="farhost"):
+        rc, _, err = _run("fleet", "up", "--fleet", str(fy), "--run", "plain", "-j", "1")
+    assert rc == 0 and "roster push failed" in err and "fleet up: 2/2 ok" in err, err
+
+
 def test_fleet_list_shows_row_values():
     tree = _band_tree("shared")
     fy = _swarm([{"id": 3, "name": "uav-03", "path": str(tree), "vars": {"altitude_band": 3}},

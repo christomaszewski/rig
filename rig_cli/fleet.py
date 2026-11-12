@@ -10,10 +10,17 @@ Invariants (settled):
   roster row's path. rig-on-the-GCS never reaches around them.
 - Fail SOFT per vehicle: an unreachable row mars its line, never aborts the sweep (DDIL).
   ssh exit 255 = transport failure (UNREACHABLE); anything else is the remote command's rc.
-- Explicit roster only (fleet.yaml); no discovery. No config side-channel: values ride
-  ``RIG_VAR_*`` env forwarding and land in each vehicle's run snapshot. The one deliberate
-  provenance carve-out: ``fleet up`` pushes fleet.yaml itself to each deployment root so the
-  run snapshot captures the roster the run was launched under.
+- Explicit roster only (fleet.yaml); no discovery. No config side-channel: one-invocation
+  values ride ``RIG_VAR_*`` env forwarding (the shell tier) and land in each vehicle's run
+  snapshot. The one deliberate carve-out is the roster itself: ``fleet up`` pushes fleet.yaml
+  to each deployment root, where the run snapshot captures it and the vehicle reads it as its
+  fleet tier — the fleet-level ``vars:`` and its OWN row's ``vars:`` (found by id). Row values
+  ride that pushed file and nothing else: forwarded as ``RIG_VAR_*`` they would outrank the
+  machine file and be gone after a reboot. So a vehicle that did not receive a roster carrying
+  row values is not started: it would come up on the values of the roster it already holds.
+- The roster is checked WHOLE before anything is pushed or started, whichever vehicles a verb
+  names: no two rows share an ``id``, and no two vehicles hold one value for a name listed
+  under ``unique:``. rig does not know what such a value means, only that it must differ.
 
 SIL (mode: sil): per-vehicle registries under ``sil.data_root/<name>/`` — the "shared run dir"
 is a VIEW, not a shared registry: after up, ``<data_root>/runs/<label>-<date>/<vehicle>`` is a
@@ -35,7 +42,7 @@ import shlex
 import shutil
 import subprocess
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
@@ -43,8 +50,12 @@ import yaml
 from . import RigError
 from .common import eprint, load_yaml, print_table
 
-FLEET_KEYS = {"fleet", "mode", "gcs_ip", "sil", "vehicles", "vars"}
-ROW_KEYS = {"id", "name", "host", "path", "data_dir", "ip"}
+FLEET_KEYS = {"fleet", "mode", "gcs_ip", "sil", "vehicles", "vars", "unique"}
+ROW_KEYS = {"id", "name", "host", "path", "data_dir", "ip", "vars"}
+_VAR_NAME = re.compile(r"[a-z][a-z0-9_]*\Z")  # provision's and the shell tier's rule
+# A row's identity is its `id` and `name` keys: a var of either name would be outranked by the
+# vehicle's own identity and do nothing.
+_ROW_RESERVED = {"vehicle", "vehicle_id"}
 SIL_KEYS = {"data_root", "network"}
 _LOCAL_HOSTS = {"", "localhost", "127.0.0.1"}
 _SSH_OPTS = ("-o", "BatchMode=yes", "-o", "ConnectTimeout=6")
@@ -58,6 +69,8 @@ class Vehicle:
     path: str                     # deployment dir on the row's host
     data_dir: str | None          # runs live here; sync needs it (or sil.data_root derives it)
     ip: str | None                # -> RIG_VEHICLE_IP when the SIL network is on
+    vars: dict = field(default_factory=dict, hash=False)  # this vehicle's own {{var}} values;
+    #                               the vehicle reads them from its row of the pushed roster
 
     @property
     def is_local(self) -> bool:
@@ -73,6 +86,8 @@ class Fleet:
     network: dict | None          # sil.network {name, subnet}
     vehicles: tuple[Vehicle, ...]
     path: Path                    # the fleet.yaml this was loaded from
+    unique: tuple[str, ...] = ()  # var names no two vehicles may share a value for
+    vars: dict = field(default_factory=dict)  # the fleet-level values (a row's own outrank them)
 
 
 def find_fleet(explicit: str | None) -> Path:
@@ -131,31 +146,105 @@ def load_fleet(explicit: str | None) -> Fleet:
         vehicles.append(Vehicle(id=raw["id"], name=str(raw["name"]),
                                 host=str(raw.get("host") or ""), path=str(raw["path"]),
                                 data_dir=(str(raw["data_dir"]) if raw.get("data_dir") else None),
-                                ip=(str(raw["ip"]) if raw.get("ip") else None)))
+                                ip=(str(raw["ip"]) if raw.get("ip") else None),
+                                vars=_row_vars(raw, f"{path}: vehicle row {raw['name']!r}")))
     if not vehicles:
         raise RigError(f"{path}: no vehicles — the roster is the whole point")
     names = [v.name for v in vehicles]
     if len(set(names)) != len(names):
         raise RigError(f"{path}: duplicate vehicle names")
-    return Fleet(name=str(data.get("fleet") or path.parent.name), mode=mode,
-                 gcs_ip=(str(data["gcs_ip"]) if data.get("gcs_ip") else None),
-                 data_root=(str(sil["data_root"]) if sil.get("data_root") else None),
-                 network=network, vehicles=tuple(vehicles), path=path)
+    by_id: dict[str, str] = {}
+    for v in vehicles:  # 3 and "3" are one id: the vehicle compares them as strings too
+        key = str(v.id).strip()
+        if key in by_id:
+            raise RigError(f"{path}: vehicles '{by_id[key]}' and '{v.name}' share id {key} — two "
+                           f"vehicles with one id share a ROS domain, and each drops the other "
+                           f"from its fleet_peer_ids")
+        by_id[key] = v.name
+    fleet = Fleet(name=str(data.get("fleet") or path.parent.name), mode=mode,
+                  gcs_ip=(str(data["gcs_ip"]) if data.get("gcs_ip") else None),
+                  data_root=(str(sil["data_root"]) if sil.get("data_root") else None),
+                  network=network, vehicles=tuple(vehicles), path=path,
+                  unique=_unique_names(data.get("unique"), path), vars=dict(data.get("vars") or {}))
+    for name in fleet.unique:
+        if not any(name in v.vars for v in vehicles):
+            raise RigError(f"{path}: unique: no vehicle row sets '{name}' (a typo?) — rows set: "
+                           f"{', '.join(sorted({n for v in vehicles for n in v.vars})) or 'nothing'}")
+    clash = shared_values(fleet)
+    if clash:
+        raise RigError(f"{path}: {clash}")
+    return fleet
 
 
-def vars_source(path: Path) -> dict:
-    """The VEHICLE-side read of a deployment-root fleet.yaml (pushed by `rig fleet up`, or
-    hand-dropped): a vars source for the manifest precedence chain — the FLEET tempo tier,
-    above vehicle.yaml defaults, below machine/local/shell. Light parse on purpose (no roster
-    validation — rows' host/path and sil: are GCS tooling, ignored here). Contributes:
-    `fleet_ids` DERIVED from the roster (the single source of truth this tier exists for),
-    `gcs_ip`, `mode` as `fleet_mode`, then the fleet-level `vars:` mapping — which overrides
-    the derived keys (explicit beats derived)."""
+def _row_vars(row: dict, where: str) -> dict:
+    """A roster row's `vars:` — the same names the other tiers take, any YAML value."""
+    raw = row.get("vars")
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise RigError(f"{where}: `vars` must be a mapping (this vehicle's own {{{{var}}}} values)")
+    for name in raw:
+        if not isinstance(name, str) or not _VAR_NAME.match(name):
+            raise RigError(f"{where}: var name {name!r} — names are lowercase [a-z][a-z0-9_]*")
+        if name in _ROW_RESERVED:
+            raise RigError(f"{where}: '{name}' is the row's identity (its `id` and `name` keys), "
+                           f"not a var")
+    return dict(raw)
+
+
+def _unique_names(raw, path: Path) -> tuple[str, ...]:
+    if raw is None:
+        return ()
+    if not isinstance(raw, list) or not all(isinstance(n, str) and _VAR_NAME.match(n) for n in raw):
+        raise RigError(f"{path}: `unique` must be a list of var names (values no two vehicles "
+                       f"may share), e.g. unique: [altitude_band]")
+    return tuple(dict.fromkeys(raw))
+
+
+def _value_key(value) -> str:
+    """How two values are compared for `unique:` — as the text a config would receive."""
+    if isinstance(value, (dict, list, tuple)):
+        return json.dumps(value, sort_keys=True, default=str)
+    return str(value).strip()
+
+
+def shared_values(fleet: Fleet, forwarded: dict | None = None, selected: tuple = ()) -> str | None:
+    """The first `unique:` name two vehicles would hold one value for, as a sentence — or None.
+    Each vehicle's value is what its fleet tier resolves to: its row's own, else the fleet-level
+    one. Rows without either hold nothing and clash with nothing. `forwarded` is `fleet up
+    --var` (the shell tier, which outranks the roster) applied to the `selected` vehicles: the
+    check is on what each vehicle will be told, across the WHOLE roster."""
+    forwarded = forwarded or {}
+    for name in fleet.unique:
+        holders: dict[str, list[tuple[str, object, str]]] = {}
+        for v in fleet.vehicles:
+            if name in forwarded and v.name in selected:
+                value, origin = forwarded[name], "--var"
+            elif name in v.vars:
+                value, origin = v.vars[name], "its row"
+            elif name in fleet.vars:
+                value, origin = fleet.vars[name], "the fleet-level vars"
+            else:
+                continue
+            holders.setdefault(_value_key(value), []).append((v.name, value, origin))
+        for same in holders.values():
+            if len(same) > 1:
+                who = " and ".join(f"{n} ({origin})" for n, _, origin in same)
+                return (f"unique: '{name}' would be {same[0][1]!r} on {who} — two vehicles must "
+                        f"not share this value")
+    return None
+
+
+def _roster_doc(path: Path) -> dict:
     data = load_yaml(path)
     unknown = set(data) - FLEET_KEYS
     if unknown:
         raise RigError(f"{path}: unknown key(s): {', '.join(sorted(unknown))} — fleet.yaml "
                        f"carries only: {', '.join(sorted(FLEET_KEYS))}")
+    return data
+
+
+def _fleet_level(data: dict, path: Path) -> dict:
     fleet_vars: dict = {}
     ids = [row["id"] for row in (data.get("vehicles") or [])
            if isinstance(row, dict) and row.get("id") is not None]
@@ -169,6 +258,46 @@ def vars_source(path: Path) -> dict:
         raise RigError(f"{path}: `vars` must be a mapping")
     fleet_vars.update(extra)
     return {"vars": fleet_vars}
+
+
+def vars_source(path: Path) -> dict:
+    """The VEHICLE-side read of a deployment-root fleet.yaml (pushed by `rig fleet up`, or
+    hand-dropped): a vars source for the manifest precedence chain — the FLEET tempo tier,
+    above vehicle.yaml defaults, below machine/local/shell. Light parse on purpose (no roster
+    validation — rows' host/path and sil: are GCS tooling, ignored here). Contributes:
+    `fleet_ids` DERIVED from the roster (the single source of truth this tier exists for),
+    `gcs_ip`, `mode` as `fleet_mode`, then the fleet-level `vars:` mapping — which overrides
+    the derived keys (explicit beats derived). These are the values every vehicle shares; a
+    vehicle's own row is read by vehicle_tiers."""
+    return _fleet_level(_roster_doc(path), path)
+
+
+def vehicle_tiers(path: Path, vehicle_id) -> list[tuple[str, dict]]:
+    """The fleet tier as ONE vehicle sees it, as labelled var sources, highest precedence first:
+    its own roster row's `vars:` (`fleet.yaml row <name>`), then the fleet-level values
+    (`fleet.yaml`, see vars_source). The row is the one whose `id` equals `vehicle_id`, compared
+    as strings (the shell gives "3", YAML gives 3). With no resolved id no row is this
+    vehicle's, so a variable only rows provide stays unknown and fails the render. The roster
+    holding this id twice is refused: either row's values could be meant. `unique:` is the
+    ground station's check (load_fleet) and is not repeated here."""
+    data = _roster_doc(path)
+    tiers: list[tuple[str, dict]] = []
+    me = None if vehicle_id is None else str(vehicle_id).strip()
+    if me and "{{" not in me:
+        mine = [row for row in (data.get("vehicles") or [])
+                if isinstance(row, dict) and row.get("id") is not None
+                and str(row["id"]).strip() == me]
+        if len(mine) > 1:
+            names = " and ".join(f"'{row.get('name', '?')}'" for row in mine)
+            raise RigError(f"{path}: vehicles {names} share id {me} — this vehicle cannot tell "
+                           f"which row is its own")
+        if mine:
+            name = str(mine[0].get("name") or me)
+            row_vars = _row_vars(mine[0], f"{path}: vehicle row '{name}'")
+            if row_vars:
+                tiers.append((f"fleet.yaml row {name}", {"vars": row_vars}))
+    tiers.append(("fleet.yaml", _fleet_level(data, path)))
+    return tiers
 
 
 def _select(fleet: Fleet, names: list[str]) -> list[Vehicle]:
@@ -259,7 +388,10 @@ def cmd_list(fleet: Fleet, *, jobs: int) -> int:
         return (f"test -e {_pathexpr(path)}/vehicle.yaml -o -x {_pathexpr(path)}/run.sh")
 
     outcomes = _fan_out(list(fleet.vehicles), probe, jobs=jobs, timeout=30)
-    rows = [("ID", "NAME", "HOST", "PATH", "STATE")]
+    # Row values side by side, so a duplicate or a gap is visible in one table. The column
+    # appears only when some row carries values: a plain roster lists exactly as before.
+    with_vars = any(v.vars for v in fleet.vehicles)
+    rows = [("ID", "NAME", "HOST", "PATH") + (("VARS",) if with_vars else ()) + ("STATE",)]
     problems = 0
     for o in outcomes:
         if not o.reachable:
@@ -268,9 +400,12 @@ def cmd_list(fleet: Fleet, *, jobs: int) -> int:
             state, problems = "no deployment at path", problems + 1
         else:
             state = "ok"
+        shown = (", ".join(f"{k}={v}" for k, v in sorted(o.vehicle.vars.items())) or "—",) \
+            if with_vars else ()
         rows.append((str(o.vehicle.id), o.vehicle.name, o.vehicle.host or "localhost",
-                     o.vehicle.path, state))
-    print(f"fleet: {fleet.name} ({fleet.mode})" + (f"  gcs: {fleet.gcs_ip}" if fleet.gcs_ip else ""))
+                     o.vehicle.path) + shown + (state,))
+    print(f"fleet: {fleet.name} ({fleet.mode})" + (f"  gcs: {fleet.gcs_ip}" if fleet.gcs_ip else "")
+          + (f"  unique: {', '.join(fleet.unique)}" if fleet.unique else ""))
     print_table(rows)
     return 1 if problems else 0
 
@@ -345,11 +480,13 @@ def _remove_network(fleet: Fleet, *, dry_run: bool) -> None:
                f"({(gone.stderr or '').strip().splitlines()[-1][:120] if gone.stderr else 'in use?'})")
 
 
-def _push_roster(fleet: Fleet, vehicles: list[Vehicle], *, dry_run: bool) -> None:
-    """The provenance carve-out: fleet.yaml lands beside each deployment so the v0.1.60 run
-    snapshot captures the roster the run was launched under. Fail-soft per vehicle."""
+def _push_roster(fleet: Fleet, vehicles: list[Vehicle], *, dry_run: bool) -> set[str]:
+    """The roster carve-out: fleet.yaml lands beside each deployment, where the run snapshot
+    captures the roster the run was launched under and the vehicle reads its fleet tier.
+    Fail-soft per vehicle; returns the names it did NOT reach (cmd_up decides what that costs)."""
+    missed: set[str] = set()
     if dry_run:
-        return
+        return missed
     for v in vehicles:
         try:
             if v.is_local:
@@ -361,8 +498,10 @@ def _push_roster(fleet: Fleet, vehicles: list[Vehicle], *, dry_run: bool) -> Non
                 if scp.returncode != 0:
                     raise OSError((scp.stderr or "").strip()[:120] or "scp failed")
         except (OSError, subprocess.TimeoutExpired) as exc:
+            missed.add(v.name)
             eprint(f"  {v.name}: warning — roster push failed ({exc}); the run snapshot will "
                    f"miss fleet.yaml")
+    return missed
 
 
 def _identity_file(fleet: Fleet, vehicle: Vehicle) -> Path | None:
@@ -460,14 +599,39 @@ def cmd_up(fleet: Fleet, names: list[str], *, run_label: str | None, set_vars: l
             raise RigError(f"fleet up: --var takes name=value with a lowercase name "
                            f"([a-z][a-z0-9_]*), not '{kv}'")
         extra[key] = value
+    # --var is the shell tier on every selected vehicle: it outranks each row's own value, so a
+    # name under `unique:` forwarded to two vehicles — or equal to another row's — is the very
+    # duplicate the roster check exists to refuse.
+    clash = shared_values(fleet, extra, tuple(v.name for v in vehicles))
+    if clash:
+        raise RigError(f"fleet up: {clash} (--var reaches every selected vehicle and outranks "
+                       f"its row)")
+    for key in sorted(extra):
+        rows = [f"{v.name}: {v.vars[key]}" for v in vehicles if key in v.vars]
+        if rows:
+            eprint(f"fleet up: note — --var {key}={extra[key]} overrides the roster's own values "
+                   f"for this invocation ({', '.join(rows)})")
+    row_values = any(v.vars for v in fleet.vehicles)
+    if dry_run and row_values:
+        eprint("fleet up: (dry-run) the roster is not pushed — each vehicle previews with the "
+               "roster it already holds")
     _ensure_network(fleet, dry_run=dry_run)
-    _push_roster(fleet, vehicles, dry_run=dry_run)
+    missed = _push_roster(fleet, vehicles, dry_run=dry_run)
     for v in vehicles:  # simulated machine identities (SIL rows) — needed even for dry-run render
         _ensure_identity(fleet, v)
     argv = ["up"] + (["--run", run_label] if run_label else []) \
         + (["--force"] if force else []) + (["--dry-run"] if dry_run else [])
-    outcomes = _fan_out(vehicles, lambda v: _chooser(v, argv, _vehicle_env(fleet, v, extra)),
-                        jobs=jobs, timeout=600)
+    # A vehicle that did not get a roster carrying row values still holds the last one it was
+    # sent — and would render THAT one's values. It is not started; the rest of the sweep is.
+    held = {name for name in missed if row_values}
+    started = _fan_out([v for v in vehicles if v.name not in held],
+                       lambda v: _chooser(v, argv, _vehicle_env(fleet, v, extra)),
+                       jobs=jobs, timeout=600)
+    by_name = {o.vehicle.name: o for o in started}
+    outcomes = [by_name.get(v.name) or Outcome(
+        v, 1, "", "not started: the roster did not reach this vehicle, and its row values would "
+                  "be those of the roster it already holds. Restore the link and run fleet up "
+                  "again", reachable=True) for v in vehicles]
     problems = _print_outcomes(outcomes)
     if not dry_run:
         _fleet_view(fleet, [o.vehicle for o in outcomes if o.rc == 0 and o.reachable], run_label)

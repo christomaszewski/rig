@@ -70,10 +70,20 @@ def _show(root: Path | None) -> int:
     unmet = sorted((set(refs) - known) | set(manifest.missing_identity))
     if unmet:
         eprint(f"  deployment at {root}: NOT satisfied — missing: {', '.join(unmet)}")
-        return 1
-    eprint(f"  deployment at {root}: all vars satisfied "
-           f"({', '.join(f'{r}={manifest.vars.get(r)}' for r in refs if r in manifest.vars)})")
-    return 0
+    else:
+        eprint(f"  deployment at {root}: all vars satisfied "
+               f"({', '.join(f'{r}={manifest.vars.get(r)}' for r in refs if r in manifest.vars)})")
+    # …and which tier each referenced value came from: a value that is satisfied but from the
+    # wrong place (a stale machine entry over the roster's) looks exactly like a right one above.
+    from .manifest import values_by_tier
+    for tier, values in values_by_tier(manifest):
+        shown = [f"{name}={value}" for name, value in values.items() if name in refs]
+        if shown:
+            eprint(f"    from {tier}: {', '.join(shown)}")
+    for clash in manifest.row_overrides:
+        eprint(f"    note: {clash.name}={clash.value!r} from {clash.tier} outranks "
+               f"{clash.row}'s {clash.row_value!r}")
+    return 1 if unmet else 0
 
 
 def provision(root: Path | None, *, vehicle_id: str | None, name: str | None,

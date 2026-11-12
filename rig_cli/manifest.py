@@ -17,6 +17,8 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import yaml
+
 from . import RigError
 from .common import load_yaml
 from .interpolate import MAP, MARKER, resolve_map, substitute_scalar
@@ -88,6 +90,33 @@ TIER_RANK = {"infra": 0, "sensor": 1, "autonomy": 2}
 TIER_SUB = {"infra": "infra", "sensor": "sensors", "autonomy": "autonomy"}
 
 
+class Vars(dict):
+    """The resolved {{var}} context: a plain dict to everything that renders with it, which also
+    remembers the tier that supplied each entry (`sources`: name -> `vehicle.yaml`, `fleet.yaml`,
+    `fleet.yaml row <name>`, the machine file's path, `vehicle.local.yaml`, `shell`, `derived`).
+    The record rides on the mapping so that it goes wherever the context is handed on whole: a
+    session's seal rebuilds its manifest and takes only `vars` from the deployment. A copy made
+    with dict() or {**vars} is a new context and has no record."""
+
+    def __init__(self, values=(), sources: dict | None = None):
+        super().__init__(values)
+        self.sources = dict(sources or {})
+
+
+yaml.SafeDumper.add_representer(Vars, yaml.SafeDumper.represent_dict)  # it dumps as the dict it is
+
+
+@dataclass(frozen=True)
+class RowOverride:
+    """A value this vehicle's roster row sets that a higher tier also sets, differently. The
+    higher tier wins the render; doctor decides what that is worth (see doctor.collect)."""
+    name: str
+    row: str            # the row's label, `fleet.yaml row <name>`
+    row_value: object
+    tier: str           # the label of the tier that outranks it
+    value: object
+
+
 @dataclass
 class Manifest:
     vehicle: str
@@ -124,6 +153,13 @@ class Manifest:
     missing_identity: tuple = ()  # mandatory per-vehicle keys nothing provides — loading stays
     #                               LAZY so management verbs (pkg list/remove/…) work on any box;
     #                               identity-CONSUMING commands (up/render/…) enforce via require_identity
+    row_overrides: tuple = ()     # RowOverride entries: roster row values a higher tier outranks
+
+    @property
+    def var_sources(self) -> dict:
+        """name -> the tier that supplied it, for every entry of `vars` (empty when `vars` is
+        not a loaded context: a hand-built manifest, or a copy of one)."""
+        return dict(getattr(self.vars, "sources", {}))
 
     def select(self, names: list[str], enabled_only: bool) -> list[Sensor]:
         """Resolve a name filter into a tiered, ordered list (infra → sensors → autonomy). Explicit names win."""
@@ -254,6 +290,24 @@ def _parse_entries(entries, tier: str, root: Path, seen: dict[str, Path],
                           profile=(str(entry["profile"]) if entry.get("profile") else None),
                           overlays=tuple(overlays), replay_start=replay.get("start")))
     return out
+
+
+_TIER_ORDER = {"shell": 0, "command line": 1, "vehicle.local.yaml": 2, "~/.rig/config.yaml": 3,
+               "fleet.yaml": 6, "vehicle.yaml": 7, "derived": 8, "default": 9}
+
+
+def values_by_tier(manifest: "Manifest") -> list[tuple[str, dict]]:
+    """(tier label, {name: value}) for every tier that supplied a value of the resolved context,
+    most specific tier first — the view `rig doctor` and bare `rig provision` print. The machine
+    file is named by its path and a roster row as `fleet.yaml row <name>`, so they rank by
+    position, between the user's config and the fleet-level values."""
+    def rank(label: str) -> int:
+        return _TIER_ORDER.get(label, 5 if label.startswith("fleet.yaml row ") else 4)
+
+    grouped: dict[str, dict] = {}
+    for name, label in sorted(manifest.var_sources.items()):
+        grouped.setdefault(label, {})[name] = manifest.vars.get(name)
+    return sorted(grouped.items(), key=lambda item: rank(item[0]))
 
 
 def project_name(name: str, vehicle_id=None) -> str:
@@ -388,6 +442,26 @@ def _effective(key: str, sources: list[dict], base):
     return None
 
 
+def _effective_from(key: str, tiers: list[tuple[str, dict]], base) -> tuple[object, str | None]:
+    """_effective, and the label of the tier that supplied the value (None with no value)."""
+    for label, source in tiers:
+        candidate = source.get(key)
+        if candidate is None or _self_referencing(candidate, key):
+            continue
+        return candidate, label
+    if base is None or _self_referencing(base, key):
+        return None, None
+    return base, "vehicle.yaml"
+
+
+def _same_value(a, b) -> bool:
+    """Whether two tiers say the same thing: YAML gives 3, the shell and a hand-edited file
+    give "3"."""
+    if isinstance(a, (dict, list, tuple)) or isinstance(b, (dict, list, tuple)):
+        return a == b
+    return str(a).strip() == str(b).strip()
+
+
 _PROVISION_HINT = ("provision this machine once: sudo rig provision --id <N> --name <name> "
                    "(writes {machine}), set RIG_VEHICLE_ID, or drop a bench vehicle.local.yaml "
                    "beside vehicle.yaml for dev work")
@@ -474,32 +548,61 @@ def load_manifest(root: Path, *, context: str = "execution", target_overrides: d
 
     # --- vehicle-local sources & {{var}} resolution (load-time pass) --------------------------
     # Precedence, most-specific-wins: shell > deployment-local > machine (/etc/rig) >
-    # fleet.yaml (the FLEET tempo tier — pushed by `rig fleet up`, persists across reboots) >
-    # vehicle.yaml. A self-referencing vehicle.yaml field ("{{vehicle_id}}") is MANDATORY.
+    # fleet.yaml (the FLEET tempo tier — pushed by `rig fleet up`, persists across reboots; this
+    # vehicle's own roster row over the fleet-level values) > vehicle.yaml. A self-referencing
+    # vehicle.yaml field ("{{vehicle_id}}") is MANDATORY. Every tier keeps its label: the
+    # resolved context records where each value came from (Manifest.var_sources).
+    overridden = {key for key, value in (target_overrides or {}).items() if value is not None}
     local = _local_files(root) if context == "execution" else []
-    sources = [_shell_source()] + [data for _, data in local] if context == "execution" else []
+    tiers: list[tuple[str, dict]] = ([("shell", _shell_source())] + local
+                                     if context == "execution" else [])
+    row_label = None
     if context == "execution" and (root / "fleet.yaml").is_file():
-        from .fleet import vars_source
-        sources.append(vars_source(root / "fleet.yaml"))
-    eff_vehicle = _effective("vehicle", sources, data.get("vehicle"))
-    eff_id = _effective("vehicle_id", sources, data.get("vehicle_id"))
-    eff_data_dir = _effective("data_dir", sources, data.get("data_dir"))
-    eff_platform = _effective("platform", sources, data.get("platform"))
-    eff_arch = _effective("arch", sources, data.get("arch"))
-    missing = tuple(key for key, eff in (("vehicle", eff_vehicle), ("vehicle_id", eff_id),
-                                         ("data_dir", eff_data_dir), ("platform", eff_platform),
-                                         ("arch", eff_arch))
+        # The fleet tier comes last, and needs this vehicle's id to find its row: the id is
+        # settled by the tiers above (and vehicle.yaml) — the roster never supplies it.
+        from .fleet import vehicle_tiers
+        own_id, _ = _effective_from("vehicle_id", tiers, data.get("vehicle_id"))
+        fleet_tiers = vehicle_tiers(root / "fleet.yaml", own_id)
+        row_label = next((label for label, _ in fleet_tiers if label != "fleet.yaml"), None)
+        tiers += fleet_tiers
+    sources = [source for _, source in tiers]
+    effective = {key: _effective_from(key, tiers, data.get(key))
+                 for key in ("vehicle", "vehicle_id", "data_dir", "platform", "arch")}
+    eff_vehicle, eff_id = effective["vehicle"][0], effective["vehicle_id"][0]
+    eff_data_dir = effective["data_dir"][0]
+    eff_platform, eff_arch = effective["platform"][0], effective["arch"][0]
+    missing = tuple(key for key, (eff, _) in effective.items()
                     if _missing_mandatory(key, eff, data.get(key)))
 
     merged_vars: dict = {}
     merged_env: dict = {}
-    for src in [data] + list(reversed(sources)):  # lowest precedence first; higher overwrites
+    supplied: dict[str, str] = {}  # var name -> the label of the tier whose value stands
+    for label, src in [("vehicle.yaml", data)] + list(reversed(tiers)):  # lowest first
         for bucket, merged in (("vars", merged_vars), ("env", merged_env)):
             extra = src.get(bucket) or {}
             if not isinstance(extra, dict):
                 raise RigError(f"`{bucket}` must be a mapping")
             merged.update(extra)
+            if bucket == "vars":
+                supplied.update(dict.fromkeys(extra, label))
+    # A roster row's value that a tier ABOVE the fleet tier also sets, differently: the row
+    # loses the render, and a stale `rig provision --var` would do so without a word.
+    row_overrides: list[RowOverride] = []
+    if row_label is not None:
+        row_vars = next(src for label, src in tiers if label == row_label).get("vars") or {}
+        for label, src in tiers:
+            if label == row_label:
+                break
+            for name, value in (src.get("vars") or {}).items():
+                if name in row_vars and not _same_value(value, row_vars[name]):
+                    row_overrides.append(RowOverride(
+                        name=name, row=row_label, row_value=row_vars[name], tier=label, value=value))
 
+    for key in ("vehicle", "vehicle_id", "platform", "arch"):  # these outrank a var of the name
+        value, label = effective[key]
+        if value is not None:  # an explicit --platform/--arch was folded into vehicle.yaml's data
+            supplied[key] = ("command line" if key in overridden and label == "vehicle.yaml"
+                             else label)
     raw_ctx = dict(merged_vars)
     if eff_vehicle is not None:
         raw_ctx["vehicle"] = eff_vehicle
@@ -523,8 +626,11 @@ def load_manifest(root: Path, *, context: str = "execution", target_overrides: d
         domain_source=domain_source,
         domain_warning=_bench_domain_warning(local, vehicle_id, domain, domain_source),
     )
-    ctx.setdefault("vehicle", vehicle)
+    if "vehicle" not in ctx:
+        ctx["vehicle"] = vehicle
+        supplied["vehicle"] = "default"
     ctx["ros_domain_id"] = ros.domain_id
+    supplied["ros_domain_id"] = "derived"
     # Derived built-in (like ros_domain_id, computed AFTER the fixpoint — so it cannot be
     # referenced by other vars:): the fleet minus THIS vehicle, for {{map fleet_peer_ids <tmpl>}}
     # peer-endpoint construction. String-normalized comparison: YAML gives ints, the shell tier
@@ -536,7 +642,9 @@ def load_manifest(root: Path, *, context: str = "execution", target_overrides: d
             ids = [part.strip() for part in ids.split(",") if part.strip()]
         if isinstance(ids, (list, tuple)):
             me = str(ctx["vehicle_id"]).strip()
-            ctx.setdefault("fleet_peer_ids", [i for i in ids if str(i).strip() != me])
+            if "fleet_peer_ids" not in ctx:  # an operator's own list wins, and keeps its tier
+                ctx["fleet_peer_ids"] = [i for i in ids if str(i).strip() != me]
+                supplied["fleet_peer_ids"] = "derived"
 
     unresolved: list[str] = list(missing)  # identity keys first, then any manifest scalar whose
     #                                        vars nothing provides — loading stays LAZY throughout;
@@ -562,6 +670,7 @@ def load_manifest(root: Path, *, context: str = "execution", target_overrides: d
     data_dir = (str(eff_data_dir or "").strip()) or None
     if data_dir is not None:
         ctx["data_dir"] = data_dir
+        supplied["data_dir"] = effective["data_dir"][1]
     # The HOST registry: when the effective data_dir is not the box's shared one (the user's,
     # else the machine's — only a TREE-local vehicle.local.yaml beats those: a reconstruct
     # workspace, a bench experiment), the shared registry stays visible READ-THROUGH
@@ -643,7 +752,8 @@ def load_manifest(root: Path, *, context: str = "execution", target_overrides: d
                     data_dir=data_dir,
                     run_capture=bool(_effective("run_capture", sources,
                                                 data.get("run_capture")) is not False),
-                    vars=ctx, extra_env=extra_env, host_data_dir=host_data_dir,
+                    vars=Vars(ctx, {name: supplied.get(name) or "derived" for name in ctx}),
+                    extra_env=extra_env, host_data_dir=host_data_dir,
                     export_profiles=_parse_export_profiles(data.get("export_profiles")),
                     replay_policy=replay_policy,
-                    missing_identity=tuple(unresolved))
+                    missing_identity=tuple(unresolved), row_overrides=tuple(row_overrides))

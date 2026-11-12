@@ -514,11 +514,14 @@ def test_stale_higher_tier_value_blocks_up_and_a_shell_override_is_only_reported
                        files={"services.yaml": "services: {}\n"})
     (root / "fleet.yaml").write_text(_SWARM)
 
-    def up(*extra) -> tuple[int, str]:
+    def rig(*argv) -> tuple[int, str]:
         err = io.StringIO()
         with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
-            rc = main(["--root", str(root), "up", "--dry-run", *extra])
+            rc = main(["--root", str(root), *argv])
         return rc, err.getvalue()
+
+    def up(*extra) -> tuple[int, str]:
+        return rig("up", "--dry-run", *extra)
 
     machine = _machine("vars: {altitude_band: 50}\n")   # an old `rig provision --var`
     with _env(RIG_VEHICLE_LOCAL=str(machine), RIG_VEHICLE_ID=None, RIG_VAR_altitude_band=None):
@@ -537,9 +540,12 @@ def test_stale_higher_tier_value_blocks_up_and_a_shell_override_is_only_reported
         assert rc == 1 and "vehicle.local.yaml" in err and "altitude_band" in err, err
     (root / "vehicle.local.yaml").unlink()
     with _env(RIG_VEHICLE_LOCAL=_NO_MACHINE, RIG_VEHICLE_ID=None, RIG_VAR_altitude_band="50"):
-        rc, err = up()                                  # one invocation, on purpose: say so, go on
+        rc, err = up()                                  # one invocation, on purpose: allowed…
         assert rc == 0, err
-        assert "altitude_band" in err and "shell" in err, err
+        rc, err = rig("doctor")                         # …and doctor says so, without failing
+        assert rc == 0, err
+        said = next((ln for ln in err.splitlines() if "[!]" in ln and "altitude_band" in ln), "")
+        assert "shell" in said and "50" in said and "30" in said, err
 
 
 if __name__ == "__main__":
