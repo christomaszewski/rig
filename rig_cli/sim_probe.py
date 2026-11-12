@@ -14,7 +14,8 @@ observing until every bound topic has endpoints on both sides, so the comparison
 vacuously; a topic still one-sided at the timeout is reported as a warning.
 
 ``simulator`` is an external simulator's stated name and version. It only words the advice
-for a stopped clock; a request without it gets Isaac's.
+for a stopped clock: to resume the simulator when /clock arrives without advancing, to start
+it when none arrives. A request without it gets Isaac's advice, which covers both.
 """
 from __future__ import annotations
 
@@ -108,9 +109,16 @@ def evaluate(request, observation):
     if (clock.get("advancing") is not True or clock.get("samples", 0) < 2 or
             not isinstance(clock.get("first_ns"), int) or
             not isinstance(clock.get("last_ns"), int) or clock["last_ns"] <= clock["first_ns"]):
-        error("clock_stopped", "No advancing /clock received; " + (
-            f"start {request['simulator']['name']} and check that it publishes /clock"
-            if "simulator" in request else "enable Isaac's ROS bridge and press Play"))
+        samples = clock.get("samples", 0)
+        if "simulator" not in request:
+            error("clock_stopped", "No advancing /clock received; enable Isaac's ROS bridge and press Play")
+        elif isinstance(samples, int) and not isinstance(samples, bool) and samples >= 1:
+            # The clock is there: telling the operator to start the simulator would mislead.
+            error("clock_stopped", f"/clock is arriving from {request['simulator']['name']} but does "
+                  "not advance; the simulator looks paused: resume it")
+        else:
+            error("clock_stopped", f"No advancing /clock received; start {request['simulator']['name']} "
+                  "and check that it publishes /clock")
     age = clock.get("advance_age_s")
     if (not isinstance(age, (int, float)) or isinstance(age, bool) or
             not math.isfinite(age) or age < 0 or age > min(2.0, request.get("timeout_s", 10.0))):
