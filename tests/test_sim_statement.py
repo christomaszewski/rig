@@ -182,6 +182,14 @@ class StatementDiff(unittest.TestCase):
         self.assertTrue(report['substantive'])
         self.assertEqual({d['section'] for d in report['differs']}, {'simulator statement'})
 
+    def test_missing_files_at_different_source_paths_have_the_same_outcome(self):
+        a, b = self.run_dir('a'), self.run_dir('b')
+        runs._seal(a, None)
+        runs._seal(b, None)
+        report = rundiff.compare(a, b)
+        self.assertFalse(report['substantive'], report['differs'])
+        self.assertIn('simulator statement', report['same'])
+
 
 if __name__ == '__main__':
     unittest.main()
