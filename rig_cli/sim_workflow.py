@@ -440,9 +440,13 @@ def execute(root, path, manifest, descriptors, plan, *, label=None, capture_outp
         selected = {r.name: r for r, _ in pairs}
         execution_manifest = dataclasses.replace(manifest, sensors=[selected.get(r.name,
             dataclasses.replace(r, enabled=False)) for r in manifest.sensors])
+        simulation = dict(provider=provider, **named, mode="attach", scene=sim["scene"],
+                          recipe=plan["recipe"], fingerprint=plan["fingerprint"], clock=provider)
+        if "statement_file" in sim:
+            from .simulation_statement import pending
+            simulation["statement"] = pending(sim["statement_file"], path)
         run_id = runs.new_run(execution_manifest, root, label or "sim-" + path.stem.replace(".", "-"),
-            simulation=dict(provider=provider, **named, mode="attach", scene=sim["scene"],
-                            recipe=plan["recipe"], fingerprint=plan["fingerprint"], clock=provider))
+                              simulation=simulation)
         output_run = Path(manifest.data_dir) / "runs" / run_id
         evidence = output_run / ".rig/simulation"
         write_yaml(evidence / "recipe.yaml", plan["recipe"])

@@ -658,6 +658,9 @@ def _seal(run_dir: Path, status_text: str | None, *, live_digest: str | None = N
         doc["config_dirty_at_seal"] = True
         eprint("rig: warning: config changed after this run's last `up` — those edits never "
                "applied to the recorded data (snapshot reflects what ran)")
+    if not doc.get("ended") and isinstance(doc.get("simulation"), dict):
+        from .simulation_statement import capture
+        capture(run_dir, doc["simulation"])
     doc["ended"] = _iso_now()
     try:
         du = subprocess.run(["du", "-sk", str(run_dir)], capture_output=True, text=True, timeout=120)

@@ -69,7 +69,8 @@ def validate(doc):
         validate_replay({"version": 1, **doc["replay"]})
     if "simulation" in doc:
         sim = _mapping(doc["simulation"], {"provider", "simulator", "mode", "replace", "ros", "publishes",
-                       "subscribes", "scene", "asset_version", "isaac_version", "seed", "probe", "timeout_s"},
+                       "subscribes", "scene", "asset_version", "isaac_version", "seed", "probe", "timeout_s",
+                       "statement_file"},
                        "simulation")
         if sim.get("provider") not in ("isaac", "external") or sim.get("mode", "attach") != "attach":
             raise RigError("simulation: supported provider/mode is isaac/attach or external/attach")
@@ -91,6 +92,10 @@ def validate(doc):
         if type(ros.get("domain_id")) is not int or not 0 <= ros["domain_id"] <= 232:
             raise RigError("simulation.ros.domain_id: expected an integer between 0 and 232")
         _string(sim.get("scene"), "simulation.scene")
+        if "statement_file" in sim:
+            value = _string(sim["statement_file"], "simulation.statement_file")
+            if "\x00" in value:
+                raise RigError("simulation.statement_file: NUL is not allowed in a file path")
         for key in ("asset_version", "isaac_version"):
             if key in sim:
                 _string(sim[key], f"simulation.{key}")

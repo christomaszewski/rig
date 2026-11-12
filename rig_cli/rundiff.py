@@ -32,7 +32,8 @@ from .common import eprint, load_yaml
 
 # manifest.yaml keys that are different for any two runs
 _PER_RUN = ("run", "label", "started", "ended", "disk_kb", "tags", "deployment", "config",
-            "capture.sha256", "simulation.fingerprint", "config_dirty_at_seal")
+            "capture.sha256", "simulation.fingerprint", "config_dirty_at_seal",
+            "simulation.recipe.simulation.statement_file", "simulation.statement.source")
 _LOGS = ("ups", "docker_logs")  # timestamped logs of what was done to the run: not compared
 _RIG_AND_VEHICLE = ("rig_version", "vehicle", "vehicle_id", "artifact")
 _TREE_FILES = ("vehicle.yaml", "services.yaml", "fleet.yaml", "vehicle.local.yaml",
@@ -287,6 +288,26 @@ def _compare_images(report: _Report, a: dict, b: dict) -> None:
         # else: a per-architecture change, already reported from the lock
 
 
+def _compare_statement(report: _Report, a: dict, b: dict) -> None:
+    """Compare the recorded opaque statement digest and capture outcome, never its contents."""
+    def statement(manifest):
+        simulation = manifest.get("simulation")
+        record = simulation.get("statement") if isinstance(simulation, dict) else None
+        return record if isinstance(record, dict) else {}
+
+    sa, sb = statement(a), statement(b)
+    if not sa and not sb:
+        return
+    report.notes.append("simulator statement: reported by the simulator, not verified by Rig; "
+                        "contents are not interpreted")
+    source_a, source_b = sa.get("source"), sb.get("source")
+    if source_a != source_b:
+        report.per_run.append({"section": "run", "key": "simulation.statement.source",
+                               "a": source_a, "b": source_b})
+    report.compare("simulator statement", {k: v for k, v in sa.items() if k != "source"},
+                   {k: v for k, v in sb.items() if k != "source"})
+
+
 def compare(run_a: Path, run_b: Path) -> dict:
     """The report for two run directories, as plain data (the --json form)."""
     a, b = _read_run(run_a), _read_run(run_b)
@@ -296,6 +317,7 @@ def compare(run_a: Path, run_b: Path) -> dict:
             report.notes.append(f"{name} holds {run['snapshots']} config snapshots; it is compared "
                                 f"at its last up ({run['digest']})")
     ma, mb = a["manifest"], b["manifest"]
+    _compare_statement(report, ma, mb)
     held_by_one = set()
     for block in _BLOCKS:  # a simulation session against a replay: say that once, not per key
         in_a, in_b = isinstance(ma.get(block), dict), isinstance(mb.get(block), dict)
@@ -305,6 +327,8 @@ def compare(run_a: Path, run_b: Path) -> dict:
     fa, fb = (_flat({k: v for k, v in m.items() if k not in _LOGS and k not in held_by_one})
               for m in (ma, mb))
     for key in sorted(set(fa) | set(fb)):
+        if key == "simulation.statement" or key.startswith("simulation.statement."):
+            continue  # opaque simulator evidence has its own section above
         va, vb = fa.get(key, _MISSING), fb.get(key, _MISSING)
         per_run = _per_run(key)
         top = key.split(".", 1)[0]
