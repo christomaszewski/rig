@@ -107,7 +107,7 @@ def with_clock(env: dict[str, str], *, provider: str | None) -> dict[str, str]:
     out = dict(env)
     out.pop("RIG_SIM_TIME", None)
     if provider is not None:
-        if provider not in ("replay", "isaac"):
+        if provider not in ("replay", "isaac", "external"):
             raise RigError(f"Unknown session clock provider: {provider}")
         out["RIG_SIM_TIME"] = "1"
     return out

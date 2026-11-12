@@ -58,7 +58,7 @@ def read_state(root):
         path = Path(root) / "var/sessions" / token / "state.json"
         state = json.loads(path.read_text())
         if (not isinstance(state, dict) or state.get("session") != token or type(state.get("version")) is not int or state.get("version") != 1 or
-                state.get("provider") not in ("isaac", "replay")):
+                state.get("provider") not in ("isaac", "external", "replay")):
             raise ValueError("invalid session state")
         _validate_state(state)
         return path, state
@@ -86,6 +86,10 @@ def _validate_state(state):
         raise ValueError("inconsistent session rows")
     if not {"vehicle", "vehicle_id", "data_dir", "run_id"} <= state.keys():
         raise ValueError("missing session identity")
+    simulator = state.get("simulator")
+    if state["provider"] == "external" and (not isinstance(simulator, dict) or any(
+            not isinstance(simulator.get(key), str) for key in ("name", "version"))):
+        raise ValueError("invalid session simulator")
     if not isinstance(state.get("engine_id"), str) or not state["engine_id"]:
         raise ValueError("missing session Docker identity")
     if (set(state["ros"]) != {"domain_id", "rmw", "distro"}
@@ -114,7 +118,7 @@ def json_write(path, doc):
 def save(path, state):
     json_write(path, state)
     if state.get("output_run"):
-        folder = "simulation" if state["provider"] == "isaac" else "replay"
+        folder = "simulation" if state["provider"] in ("isaac", "external") else "replay"
         json_write(Path(state["output_run"]) / ".rig" / folder / "lifecycle.json", state)
 
 
@@ -139,9 +143,9 @@ def engine_id(env=None):
 
 
 def register(root, manifest, pairs, env, *, provider, engine_id, launch_surfaces,
-             run_id=None, output_run=None, session_id=None):
+             run_id=None, output_run=None, session_id=None, simulator=None):
     """Publish ownership before the first launcher; callers hold the project locks."""
-    if provider not in ("isaac", "replay"):
+    if provider not in ("isaac", "external", "replay"):
         raise RigError(f"Unsupported session provider: {provider}")
     if active_session(root):
         raise RigError("A saved session exists; run rig down --end-run before starting another")
@@ -162,6 +166,8 @@ def register(root, manifest, pairs, env, *, provider, engine_id, launch_surfaces
                        for r, _ in pairs],
                  repos={d.service: str(d.repo) for _, d in pairs}, launch_surfaces=launch_surfaces,
                  configs={str(r.config): digest(r.config.read_bytes().hex()) for r, _ in pairs})
+    if simulator:  # an external simulator's stated name and version; Isaac and replay have none
+        state["simulator"] = simulator
     path = Path(root) / "var/sessions" / token / "state.json"
     if path.exists():
         raise RigError(f"Session identity already exists: {token}")
@@ -293,8 +299,10 @@ def down(root, *, dry_run=False, end_run=False, provider=None):
                     raise RigError("Session services are still running; run remains open")
                 runs.end_run(manifest, root, force=True)
         clear(root, state["session"])
+        simulator = ("Isaac" if state["provider"] == "isaac" else
+                     state["simulator"]["name"] if state["provider"] == "external" else None)
         eprint("rig: selected session services stopped" +
-               ("; external Isaac remains running" if state["provider"] == "isaac" else ""))
+               (f"; external {simulator} remains running" if simulator else ""))
         return 0
     if dry_run:
         return perform()

@@ -1,7 +1,8 @@
 """Attach selected deployment services to an existing simulator ROS graph.
 
-Isaac owns the scene and ROS bridge. Rig owns the workload, clock choice, run,
-and only the Compose projects it launches. Check and dry-run never write state.
+The simulator (Isaac, or an external one that states its own name) owns the scene and
+ROS bridge. Rig owns the workload, clock choice, run, and only the Compose projects it
+launches. Check and dry-run never write state.
 """
 from __future__ import annotations
 
@@ -49,13 +50,19 @@ def _surfaces(descriptors):
     return result
 
 
+def _name(simulation):
+    """What messages call the simulator: Isaac, or an external simulator's stated name."""
+    return simulation["simulator"]["name"] if simulation.get("provider") == "external" else "Isaac"
+
+
 # Distros whose rclpy reports no REP-2016 type hash: a cross-distro binding cannot be verified.
 _PRE_TYPE_HASH = frozenset(("foxy", "galactic", "humble"))
 
 
 def probe(simulation, env, *, require_type_hashes=False, await_counterparts=False):
     """Run a bundled, dependency-free entry point in the operator's ROS Python."""
-    request = {key: simulation[key] for key in ("ros", "publishes", "subscribes") if key in simulation}
+    request = {key: simulation[key] for key in ("ros", "publishes", "subscribes", "simulator")
+               if key in simulation}
     request["timeout_s"] = simulation.get("timeout_s", 10.0)
     if require_type_hashes:
         request["require_type_hashes"] = True
@@ -80,18 +87,19 @@ def probe(simulation, env, *, require_type_hashes=False, await_counterparts=Fals
             raise ValueError("probe exited unsuccessfully despite claiming readiness")
         return doc
     except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
-        raise RigError(f"Isaac ROS probe failed: {exc}. Set simulation.probe to Python in a "
+        raise RigError(f"{_name(simulation)} ROS probe failed: {exc}. Set simulation.probe to Python in a "
                        "sourced ROS environment (rclpy and rosgraph_msgs required)") from exc
 
 
 def _apply_probe(plan, observation):
     plan["probe"] = observation
+    simulator = _name(plan["recipe"]["simulation"])
     for issue in observation["issues"]:
         if not isinstance(issue, dict) or issue.get("status") not in ("ok", "warn", "warning", "error"):
-            raise RigError("Invalid issue in Isaac probe response")
+            raise RigError(f"Invalid issue in {simulator} probe response")
         _issue(plan, issue["status"], "probe_" + str(issue.get("code", "graph")), str(issue.get("message", "")))
     if not observation["ready"] and not any(i["status"] == "error" for i in observation["issues"]):
-        _issue(plan, "error", "probe", "Isaac connection was not verified")
+        _issue(plan, "error", "probe", f"{simulator} connection was not verified")
 
 
 def _image_report(plan, inspection):
@@ -140,14 +148,17 @@ def build(root, path, recipe, *, pull="missing", host=True):
     require_identity(original, what="simulation needs a resolved vehicle identity")
     manifest = session_recipe.apply_session(original, recipe)
     sim = session_recipe.provider_recipe(recipe, "simulation")
-    plan = dict(version=1, provider="isaac", mode="attach", recipe=recipe, selected=[], omitted=[],
-                configs={}, issues=[], clock="isaac", pull_policy=pull)
+    provider, simulator = sim["provider"], _name(sim)
+    plan = dict(version=1, provider=provider, mode="attach", recipe=recipe, selected=[], omitted=[],
+                configs={}, issues=[], clock=provider, pull_policy=pull)
+    if provider == "external":
+        plan["simulator"] = sim["simulator"]
     rows = manifest.select([], enabled_only=True)
     plan["selected"] = [r.name for r in rows]
     plan["omitted"] = [r.name for r in manifest.sensors if r.name not in plan["selected"]]
     known = {r.name: r for r in manifest.sensors}
     if recipe["session"].get("clock", "source") != "source":
-        _issue(plan, "error", "clock", "Isaac attach requires session.clock: source")
+        _issue(plan, "error", "clock", f"{simulator} attach requires session.clock: source")
     # simulation.ros is the SIMULATOR's ROS (the probe runs in it). The middleware and domain
     # must be the deployment's; the distro may differ when every bound topic's type hash matches.
     expected_ros = dict(distro=manifest.ros.distro, rmw=manifest.ros.rmw, domain_id=manifest.ros.domain_id)
@@ -166,11 +177,11 @@ def build(root, path, recipe, *, pull="missing", host=True):
                    "match; use one distro on both sides")
         else:
             plan["type_hashes"] = "required"
-            _issue(plan, "warning", "cross_distro", f"Isaac runs {sim['ros']['distro']} and the deployment "
+            _issue(plan, "warning", "cross_distro", f"{simulator} runs {sim['ros']['distro']} and the deployment "
                    f"{manifest.ros.distro}: every bound topic's REP-2016 type hash must match on both "
                    "sides, checked once the deployment's endpoints appear after startup; the middleware "
                    "must also interoperate across the two releases")
-    if sim["ros"]["distro"] not in ("humble", "jazzy"):
+    if provider == "isaac" and sim["ros"]["distro"] not in ("humble", "jazzy"):
         _issue(plan, "warning", "experimental_ros", "Isaac documents Humble/Jazzy as tested; verify your "
                "custom bridge build for this ROS distribution")
     for name in sim.get("replace", []):
@@ -182,7 +193,7 @@ def build(root, path, recipe, *, pull="missing", host=True):
     descriptors = {}
     for row in rows:
         if row.tier == "sensor" or row.service == PLAYER_SERVICE:
-            _issue(plan, "error", "selection", f"{row.name}: Isaac attach starts infrastructure and autonomy only; "
+            _issue(plan, "error", "selection", f"{row.name}: {simulator} attach starts infrastructure and autonomy only; "
                    "physical sensors and bag players must be omitted")
         try:
             if row.service not in catalog:
@@ -200,7 +211,7 @@ def build(root, path, recipe, *, pull="missing", host=True):
             for edge in (desc.interface or {}).get("publishes", ()):
                 topic = edge.name if edge.name.startswith("/") else resolve_ros_namespace(desc, row.name) + "/" + edge.name
                 if topic == "/clock" or topic in published:
-                    _issue(plan, "error", "authority", f"{row.name} and Isaac both publish {topic}; "
+                    _issue(plan, "error", "authority", f"{row.name} and {simulator} both publish {topic}; "
                            "give each output one authority (shared TF requires explicit scene/config separation)")
             if not desc.interface:
                 _issue(plan, "warning", "interface", f"{row.name}: no interface declaration; output "
@@ -236,7 +247,7 @@ def build(root, path, recipe, *, pull="missing", host=True):
                 raise RigError(f"Deployment requires {manifest.arch}; Docker engine is {architecture}")
             deployment_target(manifest, descriptors, arch=architecture)
             plan["architecture"] = architecture
-            env = dispatch.with_clock(dispatch.fleet_env(manifest, descriptors), provider="isaac")
+            env = dispatch.with_clock(dispatch.fleet_env(manifest, descriptors), provider=provider)
             env["RIG_TARGET_ARCH"] = architecture
             if any(env.get(k) != os.environ.get(k) for k in _DOCKER_ENV):
                 raise RigError("Configure the Docker connection in the shell, not vehicle env overrides, "
@@ -263,7 +274,8 @@ def report(plan, *, as_json=False):
     if as_json:
         print(json.dumps(plan, indent=2, default=str))
         return
-    eprint("rig sim: attach Isaac; selected " + ", ".join(plan.get("selected", [])))
+    eprint(f"rig sim: attach {_name(plan['recipe']['simulation'])}; selected " +
+           ", ".join(plan.get("selected", [])))
     for issue in plan["issues"]:
         eprint(f"  [{issue['status']}] {issue['message']}")
     eprint(f"  ready_to_run: {str(plan['ready_to_run']).lower()}")
@@ -273,9 +285,12 @@ def execute(root, path, manifest, descriptors, plan, *, label=None, capture_outp
     from .replay_coordinator import project_locks
     from .replay_workflow import _project_container_ids
     sim = plan["recipe"]["simulation"]
+    provider, simulator = plan["provider"], _name(sim)
+    # Recorded only for an external simulator; an Isaac run and session keep the fields they had.
+    named = {"simulator": plan["simulator"]} if provider == "external" else {}
     strict = plan.get("type_hashes") == "required"
     rows = manifest.select(plan["selected"], enabled_only=False)
-    env = dispatch.with_clock(dispatch.fleet_env(manifest, descriptors), provider="isaac")
+    env = dispatch.with_clock(dispatch.fleet_env(manifest, descriptors), provider=provider)
     env["RIG_TARGET_ARCH"] = plan["architecture"]
     env["RIG_RUNTIME_IMAGE_MAP"] = json.dumps(plan["image_pins"])
     with session_runtime.session_lock(root), project_locks(manifest, [r.name for r in manifest.sensors], env):
@@ -290,7 +305,7 @@ def execute(root, path, manifest, descriptors, plan, *, label=None, capture_outp
         # Image acquisition/capture may be slow; a cached successful probe is not a launch gate.
         fresh = probe(sim, env, require_type_hashes=strict)
         if not fresh["ready"]:
-            raise RigError("Isaac connection changed before launch: " + "; ".join(
+            raise RigError(f"{simulator} connection changed before launch: " + "; ".join(
                 i["message"] for i in fresh["issues"] if i["status"] == "error"))
         token = uuid.uuid4().hex
         folder = Path(root) / "var/sim/sessions" / token
@@ -303,16 +318,16 @@ def execute(root, path, manifest, descriptors, plan, *, label=None, capture_outp
         execution_manifest = dataclasses.replace(manifest, sensors=[selected.get(r.name,
             dataclasses.replace(r, enabled=False)) for r in manifest.sensors])
         run_id = runs.new_run(execution_manifest, root, label or "sim-" + path.stem.replace(".", "-"),
-            simulation=dict(provider="isaac", mode="attach", scene=sim["scene"],
-                            recipe=plan["recipe"], fingerprint=plan["fingerprint"], clock="isaac"))
+            simulation=dict(provider=provider, **named, mode="attach", scene=sim["scene"],
+                            recipe=plan["recipe"], fingerprint=plan["fingerprint"], clock=provider))
         output_run = Path(manifest.data_dir) / "runs" / run_id
         evidence = output_run / ".rig/simulation"
         write_yaml(evidence / "recipe.yaml", plan["recipe"])
         write_yaml(evidence / "resolved.yaml", plan)
         _json_write(evidence / "probe.json", fresh)
         state_path, state = session_runtime.register(root, execution_manifest, pairs, env,
-            provider="isaac", engine_id=plan["engine_id"], launch_surfaces=plan["launch_surfaces"],
-            run_id=run_id, output_run=output_run, session_id=token)
+            provider=provider, engine_id=plan["engine_id"], launch_surfaces=plan["launch_surfaces"],
+            run_id=run_id, output_run=output_run, session_id=token, **named)
         runs.snapshot(execution_manifest, root, stacks=plan["selected"])
         attempted = []
         def started(row, desc):
@@ -328,7 +343,7 @@ def execute(root, path, manifest, descriptors, plan, *, label=None, capture_outp
             gate = probe(sim, env, require_type_hashes=strict)
             _json_write(evidence / "probe-launch.json", gate)
             if not gate["ready"]:
-                raise RigError("Isaac connection changed during run capture; no services started")
+                raise RigError(f"{simulator} connection changed during run capture; no services started")
             if _engine_id(env) != plan["engine_id"]:
                 raise RigError("Docker engine changed during run capture; no services started")
             outcomes = dispatch.run_verb(pairs, env, "up", stop_on_failure=True, on_start=started,
@@ -341,7 +356,7 @@ def execute(root, path, manifest, descriptors, plan, *, label=None, capture_outp
             after = probe(sim, env, require_type_hashes=strict, await_counterparts=strict)
             _json_write(evidence / "probe-after.json", after)
             if not after["ready"]:
-                raise RigError("Isaac graph failed verification after startup: " + "; ".join(
+                raise RigError(f"{simulator} graph failed verification after startup: " + "; ".join(
                     i["message"] for i in after["issues"] if i["status"] == "error"))
             for issue in after["issues"]:
                 if issue["status"] in ("warn", "warning"):
@@ -375,7 +390,11 @@ def execute(root, path, manifest, descriptors, plan, *, label=None, capture_outp
 
 
 def down(root, *, dry_run=False, end_run=False):
-    return session_runtime.down(root, dry_run=dry_run, end_run=end_run, provider="isaac")
+    # There is no recipe here: the saved session says which simulation provider it is.
+    # A replay session is refused as before.
+    saved = _read_state(root)
+    provider = "external" if saved and saved[1]["provider"] == "external" else "isaac"
+    return session_runtime.down(root, dry_run=dry_run, end_run=end_run, provider=provider)
 
 
 def command(args, root):

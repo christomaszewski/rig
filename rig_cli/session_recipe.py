@@ -68,11 +68,20 @@ def validate(doc):
             raise RigError("replay: expected version-1 replay fields without a nested version")
         validate_replay({"version": 1, **doc["replay"]})
     if "simulation" in doc:
-        sim = _mapping(doc["simulation"], {"provider", "mode", "replace", "ros", "publishes",
+        sim = _mapping(doc["simulation"], {"provider", "simulator", "mode", "replace", "ros", "publishes",
                        "subscribes", "scene", "asset_version", "isaac_version", "seed", "probe", "timeout_s"},
                        "simulation")
-        if sim.get("provider") != "isaac" or sim.get("mode", "attach") != "attach":
-            raise RigError("simulation: supported provider/mode is isaac/attach")
+        if sim.get("provider") not in ("isaac", "external") or sim.get("mode", "attach") != "attach":
+            raise RigError("simulation: supported provider/mode is isaac/attach or external/attach")
+        # An external simulator states its own name and version; Isaac's version has its own field.
+        if sim["provider"] == "external":
+            simulator = _mapping(sim.get("simulator"), {"name", "version"}, "simulation.simulator")
+            for key in ("name", "version"):
+                _string(simulator.get(key), f"simulation.simulator.{key}")
+            if "isaac_version" in sim:
+                raise RigError("simulation.isaac_version: valid only with provider isaac")
+        elif "simulator" in sim:
+            raise RigError("simulation.simulator: valid only with provider external")
         replaced = _names(sim.get("replace", []), "simulation.replace")
         if set(replaced) & set(selected):
             raise RigError("simulation.replace: a replaced physical instance cannot also be selected")

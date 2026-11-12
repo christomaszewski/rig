@@ -941,13 +941,14 @@ def build_parser() -> argparse.ArgumentParser:
     rn = sub.add_parser("runs", help="list the run registry (OPEN / sealed / interrupted)")
     rn.add_argument("names", nargs="*", default=[], help=argparse.SUPPRESS)
 
-    sim = sub.add_parser("sim", help="attach a deployment to an existing Isaac Sim ROS graph",
+    sim = sub.add_parser("sim", help="attach a deployment to a running simulator's ROS graph "
+                                      "(Isaac Sim, or an external simulator the recipe names)",
                          description="Use rig sim check/up --recipe NAME, or rig sim down --end-run. "
                                      "Version-2 recipes use sessions/NAME.yaml or an explicit YAML path.")
     sim.set_defaults(sim_help=True)
     for verb in ("check", "up"):
         sp = sub.add_parser("sim-" + verb, prog=f"{parser.prog} sim {verb}",
-                            help=f"{verb} an Isaac attach session")
+                            help=f"{verb} a simulator attach session")
         sp.add_argument("--recipe", required=True, metavar="NAME|YAML")
         sp.add_argument("--attach", action="store_true", help="attach to an already running scene (the default)")
         sp.add_argument("--dry-run", action="store_true", help="inspect without creating a run or starting services")
@@ -956,7 +957,7 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--format", choices=("text", "json"), default="text")
         sp.add_argument("--label", help="label for the simulation run")
     sd = sub.add_parser("sim-down", prog=f"{parser.prog} sim down",
-                        help="stop the saved simulation session; leave external Isaac running")
+                        help="stop the saved simulation session; leave the simulator running")
     sd.add_argument("--dry-run", action="store_true")
     sd.add_argument("--end-run", action="store_true", help="seal the simulation run after successful teardown")
 

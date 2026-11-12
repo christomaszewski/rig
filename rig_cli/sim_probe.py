@@ -12,6 +12,9 @@ an error. When the simulator and the deployment run different ROS distros the re
 without one is an error too. ``await_counterparts`` (the check after the deployment starts) keeps
 observing until every bound topic has endpoints on both sides, so the comparison is not passed
 vacuously; a topic still one-sided at the timeout is reported as a warning.
+
+``simulator`` is an external simulator's stated name and version. It only words the advice
+for a stopped clock; a request without it gets Isaac's.
 """
 from __future__ import annotations
 
@@ -31,9 +34,15 @@ _TYPE_HASH = re.compile(r"RIHS\d{2}_[0-9a-f]{64}")
 
 def validate_request(request):
     if not isinstance(request, dict) or set(request) - {
-            "ros", "publishes", "subscribes", "timeout_s", "require_type_hashes", "await_counterparts"}:
-        raise ValueError("request must contain only ros, publishes, subscribes, timeout_s, "
+            "ros", "publishes", "subscribes", "timeout_s", "simulator", "require_type_hashes",
+            "await_counterparts"}:
+        raise ValueError("request must contain only ros, publishes, subscribes, timeout_s, simulator, "
                          "require_type_hashes and await_counterparts")
+    if "simulator" in request:
+        simulator = request["simulator"]
+        if (not isinstance(simulator, dict) or set(simulator) != {"name", "version"} or
+                any(not isinstance(value, str) or not value.strip() for value in simulator.values())):
+            raise ValueError("simulator requires a nonempty name and version")
     for flag in ("require_type_hashes", "await_counterparts"):
         if not isinstance(request.get(flag, False), bool):
             raise ValueError(f"{flag} must be true or false")
@@ -99,7 +108,9 @@ def evaluate(request, observation):
     if (clock.get("advancing") is not True or clock.get("samples", 0) < 2 or
             not isinstance(clock.get("first_ns"), int) or
             not isinstance(clock.get("last_ns"), int) or clock["last_ns"] <= clock["first_ns"]):
-        error("clock_stopped", "No advancing /clock received; enable Isaac's ROS bridge and press Play")
+        error("clock_stopped", "No advancing /clock received; " + (
+            f"start {request['simulator']['name']} and check that it publishes /clock"
+            if "simulator" in request else "enable Isaac's ROS bridge and press Play"))
     age = clock.get("advance_age_s")
     if (not isinstance(age, (int, float)) or isinstance(age, bool) or
             not math.isfinite(age) or age < 0 or age > min(2.0, request.get("timeout_s", 10.0))):
