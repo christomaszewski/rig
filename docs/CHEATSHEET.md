@@ -624,6 +624,12 @@ tree's registry (rig ≥ v0.2.55).
 refuse while stacks run. Each `up` also snapshots the effective config into the run
 (`.rig/config/<digest>/`, deduplicated) — the manifest's `config:`/`ups:` say exactly which config each
 stretch of data was recorded under, and sealing warns if config changed after the last `up`.
+Deployment directories on one machine share that registry, so a run left open from one is met
+from another. rig names the directory the open run was last brought up from: `rig status` and
+`rig runs` when it is not this one, an `up` that joins the run, and `rig catalog --state open`
+from anywhere (`up_from` in `--json`, for every run). Sealing also refuses while a stack the run
+launched is still running and this `vehicle.yaml` does not declare it — `rig down` here cannot
+stop it — and names the directory whose `rig down --end-run` does (`--force` seals anyway).
 `down --end-run` additionally captures every container's `docker logs` into the run
 (`.rig/logs/<sensor>/<container>.log`) before tearing down — compose down removes the containers, so
 that is the last moment their logs exist. With the bag logger's `graph:` sidecar enabled
@@ -657,6 +663,9 @@ rig run diff <run> <run> [--json]                          # what differs betwee
 rig catalog --tag site: --since 2026-08                     # FIND a run anywhere rig has seen one
                                                            #   (machine registry, imports, fleet-sync
                                                            #   trees, workspaces); --paths feeds verbs
+rig catalog --state open                                    # what is OPEN on this machine, and the
+                                                           #   deployment directory it was last
+                                                           #   brought up from; needs no deployment
 ssh $VEHICLE 'cd ~/ws/v1 && ./run.sh down --end-run'       # stop everything, then seal the session
 scp -r $VEHICLE:<data_dir>/runs/<stamp>_dock-test .        # the whole session, data + manifest
 rig graph <stamp>_dock-test --check                        # topology + declared-vs-observed WARNs

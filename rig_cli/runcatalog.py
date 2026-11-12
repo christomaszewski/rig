@@ -19,6 +19,7 @@ import dataclasses
 import datetime
 import json
 import os
+import sys
 from pathlib import Path
 
 import yaml
@@ -154,6 +155,7 @@ class Entry:
     root: Path
     kind: str           # full | slim:<profile> | link
     replay_of: str | None = None
+    up_from: str | None = None  # the deployment directory of the run's last `up`
 
     def as_dict(self) -> dict:
         d = dataclasses.asdict(self)
@@ -172,7 +174,7 @@ def _entry(run_dir: Path, root: Path, *, open_id: str | None) -> Entry | None:
         doc = {"corrupt": True}
     if not isinstance(doc, dict) or "run" not in doc and "corrupt" not in doc:
         return None
-    from .runs import failure, run_disk_kb, run_tags
+    from .runs import brought_up_from, failure, run_disk_kb, run_tags
     ended = str(doc.get("ended") or "")
     if doc.get("corrupt"):
         state = "corrupt"
@@ -196,7 +198,8 @@ def _entry(run_dir: Path, root: Path, *, open_id: str | None) -> Entry | None:
                  state=state, started=str(doc.get("started") or "?"), ended=ended or "—",
                  disk_kb=run_disk_kb(run_dir, doc),
                  tags=run_tags(doc), path=run_dir, root=root, kind=kind,
-                 replay_of=str(replay["of"]) if isinstance(replay, dict) and replay.get("of") else None)
+                 replay_of=str(replay["of"]) if isinstance(replay, dict) and replay.get("of") else None,
+                 up_from=brought_up_from(doc))
 
 
 def _is_run_dir(d: Path) -> bool:
@@ -361,5 +364,10 @@ def cmd_search(*, query: list[str], tags: list[str], label: str | None, vehicle:
     widths = [max(len(row[i]) for row in table) for i in range(len(headers))]
     for row in table:
         print("  ".join(cell.ljust(widths[i]) for i, cell in enumerate(row)).rstrip())
+    still_open = [e for e in hits if e.state == "OPEN" and e.up_from]
+    if still_open:  # beside the table: the directory to go to for an open run's stacks
+        sys.stdout.flush()
+        for e in still_open:
+            eprint(f"rig catalog: {e.run} is open, last brought up from {e.up_from}")
     eprint(f"{len(hits)} of {len(entries)} run(s)")
     return 0

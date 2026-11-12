@@ -164,7 +164,13 @@ def cmd_down(args, manifest, catalog, descriptors) -> int:
     extra = [n for n in names if not any(s.name == n and s.enabled for s in manifest.sensors)]
     if extra:
         eprint(f"rig down: also {', '.join(extra)} — launched by the open run's session")
+    other = runs_mod.open_run_elsewhere(manifest, getattr(args, "rig_root", None)) if stale else None
     for n in stale:
+        if other:  # launched from another deployment directory: say where `rig down` reaches it
+            eprint(f"rig down: warning: the open run launched '{n}' from {other[1]}, and this "
+                   f"vehicle.yaml does not declare it — its containers (if any) are not torn down "
+                   f"here; `rig down` there stops them")
+            continue
         eprint(f"rig down: warning: the open run launched '{n}', which this vehicle.yaml no longer "
                f"declares — its containers (if any) are not torn down here")
     pairs = _pairs(manifest, descriptors, list(dict.fromkeys(names)), reverse=True)
@@ -250,7 +256,7 @@ def cmd_status(args, manifest, catalog, descriptors) -> int:
     env = dispatch.fleet_env(manifest, descriptors)
     pairs = _pairs(manifest, descriptors, args.names)
     rows = status_mod.gather(pairs, env)
-    run_line = runs_mod.status_line(manifest)
+    run_line = runs_mod.status_line(manifest, getattr(args, "rig_root", None))
     if getattr(args, "format", "table") == "json":  # the machine contract fleet tooling parses
         print(status_mod.as_json(manifest, rows, run_line))
         return 0
@@ -373,6 +379,11 @@ def cmd_runs(args, manifest, catalog, descriptors) -> int:
         return 0
     if rows:
         _print_runs(rows)
+        other = runs_mod.open_run_elsewhere(manifest, getattr(args, "rig_root", None))
+        if other:  # the directory to go to for this run's stacks
+            sys.stdout.flush()
+            eprint(f"rig runs: {other[0]} is open and was last brought up from {other[1]}, "
+                   f"not this directory")
     elif manifest.data_dir:
         print(f"no runs in this deployment's registry ({Path(manifest.data_dir) / 'runs'})")
     if host is not None:

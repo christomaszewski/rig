@@ -188,14 +188,15 @@ def _iso_now() -> str:
     return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
 
 
-def running_projects(manifest: Manifest, *, env=None) -> list[str]:
+def running_projects(manifest: Manifest, *, env=None, also=()) -> list[str]:
     """This manifest's compose projects that are currently up — the rotation/seal guard's evidence.
     EVERY declared row counts, enabled or not: `rig replay` starts the disabled player and any
     disabled source row by explicit name, and a guard that looked only at enabled rows sealed
     the run under a running player (review 2026-09-04, finding 4). Raises RigError when docker
     CAN'T ANSWER (the guard must fail closed, not open); a missing docker binary alone reads as
-    [] (nothing of ours can run without it)."""
-    expected = {project_name(s.name, manifest.vehicle_id) for s in manifest.sensors}
+    [] (nothing of ours can run without it). `also` names further compose projects to look for:
+    the guard passes what the open run launched that this manifest does not declare."""
+    expected = {project_name(s.name, manifest.vehicle_id) for s in manifest.sensors} | set(also)
     try:
         proc = subprocess.run(["docker", "compose", "ls", "-a", "--format", "json"],
                               capture_output=True, text=True, timeout=15, **({"env": env} if env is not None else {}))
@@ -272,19 +273,122 @@ def down_selection(manifest: Manifest, names: list[str]) -> tuple[list[str], lis
     return chosen, [n for n in launched if n not in known]
 
 
-def _guard(manifest: Manifest, force: bool, action: str) -> None:
-    """Refuse rotation/seal while our stacks run — and refuse when we CANNOT TELL (fail closed)."""
+def brought_up_from(doc: dict) -> str | None:
+    """The deployment directory of a run's LATEST `up` (the last `ups:` entry) — where `rig down`
+    reaches what that `up` started. None for a run that was never brought up."""
+    entry = _last_up(doc)
+    return _up_dir(entry) if entry else None
+
+
+def _last_up(doc: dict) -> dict | None:
+    ups = doc.get("ups") if isinstance(doc, dict) else None
+    if not isinstance(ups, list) or not ups or not isinstance(ups[-1], dict):
+        return None
+    return ups[-1]
+
+
+def _up_dir(entry: dict) -> str | None:
+    root = entry.get("root")
+    return root if isinstance(root, str) and root else None
+
+
+def _from_here(entry: dict, root: Path) -> bool:
+    """Was this `ups:` entry written from the deployment at `root`? The same directory, or the
+    same deployment instance under a new path (a tree renamed since). Reads the instance id
+    and never mints one: `status` must not write."""
+    try:
+        here = str(Path(root).resolve())
+    except OSError:
+        here = str(root)
+    if _up_dir(entry) == here:
+        return True
+    try:
+        mine = (Path(root) / "var" / "deployment-id").read_text().strip()
+    except OSError:
+        return False
+    return bool(mine) and entry.get("deployment") == mine
+
+
+def up_elsewhere(doc: dict, root: Path | None) -> str | None:
+    """`brought_up_from` when that `up` came from a deployment other than the one at `root`.
+    None in the run's own deployment, for a run never brought up, and with no `root` to
+    compare (no claim then)."""
+    entry = _last_up(doc)
+    if entry is None or root is None or _from_here(entry, root):
+        return None
+    return _up_dir(entry)
+
+
+def open_run_elsewhere(manifest: Manifest, root: Path | None) -> tuple[str, str] | None:
+    """(run id, directory) when the OPEN run was last brought up from a directory other than
+    `root`. None otherwise and on any registry problem: this feeds notes, never an error."""
+    if not manifest.data_dir or root is None:
+        return None
+    try:
+        cur = current_run(_root(manifest))
+    except RigError:
+        return None
+    if cur is None:
+        return None
+    origin = up_elsewhere(cur[2], root)
+    return (cur[0], origin) if origin else None
+
+
+def _out_of_reach(manifest: Manifest, doc: dict) -> dict[str, dict]:
+    """{compose project: the `ups:` entry that launched it} for everything the run launched
+    that is not one of this manifest's own projects, so `rig down` here cannot stop it: an
+    instance another deployment directory declares, or a row since removed from this one.
+    The project carries the vehicle id the run was opened with."""
+    own = {project_name(s.name, manifest.vehicle_id) for s in manifest.sensors}
+    vehicle_id = doc.get("vehicle_id", manifest.vehicle_id)
+    found: dict[str, dict] = {}
+    ups = doc.get("ups")
+    for entry in ups if isinstance(ups, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        for name in entry.get("stacks") or []:
+            if isinstance(name, str) and (project := project_name(name, vehicle_id)) not in own:
+                found[project] = entry
+    return found
+
+
+def _guard(manifest: Manifest, force: bool, action: str, *, root: Path | None = None,
+           doc: dict | None = None) -> None:
+    """Refuse rotation/seal while our stacks run — and refuse when we CANNOT TELL (fail closed).
+    With the open run's manifest (`doc`), "ours" includes what the run launched that this
+    manifest does not declare: sealing from here would leave it running with nothing pointing
+    at the directory that can stop it."""
     if force:
         return
-    try:
-        live = running_projects(manifest)
+    beyond = _out_of_reach(manifest, doc) if doc else {}
+    try:  # one docker call either way, through the one function the session tests stand in for
+        up = running_projects(manifest, also=beyond) if beyond else running_projects(manifest)
     except RigError as exc:
         raise RigError(f"{action}: {exc} — retry, or --force to rotate anyway (late writes would land "
                        f"in the sealed run)")
+    live = [p for p in up if p not in beyond]
     if live:
+        origin = up_elsewhere(doc, root) if doc else None
         raise RigError(f"{action}: stacks are running ({', '.join(live)}) — a running recording belongs "
                        f"to the run it started in. `rig down` first, or --force to accept late writes "
-                       f"landing in the sealed run")
+                       f"landing in the sealed run"
+                       + (f" (the open run was last brought up from {origin})" if origin else ""))
+    left = [p for p in up if p in beyond]
+    if not left:
+        return
+    one = len(left) == 1
+    it, is_ = ("it", "is") if one else ("them", "are")
+    there = sorted({d for p in left if (d := _up_dir(beyond[p]))
+                    and not (root is not None and _from_here(beyond[p], root))})
+    if there:
+        raise RigError(f"{action}: {', '.join(left)} {is_} still running — this run launched {it} from "
+                       f"{', '.join(there)}, and this vehicle.yaml does not declare {it}, so `rig down` "
+                       f"here cannot stop {it}. `rig down --end-run` there stops {it} and ends the "
+                       f"run, or --force to seal anyway (late writes would land in the sealed run)")
+    raise RigError(f"{action}: {', '.join(left)} {is_} still running — this run launched {it}, and "
+                   f"vehicle.yaml no longer declares {it}, so `rig down` cannot stop {it}. Restore the "
+                   f"row{'' if one else 's'} and `rig down`, or `docker compose -p <project> down`, or "
+                   f"--force to seal anyway (late writes would land in the sealed run)")
 
 
 def current_run(data: Path) -> tuple[str, Path, dict] | None:
@@ -585,6 +689,13 @@ def failure(doc: dict) -> tuple[str, str] | None:
     return str(mark.get("stage") or "startup"), (lines[0][:300] if lines else "no reason recorded")
 
 
+def _say_joined(cur: tuple[str, Path, dict], root: Path) -> None:
+    """An `up` that joins a run last brought up from another deployment directory says so —
+    once: this `up` becomes the run's latest, and the note is not repeated after it."""
+    if (origin := up_elsewhere(cur[2], root)) is not None:
+        eprint(f"rig: joining run {cur[0]}, last brought up from {origin}")
+
+
 def ensure(manifest: Manifest, root: Path) -> str | None:
     """`up`'s guard: make sure an open run exists — create `_auto` if absent. NEVER rotates. Returns the
     open run id, or None when data_dir is unset (feature inert)."""
@@ -592,6 +703,7 @@ def ensure(manifest: Manifest, root: Path) -> str | None:
         return None
     data = _root(manifest)
     if (cur := current_run(data)) is not None:
+        _say_joined(cur, root)
         return cur[0]
     run_id = _open_run(manifest, root, data, None)
     eprint(f"rig: opened run {run_id} (no session was open — label one with `rig new-run <label>`)")
@@ -607,8 +719,9 @@ def new_run(manifest: Manifest, root: Path, label: str | None, *, force: bool = 
         raise RigError(f"new-run: label '{label}' must match [A-Za-z0-9][A-Za-z0-9_-]* "
                        f"(it becomes a directory name)")
     data = _root(manifest)
-    _guard(manifest, force, "new-run")
-    if (cur := current_run(data)) is not None:
+    cur = current_run(data)
+    _guard(manifest, force, "new-run", root=root, doc=cur[2] if cur else None)
+    if cur is not None:
         digest, dep = _live_state(manifest, root)
         _seal(cur[1], None, live_digest=digest, live_deployment=dep)
         eprint(f"rig: sealed run {cur[0]}")
@@ -626,7 +739,7 @@ def end_run(manifest: Manifest, root: Path, *, force: bool = False,
     if cur is None:
         eprint("rig: no active run")
         return None
-    _guard(manifest, force, "end-run")
+    _guard(manifest, force, "end-run", root=root, doc=cur[2])
     digest, dep = _live_state(manifest, root)
     _seal(cur[1], status_text, live_digest=digest, live_deployment=dep)
     _current(data).unlink(missing_ok=True)
@@ -644,6 +757,7 @@ def up_run(manifest: Manifest, root: Path, label: str, *, force: bool = False) -
     # str() both sides: a label like `123` round-trips through YAML as an int in hand-written or
     # sh-generated manifests; a type mismatch must not cause a silent rotation.
     if cur is not None and str(cur[2].get("label", "")) == str(label):
+        _say_joined(cur, root)
         return cur[0]
     return new_run(manifest, root, label, force=force)
 
@@ -938,9 +1052,10 @@ def import_runs(manifest: Manifest, paths: list[str], *, move: bool = False) -> 
     return rc
 
 
-def status_line(manifest: Manifest) -> str | None:
+def status_line(manifest: Manifest, root: Path | None = None) -> str | None:
     """The one-liner for `rig status`'s header (None when the feature is inert). Never raises — a broken
-    registry must not take `status` down with it."""
+    registry must not take `status` down with it. With `root` (the directory `status` runs in), an
+    open run last brought up from ANOTHER deployment directory names that directory."""
     if not manifest.data_dir:
         return None
     try:
@@ -951,4 +1066,6 @@ def status_line(manifest: Manifest) -> str | None:
         return "run: none active"
     run_id, _, doc = cur
     label = doc.get("label") or run_id
-    return f"run: {label} (open since {doc.get('started', '?')}) -> runs/{run_id}"
+    origin = up_elsewhere(doc, root)
+    return (f"run: {label} (open since {doc.get('started', '?')}) -> runs/{run_id}"
+            + (f", last brought up from {origin}" if origin else ""))
