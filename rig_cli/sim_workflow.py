@@ -455,6 +455,10 @@ def execute(root, path, manifest, descriptors, plan, *, label=None, capture_outp
                     _json_write(evidence / "probe-failed.json", dict(stage=stage, **exc.evidence))
                 except OSError as write_error:
                     eprint(f"rig sim: could not save the probe's output: {write_error}")
+            try:  # the listings read the run's manifest, not the session's lifecycle record
+                runs.mark_failed(output_run, stage="startup", error=state["error"])
+            except (OSError, RigError) as write_error:
+                eprint(f"rig sim: could not mark the run as failed: {write_error}")
             state["cleanup_failed"] = []
             # A failed launcher may already have created containers. Attempt every owned
             # instance even if a down launcher raises or the evidence disk is unwritable.

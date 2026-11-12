@@ -172,14 +172,16 @@ def _entry(run_dir: Path, root: Path, *, open_id: str | None) -> Entry | None:
         doc = {"corrupt": True}
     if not isinstance(doc, dict) or "run" not in doc and "corrupt" not in doc:
         return None
-    from .runs import run_disk_kb, run_tags
+    from .runs import failure, run_disk_kb, run_tags
     ended = str(doc.get("ended") or "")
     if doc.get("corrupt"):
         state = "corrupt"
     elif run_dir.name == open_id:
         state = "OPEN"
-    else:
-        state = "sealed" if ended else "unsealed"
+    elif not ended:
+        state = "unsealed"
+    else:  # a sealed run whose session never got going is not a recording to pick up
+        state = "failed" if failure(doc) else "sealed"
     kind = "link" if run_dir.is_symlink() else "full"
     prov = run_dir / ".rig" / "export.yaml"
     if prov.is_file():

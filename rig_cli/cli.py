@@ -329,6 +329,11 @@ def _print_runs(rows: list) -> None:
     widths = [max(len(row[i]) for row in table) for i in range(len(headers))]
     for row in table:
         print("  ".join(cell.ljust(widths[i]) for i, cell in enumerate(row)).rstrip())
+    failed = [r for r in rows if r.failed]
+    if failed:  # beside the table, not in it: why a run that looks recorded is not one
+        sys.stdout.flush()  # so the notes follow the table when both streams go to one pipe
+        for r in failed:
+            eprint(f"rig runs: {r.run} failed at {r.failed[0]}, so no session ran: {r.failed[1]}")
 
 
 def cmd_runs(args, manifest, catalog, descriptors) -> int:
@@ -944,7 +949,7 @@ def build_parser() -> argparse.ArgumentParser:
     er.add_argument("--force", action="store_true", help="seal even while stacks run")
     er.add_argument("names", nargs="*", default=[], help=argparse.SUPPRESS)
 
-    rn = sub.add_parser("runs", help="list the run registry (OPEN / sealed / interrupted)")
+    rn = sub.add_parser("runs", help="list the run registry (OPEN / sealed / failed / interrupted)")
     rn.add_argument("names", nargs="*", default=[], help=argparse.SUPPRESS)
 
     sim = sub.add_parser("sim", help="attach a deployment to a running simulator's ROS graph "
@@ -1196,7 +1201,7 @@ def build_parser() -> argparse.ArgumentParser:
     cs.add_argument("--since", default=None, metavar="DATE",
                     help="started at/after (YYYY, YYYY-MM, YYYY-MM-DD, YYYY-MM-DDTHH:MM)")
     cs.add_argument("--until", default=None, metavar="DATE", help="started at/before")
-    cs.add_argument("--state", default=None, choices=["sealed", "open", "unsealed", "corrupt"])
+    cs.add_argument("--state", default=None, choices=["sealed", "failed", "open", "unsealed", "corrupt"])
     cs.add_argument("--json", action="store_true", dest="as_json", help="machine output")
     cs.add_argument("--paths", action="store_true",
                     help="print run-dir paths only (feeds any run verb: `rig replay $(...)`)")

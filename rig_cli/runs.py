@@ -548,6 +548,26 @@ def _seal(run_dir: Path, status_text: str | None, *, live_digest: str | None = N
     mpath.write_text(yaml.safe_dump(doc, sort_keys=False))
 
 
+def mark_failed(run_dir: Path, *, stage: str, error: str) -> None:
+    """Record in the run's own manifest that its session never got going (`failed:` — the stage,
+    the time and the error). The run still seals and removes like any other: `ended:` keeps its
+    meaning. The listings read the mark, so a failed start is never shown as a plain sealed
+    recording, wherever the run dir is copied."""
+    mpath = run_dir / "manifest.yaml"
+    doc = load_yaml(mpath)
+    doc["failed"] = {"stage": stage, "at": _iso_now(), "error": error}
+    mpath.write_text(yaml.safe_dump(doc, sort_keys=False))
+
+
+def failure(doc: dict) -> tuple[str, str] | None:
+    """(stage, first line of the error) when the run's manifest carries a `failed:` mark."""
+    mark = doc.get("failed")
+    if not isinstance(mark, dict):
+        return None
+    lines = str(mark.get("error") or "").strip().splitlines()
+    return str(mark.get("stage") or "startup"), (lines[0][:300] if lines else "no reason recorded")
+
+
 def ensure(manifest: Manifest, root: Path) -> str | None:
     """`up`'s guard: make sure an open run exists — create `_auto` if absent. NEVER rotates. Returns the
     open run id, or None when data_dir is unset (feature inert)."""
@@ -593,7 +613,9 @@ def end_run(manifest: Manifest, root: Path, *, force: bool = False,
     digest, dep = _live_state(manifest, root)
     _seal(cur[1], status_text, live_digest=digest, live_deployment=dep)
     _current(data).unlink(missing_ok=True)
-    eprint(f"rig: sealed run {cur[0]}")
+    failed = failure(cur[2])
+    eprint(f"rig: sealed run {cur[0]}" +
+           (f", recorded as failed at {failed[0]}: no session ran" if failed else ""))
     return cur[0]
 
 
@@ -613,7 +635,7 @@ def up_run(manifest: Manifest, root: Path, label: str, *, force: bool = False) -
 class RunRow:
     run: str
     label: str
-    state: str  # OPEN | sealed | interrupted | corrupt
+    state: str  # OPEN | sealed | failed | interrupted | corrupt
     started: str
     ended: str
     disk_kb: int | None
@@ -621,6 +643,7 @@ class RunRow:
     linked: bool = False          # a symlinked registry entry (reconstruct's import) — a
     #                               reference to the archive, not a local copy
     tags: tuple[str, ...] = ()    # `rig run tag` — kept in the run's own manifest, travel with it
+    failed: tuple[str, str] | None = None  # (stage, reason) of a session that never got going
 
 
 def run_tags(doc: dict) -> tuple[str, ...]:
@@ -683,13 +706,16 @@ def registry_rows(data: Path) -> list[RunRow]:
                                started="?", ended="?", disk_kb=None))
             continue
         ended = str(doc.get("ended") or "")
-        state = "OPEN" if d.name == open_id else ("sealed" if ended else "interrupted")
+        failed = failure(doc)
+        # A failed start is still OPEN until its session is ended, and unsealed if it never was.
+        state = "OPEN" if d.name == open_id else (
+            "interrupted" if not ended else "failed" if failed else "sealed")
         replay = doc.get("replay")
         rows.append(RunRow(run=d.name, label=str(doc.get("label") or "—"), state=state,
                            started=str(doc.get("started") or "?"), ended=ended or "—",
                            disk_kb=run_disk_kb(d, doc), linked=d.is_symlink(),
                            replay_of=str(replay["of"]) if isinstance(replay, dict)
-                           and replay.get("of") else None, tags=run_tags(doc)))
+                           and replay.get("of") else None, tags=run_tags(doc), failed=failed))
     return rows
 
 
