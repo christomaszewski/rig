@@ -50,6 +50,7 @@ _PLUMBING_SERVICE_SUFFIXES = (
 )
 
 UNASSIGNED = "(unassigned)"  # nodes outside every instance namespace (recorder, tools, rogue nodes)
+PLAYER_NODE = "/rosbag2_player"  # `ros2 bag play`'s node: rosbag2 gives it no namespace to take
 
 
 @dataclass(frozen=True)
@@ -198,21 +199,101 @@ def group_nodes(fqns, instance_names, *, namespaces: dict[str, str] | None = Non
     return groups
 
 
+@dataclass(frozen=True)
+class Placed:
+    """Nodes outside every instance namespace that the run's own record lets rig place: under
+    an instance (`instance`, each node line carrying `note`), or under a heading of their own."""
+    nodes: tuple[str, ...]
+    heading: str = ""
+    instance: str | None = None
+    note: str = ""
+
+
+def _stated_simulator(record) -> tuple[str, set[str], set[str]] | None:
+    """(name, topics it publishes, topics it subscribes) from a run's `simulation:` record, or
+    None when the record is absent or not what rig writes. The name is the recipe's statement."""
+    if not isinstance(record, dict):
+        return None
+    if record.get("provider") == "external":
+        simulator = record.get("simulator")
+        if not isinstance(simulator, dict) or any(
+                not isinstance(simulator.get(key), str) for key in ("name", "version")):
+            return None
+        name = f"{simulator['name']} {simulator['version']}"
+    elif record.get("provider") == "isaac":
+        name = "Isaac"
+    else:
+        return None
+    recipe = record.get("recipe")
+    stated = recipe.get("simulation") if isinstance(recipe, dict) else None
+    topics = {}
+    for direction in ("publishes", "subscribes"):
+        entries = stated.get(direction, []) if isinstance(stated, dict) else []
+        if not isinstance(entries, list) or any(
+                not isinstance(e, dict) or not isinstance(e.get("topic"), str) for e in entries):
+            return None
+        topics[direction] = {e["topic"] for e in entries}
+    return name, topics["publishes"] | {"/clock"}, topics["subscribes"]
+
+
+def place_outside(u: GraphUnion, outside, run: dict, rows) -> list[Placed]:
+    """What the run's manifest lets rig say of nodes outside every instance namespace.
+
+    An attached run names its simulator and the topics the recipe declares for it: an outside
+    node on one of them (or publishing /clock) is listed under that simulator. rig asked the
+    simulator nothing, so the heading says the name is the recipe's and the nodes are inferred.
+    In a replay, rosbag2's player node belongs to the one player instance. Anything else stays
+    UNASSIGNED. Only the human view uses this: ownership, contracts and checks do not.
+    """
+    placed: list[Placed] = []
+    outside = list(outside)
+    players = [row.name for row in rows if row.service == PLAYER_SERVICE]
+    if isinstance(run.get("replay"), dict) and PLAYER_NODE in outside and len(players) == 1:
+        placed.append(Placed(nodes=(PLAYER_NODE,), instance=players[0],
+                             note="rosbag2's player node, which takes no namespace"))
+        outside.remove(PLAYER_NODE)
+    simulator = _stated_simulator(run.get("simulation"))
+    if simulator:
+        name, publishes, subscribes = simulator
+        nodes = tuple(fqn for fqn in outside if any(
+            (e.kind == "pubs" and e.name in publishes) or (e.kind == "subs" and e.name in subscribes)
+            for e in u.nodes[fqn]))
+        if nodes:
+            placed.append(Placed(nodes=nodes, heading=f"{name} (the simulator, as the recipe states it; "
+                                 "its nodes are inferred from the topics declared for it, not verified)"))
+    return placed
+
+
 # --- the derived views -------------------------------------------------------
 
 def render(u: GraphUnion, run_id: str, instance_names, *,
-           namespaces: dict[str, str] | None = None) -> str:
+           namespaces: dict[str, str] | None = None, placed=()) -> str:
     """The human view: nodes grouped by instance, edges tagged pub/sub/srv/cli, plumbing hidden
-    (counted in the footer). Stdout is the report — machine consumers read the epochs themselves."""
+    (counted in the footer). Stdout is the report — machine consumers read the epochs themselves.
+    `placed` (place_outside) moves outside nodes the run's record accounts for out of UNASSIGNED."""
     lines = [f"graph: {run_id} — {_n_epochs(u.epochs)}, {u.first} → {u.last}"]
     groups = group_nodes(u.nodes, instance_names, namespaces=namespaces)
+    notes: dict[str, str] = {}
+    accounted = {fqn for group in placed for fqn in group.nodes} & set(groups.get(UNASSIGNED, ()))
+    if accounted:
+        groups[UNASSIGNED] = [fqn for fqn in groups[UNASSIGNED] if fqn not in accounted]
+        if not groups[UNASSIGNED]:
+            del groups[UNASSIGNED]
+        for group in placed:
+            nodes = [fqn for fqn in group.nodes if fqn in accounted]
+            if not nodes:
+                continue
+            owner = group.instance if group.instance in instance_names else group.heading
+            groups.setdefault(owner, []).extend(nodes)
+            notes.update({fqn: group.note for fqn in nodes if group.note})
     hidden = 0
-    ordered = [n for n in instance_names if n in groups] \
+    headings = [g.heading for g in placed if g.heading in groups]
+    ordered = [n for n in instance_names if n in groups] + headings \
         + ([UNASSIGNED] if UNASSIGNED in groups else [])
     for owner in ordered:
         lines.append(f"  {owner}")
         for fqn in groups[owner]:
-            lines.append(f"    {fqn}")
+            lines.append(f"    {fqn}" + (f"  ({notes[fqn]})" if fqn in notes else ""))
             edges = u.nodes[fqn]
             keep = [e for e in sorted(edges, key=lambda e: (_KIND_RANK[e.kind], e.name, e.type))
                     if not is_plumbing(e)]
@@ -384,7 +465,14 @@ def cmd(manifest, descriptors, *, run_ref: str | None, do_check: bool,
         if not do_check:
             return 0
     else:
-        print(render(u, run_id, list(namespaces), namespaces=namespaces))
+        try:  # the run's own record; a run without one, or with a damaged one, places nothing
+            run = load_yaml(run_dir / "manifest.yaml")
+        except (RigError, OSError):
+            run = {}
+        outside = group_nodes(u.nodes, namespaces, namespaces=namespaces).get(UNASSIGNED, [])
+        print(render(u, run_id, list(namespaces), namespaces=namespaces,
+                     placed=place_outside(u, outside, run if isinstance(run, dict) else {},
+                                          manifest.sensors)))
     if do_check:
         warns = check(u, manifest, descriptors)
         for w in warns:
