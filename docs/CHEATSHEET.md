@@ -306,11 +306,18 @@ rig does not know what the value means, only that it must differ.
   old row until a push reaches it, and a reboot there renders the old value. `rig fleet list`
   shows it: the `ROSTER` column reads `current`, `STALE` or `none` per vehicle. Check it before
   a run, and `rig fleet up` the stale ones.
+- MOVING a value (a spare swap): bring the vehicle it leaves DOWN first, then edit the roster,
+  then `rig fleet up`. A vehicle that is still up when its value moves keeps running on it:
+  the refused `up` stops nothing, and `rig up` there says what is still running. `rig down`,
+  `status` and `logs` keep working on such a vehicle: when its configs no longer render they
+  use the ones its last `up` rendered (`var/rendered/`), and say so.
 - The VEHICLE's rig reads the row, and a baked artifact bundles its own rig: re-bake before using
-  row values. Under `rig fleet up` an older bundled rig does not start: it does not know
-  `up --roster`, and the ground station says so. Booting on its own it ignores row values and
-  comes up on whatever its other tiers say, unless the roster has `unique:`, which it refuses.
-  So list every per-vehicle name there.
+  row values. `rig fleet up` asks each vehicle for its rig version first: one older than v0.2.86
+  is neither sent the roster nor started, and the ground station says to re-bake it. That
+  matters because an older rig refuses EVERY verb, `down` included, once its deployment holds
+  a roster with `unique:`; delete that `fleet.yaml` there if it ever arrives another way.
+  Booting on its own with a roster that has row values and no `unique:`, an older rig ignores
+  them and comes up on whatever its other tiers say. So list every per-vehicle name there.
 
 Sources, most-specific wins: shell (`RIG_VEHICLE_ID`, `RIG_VAR_<name>`) > `vehicle.local.yaml`
 beside vehicle.yaml (bench trees) > **`/etc/rig/vehicle.local.yaml`** (THE machine's identity) >
@@ -362,9 +369,10 @@ rig fleet up --run tuesday-swarm --var gcs_ip=192.168.44.10
                                       #   row's own value, so a `unique:` name is checked first).
                                       #   SIL: ensures the docker network + the shared run-dir
                                       #   VIEW (<data_root>/runs/<label>-<date>/<vehicle> symlinks)
-                                      # spare swap: move `vars: {altitude_band: 3}` to the spare's
-                                      #   row, then `rig fleet up` — the spare renders band 3 and
-                                      #   the vehicle it came from will not start without one
+                                      # spare swap: `rig fleet down uav-03` FIRST, then move
+                                      #   `vars: {altitude_band: 3}` to the spare's row and
+                                      #   `rig fleet up` — the spare renders band 3 and uav-03
+                                      #   will not start without one
 rig fleet down --end-run              # tear down + seal everywhere (full success rms the network)
 rig fleet sync --into fleet-runs      # harvest SEALED runs (ended: = safe) into
                                       #   fleet-runs/<label>/<vehicle>/<run-id> — the SAME tree

@@ -238,6 +238,16 @@ ignorant of what such a value means; it learns only that a named value must diff
   value moved still holds the old row. rig does not chase it (never a control plane); `rig
   fleet list` compares each vehicle's copy with the ground station's and says `STALE`.
 - **No default.** A row without a value the deployment references fails the render, by name.
+- **A value that leaves must not strand its vehicle.** The verbs that act on what is already
+  running (`down`, `status`, `logs`, `end-run`) do not need a fresh render: when a row no
+  longer renders they stand on `var/rendered/<name>.yaml` as the last `up` wrote it (a failed
+  render never touches that file), and an `env:` value that can no longer be resolved is said
+  and left out. Otherwise a vehicle whose value moved while it was up could not be stopped
+  through rig. `up` still refuses, and names the stacks an earlier `up` left running. rig does
+  not stop them itself: bring the vehicle down before moving its value.
+- **A roster is not sent to a rig that cannot read it.** `fleet up` asks each vehicle's entry
+  point for its version before pushing a roster with per-vehicle values. An older rig would
+  ignore its row, and with `unique:` on disk it would refuse every verb, `down` included.
 - **A stale value is an error, not a winner.** The machine file outranks the fleet tier by
   design, so an old `rig provision --var` would silently beat the roster. A row value that the
   machine file or the tree-local file sets differently is a preflight ERROR (`--force` passes);

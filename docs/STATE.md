@@ -138,12 +138,19 @@ current host state.
   (`sources:` in a snapshot's `vars.yaml`, `rig doctor`, bare `rig provision`), and the
   snapshot keeps the machine file as `machine.local.yaml`. `rig provision --export` writes a
   record and `--apply` merges its vars and env into another machine, from the record or from a
-  run. Written and tested on 2026-11-12 with local SIL rows and the ssh/scp shims only: no real
-  vehicle, no real `/etc/rig` under sudo and no live spare swap has exercised it. `rig fleet
+  run. Written on 2026-11-12 and, beyond the suite, run by hand that day over real ssh, scp
+  and rsync against one Linux host holding five vehicles as directories (baked artifacts, a
+  stand-in launcher, one of them on v0.2.85). That trial found two faults, fixed before the
+  release: a vehicle whose value had been moved away while it was up could not be brought
+  down, and a v0.2.85 vehicle that had received a roster with `unique:` refused every verb.
+  `down`, `status`, `logs` and `run end` now stand on the last rendered configs when a tree no
+  longer renders, and `fleet up` asks each vehicle's rig version before it pushes a roster
+  with per-vehicle values. No second host, no running containers, no `/etc/rig` under sudo
+  and no swap between physical vehicles has exercised it. `rig fleet
   up` hands each vehicle the sha256 of the roster it checked (`up --roster`) and the vehicle
-  refuses any other. Known limits: a vehicle whose bundled rig predates this fails under
-  `rig fleet up` (it does not know the flag) but, booting on its own, ignores row values
-  unless the roster has `unique:`, which it refuses; a vehicle keeps the last roster that
+  refuses any other. Known limits: move a value only after bringing its vehicle down, since a
+  vehicle that is still up keeps running on it; a vehicle on an older rig, booting on its
+  own, ignores row values unless the roster has `unique:`; a vehicle keeps the last roster that
   reached it, so after a value moves the vehicle it moved from renders the old one until a
   push reaches it (`rig fleet list` shows `STALE`); `rig reconstruct` does not use the
   captured machine file. See
