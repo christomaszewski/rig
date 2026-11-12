@@ -210,6 +210,17 @@ a network change: when they differ from what the builder was created with, Rig r
 the same name with `docker buildx rm --keep-state`. A build step that fails on name resolution
 ends with a hint saying so.
 
+**One builder for every Rig home on an engine.** The builder is named for the Docker daemon and
+the registry policy, not for `RIG_HOME`, so every Rig home on one engine uses the same builder
+and the same cache. The builder carries a digest of the settings it was created with, as the
+driver option `env.RIG_BUILDER_SETTINGS` that `docker buildx inspect` shows, and each home
+compares it with its own settings. Homes with the same settings never re-create the builder. A
+real change of settings, from any home, re-creates it under its name: the cache is kept, but a
+build running on it at that moment fails and must be run again. Give the homes that share an
+engine the same `RIG_BUILDKITD_CONFIG`, or each will re-create the builder after the other. A
+builder created by Rig v0.2.85 or earlier has no such mark and is judged by each home's own
+record, so a home that has not used it may re-create it once.
+
 Explicit `BUILDX_BUILDER` / `BUILDKIT_HOST` selections and remote/cloud/multinode builders keep their
 build settings and topology; those build servers must already have the required registry access.
 An explicitly selected `docker` builder also needs the containerd image store for attestations;
@@ -237,8 +248,9 @@ in `rig.lock` stay as they were. The kept index carries the attestation of the b
 published it; the index of the build that changed nothing is left untagged in the registry. The
 output marks such images `unchanged`; a new tag of unchanged content resolves to the same index.
 
-**Adopting an image rig did not build (v0.2.76).** Replay refuses an image without a catalog row,
-for example a tag built and pushed by hand. `rig image adopt <registry>/<image>:<tag>` records it
+**Adopting an image rig did not build (v0.2.76).** Replay and `rig sim` refuse an image without a
+catalog row, for example a tag built and pushed by hand, or an `images.base` of your own; the
+refusal names this command. `rig image adopt <registry>/<image>:<tag>` records it
 from the registry's own manifest: its digest, architectures and per-architecture children. The tag
 must be in the deployment's build registry. The row replaces any rows for the same image and tag
 and is marked `adopted` with no source revision; it never copies another row's provenance.

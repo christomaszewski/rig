@@ -117,7 +117,9 @@ version-2 file for simulation and replay when it is stored under `replay/`, pass
 `--recipe replay/NAME.yaml` explicitly to both commands. A second recipe file is unnecessary.
 Check and dry-run inspect and report without starting deployment services or writing generated session state.
 Execution may acquire missing selected images; `--pull always` refreshes them and
-`--pull never` requires the local image cache. Selected launchers must support the same
+`--pull never` requires the local image cache. `rig sim check` and `--dry-run` never pull: when
+a pinned image is not on the host they report it with the `docker pull` that fetches it, and
+`rig sim up` pulls it before it starts anything. Selected launchers must support the same
 `runtime-images` inventory and immutable image pinning used by replay. Rig validates the
 local Docker engine's architecture and the deployment/artifact runtime before launching.
 A configured `data_dir` is required. Select a bag logger to retain a replayable recording;
@@ -133,6 +135,13 @@ defaults to the Python interpreter running Rig; set it to `[python3]` or an expl
 path when ROS is installed in another environment. It is an argument list, not a shell
 command. `timeout_s` bounds discovery and clock observation
 and must be greater than zero and at most 120 seconds.
+
+A probe that finds trouble says so in its result, and Rig lists each issue. A probe that
+returns no result is reported by how it ended: its exit code or signal, or that it was stopped
+after `timeout_s` plus ten seconds; how long it ran; what it printed, if that was not a result;
+and the last lines of its error stream. The advice to set `simulation.probe` is given only when
+the probe could not be run. When the launch gate or the check after startup ends this way, both
+of the probe's streams are kept with the run as `.rig/simulation/probe-failed.json`.
 
 The probe checks its actual ROS distribution, middleware and domain, expected publisher and
 subscriber topic types, and exactly one advancing `/clock` without a backwards jump during
@@ -154,6 +163,18 @@ use `rig down --end-run` so teardown and sealing remain coordinated. Log capture
 saved Docker connection before containers are removed. An incomplete teardown retains its
 session pointer for retry instead of reporting success from launcher exit codes alone.
 If a shared replay session is active instead, `rig sim down` rejects it; use `rig down --end-run`.
+
+**When startup fails.** `rig sim up` opens the run before it starts the first service, so the
+recording has somewhere to go. If a service does not start, or the graph fails verification
+afterwards, Rig stops the services it started, in reverse order, and keeps the session: the run
+stays open until `rig sim down --end-run`. What is left is the run directory with its manifest,
+the `.rig/simulation/` evidence up to the failure (`lifecycle.json` has `status: failed` and the
+error), whatever the logger recorded in the seconds it ran, and the session's frozen configs
+under `var/`. The services' container logs are not among it: the rollback removes the
+containers. The run's manifest carries `failed: {stage, at, error}`. Once sealed, `rig runs`
+and `rig catalog` list the run as `failed`, under the label that was asked for, and `rig runs`
+prints the reason; it is never listed as a plain `sealed` recording. It archives and removes
+like any other run.
 
 Execution writes immutable provider configs under `var/sim/sessions/<id>/` and shared lifecycle
 state under `var/sessions/<id>/state.json`, selected by `var/sessions/current.json`.
@@ -234,22 +255,58 @@ recipe states them. Rig does not ask the simulator what it is running, so a wron
 the recipe is a wrong value in the record. `rig sim down` and bare `rig down` stop the
 session and leave the simulator running.
 
-Two arrangements from the first live use, both for a single host:
+`rig graph` on an attached run lists the simulator's nodes under the simulator the run names,
+not under `(unassigned)`. A node is taken to be the simulator's when it is outside every
+instance namespace and is on a topic the recipe declares for the simulator, or publishes
+`/clock`. The heading says that the name is the recipe's statement and the nodes are inferred:
+Rig has verified neither.
 
-- **Zenoh.** The simulator needs a router before the session starts, and `rig replay` needs
-  the deployment's router among the session's services. Give the simulator its own router on
-  another port, and connect the deployment's router to it with the router's `connect`
-  endpoints. The same recipe, listing the deployment's router, then serves `rig sim` and
-  `rig replay`. Point the probe's Zenoh session at the simulator's router.
+Four arrangements from live use:
+
+- **Zenoh, on one host.** The simulator needs a router before the session starts, and
+  `rig replay` needs the deployment's router among the session's services. Give the simulator
+  its own router on another port, and connect the deployment's router to it with the router's
+  `connect` endpoints. The same recipe, listing the deployment's router, then serves `rig sim`
+  and `rig replay`. Point the probe's Zenoh session at the simulator's router.
 - **A host without ROS.** `simulation.probe` is an argument list, so it can name a wrapper
   that runs Python in a ROS image: for example a script that ends in
   `exec docker run --rm -i --network host -e ROS_DOMAIN_ID -e RMW_IMPLEMENTATION IMAGE python3 "$@"`.
   Rig appends `-c` and the probe's source, and sends the request on standard input.
+- **The simulator on another host.** The simulator's router must listen on an address the
+  stack's host can reach, not on loopback alone, and the deployment's router connects to it
+  there. The probe's Zenoh session must join that router as a client, not as a peer: with
+  `rmw_zenoh`, `ZENOH_CONFIG_OVERRIDE='mode="client";connect/endpoints=["tcp/HOST:PORT"]'` in
+  the probe's wrapper. Sessions are peers by default, and a peer that reaches a router on
+  another host sees none of that router's graph, because peers expect to reach each other
+  directly and the simulator's sessions listen on their own host. The check then reports no
+  clock and no topics although the simulator is running. On one host a peer works, which is
+  why the arrangement above does not show it. The session pins each image by its digest for
+  the host's architecture, so the images must be built or pulled on the stack's host.
+- **A second deployment on one host.** `rmw_zenoh` sessions look for their router at
+  `localhost:7447` unless told otherwise, so two deployments cannot both leave the default
+  alone. Give the second its own ROS domain and its own router port, in the `listen`
+  endpoints of its router's config. Every ROS container of that deployment must then look for
+  the router there, and rig-infra's services have no setting that reaches all of them: the
+  bag logger's graph snapshotter takes none. What works today is a base image with the
+  default moved, named as `images.base` in `vehicle.yaml`:
+
+  ```dockerfile
+  ARG BASE_IMAGE
+  FROM ${BASE_IMAGE}
+  ARG ROUTER_PORT=7457
+  RUN cfg="/opt/ros/${ROS_DISTRO}/share/rmw_zenoh_cpp/config/DEFAULT_RMW_ZENOH_SESSION_CONFIG.json5" \
+   && sed -i "s#\"tcp/localhost:7447\"#\"tcp/127.0.0.1:${ROUTER_PORT}\"#" "$cfg" \
+   && grep -q "\"tcp/127.0.0.1:${ROUTER_PORT}\"" "$cfg"
+  ```
+
+  Rig did not build that image. Once `rig build` has written a build catalog to `rig.lock`,
+  record it with `rig image adopt <image>:<tag>`, or `rig sim check` refuses it as an image the
+  catalog does not cover. On a host where port 7447 is free, none of this is needed.
 
 [examples/external-attach](../examples/external-attach/README.md) has a recipe to copy.
 Automated tests cover this provider's recipes, plans, records and session lifecycle. It has
-been run against one live simulator on one host; [State](STATE.md) records what was and was
-not exercised.
+been run against two live simulators, on one host and across two; [State](STATE.md) records
+what was and was not exercised.
 
 ## Frames, versions and current limits
 

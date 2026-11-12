@@ -723,7 +723,15 @@ sudo rig provision --registry localhost:5000  # the bench's image mirror (images
 
 `rig run import <path…>` adopts scp'd/downloaded runs into the registry (copy by default) so
 id-based verbs and TAB completion cover them; `rig run rm <id…>` reclaims disk (sealed runs
-freely, interrupted with --force, the OPEN run never).
+freely, interrupted with --force, the OPEN run never). It removes a run whole or not at all: a
+run that holds files this user cannot remove is refused before anything is deleted, with the
+`chown` that hands it over. The stock bag logger writes its bags as root, so this is the usual
+case for a recorded run removed by a user.
+
+`rig runs` lists a sealed run whose session never started as `failed`, not `sealed`, and prints
+the reason beside the table: today that is a `rig sim up` whose startup failed. The mark is
+`failed:` in the run's own manifest, so it travels with the run; `rig catalog --state failed`
+finds such runs.
 
 **Where imports go, and who sees them** (rig ≥ v0.2.55). The registry is the box's — this
 user's (`rig setup --data-dir`) or the machine's (`sudo rig provision --data-dir`) — so a run
