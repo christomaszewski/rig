@@ -24,7 +24,11 @@ that seals the wrong run. ``manifest.yaml`` is the machine contract: ``ended:`` 
 Config snapshots: every non-dry-run `up` captures the EFFECTIVE config (vehicle.yaml + lock + resolved
 vars + rendered per-instance configs) into ``runs/<id>/.rig/config/<digest12>/`` — content-addressed,
 so an unchanged config writes nothing — and appends an ``ups:`` event to the manifest. The generated
-``vars.yaml`` holds the resolved values and, under ``sources``, the tier that supplied each one. The capture
+``vars.yaml`` holds the resolved values and, under ``sources``, the tier that supplied each one; the
+machine identity file (/etc/rig/vehicle.local.yaml), when there is one, is copied verbatim as
+``machine.local.yaml`` — the provisioning this run was brought up under, which `rig provision --apply
+<run>` can hand to another vehicle. Its ``env:`` values may be sensitive; they were already recorded,
+resolved, in vars.yaml, so the copy exposes nothing new. The capture
 point is `up`, not open/seal: every config that governed recorded data was live at some `up`, while the
 tree at seal time may contain edits that never ran — so sealing only DIRTY-CHECKS (flags, never copies).
 The check is gated on a per-deployment-INSTANCE id (``var/deployment-id``, minted lazily; var/ is never
@@ -57,13 +61,15 @@ import yaml
 from . import RigError, __version__
 from .common import eprint, load_yaml
 from .lock import sha256_bytes
-from .manifest import Manifest, project_name
+from .manifest import Manifest, machine_file, project_name
 
 _LABEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 # What _collect_config gathers, as a number: bump it whenever the set (or the content of a
 # generated member) changes. 1 (unstamped entries, rig <= 0.2.85): the tree's files, vars.yaml
-# with values only, rendered configs. 2: vars.yaml names each value's source tier.
+# with values only, rendered configs. 2: vars.yaml names each value's source tier, and the
+# machine identity file joins as machine.local.yaml.
 CAPTURE_SET = 2
+MACHINE_COPY = "machine.local.yaml"  # never `vehicle.local.yaml`: that name is the tree's own file
 
 
 def _remember(data: Path) -> None:
@@ -324,14 +330,17 @@ def _collect_config(manifest: Manifest, root: Path) -> dict[str, bytes]:
     tree ⇒ a snapshot is meaningless); the rest joins when present. vars.yaml is generated: the
     RESOLVED var/env context and, under `sources`, the tier each var came from — the trace of the
     contributions from outside the tree (machine-local identity in /etc/rig, RIG_VAR_* from the
-    shell, a roster row). Rendered configs come off the MATERIALIZED manifest rows, never a
-    var/rendered glob (stale files linger for removed instances). Changing what this returns
-    changes every digest: bump CAPTURE_SET with it."""
+    shell, a roster row). The machine file itself joins as machine.local.yaml when it exists
+    (RIG_VEHICLE_LOCAL names it for a simulated machine). Rendered configs come off the
+    MATERIALIZED manifest rows, never a var/rendered glob (stale files linger for removed
+    instances). Changing what this returns changes every digest: bump CAPTURE_SET with it."""
     files = {"vehicle.yaml": (root / "vehicle.yaml").read_bytes()}
     for name in ("vehicle.local.yaml", "services.yaml", "rig.lock",
                  "fleet.yaml"):  # `fleet up` pushes the roster here — the run records its fleet
         if (path := root / name).is_file():
             files[name] = path.read_bytes()
+    if (machine := machine_file()).is_file():  # verbatim: the record must be the file, not a re-dump
+        files[MACHINE_COPY] = machine.read_bytes()
     files["vars.yaml"] = yaml.safe_dump(
         {"vars": dict(manifest.vars), "env": manifest.extra_env,
          "sources": manifest.var_sources}, sort_keys=True).encode()
