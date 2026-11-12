@@ -60,6 +60,14 @@ def _brief(value, limit: int = 48) -> str:
     return text if len(text) <= limit else text[:limit - 1] + "…"
 
 
+def shell_overrides(manifest: Manifest) -> list[str]:
+    """A sentence for each roster row value the shell tier outranks on this invocation — an
+    explicit choice, so it is said (doctor warns, `up` prints it) and never blocked."""
+    return [f"{clash.name}: the shell (RIG_VAR_{clash.name}) sets {clash.value!r} over "
+            f"{clash.row}'s {clash.row_value!r}, for this invocation only"
+            for clash in manifest.row_overrides if clash.tier == "shell"]
+
+
 def collect(
     manifest: Manifest, catalog: dict[str, ServiceEntry], descriptors: dict[str, Descriptor],
     *, configs: dict | None = None,
@@ -87,12 +95,9 @@ def collect(
     # A roster row's value outranked by this vehicle's own files: the roster says one thing and
     # the vehicle would run on another, which nobody reading the roster can see. The machine
     # file and the tree-local file block; the shell is one invocation's explicit choice.
+    issues += [Issue(WARN, note) for note in shell_overrides(manifest)]
     for clash in manifest.row_overrides:
-        if clash.tier == "shell":
-            issues.append(Issue(WARN, f"{clash.name}: the shell (RIG_VAR_{clash.name}) sets "
-                                      f"{clash.value!r} over {clash.row}'s {clash.row_value!r}, "
-                                      f"for this invocation only"))
-        else:
+        if clash.tier != "shell":
             issues.append(Issue(ERROR, f"{clash.name}: {clash.tier} sets {clash.value!r}, but "
                                        f"{clash.row} sets {clash.row_value!r} — the vehicle's own "
                                        f"file outranks the roster, so it would run on "

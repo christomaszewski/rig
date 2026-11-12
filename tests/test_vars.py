@@ -540,9 +540,11 @@ def test_stale_higher_tier_value_blocks_up_and_a_shell_override_is_only_reported
         assert rc == 1 and "vehicle.local.yaml" in err and "altitude_band" in err, err
     (root / "vehicle.local.yaml").unlink()
     with _env(RIG_VEHICLE_LOCAL=_NO_MACHINE, RIG_VEHICLE_ID=None, RIG_VAR_altitude_band="50"):
-        rc, err = up()                                  # one invocation, on purpose: allowed…
+        rc, err = up()                                  # one invocation, on purpose: say so, go on
         assert rc == 0, err
-        rc, err = rig("doctor")                         # …and doctor says so, without failing
+        said = next((ln for ln in err.splitlines() if "altitude_band" in ln), "")
+        assert "shell" in said and "50" in said and "30" in said, err
+        rc, err = rig("doctor")                         # doctor says it too, as a warning
         assert rc == 0, err
         said = next((ln for ln in err.splitlines() if "[!]" in ln and "altitude_band" in ln), "")
         assert "shell" in said and "50" in said and "30" in said, err

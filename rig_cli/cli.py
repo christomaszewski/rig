@@ -104,6 +104,8 @@ def cmd_up(args, manifest, catalog, descriptors) -> int:
         return 1
     if manifest.ros.domain_warning:  # a bench must not join the vehicle's domain unnoticed
         eprint(f"rig: warning: {manifest.ros.domain_warning}")
+    for note in doctor_mod.shell_overrides(manifest):  # one invocation's choice: said, not blocked
+        eprint(f"rig: note: {note}")
     env = dispatch.fleet_env(manifest, descriptors)
     if args.target_state:  # --standby/--active: the up-dispatch-only posture token (fleet_env pops
         env["RIG_TARGET_STATE"] = args.target_state  # it on every other verb; launchers honor it at
