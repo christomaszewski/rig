@@ -15,6 +15,12 @@ relocated build images and hard-coded ROS settings that it used to pass.
 Rig **v0.2.85** lets `rig sim` attach to a simulator other than Isaac through the experimental
 `external` provider, recording the simulator the recipe names, and no longer seals an
 untouched session's run as if its configuration had been edited.
+Rig **v0.2.86** puts per-vehicle values in the fleet roster, where `rig fleet` refuses a
+duplicate, hands a vehicle's provisioned values to its replacement with `rig provision --export`
+and `--apply`, and compares two runs' records with `rig run diff`. A `rig sim` probe no longer
+loses its result to the middleware, and an attach that fails says what went wrong and is not
+listed as a recording. A vehicle reads its roster row with its own bundled rig: re-bake before
+putting values in roster rows.
 Use the Rig executable shipped with your deployment; updating another installation does not
 upgrade a baked artifact. Simulator attachment, Isaac's and an external simulator's, remains
 explicitly **experimental**.
@@ -66,6 +72,7 @@ totals should not be read as current operator requirements:
 - [v0.2.83 release notes](releases/v0.2.83.md) (preparation acquires replay runtime images)
 - [v0.2.84 release notes](releases/v0.2.84.md) (service contract, rigification guide and stricter certify)
 - [v0.2.85 release notes](releases/v0.2.85.md) (external simulation provider and session seal fix)
+- [v0.2.86 release notes](releases/v0.2.86.md) (roster values, provisioning records, run comparison and simulation attach fixes)
 - [Coordinated replay readiness, 2026-10-27](releases/coordinated-replay-readiness-2026-10-27.md)
 
 The release readiness report establishes replay evidence on its stated machines/versions.

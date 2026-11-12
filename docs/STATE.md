@@ -1,8 +1,9 @@
 # rig — project state & handoff (resume here)
 
-Released checkpoint: **v0.2.85 — external simulation provider and session seal fix**,
-reviewed **2026-11-12**. Use the [documentation index](README.md) to choose an operator
-workflow. The dated entries below are historical observations, not the current host state.
+Released checkpoint: **v0.2.86 — roster values, provisioning records, run comparison and
+simulation attach fixes**, reviewed **2026-11-12**. Use the [documentation index](README.md)
+to choose an operator workflow. The dated entries below are historical observations, not the
+current host state.
 
 - **v0.2.83 preparation improvement:** real `replay prepare` acquires the recipe's runtime
   images using `--pull missing|always|never`, defaulting to `missing`, before image-dependent
@@ -85,7 +86,7 @@ workflow. The dated entries below are historical observations, not the current h
   changed by this. See the
   [reference](SIMULATION.md#an-external-simulator),
   [example](../examples/external-attach/README.md) and [v0.2.85](releases/v0.2.85.md).
-- **v0.2.86 simulation attach fixes (prepared 2026-11-12; not tagged):** fixes for what the
+- **v0.2.86 simulation attach fixes:** fixes for what the
   second simulator and the second host showed, each with a test that fails on v0.2.85. The
   Rig CLI only.
   - *The probe's result survives the middleware.* The failed startups above had two causes,
@@ -120,7 +121,7 @@ workflow. The dated entries below are historical observations, not the current h
   with a manifest rebuilt from the saved session, which holds no vars. Found on the first
   live use of `rig sim`; covered by `tests/test_session_seal.py`, and confirmed live on
   2026-11-12 (an untouched session now seals without the flag).
-- **v0.2.86 run comparison (prepared 2026-11-12; not tagged):** `rig run diff A B` says what
+- **v0.2.86 run comparison:** `rig run diff A B` says what
   differs between two runs' records: packages, images by per-architecture digest, the
   simulation block, values and their sources, the machine file and rendered configs. It is
   read-only and exits 0, 1 or 2 as `diff` does. An index digest that differs over the same
@@ -128,8 +129,7 @@ workflow. The dated entries below are historical observations, not the current h
   hand on three v0.2.85 runs of one deployment; the suite uses written runs. It does not
   compare recorded data, logs or probes, and does not verify a snapshot against its name.
   See [v0.2.86](releases/v0.2.86.md).
-- **v0.2.86 per-vehicle roster values and provisioning records (version and notes prepared
-  2026-11-12; not tagged).**
+- **v0.2.86 per-vehicle roster values and provisioning records.**
   Roster rows take `vars:`; a vehicle reads its own row from the pushed fleet.yaml, above the
   fleet-level `vars:` and below its machine file. `unique:` lists names no two vehicles may
   share a value for, checked across the whole roster with `--var` applied; duplicate ids are
