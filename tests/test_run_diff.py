@@ -44,6 +44,7 @@ def _spec(**over) -> dict:
         "child": _sha("a1"), "index": _sha("b1"),      # the image, and this build's index of it
         "vars": {"rate_hz": 2, "vehicle": "bench-01", "vehicle_id": 7},
         "sources": None, "machine": None, "horizon_s": 10, "config": "aaa000000001",
+        "held": None,                                  # what the daemon said beyond the index digest
     }
     spec.update(over)
     return spec
@@ -102,9 +103,11 @@ def _write_run(registry: pathlib.Path, spec: dict) -> pathlib.Path:
                 "source": {"path": "zenoh-router", "repo": "https://example.org/infra.git", "rev": "eeee00000001"}}},
         "registries": {"lab": {"commit": "eeee00000003", "type": "local-dir", "path": "/home/bench/registry"}},
         "schema": 1}, sort_keys=True))
-    (run / ".rig" / "images.yaml").write_text(yaml.safe_dump({
-        "images": {BASE: f"localhost:5000/fleet-ros@{_sha('e1')}",
-                   PLANNER: f"localhost:5000/planner@{spec['index']}"}, "schema": 1}, sort_keys=True))
+    images = {"images": {BASE: f"localhost:5000/fleet-ros@{_sha('e1')}",
+                         PLANNER: f"localhost:5000/planner@{spec['index']}"}, "schema": 1}
+    if spec["held"] is not None:
+        images["held"] = {PLANNER: spec["held"]}
+    (run / ".rig" / "images.yaml").write_text(yaml.safe_dump(images, sort_keys=True))
     return run
 
 
@@ -270,6 +273,45 @@ def test_an_image_its_lock_does_not_describe_is_not_called_the_same():
     rc, doc = _diff(a, a2)                                           # each other; A ran something else
     assert rc == 1 and ("images", PLANNER) in _found(doc, "differs"), doc
     assert ("images", PLANNER) not in _found(doc, "index_only"), doc
+
+
+def test_the_image_the_daemon_held_settles_what_an_index_digest_cannot():
+    """A run may record, next to the index digest, which per-platform manifest the daemon held
+    (`held:` in .rig/images.yaml). That is the image itself: two runs that held one manifest ran
+    one image whatever their index digests and locks say, and two that held different ones did
+    not. A build that keeps an unchanged image's earlier index in rig.lock leaves exactly this:
+    a daemon index the lock does not record, over the image the lock describes."""
+    def held(manifest=None, image_id=None) -> dict:
+        doc = {"id": image_id or _sha("1d"), "platform": "linux/amd64"}
+        if manifest:
+            doc["manifest"] = manifest
+        return doc
+
+    def pair(held_a, held_b, child_b=_sha("a1")):
+        registry = pathlib.Path(tempfile.mkdtemp()) / "data"
+        a = _write_run(registry, _spec(held=held_a))
+        _held(a, PLANNER, f"localhost:5000/planner@{_sha('f8')}")    # an index A's lock does not record
+        b = _write_run(registry, _spec(stamp="20260301T100500Z", label="b", config="aaa000000005",
+                                       index=_sha("b5"), child=child_b, held=held_b))
+        return _diff(a, b)
+
+    rc, doc = pair(None, None)                                       # nothing more recorded: v0.2.86
+    assert rc == 1 and ("images", PLANNER) in _found(doc, "differs"), doc
+    rc, doc = pair(held(_sha("a1")), held(_sha("a1")))               # one manifest: one image
+    assert rc == 0 and ("images", PLANNER) in _found(doc, "index_only"), doc
+    assert not any("rig.lock" in note for note in doc["notes"]), doc["notes"]
+    rc, doc = pair(held(_sha("a1")), held(_sha("a9")))               # two manifests: two images,
+    assert rc == 1 and ("images", PLANNER) in _found(doc, "differs"), doc   # though the locks agree
+    assert ("images", PLANNER) not in _found(doc, "index_only"), doc
+    rc, doc = pair(held(_sha("a1")), None)                           # only A says: its manifest is the
+    assert rc == 0 and ("images", PLANNER) in _found(doc, "index_only"), doc  # one its lock lists,
+    rc, doc = pair(held(_sha("a9")), None)                           # ...or it is not
+    assert rc == 1 and ("images", PLANNER) in _found(doc, "differs"), doc
+    # a daemon that cannot name the manifest still gives docker's image id
+    rc, doc = pair(held(image_id=_sha("c7")), held(image_id=_sha("c7")))
+    assert rc == 0 and ("images", PLANNER) in _found(doc, "index_only"), doc
+    rc, doc = pair(held(image_id=_sha("c7")), held(image_id=_sha("c8")))
+    assert rc == 1 and ("images", PLANNER) in _found(doc, "differs"), doc    # back to the lock rule
 
 
 def test_runs_resolve_by_path_anywhere_and_by_id_or_label_inside_a_deployment():
