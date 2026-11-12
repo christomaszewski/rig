@@ -191,6 +191,26 @@ class RuntimeImages(unittest.TestCase):
             row[field] = previous
         self.assertEqual(self.docker_calls("pull"), [])
 
+    def test_an_image_outside_the_catalog_names_adoption_whatever_the_session(self):
+        """The inventory serves rig sim as well as replay, and adoption is the remedy that works
+        for an image rig did not build."""
+        self.catalog()
+        self.responses["cam"]["roles"] = {}
+        self.responses["cam"]["images"] = ["localhost:5000/base-ros:gz"]
+        with self.assertRaises(RigError) as raised:
+            self.inventory()
+        message = str(raised.exception)
+        self.assertIn("localhost:5000/base-ros:gz", message)
+        self.assertIn("`rig image adopt localhost:5000/base-ros:gz`", message)
+        self.assertNotIn("Replay", message)
+        self.assertNotIn("replay", message)
+        # adopt takes the tag a deployment refers to, never a digest
+        self.responses["cam"]["images"] = ["localhost:5000/base-ros@" + OTHER_ID]
+        with self.assertRaises(RigError) as raised:
+            self.inventory()
+        self.assertIn("`rig image adopt localhost:5000/base-ros:<tag>`", str(raised.exception))
+        self.assertEqual(self.docker_calls("pull"), [])
+
     def test_cold_cache_proposal_is_read_only_and_acquisition_pulls_once(self):
         self.second_instance()
         inventory = self.inventory()
