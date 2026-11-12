@@ -633,6 +633,30 @@ def test_unique_refuses_a_value_it_cannot_resolve_and_leaves_unrelated_ones_alon
                      _row(7, "uav-07", altitude_band=40)]) == ""     # not this check's business
 
 
+def test_unique_refuses_roster_vars_that_authoritative_vehicle_fields_can_replace():
+    # A supplied var is not necessarily the value a vehicle will render: these names come
+    # from its manifest/machine fields, or are derived after vars have been resolved.
+    for name, values in (("ros_domain_id", (3, 7)), ("platform", ("jp7", "cpu")),
+                         ("arch", ("arm64", "amd64")), ("data_dir", ("/a", "/b"))):
+        rows = [_row(3, "uav-03", **{name: values[0]}),
+                _row(7, "uav-07", **{name: values[1]})]
+        said = _refusal(rows, unique=[name])
+        assert name in said and "uav-03" in said, (name, said)
+        for row in rows:
+            row["vars"]["altitude_band"] = "{{step}}"
+            row["vars"]["step"] = "{{" + name + "}}"
+        said = _refusal(rows)
+        assert name in said and "altitude_band" in said, (name, said)
+    # Explicit fleet_peer_ids is honored by the vehicle; other vars are irrelevant unless
+    # the unique value consumes them. Vehicle identity remains available for interpolation.
+    assert _refusal([_row(3, "uav-03", fleet_peer_ids=[7], platform="jp7"),
+                     _row(7, "uav-07", fleet_peer_ids=[3], platform="jp7")],
+                    vars={"altitude_band": "{{fleet_peer_ids}}"}) == ""
+    assert _refusal([_row(3, "uav-03", ros_domain_id=42),
+                     _row(7, "uav-07", ros_domain_id=42)],
+                    vars={"altitude_band": "{{vehicle_id}}0"}) == ""
+
+
 def test_fleet_up_var_is_applied_before_unique_values_are_resolved():
     trees = {name: _band_tree(name) for name in ("uav-03", "uav-07")}
     data_root = pathlib.Path(tempfile.mkdtemp()) / "sil-data"
@@ -1016,6 +1040,31 @@ def test_a_moved_value_another_var_is_built_from_does_not_block_teardown():
     assert "ended:" in (run_dir / "manifest.yaml").read_text()
     rendered = yaml.safe_load((trees["uav-03"] / "var" / "rendered" / "sim.yaml").read_text())
     assert rendered["band"] == 3                                    # torn down as it was started
+
+
+def test_running_verbs_do_not_dispatch_with_an_unresolved_vehicle_id():
+    tree = _remote_band_tree("uav-07", 7)
+    local = tree / "vehicle.local.yaml"
+    identity = yaml.safe_load(local.read_text())
+    identity.update(vehicle_id="{{assignment}}", vars={"assignment": 7})
+    local.write_text(yaml.safe_dump(identity))
+    (tree / "config/infra/sim.yaml").write_text("service: simsvc\nname: sim\nrate: 1\n")
+    service = pathlib.Path(yaml.safe_load((tree / "services.yaml").read_text())
+                           ["services"]["simsvc"]["path"])
+    calls = service / "calls.log"
+    import shlex
+    (service / "sim-up").write_text(
+        '#!/bin/sh\nprintf "%s %s\\n" "$2" "$COMPOSE_PROJECT_NAME" >> '
+        + shlex.quote(str(calls)) + '\n')
+    rc, _, err = _run("--root", str(tree), "up")
+    assert rc == 0 and "up sim-vehicle-7" in calls.read_text(), err
+    before = calls.read_text()
+    identity["vars"] = {}
+    local.write_text(yaml.safe_dump(identity))
+    for argv in (("status", "--format", "json"), ("down",), ("logs",)):
+        rc, out, err = _run("--root", str(tree), *argv)
+        assert rc == 1 and "vehicle_id" in err and "unresolved" in err, (argv, rc, out, err)
+        assert calls.read_text() == before, (argv, calls.read_text())
 
 
 def test_fleet_list_shows_row_values():

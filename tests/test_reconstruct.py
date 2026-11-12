@@ -115,11 +115,12 @@ def test_capture_rides_open_and_stamps_manifest():
 
 
 _STORE_SHIM = r'''#!/bin/sh
-# A daemon that holds one image under index $SHIM_INDEX. With $SHIM_CHILD set it can also say
-# which linux/amd64 manifest that is (the containerd image store); without, it cannot.
-[ -n "$SHIM_INDEX" ] || exit 1
+# A daemon that holds an image with $SHIM_ID or $SHIM_INDEX. A local build may have an id
+# without a repository digest. $SHIM_CHILD adds the containerd store's platform manifest.
+[ -n "${SHIM_ID:-$SHIM_INDEX}" ] || exit 1
 case "$*" in
   "inspect --format {{json .RepoDigests}} "*)
+    [ -n "$SHIM_INDEX" ] || { echo '[]'; exit 0; }
     echo "[\"localhost:5000/planner@$SHIM_INDEX\"]"; exit 0 ;;
   "image inspect --format {{.Id}} {{.Os}}/{{.Architecture}} "*)
     echo "${SHIM_ID:-$SHIM_INDEX} linux/amd64"; exit 0 ;;
@@ -135,8 +136,7 @@ exit 1
 def test_capture_records_the_image_behind_the_index_the_daemon_holds():
     # An index digest is new on every build; the per-platform manifest under it is the image.
     # Where the daemon can name that manifest the capture records it beside the index digest;
-    # where it cannot, docker's own image id. An image the daemon does not hold stays null,
-    # and nothing more is asked about it.
+    # where it cannot, docker's own image id. An image the daemon does not hold stays null.
     shim = pathlib.Path(tempfile.mkdtemp())
     (shim / "docker").write_text(_STORE_SHIM)
     (shim / "docker").chmod(0o755)
@@ -154,7 +154,29 @@ def test_capture_records_the_image_behind_the_index_the_daemon_holds():
         doc = bake.image_record([ref])
         assert doc["held"] == {ref: {"id": config, "platform": "linux/amd64"}}, doc
         del os.environ["SHIM_INDEX"]
+        del os.environ["SHIM_ID"]
         assert bake.image_record([ref]) == {"schema": 1, "images": {ref: None}}
+    finally:
+        for key, value in old.items():
+            os.environ.pop(key, None) if value is None else os.environ.__setitem__(key, value)
+
+
+def test_capture_records_local_image_id_without_repo_digest():
+    # A classic-store local build is runnable before its first push. Its RepoDigests is empty,
+    # but its image id still identifies exactly what the daemon holds.
+    shim = pathlib.Path(tempfile.mkdtemp())
+    (shim / "docker").write_text(_STORE_SHIM)
+    (shim / "docker").chmod(0o755)
+    ref, config = "planner:dev", "sha256:" + "c" * 64
+    old = {k: os.environ.get(k) for k in ("PATH", "SHIM_INDEX", "SHIM_CHILD", "SHIM_ID")}
+    os.environ["PATH"] = f"{shim}:{old['PATH']}"
+    try:
+        os.environ.pop("SHIM_INDEX", None)
+        os.environ.pop("SHIM_CHILD", None)
+        os.environ["SHIM_ID"] = config
+        doc = bake.image_record([ref])
+        assert doc["images"] == {ref: None}, doc
+        assert doc.get("held") == {ref: {"id": config, "platform": "linux/amd64"}}, doc
     finally:
         for key, value in old.items():
             os.environ.pop(key, None) if value is None else os.environ.__setitem__(key, value)

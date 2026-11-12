@@ -485,6 +485,34 @@ def test_a_unique_value_built_from_the_vehicle_name_needs_the_rosters_name():
         assert rc == 0, err
 
 
+def test_a_templated_vehicle_name_is_checked_after_it_resolves():
+    root = _deployment("vehicle: t\nvehicle_id: 3\nsensors: []\n",
+                       files={"services.yaml": "services: {}\n"})
+    (root / "fleet.yaml").write_text(_SWARM_BUILT.replace(
+        '"{{spacing}}{{vehicle_id}}"', '"band-{{vehicle}}"'))
+    machine = _machine('vehicle: "{{call_sign}}"\nvars: {call_sign: wrong-name}\n')
+    with _env(RIG_VEHICLE_LOCAL=str(machine), RIG_VEHICLE_ID=None, RIG_VEHICLE_NAME=None):
+        rc, err = _preflight(root)
+        assert rc == 1 and "preflight failed" in err, err
+        assert "uav-03" in err and "wrong-name" in err and "altitude_band" in err, err
+        machine.write_text('vehicle: "{{call_sign}}"\nvars: {call_sign: uav-03}\n')
+        rc, err = _preflight(root)
+        assert rc == 0, err
+
+
+def test_tolerant_load_keeps_unresolved_vehicle_names_behind_the_identity_gate():
+    from rig_cli.manifest import require_identity
+    root = _deployment('vehicle: "{{call_sign}}"\nvehicle_id: 7\nsensors: []\n')
+    with _env(RIG_VEHICLE_LOCAL=_NO_MACHINE, RIG_VEHICLE_ID=None, RIG_VEHICLE_NAME=None):
+        manifest = load_manifest(root, tolerate_vars=True)
+        try:
+            require_identity(manifest, what="running verb", tolerate_env=True)
+        except RigError as exc:
+            assert "vehicle" in str(exc) and "unresolved" in str(exc), exc
+        else:
+            raise AssertionError("a running verb accepted an unresolved vehicle name")
+
+
 def test_var_sources_names_the_tier_that_supplied_each_value():
     machine = pathlib.Path(tempfile.mkdtemp()) / "vehicle.local.yaml"
     root = _deployment("vehicle: t\nvehicle_id: 1\nvars: {band: 1, only_here: base}\nsensors: []\n")

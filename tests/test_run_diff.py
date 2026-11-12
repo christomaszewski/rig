@@ -314,6 +314,66 @@ def test_the_image_the_daemon_held_settles_what_an_index_digest_cannot():
     assert rc == 1 and ("images", PLANNER) in _found(doc, "differs"), doc    # back to the lock rule
 
 
+def _two_platform_runs(index_b: str) -> tuple[pathlib.Path, pathlib.Path]:
+    """Both locks list the same multiarch image; each run held a different platform of it."""
+    registry = pathlib.Path(tempfile.mkdtemp()) / "data"
+    a = _write_run(registry, _spec(held={
+        "id": _sha("b1"), "platform": "linux/amd64", "manifest": _sha("a1")}))
+    b = _write_run(registry, _spec(stamp="20260301T100500Z", label="b", config="aaa000000005",
+                                   index=index_b, held={
+                                       "id": index_b, "platform": "linux/arm64", "manifest": _sha("a2")}))
+    for run in (a, b):
+        manifest = yaml.safe_load((run / "manifest.yaml").read_text())
+        path = run / ".rig" / "config" / manifest["config"] / "rig.lock"
+        lock = yaml.safe_load(path.read_text())
+        lock["build_catalog"][PLANNER]["children"]["arm64"] = _sha("a2")
+        lock["build_catalog"][PLANNER]["architectures"] = ["amd64", "arm64"]
+        path.write_text(yaml.safe_dump(lock, sort_keys=True))
+    return a, b
+
+
+def _assert_platform_difference(a: pathlib.Path, b: pathlib.Path) -> None:
+    rc, doc = _diff(a, b)
+    assert rc == 1, doc
+    assert any(c["section"] == "images" and (c["a"], c["b"]) == ("linux/amd64", "linux/arm64")
+               for c in doc["differs"]), doc
+    assert any(c["section"] == "images" and (c["a"], c["b"]) == (_sha("a1"), _sha("a2"))
+               for c in doc["differs"]), doc
+    assert ("images", PLANNER) not in _found(doc, "index_only"), doc
+
+
+def test_one_index_does_not_hide_different_held_platform_images():
+    # Equal multiarch index digests and equal containerd image ids do not identify which
+    # platform ran. The new held record supplies that distinction even with no arch in the tree.
+    _assert_platform_difference(*_two_platform_runs(_sha("b1")))
+
+
+def test_equal_lock_children_do_not_override_different_held_platforms():
+    # Both locks vouch for both architecture images, but each daemon selected a different one.
+    # Rebuilt indexes must not let the equal-lock fallback erase that recorded difference.
+    _assert_platform_difference(*_two_platform_runs(_sha("b5")))
+
+
+def test_local_images_compare_their_recorded_ids_without_repo_digests():
+    registry = pathlib.Path(tempfile.mkdtemp()) / "data"
+    a = _write_run(registry, _spec(held={"id": _sha("c7"), "platform": "linux/amd64"}))
+    b = _write_run(registry, _spec(stamp="20260301T100500Z", label="b", config="aaa000000005",
+                                   held={"id": _sha("c8"), "platform": "linux/amd64"}))
+    for run in (a, b):
+        _held(run, PLANNER, None)                              # neither local build was pushed
+    rc, doc = _diff(a, b)
+    assert rc == 1, doc
+    assert any(c["section"] == "images" and (c["a"], c["b"]) == (_sha("c7"), _sha("c8"))
+               for c in doc["differs"]), doc
+    assert ("images", PLANNER) not in _found(doc, "index_only"), doc
+    path = b / ".rig" / "images.yaml"
+    record = yaml.safe_load(path.read_text())
+    record["held"][PLANNER]["id"] = _sha("c7")
+    path.write_text(yaml.safe_dump(record, sort_keys=True))
+    rc, doc = _diff(a, b)                                      # the same local build is unchanged
+    assert rc == 0 and not doc["differs"] and not doc["index_only"], doc
+
+
 def test_runs_resolve_by_path_anywhere_and_by_id_or_label_inside_a_deployment():
     registry, a, b, _ = _three_runs()
     root = pathlib.Path(tempfile.mkdtemp())
