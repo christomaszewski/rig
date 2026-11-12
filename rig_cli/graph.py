@@ -51,6 +51,7 @@ _PLUMBING_SERVICE_SUFFIXES = (
 
 UNASSIGNED = "(unassigned)"  # nodes outside every instance namespace (recorder, tools, rogue nodes)
 PLAYER_NODE = "/rosbag2_player"  # `ros2 bag play`'s node: rosbag2 gives it no namespace to take
+PROBE_NODES = "/rig/probe/_rig_sim_probe_"  # how sim_probe.py names the node it watches with
 
 
 @dataclass(frozen=True)
@@ -242,8 +243,9 @@ def place_outside(u: GraphUnion, outside, run: dict, rows) -> list[Placed]:
     An attached run names its simulator and the topics the recipe declares for it: an outside
     node on one of them (or publishing /clock) is listed under that simulator. rig asked the
     simulator nothing, so the heading says the name is the recipe's and the nodes are inferred.
-    In a replay, rosbag2's player node belongs to the one player instance. Anything else stays
-    UNASSIGNED. Only the human view uses this: ownership, contracts and checks do not.
+    In a replay, rosbag2's player node belongs to the one player instance. rig's own probe node
+    is listed as rig's. Anything else stays UNASSIGNED. Only the human view uses this:
+    ownership, contracts and checks do not.
     """
     placed: list[Placed] = []
     outside = list(outside)
@@ -261,6 +263,12 @@ def place_outside(u: GraphUnion, outside, run: dict, rows) -> list[Placed]:
         if nodes:
             placed.append(Placed(nodes=nodes, heading=f"{name} (the simulator, as the recipe states it; "
                                  "its nodes are inferred from the topics declared for it, not verified)"))
+    # The check after startup runs while the logger is already recording the graph. This one is
+    # known, not inferred: the name is rig's own.
+    probes = tuple(fqn for fqn in outside if fqn.startswith(PROBE_NODES))
+    if probes:
+        placed.append(Placed(nodes=probes, heading="rig (its own probe of the graph during "
+                                                   "startup, which only listens)"))
     return placed
 
 
