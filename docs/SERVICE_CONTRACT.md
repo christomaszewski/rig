@@ -4,7 +4,7 @@ What a service must provide for Rig to build, launch, observe, ship, record and 
 This is the normative reference. The [rigification guide](RIGIFICATION.md) is the walkthrough
 that gets existing software to this point.
 
-This document describes Rig **v0.2.84**. Where it and the code disagree, the code is right:
+This document describes Rig **v0.2.85**. Where it and the code disagree, the code is right:
 `rig_cli/descriptor.py` and `rig_cli/build_contract.py` parse the descriptor,
 `rig_cli/dispatch.py` builds every launcher's environment, and `rig_cli/certify.py` is the
 executable form of the core contract.

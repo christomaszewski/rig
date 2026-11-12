@@ -12,8 +12,12 @@ images by default, honoring `--pull missing|always|never`; check and dry-run rem
 Rig **v0.2.84** adds the [service contract](SERVICE_CONTRACT.md) and the
 [rigification guide](RIGIFICATION.md), and makes `rig certify` fail fixed container names,
 relocated build images and hard-coded ROS settings that it used to pass.
+Rig **v0.2.85** lets `rig sim` attach to a simulator other than Isaac through the experimental
+`external` provider, recording the simulator the recipe names, and no longer seals an
+untouched session's run as if its configuration had been edited.
 Use the Rig executable shipped with your deployment; updating another installation does not
-upgrade a baked artifact. Isaac attachment remains explicitly **experimental**.
+upgrade a baked artifact. Simulator attachment, Isaac's and an external simulator's, remains
+explicitly **experimental**.
 
 | Task | Start here |
 | --- | --- |
@@ -61,6 +65,7 @@ totals should not be read as current operator requirements:
 - [v0.2.82 release notes](releases/v0.2.82.md) (unchanged images keep their digest across builds)
 - [v0.2.83 release notes](releases/v0.2.83.md) (preparation acquires replay runtime images)
 - [v0.2.84 release notes](releases/v0.2.84.md) (service contract, rigification guide and stricter certify)
+- [v0.2.85 release notes](releases/v0.2.85.md) (external simulation provider and session seal fix)
 - [Coordinated replay readiness, 2026-10-27](releases/coordinated-replay-readiness-2026-10-27.md)
 
 The release readiness report establishes replay evidence on its stated machines/versions.

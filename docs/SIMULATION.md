@@ -197,8 +197,8 @@ are outside this attach workflow.
 ## An external simulator
 
 `provider: external` is for any simulator that already publishes `/clock` and its topics on
-the deployment's ROS graph. It is experimental too, and Rig still only attaches: it does not
-launch, reset, step or seed the simulator.
+the deployment's ROS graph. It is experimental too (since Rig v0.2.85), and Rig still only
+attaches: it does not launch, reset, step or seed the simulator.
 
 ```yaml
 simulation:

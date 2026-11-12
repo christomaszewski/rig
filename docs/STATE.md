@@ -1,7 +1,7 @@
 # rig — project state & handoff (resume here)
 
-Released checkpoint: **v0.2.84 — service contract, rigification guide and stricter certify**,
-reviewed **2026-11-11**. Use the [documentation index](README.md) to choose an operator
+Released checkpoint: **v0.2.85 — external simulation provider and session seal fix**,
+reviewed **2026-11-12**. Use the [documentation index](README.md) to choose an operator
 workflow. The dated entries below are historical observations, not the current host state.
 
 - **v0.2.83 preparation improvement:** real `replay prepare` acquires the recipe's runtime
@@ -56,7 +56,7 @@ workflow. The dated entries below are historical observations, not the current h
 - Experimental `rig sim check/up/down` attaches to an existing Isaac ROS graph, checks ROS
   settings/endpoints/QoS and progressing time, pins selected images, captures a normal run,
   and uses frozen session state for status/logs/teardown. It does not launch or reset Isaac.
-- Experimental `simulation.provider: external` (after v0.2.84, not yet released) lets `rig sim`
+- Experimental `simulation.provider: external` (v0.2.85) lets `rig sim`
   attach to a simulator other than Isaac and record it as the recipe states it:
   `provider: external`, `simulator: {name, version}` and `clock: external` in the plan, the run
   metadata and the saved session. Scene, seed, name and version are recorded as stated and not
@@ -70,10 +70,10 @@ workflow. The dated entries below are historical observations, not the current h
   another host or another ROS distribution, a DDS middleware, sensor replacement, a failed
   startup and its rollback, and a clock that stops during a session. Live Isaac acceptance is
   still pending and is not changed by this. See the
-  [reference](SIMULATION.md#an-external-simulator) and
-  [example](../examples/external-attach/README.md).
-- A session's run is sealed against the deployment's own var context (after v0.2.84, not yet
-  released). Until then `rig sim down --end-run`, and `rig down --end-run` on a recipe
+  [reference](SIMULATION.md#an-external-simulator),
+  [example](../examples/external-attach/README.md) and [v0.2.85](releases/v0.2.85.md).
+- A session's run is sealed against the deployment's own var context (v0.2.85). Until then
+  `rig sim down --end-run`, and `rig down --end-run` on a recipe
   session, marked every run `config_dirty_at_seal` and warned that the config had changed
   after the last `up`, whether or not anything had: the teardown compared the run's snapshot
   with a manifest rebuilt from the saved session, which holds no vars. Found on the first
