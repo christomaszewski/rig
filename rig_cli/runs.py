@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -768,6 +769,34 @@ def tag_runs(manifest: Manifest, ref: str, tags: list[str], *, remove: bool = Fa
     return 0
 
 
+def _not_removable(run_dir: Path) -> list[Path]:
+    """Directories in the run (itself included) whose entries this user cannot remove. Removing
+    an entry takes write permission on the directory that holds it, whoever owns the entry: a
+    recorder that ran as root leaves directories only root can empty."""
+    blocked: list[Path] = []
+
+    def unreadable(error: OSError) -> None:
+        blocked.append(Path(error.filename or run_dir))
+    if not os.access(run_dir.parent, os.W_OK | os.X_OK):  # the run dir is an entry of runs/
+        blocked.append(run_dir.parent)
+    for folder, dirs, files in os.walk(run_dir, onerror=unreadable):  # never follows links
+        if (dirs or files) and not os.access(folder, os.W_OK | os.X_OK):
+            blocked.append(Path(folder))
+    return sorted(set(blocked))
+
+
+def _owner(path: Path) -> str:
+    try:
+        uid = path.stat().st_uid
+    except OSError:
+        return "another user"
+    try:
+        import pwd
+        return pwd.getpwuid(uid).pw_name
+    except (ImportError, KeyError):
+        return f"uid {uid}"
+
+
 def remove_runs(manifest: Manifest, run_ids: list[str], *, force: bool = False) -> int:
     """`run rm`: delete run dirs from THIS registry, by id (never by path — containment is the
     registry's own doctrine: a mis-typed path must not delete something outside runs/). Sealed
@@ -815,6 +844,18 @@ def remove_runs(manifest: Manifest, run_ids: list[str], *, force: bool = False) 
                    f"be the only copy of that session; --force to remove anyway")
             rc = 1
             continue
+        # All or nothing: a removal that stops part-way has already deleted the manifest, and
+        # what is left lists as an interrupted run. Look before deleting anything.
+        blocked = _not_removable(run_dir)
+        if blocked:
+            more = f" (and {len(blocked) - 1} more of its directories)" if len(blocked) > 1 else ""
+            eprint(f"rig run rm: {rid}: nothing was removed — {blocked[0]}{more} is "
+                   f"{_owner(blocked[0])}'s, and this user cannot remove what is in it (a service "
+                   f"that runs as root, such as the stock bag logger, writes its files as root). "
+                   f"Take the run over, then remove it:\n"
+                   f"  sudo chown -R {os.getuid()}:{os.getgid()} {run_dir} && rig run rm {rid}")
+            rc = 1
+            continue
         kb = doc.get("disk_kb")
         if not isinstance(kb, int):
             try:
@@ -822,7 +863,14 @@ def remove_runs(manifest: Manifest, run_ids: list[str], *, force: bool = False) 
                                         text=True, timeout=120).stdout.split()[0])
             except Exception:  # noqa: BLE001 — size is display-only
                 kb = 0
-        shutil.rmtree(run_dir)
+        try:
+            shutil.rmtree(run_dir)
+        except OSError as exc:  # what the look above could not foresee (ACLs, a busy mount)
+            eprint(f"rig run rm: {rid}: stopped part-way ({exc}); what is left of it is in "
+                   f"{run_dir} and may list as interrupted — fix the cause, then "
+                   f"`rig run rm --force {rid}`")
+            rc = 1
+            continue
         freed_kb += kb
         eprint(f"rig run rm: removed {rid}" + (f" ({kb // 1024} MB)" if kb else ""))
     if freed_kb:
