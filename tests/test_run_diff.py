@@ -281,6 +281,42 @@ def test_a_run_with_several_snapshots_is_compared_at_its_last_up_and_says_so():
     assert "2 config snapshots" in out and "last" in out
 
 
+def _as_replay(run: pathlib.Path, *, of: str, launch_s: float, session: int) -> None:
+    """Turn a written run into a replay session's record: no simulation block, a replay one."""
+    doc = yaml.safe_load((run / "manifest.yaml").read_text())
+    doc.pop("simulation")
+    doc["replay"] = {
+        "of": of, "source": f"/data/runs/{of}", "clock": "sim", "fingerprint": f"{session:012x}",
+        "source_fingerprint": "5050505050aa", "playback": {"topics": ["/camera/image"]},
+        "start_at_unix_s": 1772359200.0 + launch_s,
+        "startup": {"session": session, "status": "started", "timings": {"launch_s": launch_s}},
+        "verification": {"mode": "cached", "hashed_files": session % 7}}
+    (run / "manifest.yaml").write_text(yaml.safe_dump(doc, sort_keys=False))
+
+
+def test_a_replay_is_compared_by_what_it_replayed_not_by_how_long_it_took():
+    registry, a, _, _ = _three_runs()
+    r1 = _write_run(registry, _spec(stamp="20260301T102000Z", label="r1", config="121212121212"))
+    r2 = _write_run(registry, _spec(stamp="20260301T102100Z", label="r2", config="343434343434"))
+    r3 = _write_run(registry, _spec(stamp="20260301T102200Z", label="r3", config="565656565656"))
+    _as_replay(r1, of=a.name, launch_s=2.86, session=1001)
+    _as_replay(r2, of=a.name, launch_s=3.41, session=1002)
+    _as_replay(r3, of="20260201T000000Z_other", launch_s=2.90, session=1003)
+    rc, doc = _diff(r1, r2)                                     # the same source, replayed twice
+    assert rc == 0 and doc["differs"] == [] and "replay" in doc["same"]
+    assert {"replay.startup.timings.launch_s", "replay.fingerprint",
+            "replay.start_at_unix_s"} <= {c["key"] for c in doc["per_run"]}
+    rc, doc = _diff(r1, r3)                                     # another source
+    by_key = {(c["section"], c["key"]): (c["a"], c["b"]) for c in doc["differs"]}
+    assert rc == 1 and by_key[("replay", "of")] == (a.name, "20260201T000000Z_other")
+    assert {section for section, _ in by_key} == {"replay"}
+    rc, doc = _diff(a, r1)                                      # a simulation session against a replay
+    assert rc == 1                                              # one line each, not one per key
+    assert [c for c in doc["differs"] if c["section"] in ("simulation", "replay")] == [
+        {"section": "simulation", "key": "(recorded)", "a": "yes", "b": "no"},
+        {"section": "replay", "key": "(recorded)", "a": "no", "b": "yes"}]
+
+
 def test_run_diff_writes_nothing():
     registry, a, b, _ = _three_runs()
 

@@ -12,7 +12,8 @@ section by section, and sorts every difference into one of three kinds:
   build, so the index says nothing about whether the image changed; the per-architecture
   digests in the captured rig.lock (`build_catalog.<ref>.children`) do. Reported, not counted.
 - **per run** — what is different for any two runs: id, label, times, the snapshot's name,
-  the capture hash, the session fingerprint. Reported apart, not counted.
+  the capture hash, the session fingerprint, a replay's startup timings. Reported apart, not
+  counted.
 
 A run with several snapshots is compared at its LAST `up`. What a run recorded while it ran
 (bags, recordings, graph, container logs, simulation probes) is data, not configuration, and
@@ -39,8 +40,17 @@ _TREE_FILES = ("vehicle.yaml", "services.yaml", "fleet.yaml", "vehicle.local.yam
 NOT_COMPARED = ("the log of ups and container-log captures", "recorded data (bags, recordings, "
                 "graph)", "container logs", "simulation probes", "the captured tree "
                 "(.rig/artifact.tar.gz)")
+_BLOCKS = ("simulation", "replay")  # what a session was: held whole by one kind of run only
 _MISSING = object()
 _DIGEST = re.compile(r"\b(sha256:)?([0-9a-f]{12})[0-9a-f]{28,52}\b")
+
+
+def _per_run(key: str) -> bool:
+    """Manifest keys that differ for any two runs: identity, timestamps, a session's
+    fingerprint, and a replay's startup timings and verification counters."""
+    last = key.rsplit(".", 1)[-1]
+    return (key in _PER_RUN or last in ("at", "fingerprint") or last.endswith("_unix_s")
+            or key.startswith(("replay.startup.", "replay.verification.")))
 
 
 def _flat(value, prefix: str = "") -> dict:
@@ -209,11 +219,17 @@ def compare(run_a: Path, run_b: Path) -> dict:
             report.notes.append(f"{name} holds {run['snapshots']} config snapshots; it is compared "
                                 f"at its last up ({run['digest']})")
     ma, mb = a["manifest"], b["manifest"]
-    fa, fb = _flat({k: v for k, v in ma.items() if k not in _LOGS}), \
-        _flat({k: v for k, v in mb.items() if k not in _LOGS})
+    held_by_one = set()
+    for block in _BLOCKS:  # a simulation session against a replay: say that once, not per key
+        in_a, in_b = isinstance(ma.get(block), dict), isinstance(mb.get(block), dict)
+        if in_a != in_b:
+            report.change(block, "(recorded)", "yes" if in_a else "no", "yes" if in_b else "no")
+            held_by_one.add(block)
+    fa, fb = (_flat({k: v for k, v in m.items() if k not in _LOGS and k not in held_by_one})
+              for m in (ma, mb))
     for key in sorted(set(fa) | set(fb)):
         va, vb = fa.get(key, _MISSING), fb.get(key, _MISSING)
-        per_run = key in _PER_RUN or key.rsplit(".", 1)[-1] == "at"
+        per_run = _per_run(key)
         top = key.split(".", 1)[0]
         section = ("run" if per_run else "rig and vehicle" if top in _RIG_AND_VEHICLE + ("capture",)
                    else "stacks" if top == "stacks" else top if top in ("simulation", "replay")
