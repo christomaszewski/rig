@@ -129,6 +129,20 @@ current host state.
   hand on three v0.2.85 runs of one deployment; the suite uses written runs. It does not
   compare recorded data, logs or probes, and does not verify a snapshot against its name.
   See [v0.2.86](releases/v0.2.86.md).
+- **v0.2.86 an open run names its deployment directory:** deployment directories on one
+  machine share the run registry, and a run left open with its stacks up had to be traced back
+  to its directory by hand before the next deploy. `rig status`, `rig runs`, an `up` that
+  joins the run and the `rig down` warning now name the directory the open run was last
+  brought up from when it is not this one; `rig catalog --state open` says it from anywhere
+  and `--json` carries `up_from` for every run. Sealing from the wrong directory used to
+  succeed and leave the other directory's stacks running: `run end`, `run new` and `up --run`
+  now refuse while a stack the run launched, which this `vehicle.yaml` does not declare, is
+  still running, and name the directory (`--force` seals anyway). Read from the `ups:` entries
+  runs have carried since v0.1.60; nothing new is written. Covered by `tests/test_runs.py`
+  and `tests/test_runcatalog.py`, and tried by hand on 2026-11-12 through the CLI with two
+  directories and a stand-in for docker. Not exercised with real containers or a real
+  restart. After an `up` from this directory joins the run, `rig status` no longer names the
+  other one; the refusal still does. See [v0.2.86](releases/v0.2.86.md).
 - **v0.2.86 per-vehicle roster values and provisioning records.**
   Roster rows take `vars:`; a vehicle reads its own row from the pushed fleet.yaml, above the
   fleet-level `vars:` and below its machine file. `unique:` lists names no two vehicles may
