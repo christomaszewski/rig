@@ -478,6 +478,194 @@ def test_descriptor_interface_parse():
             pass
 
 
+# --- nodes outside every instance namespace, placed by the run's own record ------------------
+
+# An attached lap as the logger's snapshotter saw it: the simulator's bridge and a stray tool
+# sit outside every instance namespace.
+EPOCH_SIM = textwrap.dedent("""\
+    schema: 1
+    first: 2026-11-12T16:21:37Z
+    last: 2026-11-12T16:21:59Z
+    nodes:
+      /bag_logger:
+        pubs: []
+        subs:
+        - {topic: /clock, type: rosgraph_msgs/msg/Clock}
+        - {topic: /odom, type: nav_msgs/msg/Odometry}
+        - {topic: /cmd_vel, type: geometry_msgs/msg/Twist}
+        provides: []
+        requires: []
+      /waypoint_driver/driver:
+        pubs:
+        - {topic: /cmd_vel, type: geometry_msgs/msg/Twist}
+        subs:
+        - {topic: /odom, type: nav_msgs/msg/Odometry}
+        provides: []
+        requires: []
+      /ros_gz_bridge:
+        pubs:
+        - {topic: /clock, type: rosgraph_msgs/msg/Clock}
+        - {topic: /odom, type: nav_msgs/msg/Odometry}
+        subs:
+        - {topic: /cmd_vel, type: geometry_msgs/msg/Twist}
+        provides: []
+        requires: []
+      /stray_tool:
+        pubs:
+        - {topic: /notes, type: std_msgs/msg/String}
+        subs: []
+        provides: []
+        requires: []
+    """)
+
+# Its replay: rosbag2's player node is outside the player instance's namespace.
+EPOCH_REPLAY = textwrap.dedent("""\
+    schema: 1
+    first: 2026-11-12T16:22:11Z
+    last: 2026-11-12T16:22:51Z
+    nodes:
+      /waypoint_driver/driver:
+        pubs:
+        - {topic: /cmd_vel, type: geometry_msgs/msg/Twist}
+        subs:
+        - {topic: /odom, type: nav_msgs/msg/Odometry}
+        provides: []
+        requires: []
+      /bag_player/release_gate:
+        pubs: []
+        subs: []
+        provides: []
+        requires:
+        - {service: /rosbag2_player/resume, type: rosbag2_interfaces/srv/Resume}
+      /rosbag2_player:
+        pubs:
+        - {topic: /clock, type: rosgraph_msgs/msg/Clock}
+        - {topic: /odom, type: nav_msgs/msg/Odometry}
+        subs: []
+        provides:
+        - {service: /rosbag2_player/resume, type: rosbag2_interfaces/srv/Resume}
+        requires: []
+    """)
+
+_SIM_RECIPE = {"simulation": {"publishes": [{"topic": "/odom", "type": "nav_msgs/msg/Odometry"}],
+                              "subscribes": [{"topic": "/cmd_vel", "type": "geometry_msgs/msg/Twist"}]}}
+_EXTERNAL = {"provider": "external", "simulator": {"name": "gazebo", "version": "10.5.0"},
+             "mode": "attach", "recipe": _SIM_RECIPE}
+_BENCH_ROWS = (("bag_logger", "ros2-bag-logger"), ("waypoint_driver", "waypoint-driver"),
+               ("bag_player", "ros2-bag-player"))
+
+
+def _graphed(epoch, record, rows=_BENCH_ROWS) -> list[str]:
+    """`rig graph` on a run holding `epoch`, whose manifest carries `record`. The lines printed."""
+    import contextlib
+    import io
+    import yaml
+    run = _run_dir(epoch)
+    (run / "manifest.yaml").write_text(yaml.safe_dump({"run": run.name, **record}))
+    manifest = _manifest([_sensor(name, service) for name, service in rows])
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        assert graph.cmd(manifest, {}, run_ref=str(run), do_check=False, contract_instance=None,
+                         out=None) == 0
+    return out.getvalue().splitlines()
+
+
+def _section(lines, starts) -> list[str]:
+    """The node lines under the group heading that starts with `starts`."""
+    at = next(i for i, line in enumerate(lines) if line.startswith("  " + starts))
+    nodes = []
+    for line in lines[at + 1:]:
+        if not line.startswith("    "):
+            break
+        if line.startswith("    /"):
+            nodes.append(line.strip())
+    return nodes
+
+
+def test_simulator_nodes_are_grouped_under_the_simulator_the_run_names():
+    lines = _graphed(EPOCH_SIM, {"simulation": _EXTERNAL})
+    heading = next(line for line in lines if line.startswith("  gazebo 10.5.0"))
+    # rig never asked the simulator what it is: the heading says where the name and the nodes
+    # come from.
+    assert "as the recipe states it" in heading and "not verified" in heading, heading
+    assert _section(lines, "gazebo 10.5.0") == ["/ros_gz_bridge"]
+    assert _section(lines, graph.UNASSIGNED) == ["/stray_tool"]  # nothing the record speaks of
+    order = [line.strip().split(" (")[0] for line in lines if line.startswith("  ") and line[2] != " "]
+    assert order[:4] == ["bag_logger", "waypoint_driver", "gazebo 10.5.0", "(unassigned)"], order
+
+
+def test_a_node_is_the_simulators_by_any_topic_the_recipe_declares_for_it():
+    bridge_pubs = ("    pubs:\n"
+                   "    - {topic: /clock, type: rosgraph_msgs/msg/Clock}\n"
+                   "    - {topic: /odom, type: nav_msgs/msg/Odometry}\n"
+                   "    subs:\n"
+                   "    - {topic: /cmd_vel, type: geometry_msgs/msg/Twist}\n")
+    assert EPOCH_SIM.count(bridge_pubs) == 1
+    only_listens = EPOCH_SIM.replace(bridge_pubs, bridge_pubs.replace(
+        "    pubs:\n    - {topic: /clock, type: rosgraph_msgs/msg/Clock}\n"
+        "    - {topic: /odom, type: nav_msgs/msg/Odometry}\n", "    pubs: []\n"))
+    assert _section(_graphed(only_listens, {"simulation": _EXTERNAL}), "gazebo 10.5.0") == ["/ros_gz_bridge"]
+    # /clock is the simulator's whether or not the recipe lists it.
+    bare = {**_EXTERNAL, "recipe": {"simulation": {}}}
+    assert _section(_graphed(EPOCH_SIM, {"simulation": bare}), "gazebo 10.5.0") == ["/ros_gz_bridge"]
+
+
+def test_an_isaac_run_names_isaac():
+    record = {"provider": "isaac", "mode": "attach", "recipe": _SIM_RECIPE}
+    lines = _graphed(EPOCH_SIM, {"simulation": record})
+    assert _section(lines, "Isaac (") == ["/ros_gz_bridge"]
+    assert not any("gazebo" in line for line in lines)
+
+
+def test_without_a_simulation_record_nothing_is_placed():
+    lines = _graphed(EPOCH_SIM, {})
+    assert _section(lines, graph.UNASSIGNED) == ["/ros_gz_bridge", "/stray_tool"]
+    for damaged in ({"simulation": "gazebo"}, {"simulation": {"provider": "external"}},
+                    {"simulation": {"provider": "external", "simulator": {"name": 7, "version": "1"}}},
+                    {"simulation": {**_EXTERNAL, "recipe": {"simulation": {"publishes": "all"}}}}):
+        placed = _graphed(EPOCH_SIM, damaged)
+        assert "/stray_tool" in _section(placed, graph.UNASSIGNED), damaged
+
+
+def test_the_replay_players_node_is_listed_with_the_player_instance():
+    lines = _graphed(EPOCH_REPLAY, {"replay": {"of": "20261112T162130Z_lap", "recipe": _SIM_RECIPE}})
+    assert _section(lines, "bag_player") == [
+        "/bag_player/release_gate",
+        "/rosbag2_player  (rosbag2's player node, which takes no namespace)"]
+    assert not any(line.startswith("  " + graph.UNASSIGNED) for line in lines)
+    # Its edges are listed under it like any node's.
+    at = lines.index("    /rosbag2_player  (rosbag2's player node, which takes no namespace)")
+    assert lines[at + 1].split() == ["pub", "/clock", "rosgraph_msgs/msg/Clock"]
+
+
+def test_a_run_that_is_not_a_replay_does_not_claim_a_player_node():
+    assert "/rosbag2_player" in _section(_graphed(EPOCH_REPLAY, {}), graph.UNASSIGNED)
+    # Nor does a replay claim it for a deployment with no player instance, or with two.
+    record = {"replay": {"of": "20261112T162130Z_lap"}}
+    assert "/rosbag2_player" in _section(_graphed(EPOCH_REPLAY, record, _BENCH_ROWS[:2]), graph.UNASSIGNED)
+    two = _BENCH_ROWS + (("second_player", "ros2-bag-player"),)
+    assert "/rosbag2_player" in _section(_graphed(EPOCH_REPLAY, record, two), graph.UNASSIGNED)
+
+
+def test_a_simulator_left_running_through_a_replay_is_not_claimed():
+    """A replay's record carries the recipe, but the session attached no simulator."""
+    lines = _graphed(EPOCH_SIM, {"replay": {"of": "20261112T162130Z_lap",
+                                            "recipe": {"simulation": _EXTERNAL["recipe"]["simulation"]}}})
+    assert "/ros_gz_bridge" in _section(lines, graph.UNASSIGNED)
+    assert not any("gazebo" in line for line in lines)
+
+
+def test_placing_outside_nodes_changes_neither_the_contract_nor_the_check():
+    import yaml
+    run = _run_dir(EPOCH_REPLAY)
+    (run / "manifest.yaml").write_text(yaml.safe_dump({"run": run.name, "replay": {"of": "x"}}))
+    u = graph.union(graph.load_epochs(run))
+    names = [name for name, _ in _BENCH_ROWS]
+    scaffold = graph.contract(u, "bag_player", "ros2-bag-player", run.name, instance_names=names)
+    assert "/clock" not in scaffold and "/rosbag2_player/resume" in scaffold  # the gate's client only
+    assert graph.group_nodes(u.nodes, names)[graph.UNASSIGNED] == ["/rosbag2_player"]
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):
