@@ -499,6 +499,7 @@ def test_deployment_id_minted_once_and_stable():
 # --- provenance: where values came from, and the machine file itself ----------------------------
 
 import contextlib  # noqa: E402
+import io  # noqa: E402
 
 _RUN_0_2_84 = pathlib.Path(__file__).resolve().parent / "fixtures" / "run-v0.2.84"
 
@@ -782,6 +783,215 @@ def test_down_selection_covers_what_the_open_session_launched():
     assert runs.down_selection(m, []) == (["cam", "bag_player"], ["gone"])
     assert runs.down_selection(m, ["cam"]) == (["cam"], [])              # explicit names win
     assert runs.launched_names(_manifest(None)) == []                     # no data_dir: inert
+
+
+# --- which deployment directory an open run was brought up from ---------------------------------
+#
+# Several deployment trees on one machine share one registry (the machine file's data_dir). A run
+# left open by tree A, with its stacks back after a reboot, is found from tree B: the run's last
+# `ups:` entry names the directory it was brought up from, and the run is not sealed from B while
+# a stack it launched, which B cannot stop, is still running.
+
+def _two_trees(extra="nav_a"):
+    """Tree A brings up cam (+ `extra`) and leaves the run open; tree B, on the same data
+    disk, declares only cam. -> (m_a, root_a, m_b, root_b, data, run id)."""
+    _mark_idle()
+    m_a, root_a, data = _world(port=1)
+    names = ["cam"]
+    if extra:
+        m_a = dataclasses.replace(m_a, sensors=m_a.sensors + [
+            Sensor(name=extra, service="n", config=m_a.sensors[0].config, enabled=True, order=20)])
+        names.append(extra)
+    rid = runs.ensure(m_a, root_a)
+    assert runs.snapshot(m_a, root_a, stacks=names) is not None
+    m_b, root_b, _ = _world(port=2)
+    m_b = dataclasses.replace(m_b, data_dir=str(data))
+    return m_a, root_a, m_b, root_b, data, rid
+
+
+def _running(*projects: str) -> None:
+    os.environ["SHIM_COMPOSE_LS"] = json.dumps(
+        [{"Name": p, "Status": "running(1)"} for p in projects])
+
+
+def _stderr_of(fn) -> str:
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        fn()
+    return err.getvalue()
+
+
+def test_brought_up_from_is_the_directory_of_the_last_up():
+    assert runs.brought_up_from({}) is None
+    assert runs.brought_up_from({"ups": "nonsense"}) is None
+    assert runs.brought_up_from({"ups": [{"stacks": ["cam"]}]}) is None       # no root recorded
+    assert runs.brought_up_from({"ups": [{"root": "/srv/a"}, {"root": "/srv/b"}]}) == "/srv/b"
+    m_a, root_a, m_b, root_b, data, rid = _two_trees()
+    assert runs.brought_up_from(_run_doc(data, rid)) == str(root_a.resolve())
+
+
+def test_status_line_names_the_other_directory_and_is_unchanged_in_its_own():
+    m_a, root_a, m_b, root_b, data, rid = _two_trees()
+    plain = runs.status_line(m_a)
+    assert runs.status_line(m_a, root_a) == plain                  # its own tree: as before
+    assert str(root_a.resolve()) not in plain
+    there = runs.status_line(m_b, root_b)
+    assert there.startswith(plain) and str(root_a.resolve()) in there
+    assert runs.status_line(m_b) == plain                          # no tree given: no claim
+    runs.snapshot(m_b, root_b, stacks=["cam"])                     # B's own `up` joins the run
+    assert runs.status_line(m_b, root_b) == plain
+    assert str(root_b.resolve()) in runs.status_line(m_a, root_a)  # ...and A now points at B
+
+
+def test_a_tree_renamed_since_its_up_is_still_the_runs_own():
+    # Same deployment instance under a new path: not "another directory", and nothing to go to.
+    m_a, root_a, m_b, root_b, data, rid = _two_trees(extra=None)
+    plain = runs.status_line(m_a)
+    moved = root_a.parent / (root_a.name + "-renamed")
+    root_a.rename(moved)
+    assert runs.status_line(m_a, moved) == plain
+    assert _stderr_of(lambda: runs.ensure(m_a, moved)) == ""
+    assert not (root_b / "var" / "deployment-id").exists()         # asking from B minted nothing
+    assert str(root_a.resolve()) in runs.status_line(m_b, root_b)
+    assert not (root_b / "var" / "deployment-id").exists()
+
+
+def test_up_that_joins_a_run_from_another_directory_says_so():
+    m_a, root_a, m_b, root_b, data, rid = _two_trees()
+    assert _stderr_of(lambda: runs.ensure(m_a, root_a)) == ""      # its own run: silent, as before
+    said = _stderr_of(lambda: runs.ensure(m_b, root_b))
+    assert rid in said and str(root_a.resolve()) in said
+    m_a, root_a, m_b, root_b, data, rid = _two_trees()
+    field = runs.new_run(m_a, root_a, "field")
+    runs.snapshot(m_a, root_a, stacks=["cam"])
+    said = _stderr_of(lambda: runs.up_run(m_b, root_b, "field"))   # `up --run field` joins too
+    assert field in said and str(root_a.resolve()) in said
+
+
+def test_seal_refused_while_a_stack_launched_from_another_directory_still_runs():
+    m_a, root_a, m_b, root_b, data, rid = _two_trees()
+    _running(project_name("nav_a", 1))
+    for fn in (lambda: runs.end_run(m_b, root_b), lambda: runs.new_run(m_b, root_b, "next"),
+               lambda: runs.up_run(m_b, root_b, "next")):
+        try:
+            fn()
+            raise AssertionError("sealed a run whose stack is still running elsewhere")
+        except RigError as exc:
+            assert project_name("nav_a", 1) in str(exc), exc
+            assert str(root_a.resolve()) in str(exc), exc          # where to go to stop it
+    assert (data / "current").resolve().name == rid and "ended" not in _run_doc(data, rid)
+    assert runs.end_run(m_b, root_b, force=True) == rid            # --force still overrides
+    _mark_idle()
+
+
+def test_seal_from_another_directory_goes_through_once_nothing_runs():
+    # The forgotten seal: A's run is open, nothing of it is running, B seals it as before.
+    m_a, root_a, m_b, root_b, data, rid = _two_trees()
+    assert runs.end_run(m_b, root_b) == rid
+    assert "ended" in _run_doc(data, rid) and not (data / "current").exists()
+
+
+def test_seal_refusal_outlives_a_later_up_from_this_directory():
+    # B's own `up` joined the run, so the LAST up is B's: nav_a, launched from A, is still found.
+    m_a, root_a, m_b, root_b, data, rid = _two_trees()
+    runs.snapshot(m_b, root_b, stacks=["cam"])
+    _running(project_name("nav_a", 1))
+    try:
+        runs.end_run(m_b, root_b)
+        raise AssertionError("sealed under a stack an earlier up launched")
+    except RigError as exc:
+        assert project_name("nav_a", 1) in str(exc) and str(root_a.resolve()) in str(exc), exc
+    _mark_idle()
+
+
+def test_seal_refusal_uses_the_vehicle_id_the_run_was_opened_with():
+    # The compose project carries the id of the vehicle that launched it, not this tree's.
+    m_a, root_a, m_b, root_b, data, rid = _two_trees()
+    m_b = dataclasses.replace(m_b, vehicle_id=2)
+    _running(project_name("nav_a", 1))
+    try:
+        runs.end_run(m_b, root_b)
+        raise AssertionError("looked for the project under this tree's vehicle id")
+    except RigError as exc:
+        assert project_name("nav_a", 1) in str(exc), exc
+    _running(project_name("nav_a", 2))                             # some other vehicle's stack
+    assert runs.end_run(m_b, root_b) == rid
+    _mark_idle()
+
+
+def test_seal_refused_while_a_row_removed_from_this_tree_still_runs():
+    # Same directory: the row was taken out of vehicle.yaml while its stack was up.
+    m_a, root_a, m_b, root_b, data, rid = _two_trees()
+    trimmed = dataclasses.replace(m_a, sensors=m_a.sensors[:1])
+    _running(project_name("nav_a", 1))
+    try:
+        runs.end_run(trimmed, root_a)
+        raise AssertionError("sealed under a stack this run launched")
+    except RigError as exc:
+        assert project_name("nav_a", 1) in str(exc), exc
+    _mark_idle()
+    assert runs.end_run(trimmed, root_a) == rid
+
+
+def test_guard_asks_once_through_running_projects():
+    # The session tests stand in for runs.running_projects to stay off the real docker. The guard
+    # asks through it, once, and passes `also` only when the run launched something out of reach.
+    m_a, root_a, m_b, root_b, data, rid = _two_trees()
+    asked = []
+    real = runs.running_projects
+
+    def stand_in(manifest, **kw):
+        asked.append(kw)
+        return []
+    runs.running_projects = stand_in
+    try:
+        assert runs.end_run(m_b, root_b) == rid                    # nav_a was launched from A
+        assert len(asked) == 1 and project_name("nav_a", 1) in asked[0]["also"]
+        del asked[:]
+        again = runs.ensure(m_a, root_a)
+        runs.snapshot(m_a, root_a, stacks=["cam", "nav_a"])
+        assert runs.end_run(m_a, root_a) == again                  # its own tree: asked as before
+        assert asked == [{}]
+    finally:
+        runs.running_projects = real
+
+
+def test_running_refusal_names_where_the_open_run_was_brought_up():
+    # B declares cam too, so the existing guard fires; it now says where the run came from.
+    m_a, root_a, m_b, root_b, data, rid = _two_trees(extra=None)
+    _running(project_name("cam", 1))
+    try:
+        runs.up_run(m_b, root_b, "field")
+        raise AssertionError("expected RigError while stacks run")
+    except RigError as exc:
+        assert "running" in str(exc) and str(root_a.resolve()) in str(exc), exc
+    try:
+        runs.end_run(m_a, root_a)
+        raise AssertionError("expected RigError while stacks run")
+    except RigError as exc:                                        # in its own tree: as before
+        assert "running" in str(exc) and str(root_a.resolve()) not in str(exc), exc
+    _mark_idle()
+
+
+def test_runs_listing_and_down_point_at_the_other_directory():
+    from types import SimpleNamespace
+    from rig_cli.cli import cmd_down, cmd_runs
+
+    m_a, root_a, m_b, root_b, data, rid = _two_trees()
+    here = SimpleNamespace(names=[], rig_root=root_a)
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        said = _stderr_of(lambda: cmd_runs(here, m_a, {}, {}))
+    assert rid in out.getvalue() and str(root_a.resolve()) not in said   # its own tree: no note
+    there = SimpleNamespace(names=[], rig_root=root_b)
+    with contextlib.redirect_stdout(io.StringIO()):
+        said = _stderr_of(lambda: cmd_runs(there, m_b, {}, {}))
+    assert rid in said and str(root_a.resolve()) in said
+    # `rig down` in B cannot tear nav_a down: the warning now says where it was launched
+    bare = dataclasses.replace(m_b, sensors=[])
+    args = SimpleNamespace(names=[], end_run=False, dry_run=False, rig_root=root_b)
+    said = _stderr_of(lambda: cmd_down(args, bare, {}, {}))
+    assert "nav_a" in said and str(root_a.resolve()) in said
 
 
 def test_labels_resolve_exactly_never_to_a_replay_of_the_run():

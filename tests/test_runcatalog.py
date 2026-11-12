@@ -200,6 +200,34 @@ def test_filters_and_outputs():
         assert rc == 0 and "6 of 6" not in out and "20260701T100000Z_old" in out
 
 
+def test_open_run_names_the_directory_it_was_brought_up_from():
+    # Asked from anywhere, no deployment needed: which directory do I go to for this open run?
+    home, mfile, machine_reg, harvest, archive, workspace = _world()
+    for rid, root in (("20260902T100000Z_open", "/srv/deploy/v1"),
+                      ("20260901T100000Z_bench", "/srv/deploy/v0")):
+        mpath = machine_reg / "runs" / rid / "manifest.yaml"
+        doc = yaml.safe_load(mpath.read_text())
+        doc["ups"] = [{"at": "2026-09-02T10:00:05Z", "stacks": ["cam"], "root": "/srv/elsewhere"},
+                      {"at": "2026-09-02T10:05:00Z", "stacks": ["cam"], "root": root}]
+        mpath.write_text(yaml.safe_dump(doc, sort_keys=False))
+    with _env(RIG_HOME=str(home), RIG_VEHICLE_LOCAL=str(mfile)):
+        by = {e.run: e for e in runcatalog.scan()[0]}
+        assert by["20260902T100000Z_open"].up_from == "/srv/deploy/v1"     # the LAST up
+        assert by["20260901T100000Z_bench"].up_from == "/srv/deploy/v0"    # sealed runs keep it
+        assert by["20260801T100000Z_survey"].up_from is None               # never brought up
+        rc, out, err = _cli("catalog", "--state", "open")
+        assert rc == 0 and "20260902T100000Z_open" in out
+        assert "20260902T100000Z_open" in err and "/srv/deploy/v1" in err
+        rc, out, err = _cli("catalog", "--since", "2026-09")               # open + a sealed run:
+        assert rc == 0 and "/srv/deploy/v1" in err and "/srv/deploy/v0" not in err  # open only
+        rc, out, _ = _cli("catalog", "--json", "--since", "2026-09")
+        got = {d["run"]: d["up_from"] for d in json.loads(out)}
+        assert got == {"20260902T100000Z_open": "/srv/deploy/v1",
+                       "20260901T100000Z_bench": "/srv/deploy/v0"}
+        rc, out, _ = _cli("catalog", "--json", "--label", "survey")
+        assert rc == 0 and all(d["up_from"] is None for d in json.loads(out))
+
+
 def test_rig_remembers_registries_it_writes_and_harvests():
     """new-run / import / fleet sync / reconstruct register their roots (best-effort)."""
     from rig_cli import runs
