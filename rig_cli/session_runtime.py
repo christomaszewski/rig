@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import contextlib
+import dataclasses
 import os
 from pathlib import Path
 import re
@@ -17,7 +18,7 @@ import uuid
 from . import RigError, dispatch, runs
 from .common import eprint
 from .descriptor import load_descriptor
-from .manifest import Manifest, RIG_OWNED_ENV, RosSettings, Sensor
+from .manifest import Manifest, RIG_OWNED_ENV, RosSettings, Sensor, load_manifest
 from .replay_recipe import digest
 
 DOCKER_ENV = ("DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG", "DOCKER_CERT_PATH", "DOCKER_TLS_VERIFY")
@@ -211,6 +212,21 @@ def saved_context(state):
     return manifest, descriptors, env
 
 
+def _seal_manifest(root, manifest):
+    """The saved manifest with the deployment's resolved vars and env, for sealing.
+
+    The saved session keeps identity and rows, not the var context. The seal's advisory
+    dirty-check digests that context with the files, so without it every session sealed as
+    if its config had been edited after `up`. A tree that no longer loads keeps the saved
+    manifest: the check then reports the change, which is true.
+    """
+    try:
+        live = load_manifest(root, validate_configs=False)
+    except (RigError, OSError):
+        return manifest
+    return dataclasses.replace(manifest, vars=live.vars, extra_env=live.extra_env)
+
+
 def observe(args, root):
     from . import status
     saved = read_state(root)
@@ -297,7 +313,7 @@ def down(root, *, dry_run=False, end_run=False, provider=None):
             if current_run:
                 if runs.running_projects(manifest, env=env):
                     raise RigError("Session services are still running; run remains open")
-                runs.end_run(manifest, root, force=True)
+                runs.end_run(_seal_manifest(root, manifest), root, force=True)
         clear(root, state["session"])
         simulator = ("Isaac" if state["provider"] == "isaac" else
                      state["simulator"]["name"] if state["provider"] == "external" else None)
