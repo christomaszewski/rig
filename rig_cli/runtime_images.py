@@ -140,8 +140,14 @@ def inventory(manifest, descriptors, rows, configs, *, architecture, env=None,
                     except (KeyError, TypeError, ValueError) as exc:
                         raise RigError(f"Replay companion metadata for {ref} is invalid: {exc}") from exc
                     if manifest.build_catalog and not companions:
-                        raise RigError(f"Replay image {ref} has no matching companion catalog entry; "
-                                       "remove the override or build the matching release")
+                        # Sessions of every kind come through here, and adoption is the remedy
+                        # for an image rig did not build (it takes a tag, never a digest).
+                        tag = ref if "@" not in ref else ref.split("@", 1)[0] + ":<tag>"
+                        raise RigError(f"Runtime image {ref} has no matching companion catalog entry: "
+                                       "rig.lock's build catalog covers every image a session runs. "
+                                       f"If rig did not build it, record it with `rig image adopt {tag}`; "
+                                       "otherwise build the matching release or remove the override "
+                                       "that selects it")
                     expected = [ref] if _ID.fullmatch(ref) else []
                 result["images"][ref] = dict(source=source, owners=[], expected_ids=expected,
                                              required_labels={})
