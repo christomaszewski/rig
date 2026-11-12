@@ -1,7 +1,9 @@
 """Read-only ROS graph/clock probe, also executable as ``python -c <this file>``.
 
 The configured interpreter must have rclpy and rosgraph_msgs. Rig itself does not
-import ROS. One JSON request arrives on stdin and one JSON result leaves stdout.
+import ROS. One JSON request arrives on stdin and one JSON result leaves stdout, and nothing
+else does: run as a program, the probe sends everything a library writes to standard output,
+Zenoh's own log included, to standard error.
 Endpoint discovery establishes connectivity, not the remote process's identity or
 sensor fidelity. ROS_DISTRO describes this probe's sourced environment.
 
@@ -313,7 +315,30 @@ def observe(request):
         context.try_shutdown()
 
 
-def main():
+def _reserve_stdout():
+    """Keep the real standard output for the result alone; returns the stream to write it to.
+
+    main() redirects Python's prints and rcutils' logging, but a native library writes to file
+    descriptor 1 without asking. rmw_zenoh's Zenoh does: its own log goes to standard output,
+    colour codes and all. One such line ahead of the result, or one that C stdio holds back
+    until the process ends, and the caller cannot parse what it reads. So the result gets a
+    descriptor of its own and descriptor 1 becomes standard error for the rest of the process:
+    whatever a library writes there joins the diagnostics.
+    """
+    try:
+        sys.stdout.flush()
+        result = os.dup(1)
+    except (OSError, ValueError, AttributeError):
+        return None  # no usable descriptor: the result goes to sys.stdout as before
+    try:
+        os.dup2(2, 1)
+    except OSError:
+        os.close(result)
+        return None
+    return os.fdopen(result, "w")
+
+
+def main(result_stream=None):
     try:
         request = validate_request(json.load(sys.stdin))
     except (ValueError, TypeError) as exc:
@@ -338,9 +363,9 @@ def main():
                 os.environ.pop("RCUTILS_LOGGING_USE_STDOUT", None)
             else:
                 os.environ["RCUTILS_LOGGING_USE_STDOUT"] = old_log_stream
-    print(json.dumps(result, sort_keys=True))
+    print(json.dumps(result, sort_keys=True), file=result_stream or sys.stdout, flush=True)
     return 0 if result["ready"] else 1
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(_reserve_stdout()))

@@ -76,18 +76,41 @@ _INTERPRETER_ADVICE = ("Set simulation.probe to Python in a sourced ROS environm
 _STREAM_KEPT = 64 * 1024  # of each probe stream, in the run's evidence
 
 
+class ProbeResult(dict):
+    """What a probe printed, with the end of its error stream beside it in `log`.
+
+    It is the probe's document and compares equal to it; the log is rig's observation of the
+    process and stays out of the saved evidence. A probe that saw too little often has the
+    reason there: the middleware's own complaint.
+    """
+
+    def __init__(self, document, log=""):
+        super().__init__(document)
+        self.log = log
+
+
+def _reasons(observation):
+    """Why a probe was not ready: the errors it reported, then what its process logged."""
+    reasons = "; ".join(i["message"] for i in observation["issues"] if i["status"] == "error")
+    log = getattr(observation, "log", "")
+    return reasons + (". " + log if log else "")
+
+
+_ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")  # colour codes, as Zenoh's log carries them
+
+
 def _text(stream):
     if isinstance(stream, bytes):
         return stream.decode(errors="replace")
     return stream or ""
 
 
-def _last_words(stderr, lines=8, width=200):
+def _last_words(stderr, whose="Its", lines=8, width=200):
     """The end of a probe's error stream: where a process that dies says why."""
-    kept = [line.rstrip()[:width] for line in stderr.splitlines() if line.strip()][-lines:]
+    kept = [_ANSI.sub("", line).rstrip()[:width] for line in stderr.splitlines() if line.strip()][-lines:]
     if not kept:
-        return "Its error stream was empty"
-    return "Its error stream ended:\n" + "\n".join("    " + line for line in kept)
+        return f"{whose} error stream was empty"
+    return f"{whose} error stream ended:\n" + "\n".join("    " + line for line in kept)
 
 
 def _probe_failure(simulation, argv, what, *, returncode, duration, stdout, stderr, timed_out=False):
@@ -144,7 +167,9 @@ def probe(simulation, env, *, require_type_hashes=False, await_counterparts=Fals
                              stdout=_text(exc.stdout), stderr=_text(exc.stderr), timed_out=True) from exc
     duration = time.monotonic() - began
     try:
-        return _probe_result(result)
+        document = _probe_result(result)
+        return ProbeResult(document, _last_words(result.stderr, "The probe's")
+                           if not document["ready"] and (result.stderr or "").strip() else "")
     except ValueError as exc:
         if result.returncode < 0:
             try:
@@ -159,13 +184,13 @@ def probe(simulation, env, *, require_type_hashes=False, await_counterparts=Fals
             what = ended + " and printed nothing"
         else:
             what = (f"{ended} and printed something other than a probe result ({exc}); "
-                    f"its output began {printed[0][:200]!r}")
+                    f"its output began {_ANSI.sub('', printed[0])[:200]!r}")
         raise _probe_failure(simulation, argv, what, returncode=result.returncode, duration=duration,
                              stdout=result.stdout, stderr=result.stderr) from exc
 
 
 def _apply_probe(plan, observation):
-    plan["probe"] = observation
+    plan["probe"] = dict(observation)
     simulator = _name(plan["recipe"]["simulation"])
     for issue in observation["issues"]:
         if not isinstance(issue, dict) or issue.get("status") not in ("ok", "warn", "warning", "error"):
@@ -173,6 +198,8 @@ def _apply_probe(plan, observation):
         _issue(plan, issue["status"], "probe_" + str(issue.get("code", "graph")), str(issue.get("message", "")))
     if not observation["ready"] and not any(i["status"] == "error" for i in observation["issues"]):
         _issue(plan, "error", "probe", f"{simulator} connection was not verified")
+    if not observation["ready"] and getattr(observation, "log", ""):
+        _issue(plan, "warning", "probe_log", observation.log)
 
 
 def _image_report(plan, inspection):
@@ -385,8 +412,7 @@ def execute(root, path, manifest, descriptors, plan, *, label=None, capture_outp
         # Image acquisition/capture may be slow; a cached successful probe is not a launch gate.
         fresh = probe(sim, env, require_type_hashes=strict)
         if not fresh["ready"]:
-            raise RigError(f"{simulator} connection changed before launch: " + "; ".join(
-                i["message"] for i in fresh["issues"] if i["status"] == "error"))
+            raise RigError(f"{simulator} connection changed before launch: " + _reasons(fresh))
         token = uuid.uuid4().hex
         folder = Path(root) / "var/sim/sessions" / token
         pairs = []
@@ -439,8 +465,7 @@ def execute(root, path, manifest, descriptors, plan, *, label=None, capture_outp
             after = probe(sim, env, require_type_hashes=strict, await_counterparts=strict)
             _json_write(evidence / "probe-after.json", after)
             if not after["ready"]:
-                raise RigError(f"{simulator} graph failed verification after startup: " + "; ".join(
-                    i["message"] for i in after["issues"] if i["status"] == "error"))
+                raise RigError(f"{simulator} graph failed verification after startup: " + _reasons(after))
             for issue in after["issues"]:
                 if issue["status"] in ("warn", "warning"):
                     eprint(f"rig sim: warning: {issue['message']}")
