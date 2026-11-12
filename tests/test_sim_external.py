@@ -185,6 +185,36 @@ class ExternalProbe(unittest.TestCase):
         self.assertEqual(self.stopped(probe_request()),
                          "No advancing /clock received; enable Isaac's ROS bridge and press Play")
 
+    def test_a_paused_simulator_is_not_told_to_start_and_publish_a_clock(self):
+        """/clock arriving without advancing is a paused simulator, not a missing one."""
+        request = probe_request(simulator=dict(SIMULATOR))
+        for samples in (1, 8020):
+            observed = observation()
+            observed["clock"].update(samples=samples, first_ns=13446000000, last_ns=13446000000,
+                                     advancing=False, advance_age_s=None)
+            result = sim_probe.evaluate(request, observed)
+            messages = [i["message"] for i in result["issues"] if i["code"] == "clock_stopped"]
+            with self.subTest(samples=samples):
+                self.assertFalse(result["ready"])
+                self.assertEqual(messages, ["/clock is arriving from worldsim but does not advance; "
+                                            "the simulator looks paused: resume it"])
+                self.assertFalse(says_isaac(result), result["issues"])
+        # With no clock at all the advice is still to start it.
+        for silent in ({"samples": 0, "first_ns": None, "last_ns": None, "advancing": False},
+                       {"samples": 0, "first_ns": None, "last_ns": None, "advancing": False,
+                        "publishers": 0, "max_publishers": 0}):
+            observed = observation()
+            observed["clock"].update(silent)
+            messages = [i["message"] for i in sim_probe.evaluate(request, observed)["issues"]
+                        if i["code"] == "clock_stopped"]
+            self.assertEqual(messages, ["No advancing /clock received; start worldsim and check "
+                                        "that it publishes /clock"])
+        # Isaac's advice covers both, and is what it was.
+        observed = observation()
+        observed["clock"].update(samples=8020, first_ns=5, last_ns=5, advancing=False)
+        self.assertIn("No advancing /clock received; enable Isaac's ROS bridge and press Play",
+                      [i["message"] for i in sim_probe.evaluate(probe_request(), observed)["issues"]])
+
     def test_no_external_probe_result_mentions_isaac(self):
         request = probe_request(simulator=dict(SIMULATOR))
         result = sim_probe.evaluate(request, observation())
