@@ -208,6 +208,12 @@ def _applied_record(name):
     return rig_home() / 'cache' / 'buildx' / f'{name}.toml'
 
 
+# The builder carries a digest of the settings it was created with, as a driver option that
+# `docker buildx inspect` prints. The builder is shared by every RIG_HOME on the engine, so
+# the record of what it holds has to be on the builder, not in one home's cache.
+_SETTINGS_MARK = 'env.RIG_BUILDER_SETTINGS'
+
+
 def _managed_builder(info, settings):
     config = ''.join(f'[registry.{json.dumps(host)}]\n  {transport} = true\n'
                      for host, transport in sorted(settings.items()))
@@ -215,6 +221,7 @@ def _managed_builder(info, settings):
                            os.environ.get('DOCKER_TLS_VERIFY'), config], sort_keys=True)
     name = 'rig-registry-' + hashlib.sha256(identity.encode()).hexdigest()[:16]
     tuning = _builder_tuning(info)
+    mark = hashlib.sha256((config + tuning).encode()).hexdigest()
     record = _applied_record(name)
     try:
         applied = record.read_text()
@@ -227,7 +234,10 @@ def _managed_builder(info, settings):
         if existing.returncode == 0:
             if not re.search(r'^Driver:\s+docker-container\s*$', existing.stdout, re.M):
                 raise RigError(f'{name}: expected a Rig-managed docker-container builder')
-            if applied == config + tuning:
+            carried = re.search(re.escape(_SETTINGS_MARK) + r'="?([0-9a-f]{64})\b', existing.stdout)
+            # A marked builder answers for itself, whichever home created it. One from before
+            # the mark is judged by this home's record, as it always was.
+            if (carried[1] == mark) if carried else (applied == config + tuning):
                 return name
             # Same name + kept state volume = same build cache, new settings (a new network's DNS).
             removed = subprocess.run(['docker', 'buildx', 'rm', '--keep-state', name],
@@ -242,7 +252,8 @@ def _managed_builder(info, settings):
             path.write_text(config + tuning)
             proc = subprocess.run(
                 ['docker', 'buildx', 'create', '--name', name, '--driver', 'docker-container',
-                 '--driver-opt', 'network=host', '--buildkitd-config', str(path)],
+                 '--driver-opt', 'network=host', '--driver-opt', f'{_SETTINGS_MARK}={mark}',
+                 '--buildkitd-config', str(path)],
                 capture_output=True, text=True, timeout=30)
         if proc.returncode:
             # Another Rig invocation may have created the same policy concurrently.
