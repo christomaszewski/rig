@@ -11,8 +11,10 @@ import json
 import os
 from pathlib import Path
 import re
+import signal
 import subprocess
 import sys
+import time
 import uuid
 
 from . import RigError, dispatch, resolve, runs, runtime_images, session_recipe
@@ -59,8 +61,67 @@ def _name(simulation):
 _PRE_TYPE_HASH = frozenset(("foxy", "galactic", "humble"))
 
 
+class ProbeFailure(RigError):
+    """A probe that ran and returned no usable result; `evidence` holds what it left behind."""
+
+    def __init__(self, message, evidence):
+        super().__init__(message)
+        self.evidence = evidence
+
+
+# Beyond simulation.timeout_s: for the interpreter and the middleware to start and stop.
+PROBE_GRACE_S = 10
+_INTERPRETER_ADVICE = ("Set simulation.probe to Python in a sourced ROS environment "
+                       "(rclpy and rosgraph_msgs required)")
+_STREAM_KEPT = 64 * 1024  # of each probe stream, in the run's evidence
+
+
+def _text(stream):
+    if isinstance(stream, bytes):
+        return stream.decode(errors="replace")
+    return stream or ""
+
+
+def _last_words(stderr, lines=8, width=200):
+    """The end of a probe's error stream: where a process that dies says why."""
+    kept = [line.rstrip()[:width] for line in stderr.splitlines() if line.strip()][-lines:]
+    if not kept:
+        return "Its error stream was empty"
+    return "Its error stream ended:\n" + "\n".join("    " + line for line in kept)
+
+
+def _probe_failure(simulation, argv, what, *, returncode, duration, stdout, stderr, timed_out=False):
+    command = f"simulation.probe ({argv[0]})"
+    message = f"{_name(simulation)} ROS probe failed: {command} {what}. {_last_words(stderr)}"
+    if returncode in (126, 127):  # the shell's "cannot execute" and "not found", from a wrapper
+        message += ". " + _INTERPRETER_ADVICE
+    return ProbeFailure(message, dict(argv=argv[:-1], returncode=returncode, duration_s=round(duration, 1),
+                                      stdout=stdout[-_STREAM_KEPT:], stderr=stderr[-_STREAM_KEPT:],
+                                      timed_out=timed_out))
+
+
+def _probe_result(result):
+    doc = json.loads(result.stdout)
+    if (not isinstance(doc, dict) or type(doc.get("version")) is not int or doc["version"] != 1
+            or type(doc.get("ready")) is not bool or not isinstance(doc.get("issues"), list)):
+        raise ValueError("expected version-1 probe response")
+    for issue in doc["issues"]:
+        if (not isinstance(issue, dict) or issue.get("status") not in ("ok", "warn", "warning", "error")
+                or not isinstance(issue.get("code"), str) or not isinstance(issue.get("message"), str)):
+            raise ValueError("invalid issue in probe response")
+    if doc["ready"] and any(i["status"] == "error" for i in doc["issues"]):
+        raise ValueError("probe claims readiness with unresolved errors")
+    if result.returncode and doc["ready"]:
+        raise ValueError("probe exited unsuccessfully despite claiming readiness")
+    return doc
+
+
 def probe(simulation, env, *, require_type_hashes=False, await_counterparts=False):
-    """Run a bundled, dependency-free entry point in the operator's ROS Python."""
+    """Run a bundled, dependency-free entry point in the operator's ROS Python.
+
+    A probe that reports trouble does so in its result. One that returns no usable result
+    raises ProbeFailure with its exit code, its duration and the end of its error stream.
+    """
     request = {key: simulation[key] for key in ("ros", "publishes", "subscribes", "simulator")
                if key in simulation}
     request["timeout_s"] = simulation.get("timeout_s", 10.0)
@@ -70,25 +131,37 @@ def probe(simulation, env, *, require_type_hashes=False, await_counterparts=Fals
         request["await_counterparts"] = True
     source = Path(__file__).with_name("sim_probe.py").read_text()
     argv = simulation.get("probe", [sys.executable]) + ["-c", source]
+    limit = request["timeout_s"] + PROBE_GRACE_S
+    began = time.monotonic()
     try:
         result = subprocess.run(argv, input=json.dumps(request), capture_output=True, text=True,
-                                env=env, timeout=request["timeout_s"] + 10)
-        doc = json.loads(result.stdout)
-        if (not isinstance(doc, dict) or type(doc.get("version")) is not int or doc["version"] != 1
-                or type(doc.get("ready")) is not bool or not isinstance(doc.get("issues"), list)):
-            raise ValueError("expected version-1 probe response")
-        for issue in doc["issues"]:
-            if (not isinstance(issue, dict) or issue.get("status") not in ("ok", "warn", "warning", "error")
-                    or not isinstance(issue.get("code"), str) or not isinstance(issue.get("message"), str)):
-                raise ValueError("invalid issue in probe response")
-        if doc["ready"] and any(i["status"] == "error" for i in doc["issues"]):
-            raise ValueError("probe claims readiness with unresolved errors")
-        if result.returncode and doc["ready"]:
-            raise ValueError("probe exited unsuccessfully despite claiming readiness")
-        return doc
-    except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
-        raise RigError(f"{_name(simulation)} ROS probe failed: {exc}. Set simulation.probe to Python in a "
-                       "sourced ROS environment (rclpy and rosgraph_msgs required)") from exc
+                                errors="replace", env=env, timeout=limit)
+    except OSError as exc:  # the probe was never run: the one case the interpreter is to blame
+        raise RigError(f"{_name(simulation)} ROS probe failed: {exc}. {_INTERPRETER_ADVICE}") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise _probe_failure(simulation, argv, f"printed no result in {limit:g} s and was stopped",
+                             returncode=None, duration=time.monotonic() - began,
+                             stdout=_text(exc.stdout), stderr=_text(exc.stderr), timed_out=True) from exc
+    duration = time.monotonic() - began
+    try:
+        return _probe_result(result)
+    except ValueError as exc:
+        if result.returncode < 0:
+            try:
+                name = f" ({signal.Signals(-result.returncode).name})"
+            except ValueError:
+                name = ""
+            ended = f"was killed by signal {-result.returncode}{name} after {duration:.1f} s"
+        else:
+            ended = f"exited {result.returncode} after {duration:.1f} s"
+        printed = [line for line in result.stdout.splitlines() if line.strip()]
+        if not printed:
+            what = ended + " and printed nothing"
+        else:
+            what = (f"{ended} and printed something other than a probe result ({exc}); "
+                    f"its output began {printed[0][:200]!r}")
+        raise _probe_failure(simulation, argv, what, returncode=result.returncode, duration=duration,
+                             stdout=result.stdout, stderr=result.stderr) from exc
 
 
 def _apply_probe(plan, observation):
@@ -330,6 +403,7 @@ def execute(root, path, manifest, descriptors, plan, *, label=None, capture_outp
             run_id=run_id, output_run=output_run, session_id=token, **named)
         runs.snapshot(execution_manifest, root, stacks=plan["selected"])
         attempted = []
+        stage = None  # which probe is running, should it die
         def started(row, desc):
             if _project_container_ids(manifest, row, env=env):
                 raise RigError(f"{row.name}: Compose project appeared during startup")
@@ -340,6 +414,7 @@ def execute(root, path, manifest, descriptors, plan, *, label=None, capture_outp
             _verify_files(plan["control_files"], "Deployment")
             for files in plan["launch_surfaces"].values():
                 _verify_files(files, "Launcher")
+            stage = "launch gate"
             gate = probe(sim, env, require_type_hashes=strict)
             _json_write(evidence / "probe-launch.json", gate)
             if not gate["ready"]:
@@ -353,6 +428,7 @@ def execute(root, path, manifest, descriptors, plan, *, label=None, capture_outp
                 raise RigError("Startup failed for " + ", ".join(failed))
             # Cross-distro: the deployment's endpoints exist only now, so this check is the one
             # that compares type hashes across both sides — wait for them rather than pass early.
+            stage = "after startup"
             after = probe(sim, env, require_type_hashes=strict, await_counterparts=strict)
             _json_write(evidence / "probe-after.json", after)
             if not after["ready"]:
@@ -374,6 +450,11 @@ def execute(root, path, manifest, descriptors, plan, *, label=None, capture_outp
                 except OSError as write_error:
                     eprint(f"rig sim: could not save failure evidence: {write_error}")
             save_failure()
+            if isinstance(exc, ProbeFailure):  # the message quotes the end; keep both streams whole
+                try:
+                    _json_write(evidence / "probe-failed.json", dict(stage=stage, **exc.evidence))
+                except OSError as write_error:
+                    eprint(f"rig sim: could not save the probe's output: {write_error}")
             state["cleanup_failed"] = []
             # A failed launcher may already have created containers. Attempt every owned
             # instance even if a down launcher raises or the evidence disk is unwritable.
