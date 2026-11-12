@@ -1,0 +1,30 @@
+# Copy to <deployment>/sessions/world.yaml. Start the simulator first: Rig only attaches.
+# See docs/SIMULATION.md, "An external simulator".
+version: 2
+session:
+  instances: [bag_logger, planner]
+  clock: source
+  overrides:
+    bag_logger:
+      control: {use_sim_time: true}
+
+simulation:
+  provider: external
+  # What is really running. Recorded as stated and not verified. Quote the version.
+  simulator: {name: worldsim, version: "abc1234"}
+  mode: attach
+  ros: {distro: lyrical, rmw: rmw_zenoh_cpp, domain_id: 1}
+  scene: scenarios/typical.yaml
+  seed: 7
+  publishes:
+    - {topic: /world/view, type: std_msgs/msg/String}
+    - {topic: /world/report, type: std_msgs/msg/String}
+  subscribes:
+    - {topic: /agent/plan, type: std_msgs/msg/String}
+  probe: [python3]
+  timeout_s: 10
+
+replay:
+  source: world-a
+  playback:
+    exclude: [/agent/plan]

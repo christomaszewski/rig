@@ -256,7 +256,8 @@ renamed services, exact bag selection, and source-preserving legacy imports. No 
 are required; packaging recipes with suites is deferred.
 [Isaac simulation](docs/SIMULATION.md) covers attaching selected services to an existing Isaac
 ROS graph, shared version-2 session recipes, clock checks, recording and replay. Version-1 replay
-recipes retain their existing behavior.
+recipes retain their existing behavior. Its experimental `external` provider attaches to another
+simulator the same way and records the name and version the recipe states.
 [Offline Isaac walkthrough](docs/ISAAC_OFFLINE.md) covers preparing a compatible Jazzy/Zenoh
 deployment, local scene/assets and image caches, then camera capture and replay with a shared
 recipe. Isaac attachment is experimental (since v0.2.73); live GPU acceptance is still pending.

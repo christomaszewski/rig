@@ -30,6 +30,7 @@ upgrade a baked artifact. Isaac attachment remains explicitly **experimental**.
 | Hold replay producers until consumers are ready | [Coordinated startup](replay-coordination.md) |
 | Attach selected services to a running Isaac ROS graph | [Simulation reference](SIMULATION.md) (experimental) |
 | Prepare an offline Isaac machine and record→replay | [Offline walkthrough](ISAAC_OFFLINE.md) and [example](../examples/isaac-attach/README.md) |
+| Attach selected services to another running simulator | [External simulator](SIMULATION.md#an-external-simulator) and [example](../examples/external-attach/README.md) (experimental) |
 | Inspect current evidence and remaining Isaac acceptance | [Preparation report](ISAAC_PREP_REPORT.md) |
 | Resume development or understand decisions | [State](STATE.md), [design](DESIGN.md), [roadmap](ROADMAP.md) |
 

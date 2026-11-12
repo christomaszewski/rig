@@ -15,6 +15,10 @@ subscriptions and ROS bridge in Isaac before invoking Rig. Recipe topic bindings
 the graph that must already exist; they do not create OmniGraphs, remap topics, rewrite
 frame IDs, load a USD scene or change the simulator's seed.
 
+A second provider, `external`, attaches in the same way to a simulator other than Isaac.
+[An external simulator](#an-external-simulator) lists what differs; the rest of this page
+applies to both.
+
 ## A shared session recipe
 
 Save the following as `sessions/warehouse.yaml`, adapting the instance names and ROS
@@ -189,6 +193,50 @@ Keep command authority explicit: the live controller should own its regenerated 
 topics. The example replay exclusion removes recorded commands from ordinary data playback.
 Feeding recorded controls into a live simulator and mixing bag-driven sensors with Isaac
 are outside this attach workflow.
+
+## An external simulator
+
+`provider: external` is for any simulator that already publishes `/clock` and its topics on
+the deployment's ROS graph. It is experimental too, and Rig still only attaches: it does not
+launch, reset, step or seed the simulator.
+
+```yaml
+simulation:
+  provider: external
+  simulator: {name: worldsim, version: "abc1234"}
+  mode: attach
+  ros: {distro: lyrical, rmw: rmw_zenoh_cpp, domain_id: 1}
+  scene: scenarios/typical.yaml
+  seed: 7
+  publishes:
+    - {topic: /world/view, type: std_msgs/msg/String}
+    - {topic: /world/report, type: std_msgs/msg/String}
+  subscribes:
+    - {topic: /agent/plan, type: std_msgs/msg/String}
+```
+
+`simulator` is required and holds exactly `name` and `version`, both non-empty strings. Quote
+a version that YAML would read as a number. `simulator` is valid only with `external` and
+`isaac_version` only with `isaac`; any other provider is refused. The other fields, and the
+`session` and `replay` sections, mean what they mean for Isaac.
+
+Preflight and the probe check the same things as for Isaac: ROS settings, selected tiers,
+one authority per output, runtime images, endpoint types, type hashes, QoS and the clock.
+The simulator must be the only `/clock` publisher and must keep the clock advancing while it
+waits for the stack, because the probe requires an advance within the last 2 seconds. Two
+things differ. The Humble/Jazzy warning concerns Isaac's tested distributions and is not
+raised. Messages name the simulator by `simulator.name`.
+
+The plan, the run's `simulation` metadata, the saved session and the run's `.rig/simulation/`
+directory say `provider: external`, carry the `simulator` mapping, and give `clock` as
+`external`. The scene, the seed and the simulator's name and version are recorded as the
+recipe states them. Rig does not ask the simulator what it is running, so a wrong value in
+the recipe is a wrong value in the record. `rig sim down` and bare `rig down` stop the
+session and leave the simulator running.
+
+[examples/external-attach](../examples/external-attach/README.md) has a recipe to copy.
+Automated tests cover this provider's recipes, plans, records and session lifecycle. It has
+not been run against a live simulator; [State](STATE.md) records what has been exercised.
 
 ## Frames, versions and current limits
 

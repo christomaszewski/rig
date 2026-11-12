@@ -56,6 +56,15 @@ workflow. The dated entries below are historical observations, not the current h
 - Experimental `rig sim check/up/down` attaches to an existing Isaac ROS graph, checks ROS
   settings/endpoints/QoS and progressing time, pins selected images, captures a normal run,
   and uses frozen session state for status/logs/teardown. It does not launch or reset Isaac.
+- Experimental `simulation.provider: external` (after v0.2.84, not yet released) lets `rig sim`
+  attach to a simulator other than Isaac and record it as the recipe states it:
+  `provider: external`, `simulator: {name, version}` and `clock: external` in the plan, the run
+  metadata and the saved session. Scene, seed, name and version are recorded as stated and not
+  verified. Isaac recipes and saved Isaac sessions are unchanged. This provider is covered by
+  unit tests only (`tests/test_sim_external.py`, `tests/test_sim_external_replace.py`). It has
+  not been exercised against a live simulator. See the
+  [reference](SIMULATION.md#an-external-simulator) and
+  [example](../examples/external-attach/README.md).
 - The [offline Isaac walkthrough](ISAAC_OFFLINE.md) and [example](../examples/isaac-attach/README.md)
   cover preparation and capture→replay. The repository's Lyrical default requires a compatibility
   decision: NVIDIA 6.0.0 documents tested Humble/Jazzy, including Linux Jazzy/Zenoh. Since
