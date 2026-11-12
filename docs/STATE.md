@@ -62,16 +62,54 @@ workflow. The dated entries below are historical observations, not the current h
   metadata and the saved session. Scene, seed, name and version are recorded as stated and not
   verified. Isaac recipes and saved Isaac sessions are unchanged. Unit tests cover it
   (`tests/test_sim_external.py`, `tests/test_sim_external_replace.py`). **Exercised live on
-  2026-11-12** against one private, mission-level simulator on one amd64 host (Lyrical,
-  `rmw_zenoh_cpp`; `/clock` and two `std_msgs/msg/String` topics out, one in): `rig sim check`,
-  `rig sim up` with a bag logger and one autonomy service, `rig sim down --end-run`, over several
-  sessions, and `rig replay --recipe` of a recorded run under the shared recipe. The
-  probe ran in a container through `simulation.probe`. **Not exercised:** a simulator on
-  another host or another ROS distribution, a DDS middleware, sensor replacement, a failed
-  startup and its rollback, and a clock that stops during a session. Live Isaac acceptance is
-  still pending and is not changed by this. See the
+  2026-11-12**, all of it with v0.2.85 unchanged, Lyrical and `rmw_zenoh_cpp`, the probe run in
+  a container through `simulation.probe`:
+  - One private, mission-level simulator on one amd64 host (`/clock` and two
+    `std_msgs/msg/String` topics out, one in): `rig sim check`, `rig sim up` with a bag logger
+    and one autonomy service, `rig sim down --end-run`, over several sessions, and
+    `rig replay --recipe` of a recorded run under the shared recipe.
+  - The same stack on another host: an arm64 Jetson Orin attached to that simulator on the
+    x86-64 server, across two subnets, and a recording made on the server replayed on the
+    Orin. The images were built on the Orin for arm64. The probe had to join the simulator's
+    router as a Zenoh client.
+  - A second simulator with standard message types: Gazebo (`gz sim` 10.5.0, headless) on the
+    amd64 host, `nav_msgs/msg/Odometry` out and `geometry_msgs/msg/Twist` in, a 500 Hz clock,
+    attach and replay. This was a second deployment on the host, on its own router port.
+  - A failed startup and its rollback, against Gazebo: two of 59 attaches failed with a probe
+    whose output Rig could not read. Where that was the check after startup, Rig stopped the
+    three services it had started, in reverse order, and kept the run and the session, as
+    designed. The cause was in the probe and is described in the next entry.
+
+  **Not exercised:** another ROS distribution, a DDS middleware, sensor replacement, and a
+  clock that stops during a session. Live Isaac acceptance is still pending and is not
+  changed by this. See the
   [reference](SIMULATION.md#an-external-simulator),
   [example](../examples/external-attach/README.md) and [v0.2.85](releases/v0.2.85.md).
+- **After v0.2.85, not yet released:** fixes for what the second simulator and the second host
+  showed, each with a test that fails on v0.2.85. The Rig CLI only.
+  - *The probe's result survives the middleware.* The failed startups above had two causes,
+    both in the probe and both reproduced against Gazebo with the probe's streams kept.
+    `rmw_zenoh`'s Zenoh writes its own log to standard output, so a line of it ahead of the
+    probe's JSON made Rig report `Expecting value: line 1 column 1 (char 0)` and drop both.
+    And the probe left the graph before it printed: when closing its Zenoh session timed out
+    (ten seconds, seen when peers that had just joined were still connecting to it), rclpy's
+    error replaced an observation that had found the graph ready. The probe now keeps
+    standard output for its result, reports before it leaves, and treats a failed departure
+    as a note. Why Zenoh's close times out is not known and is not Rig's to fix.
+  - A probe that returns no result reports how it ended, how long it ran and the end of its
+    error stream; a probe that is not ready is followed by what the middleware logged.
+  - A run whose startup failed carries `failed:` in its manifest and is listed as `failed`.
+  - `rig graph` lists the simulator's nodes under the simulator the run names, as stated and
+    inferred, and rosbag2's player node with the player instance.
+  - Image messages name `rig image adopt` and say that `rig sim up` pulls; a paused external
+    simulator is worded as paused.
+  - `rig run rm` refuses, before deleting anything, a run that holds files the user cannot
+    remove.
+  - The managed Buildx builder carries a digest of its settings, so Rig homes that share a
+    Docker engine no longer re-create it on each other.
+
+  These apply to Isaac sessions as well; a healthy Isaac session prints and writes what it
+  did. See the [reference](SIMULATION.md#check-start-and-stop).
 - A session's run is sealed against the deployment's own var context (v0.2.85). Until then
   `rig sim down --end-run`, and `rig down --end-run` on a recipe
   session, marked every run `config_dirty_at_seal` and warned that the config had changed

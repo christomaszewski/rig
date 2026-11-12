@@ -136,12 +136,27 @@ path when ROS is installed in another environment. It is an argument list, not a
 command. `timeout_s` bounds discovery and clock observation
 and must be greater than zero and at most 120 seconds.
 
-A probe that finds trouble says so in its result, and Rig lists each issue. A probe that
-returns no result is reported by how it ended: its exit code or signal, or that it was stopped
-after `timeout_s` plus ten seconds; how long it ran; what it printed, if that was not a result;
-and the last lines of its error stream. The advice to set `simulation.probe` is given only when
-the probe could not be run. When the launch gate or the check after startup ends this way, both
-of the probe's streams are kept with the run as `.rig/simulation/probe-failed.json`.
+A probe that finds trouble says so in its result, and Rig lists each issue, followed by the
+last lines of the probe's error stream when there are any: what the middleware logged while
+the probe saw too little is often the reason. A probe that returns no result is reported by
+how it ended: its exit code or signal, or that it was stopped after `timeout_s` plus ten
+seconds; how long it ran; what it printed, if that was not a result; and the last lines of its
+error stream. The advice to set `simulation.probe` is given only when the probe could not be
+run. When the launch gate or the check after startup ends this way, both of the probe's
+streams are kept with the run as `.rig/simulation/probe-failed.json`.
+
+The probe's standard output carries its result and nothing else. `rmw_zenoh`'s Zenoh writes
+its own log to standard output, not standard error, so the probe gives its result a
+descriptor of its own and sends everything a library writes to standard output to standard
+error. A wrapper named in `simulation.probe` must keep the two streams apart, as
+`docker run -i` without `-t` does.
+
+The probe's verdict is what it observed, and it reports before it leaves the graph. Leaving
+can fail without anything being wrong with the graph: closing a Zenoh session can run into
+Zenoh's ten-second timeout when peers that have just joined are still connecting to the
+probe. The probe notes such a failure on standard error and its verdict stands; the check
+then takes those ten seconds longer. A probe that has reported and does not exit within
+`timeout_s` plus ten seconds is stopped, with a warning, and its result is used.
 
 The probe checks its actual ROS distribution, middleware and domain, expected publisher and
 subscriber topic types, and exactly one advancing `/clock` without a backwards jump during

@@ -218,8 +218,8 @@ compares it with its own settings. Homes with the same settings never re-create 
 real change of settings, from any home, re-creates it under its name: the cache is kept, but a
 build running on it at that moment fails and must be run again. Give the homes that share an
 engine the same `RIG_BUILDKITD_CONFIG`, or each will re-create the builder after the other. A
-builder created by Rig v0.2.85 or earlier has no such mark and is judged by each home's own
-record, so a home that has not used it may re-create it once.
+builder created by a Rig that did not yet write the mark is judged by each home's own record,
+as before, so a home that has not used it may re-create it once.
 
 Explicit `BUILDX_BUILDER` / `BUILDKIT_HOST` selections and remote/cloud/multinode builders keep their
 build settings and topology; those build servers must already have the required registry access.
