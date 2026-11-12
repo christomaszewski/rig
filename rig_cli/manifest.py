@@ -115,6 +115,7 @@ class RowOverride:
     row_value: object
     tier: str           # the label of the tier that outranks it
     value: object
+    unique: tuple = ()  # the roster's `unique:` names built from this one (fleet.unique_inputs)
 
 
 @dataclass
@@ -570,13 +571,15 @@ def load_manifest(root: Path, *, context: str = "execution", target_overrides: d
     local = _local_files(root) if context == "execution" else []
     tiers: list[tuple[str, dict]] = ([("shell", _shell_source())] + local
                                      if context == "execution" else [])
-    row_label = None
+    row_label = roster_name = None
+    fleet_tiers: list[tuple[str, dict]] = []
     if context == "execution" and (root / "fleet.yaml").is_file():
         # The fleet tier comes last, and needs this vehicle's id to find its row: the id is
         # settled by the tiers above (and vehicle.yaml) — the roster never supplies it.
-        from .fleet import vehicle_tiers
+        from .fleet import row_name, vehicle_tiers
         own_id, _ = _effective_from("vehicle_id", tiers, data.get("vehicle_id"))
         fleet_tiers = vehicle_tiers(root / "fleet.yaml", own_id)
+        roster_name = row_name(root / "fleet.yaml", own_id)
         row_label = next((label for label, _ in fleet_tiers if label != "fleet.yaml"), None)
         tiers += fleet_tiers
     sources = [source for _, source in tiers]
@@ -601,16 +604,37 @@ def load_manifest(root: Path, *, context: str = "execution", target_overrides: d
                 supplied.update(dict.fromkeys(extra, label))
     # A roster row's value that a tier ABOVE the fleet tier also sets, differently: the row
     # loses the render, and a stale `rig provision --var` would do so without a word.
+    # The same goes for anything a `unique:` value of the roster is built from, whichever roster
+    # level supplies it: the ground station compared the roster's values across the fleet, and
+    # a tier above the roster that changes one takes this vehicle off that comparison.
     row_overrides: list[RowOverride] = []
-    if row_label is not None:
-        row_vars = next(src for label, src in tiers if label == row_label).get("vars") or {}
+    if fleet_tiers:
+        from .fleet import unique_inputs
+        told: dict = {}  # name -> (value, label), as the roster hands it to this vehicle
+        for label, src in reversed(fleet_tiers):
+            for name, value in (src.get("vars") or {}).items():
+                told[name] = (value, label)
+        feeds = unique_inputs(root / "fleet.yaml", {name: value for name, (value, _) in told.items()})
         for label, src in tiers:
-            if label == row_label:
+            if label == fleet_tiers[0][0]:
                 break
             for name, value in (src.get("vars") or {}).items():
-                if name in row_vars and not _same_value(value, row_vars[name]):
+                if name not in told:
+                    continue
+                roster_value, roster_label = told[name]
+                if (roster_label == row_label or name in feeds) \
+                        and not _same_value(value, roster_value):
                     row_overrides.append(RowOverride(
-                        name=name, row=row_label, row_value=row_vars[name], tier=label, value=value))
+                        name=name, row=roster_label, row_value=roster_value, tier=label,
+                        value=value, unique=feeds.get(name, ())))
+        # A vehicle finds its row by id, so the id always agrees with the roster. Its name is
+        # its own: a unique value built from the name was compared under the ROW's name.
+        own_name, name_source = effective["vehicle"]
+        if roster_name is not None and "vehicle" in feeds and own_name is not None \
+                and not MARKER.search(str(own_name)) and str(own_name).strip() != roster_name:
+            row_overrides.append(RowOverride(
+                name="vehicle", row=f"fleet.yaml row {roster_name}", row_value=roster_name,
+                tier=name_source, value=own_name, unique=feeds["vehicle"]))
 
     for key in ("vehicle", "vehicle_id", "platform", "arch"):  # these outrank a var of the name
         value, label = effective[key]

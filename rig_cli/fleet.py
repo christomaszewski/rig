@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import datetime
+import decimal
 import hashlib
 import json
 import os
@@ -55,6 +56,7 @@ import yaml
 
 from . import RigError
 from .common import eprint, load_yaml, print_table
+from .interpolate import MARKER, resolve_map
 
 FLEET_KEYS = {"fleet", "mode", "gcs_ip", "sil", "vehicles", "vars", "unique"}
 ROW_KEYS = {"id", "name", "host", "path", "data_dir", "ip", "vars"}
@@ -207,10 +209,11 @@ def load_fleet(explicit: str | None) -> Fleet:
                   network=network, vehicles=tuple(vehicles), path=path,
                   unique=_unique_names(data.get("unique"), path), vars=dict(data.get("vars") or {}),
                   digest=digest, per_vehicle="unique" in data or any(v.vars for v in vehicles))
-    for name in fleet.unique:
-        if not any(name in v.vars for v in vehicles):
-            raise RigError(f"{path}: unique: no vehicle row sets '{name}' (a typo?) — rows set: "
-                           f"{', '.join(sorted({n for v in vehicles for n in v.vars})) or 'nothing'}")
+    for name in fleet.unique:  # a fleet-level value built from the id is a value per vehicle
+        if name not in fleet.vars and not any(name in v.vars for v in vehicles):
+            known = sorted(set(fleet.vars) | {n for v in vehicles for n in v.vars})
+            raise RigError(f"{path}: unique: nothing in the roster sets '{name}' (a typo?) — "
+                           f"it sets: {', '.join(known) or 'nothing'}")
     clash = shared_values(fleet)
     if clash:
         raise RigError(f"{path}: {clash}")
@@ -242,38 +245,131 @@ def _unique_names(raw, path: Path) -> tuple[str, ...]:
     return tuple(dict.fromkeys(raw))
 
 
+_PLAIN_NUMBER = re.compile(r"-?(?:0|[1-9]\d*)(?:\.\d+)?")
+
+
 def _value_key(value) -> str:
-    """How two values are compared for `unique:` — as the text a config would receive."""
+    """How two values are compared for `unique:`: as the text a config would receive, and a
+    number as one number however it is written (30, 30.0, "30" and "30.0" are one band)."""
     if isinstance(value, (dict, list, tuple)):
         return json.dumps(value, sort_keys=True, default=str)
-    return str(value).strip()
+    text = str(value).strip()
+    if isinstance(value, bool) or not _PLAIN_NUMBER.fullmatch(text):
+        return text
+    return format(decimal.Decimal(text).normalize(), "f")
+
+
+# Names a vehicle works out for itself. The roster cannot say what they will be, so a `unique:`
+# value built from one cannot be checked here.
+_VEHICLE_SIDE = ("ros_domain_id", "fleet_peer_ids", "data_dir", "platform", "arch")
+
+
+def _told(fleet: Fleet, vehicle: Vehicle, forwarded: dict, selected: tuple) -> tuple[dict, dict]:
+    """(vars, where each came from) as the roster hands them to ONE vehicle, in the vehicle's
+    own order: the fleet-level values (the roster-derived ones included, by the function the
+    vehicle reads them with), then its row, then `fleet up --var` when the vehicle is among
+    the selected. Its name and id go on top, as they do on the vehicle."""
+    told, origin = {}, {}
+    for label, values in (("the fleet-level vars", _fleet_level(_roster_doc(fleet.path), fleet.path)["vars"]),
+                          ("its row", vehicle.vars),
+                          ("--var", forwarded if vehicle.name in selected else {})):
+        for key, value in values.items():
+            told[key], origin[key] = value, label
+    told["vehicle"], told["vehicle_id"] = vehicle.name, vehicle.id
+    origin["vehicle"] = origin["vehicle_id"] = "the roster"
+    return told, origin
+
+
+def _inputs(name: str, values: dict) -> tuple[list[str], list[str]]:
+    """(names `name` is built from, itself first; those among them `values` does not hold)."""
+    seen, missing, todo = [], [], [name]
+    while todo:
+        key = todo.pop()
+        if key in seen or key in missing:
+            continue
+        if key not in values:
+            missing.append(key)
+            continue
+        seen.append(key)
+        if isinstance(values[key], str):
+            todo += MARKER.findall(values[key])
+    return seen, sorted(missing)
 
 
 def shared_values(fleet: Fleet, forwarded: dict | None = None, selected: tuple = ()) -> str | None:
-    """The first `unique:` name two vehicles would hold one value for, as a sentence — or None.
-    Each vehicle's value is what its fleet tier resolves to: its row's own, else the fleet-level
-    one. Rows without either hold nothing and clash with nothing. `forwarded` is `fleet up
-    --var` (the shell tier, which outranks the roster) applied to the `selected` vehicles: the
-    check is on what each vehicle will be told, across the WHOLE roster."""
+    """The first thing wrong with the roster's `unique:` values, as a sentence — or None.
+
+    What is compared is the value the roster tells each vehicle to use, resolved the way the
+    vehicle resolves it (see _told): two spellings of one value clash, and one spelling that
+    renders a value per vehicle (`"{{vehicle_id}}0"`) does not. A value built from something
+    the roster does not set cannot be compared and is refused. Vars no `unique:` value is
+    built from are not looked at: they may well wait for the vehicle. A row that is told no
+    value holds nothing and clashes with nothing. `forwarded` is `fleet up --var` (the shell
+    tier on the `selected` vehicles); the check is across the WHOLE roster.
+
+    This is a statement about the roster. A vehicle's own files and shell can still outrank
+    it, which the vehicle checks for itself (manifest.load_manifest, doctor.collect)."""
     forwarded = forwarded or {}
     for name in fleet.unique:
         holders: dict[str, list[tuple[str, object, str]]] = {}
         for v in fleet.vehicles:
-            if name in forwarded and v.name in selected:
-                value, origin = forwarded[name], "--var"
-            elif name in v.vars:
-                value, origin = v.vars[name], "its row"
-            elif name in fleet.vars:
-                value, origin = fleet.vars[name], "the fleet-level vars"
-            else:
+            told, origin = _told(fleet, v, forwarded, selected)
+            if name not in told:
                 continue
-            holders.setdefault(_value_key(value), []).append((v.name, value, origin))
+            used, missing = _inputs(name, told)
+            written = told[name]
+            if missing:
+                side = [m for m in missing if m in _VEHICLE_SIDE]
+                why = (f"only the vehicle knows {', '.join(side)}" if side and side == missing else
+                       f"the roster does not set {', '.join(missing)}")
+                return (f"unique: '{name}' on {v.name} is {written!r} ({origin[name]}), and {why} — "
+                        f"what {v.name} would use cannot be compared with the other vehicles. "
+                        f"Set {'it' if len(missing) == 1 else 'them'} in the roster (a row's "
+                        f"`vars:` or the fleet-level ones), or write the value out")
+            value = resolve_map({key: told[key] for key in used},
+                                where=f"unique: '{name}' on {v.name}", allow_unresolved=True)[name]
+            if isinstance(value, str) and MARKER.search(value):
+                return (f"unique: '{name}' on {v.name} is {written!r} ({origin[name]}), which does "
+                        f"not resolve to a value (references nested too deep) — write it out")
+            how = origin[name]
+            if _value_key(value) != _value_key(written):
+                how += f": {written!r}"
+            via = sorted(key for key in used if key != name and origin[key] == "--var")
+            if via:
+                how += f", with --var {', '.join(via)}"
+            holders.setdefault(_value_key(value), []).append((v.name, value, how))
         for same in holders.values():
             if len(same) > 1:
-                who = " and ".join(f"{n} ({origin})" for n, _, origin in same)
+                who = " and ".join(f"{n} ({how})" for n, _, how in same)
                 return (f"unique: '{name}' would be {same[0][1]!r} on {who} — two vehicles must "
                         f"not share this value")
     return None
+
+
+def row_name(path: Path, vehicle_id) -> str | None:
+    """The `name` of the roster row a vehicle with this id reads as its own — None when no row
+    (or more than one) carries the id. The row is found by id; the name is the roster's."""
+    me = None if vehicle_id is None else str(vehicle_id).strip()
+    if not me or "{{" in me:
+        return None
+    mine = [row for row in (_roster_doc(path).get("vehicles") or [])
+            if isinstance(row, dict) and row.get("id") is not None and str(row["id"]).strip() == me]
+    return str(mine[0].get("name") or me) if len(mine) == 1 else None
+
+
+def unique_inputs(path: Path, values: dict) -> dict[str, tuple[str, ...]]:
+    """{var name: the `unique:` names built from it} for ONE vehicle's fleet tier `values` (its
+    row over the fleet-level ones): every `unique:` name, and every var its value references,
+    however indirectly. These are what the ground station compared across the roster; a tier
+    above the roster that sets one differently takes the vehicle off that check."""
+    feeds: dict[str, list[str]] = {}
+    for name in _unique_names(_roster_doc(path).get("unique"), path):
+        if name not in values:
+            continue
+        used, beyond = _inputs(name, values)  # `beyond`: the vehicle's own name and id
+        for key in used + beyond:
+            feeds.setdefault(key, []).append(name)
+    return {key: tuple(names) for key, names in feeds.items()}
 
 
 def _roster_doc(path: Path) -> dict:

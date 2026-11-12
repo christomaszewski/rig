@@ -63,9 +63,24 @@ def _brief(value, limit: int = 48) -> str:
 def shell_overrides(manifest: Manifest) -> list[str]:
     """A sentence for each roster row value the shell tier outranks on this invocation — an
     explicit choice, so it is said (doctor warns, `up` prints it) and never blocked."""
-    return [f"{clash.name}: the shell (RIG_VAR_{clash.name}) sets {clash.value!r} over "
-            f"{clash.row}'s {clash.row_value!r}, for this invocation only"
+    return [f"{clash.name}: the shell ({_shell_name(clash.name)}) sets {clash.value!r} over "
+            f"{clash.row}'s {clash.row_value!r}, for this invocation only" + _feeds(clash)
             for clash in manifest.row_overrides if clash.tier == "shell"]
+
+
+def _shell_name(name: str) -> str:
+    return "RIG_VEHICLE_NAME" if name == "vehicle" else f"RIG_VAR_{name}"
+
+
+def _feeds(clash) -> str:
+    """What makes an override matter beyond its own name: the roster's `unique:` values built
+    from it, which the ground station compared across the fleet with the roster's value."""
+    built = [name for name in clash.unique if name != clash.name]
+    if not built:
+        return ""
+    return (f" (the roster's unique value{'s' if len(built) > 1 else ''} {', '.join(built)} "
+            f"{'are' if len(built) > 1 else 'is'} built from it, and compared across the fleet "
+            f"with the roster's value)")
 
 
 def collect(
@@ -97,12 +112,18 @@ def collect(
     # file and the tree-local file block; the shell is one invocation's explicit choice.
     issues += [Issue(WARN, note) for note in shell_overrides(manifest)]
     for clash in manifest.row_overrides:
-        if clash.tier != "shell":
+        if clash.tier != "shell" and clash.name == "vehicle":
+            issues.append(Issue(ERROR, f"vehicle: {clash.tier} names this vehicle {clash.value!r}, "
+                                       f"but its roster row, found by id, is {clash.row_value!r} "
+                                       f"({clash.row}){_feeds(clash)}. Name the vehicle "
+                                       f"{clash.row_value!r} here, or rename the row"))
+        elif clash.tier != "shell":
             issues.append(Issue(ERROR, f"{clash.name}: {clash.tier} sets {clash.value!r}, but "
                                        f"{clash.row} sets {clash.row_value!r} — the vehicle's own "
                                        f"file outranks the roster, so it would run on "
-                                       f"{clash.value!r}. Delete `{clash.name}` from {clash.tier} "
-                                       f"(or set it to the roster's value), or change the roster"))
+                                       f"{clash.value!r}{_feeds(clash)}. Delete `{clash.name}` "
+                                       f"from {clash.tier} (or set it to the roster's value), or "
+                                       f"change the roster"))
 
     # rmw_zenoh needs a shared zenoh router (one per vehicle) in the infra tier — and the converse:
     # a router on a NON-zenoh fleet is a runtime failure waiting to happen. The router runs `rmw_zenohd`
