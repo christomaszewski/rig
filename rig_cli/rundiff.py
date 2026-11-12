@@ -282,8 +282,8 @@ def compare(run_a: Path, run_b: Path) -> dict:
 
     def ident(run: dict) -> dict:
         m = run["manifest"]
-        return {"run": str(m.get("run") or run["dir"].name), "label": m.get("label"),
-                "started": m.get("started"), "path": str(run["dir"])}
+        return {"run": str(m.get("run") or run["dir"].name), "vehicle": m.get("vehicle"),
+                "label": m.get("label"), "started": m.get("started"), "path": str(run["dir"])}
 
     def order(change: dict) -> int:  # run, label and times first: what a person looks for
         return _PER_RUN.index(change["key"]) if change["key"] in _PER_RUN else len(_PER_RUN)
@@ -306,8 +306,8 @@ def render(doc: dict) -> str:
     lines = ["rig run diff"]
     for name in ("a", "b"):
         run = doc[name]
-        lines.append(f"  {name.upper()}  {run['run']}  (label {run['label'] or '—'}, "
-                     f"started {run['started'] or '?'})")
+        lines.append(f"  {name.upper()}  {run['run']}  (vehicle {run.get('vehicle') or '—'}, "
+                     f"label {run['label'] or '—'}, started {run['started'] or '?'})")
     lines += [f"  note: {note}" for note in doc["notes"]]
     lines.append("")
     if doc["differs"]:
