@@ -262,6 +262,10 @@ def _value_key(value) -> str:
 # Names a vehicle works out for itself. The roster cannot say what they will be, so a `unique:`
 # value built from one cannot be checked here.
 _VEHICLE_SIDE = ("ros_domain_id", "fleet_peer_ids", "data_dir", "platform", "arch")
+# Unlike an explicitly supplied fleet_peer_ids, these vars can be replaced by authoritative
+# manifest/machine fields (or derived unconditionally). A roster assignment cannot establish
+# what a vehicle will use, even when every dependency appears to be present here.
+_AUTHORITATIVE_VEHICLE_VALUES = {"ros_domain_id", "data_dir", "platform", "arch"}
 
 
 def _told(fleet: Fleet, vehicle: Vehicle, forwarded: dict, selected: tuple) -> tuple[dict, dict]:
@@ -318,6 +322,13 @@ def shared_values(fleet: Fleet, forwarded: dict | None = None, selected: tuple =
                 continue
             used, missing = _inputs(name, told)
             written = told[name]
+            authoritative = sorted(_AUTHORITATIVE_VEHICLE_VALUES.intersection(used + missing))
+            if authoritative:
+                return (f"unique: '{name}' on {v.name} is {written!r} ({origin[name]}), and uses "
+                        f"{', '.join(authoritative)}, which the vehicle derives or takes from "
+                        f"its own manifest/machine fields — setting roster vars with those "
+                        f"names cannot establish what it will use. Write the unique value "
+                        f"without these vehicle-only values")
             if missing:
                 side = [m for m in missing if m in _VEHICLE_SIDE]
                 why = (f"only the vehicle knows {', '.join(side)}" if side and side == missing else

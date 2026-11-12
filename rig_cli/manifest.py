@@ -633,15 +633,6 @@ def load_manifest(root: Path, *, context: str = "execution", target_overrides: d
                     row_overrides.append(RowOverride(
                         name=name, row=roster_label, row_value=roster_value, tier=label,
                         value=value, unique=feeds.get(name, ())))
-        # A vehicle finds its row by id, so the id always agrees with the roster. Its name is
-        # its own: a unique value built from the name was compared under the ROW's name.
-        own_name, name_source = effective["vehicle"]
-        if roster_name is not None and "vehicle" in feeds and own_name is not None \
-                and not MARKER.search(str(own_name)) and str(own_name).strip() != roster_name:
-            row_overrides.append(RowOverride(
-                name="vehicle", row=f"fleet.yaml row {roster_name}", row_value=roster_name,
-                tier=name_source, value=own_name, unique=feeds["vehicle"]))
-
     for key in ("vehicle", "vehicle_id", "platform", "arch"):  # these outrank a var of the name
         value, label = effective[key]
         if value is not None:  # an explicit --platform/--arch was folded into vehicle.yaml's data
@@ -666,6 +657,17 @@ def load_manifest(root: Path, *, context: str = "execution", target_overrides: d
 
     vehicle = str(ctx.get("vehicle", "vehicle"))
     vehicle_id = ctx.get("vehicle_id")
+    # Tolerant running-verb loads may retain unresolved identity expressions. Those fields
+    # must still hit require_identity before they can name a Compose project or fleet env.
+    missing += tuple(key for key in ("vehicle", "vehicle_id") if key not in missing
+                     and isinstance(ctx.get(key), str) and MARKER.search(ctx[key]))
+    # A vehicle finds its row by id, but its name may itself be built from vars. Compare the
+    # resolved name: a unique value built from it was checked under the roster row's name.
+    if fleet_tiers and roster_name is not None and "vehicle" in feeds \
+            and not MARKER.search(vehicle) and vehicle.strip() != roster_name:
+        row_overrides.append(RowOverride(
+            name="vehicle", row=f"fleet.yaml row {roster_name}", row_value=roster_name,
+            tier=supplied.get("vehicle") or "default", value=vehicle, unique=feeds["vehicle"]))
     ros_raw = data.get("ros") or {}
     local_domain = next(((label, src["ros"]["domain_id"]) for label, src in local if "ros" in src), None)
     domain, domain_source = (local_domain[1], local_domain[0]) if local_domain else \
