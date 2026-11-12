@@ -460,7 +460,11 @@ inside the reconstructed directory when you need a CLI feature absent from that 
 
 **Restore runtime images before replay.** Native run captures contain no Docker image bytes.
 The source run's `.rig/images.yaml` maps image refs to locally observed `repo@sha256:…`
-identities, best-effort: entries can be null and the file can be absent. `reconstruct` neither
+identities, best-effort: entries can be null and the file can be absent. For a
+multi-architecture image that identity is an index digest, which is new on every build; where
+the daemon can say more, `held:` in the same file records what is behind it: docker's image id,
+the platform, and (containerd image store, Docker 28 or later) the digest of that platform's
+manifest, the one `rig.lock` lists under `children`. `reconstruct` neither
 pulls these images nor rewrites launcher image refs to those digests. `--registry HOST` changes
 the registry host for the tree; it does not populate the mirror or restore image content.
 

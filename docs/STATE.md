@@ -133,8 +133,12 @@ current host state.
   that keeps an unchanged image's earlier index (v0.2.82) can leave the daemon holding the
   fresh one, and such a run then differs from a rebuild of the same source: on the three
   hand-checked runs the rebuild pair now reports the planner image as a difference, where it
-  read "no difference of substance" before. Rig does not record which per-architecture image
-  a daemon's index holds; closing that gap is open.
+  read "no difference of substance" before. From this version a run also records what was
+  behind the index its daemon held (`held:` in `.rig/images.yaml`: image id, platform and,
+  with the containerd image store, the platform's manifest digest), and `rig run diff`
+  compares by that first, so a kept digest no longer separates a run from a rebuild. That
+  holds for runs opened from this version on; the capture was tried against a real daemon,
+  and no real pair of such runs has been compared yet.
   See [v0.2.86](releases/v0.2.86.md).
 - **v0.2.86 an open run names its deployment directory:** deployment directories on one
   machine share the run registry, and a run left open with its stacks up had to be traced back
