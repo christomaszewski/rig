@@ -13,9 +13,11 @@ import io
 import json
 import os
 from pathlib import Path
+import select
 import stat
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -203,6 +205,178 @@ class NativeOutput(unittest.TestCase):
         script.chmod(script.stat().st_mode | stat.S_IXUSR)
         simulation = dict(external.recipe()["simulation"], probe=[str(script)], timeout_s=1)
         self.assertEqual(sim.probe(simulation, dict(os.environ)), ready)
+
+
+# A ROS graph for rig's real probe source to watch: the recipe's simulator, as seen through a
+# stand-in rclpy. STAND_IN_CLOSE says how leaving the graph goes: "ok", "fails" (the session
+# close times out, Zenoh logs the error to standard output, rclpy raises), "hangs" or "crashes".
+STAND_IN_ROS = {
+    "rclpy/__init__.py": """
+from types import SimpleNamespace as N
+
+TYPES = {"/clock": "rosgraph_msgs/msg/Clock", "/agent/plan": "std_msgs/msg/String",
+         "/world/view": "std_msgs/msg/String", "/world/report": "std_msgs/msg/String"}
+
+
+def init(args=None, context=None):
+    pass
+
+
+class Node:
+    def create_subscription(self, message, topic, callback, qos):
+        self.on_clock = callback
+
+    def endpoint(self, topic):
+        policy = N(name="RELIABLE")
+        qos = N(depth=10, reliability=policy, durability=policy, history=policy, liveliness=policy)
+        return N(node_namespace="/", node_name="worldsim", topic_type=TYPES[topic],
+                 endpoint_gid=[7] * 16, qos_profile=qos)
+
+    def get_publishers_info_by_topic(self, topic):
+        return [] if topic == "/agent/plan" else [self.endpoint(topic)]
+
+    def get_subscriptions_info_by_topic(self, topic):
+        return [self.endpoint(topic)] if topic == "/agent/plan" else []
+
+    def destroy_node(self):
+        pass
+
+
+def create_node(name, **options):
+    return Node()
+""",
+    "rclpy/context.py": """
+import os
+import time
+
+
+class Context:
+    def get_domain_id(self):
+        return 1
+
+    def ok(self):
+        return True
+
+    def try_shutdown(self):
+        how = os.environ.get("STAND_IN_CLOSE", "ok")
+        if how == "fails":
+            time.sleep(0.2)  # Zenoh waits ten seconds before it gives up
+            os.write(1, b"\\x1b[2m2026-11-12T17:39:25.808339Z\\x1b[0m \\x1b[31mERROR\\x1b[0m "
+                        b"ThreadId(10) \\x1b[2mzenohc::session\\x1b[0m\\x1b[2m:\\x1b[0m Error closing "
+                        b"session: close operation timed out!\\n")
+            raise RuntimeError("Failed to close the session(Error code: -128 )")
+        if how == "hangs":
+            time.sleep(120)
+        if how == "crashes":
+            os.kill(os.getpid(), 11)
+""",
+    "rclpy/executors.py": """
+import time
+from types import SimpleNamespace as N
+
+
+class SingleThreadedExecutor:
+    def __init__(self, context=None):
+        self.stamp = 0
+
+    def add_node(self, node):
+        self.node = node
+
+    def spin_once(self, timeout_sec=None):
+        time.sleep(0.02)
+        self.stamp += 1
+        self.node.on_clock(N(clock=N(sec=self.stamp, nanosec=0)))
+
+    def shutdown(self):
+        pass
+""",
+    "rclpy/qos.py": """
+from types import SimpleNamespace as N
+
+ReliabilityPolicy = DurabilityPolicy = HistoryPolicy = N(BEST_EFFORT=1, VOLATILE=2, KEEP_LAST=3)
+
+
+def QoSProfile(**settings):
+    return settings
+
+
+def qos_check_compatible(publisher, subscriber):
+    return N(name="OK"), ""
+""",
+    "rclpy/utilities.py": "def get_rmw_implementation_identifier():\n    return 'rmw_zenoh_cpp'\n",
+    "rosgraph_msgs/__init__.py": "",
+    "rosgraph_msgs/msg.py": "class Clock:\n    pass\n",
+}
+
+
+class LeavingTheGraph(unittest.TestCase):
+    """Once the probe has observed the graph, leaving it cannot change what it saw.
+
+    Seen against Gazebo on 2026-11-12: the probe saw a ready graph in a second, then closing
+    its Zenoh session timed out after ten. rclpy raised, the probe reported that instead of
+    its observation and exited 1, and Zenoh's error line on standard output hid even that. A
+    session whose services had started was rolled back. Here rig's real probe source runs
+    against a stand-in ROS that leaves in each of those ways.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        for name, source in STAND_IN_ROS.items():
+            path = Path(self.tmp.name) / name
+            path.parent.mkdir(exist_ok=True)
+            path.write_text(source)
+
+    def probe(self, close):
+        simulation = dict(external.recipe()["simulation"], probe=[sys.executable], timeout_s=2)
+        env = dict(os.environ, PYTHONPATH=self.tmp.name, ROS_DISTRO="lyrical", STAND_IN_CLOSE=close)
+        began = time.monotonic()
+        result = sim.probe(simulation, env)
+        return result, time.monotonic() - began
+
+    def test_the_stand_in_graph_is_ready(self):
+        result, _ = self.probe("ok")
+        self.assertTrue(result["ready"], result["issues"])
+        self.assertEqual(result["clock"]["publishers"], 1)
+
+    def test_a_session_close_that_fails_does_not_undo_a_ready_observation(self):
+        # v0.2.85: "worldsim ROS probe failed: Expecting value: line 1 column 1 (char 0)"
+        result, _ = self.probe("fails")
+        self.assertTrue(result["ready"], result["issues"])
+        self.assertEqual([i["code"] for i in result["issues"]], ["connected"])
+
+    def test_a_probe_that_reported_and_then_hangs_is_taken_at_its_word(self):
+        with patch.object(sim, "PROBE_GRACE_S", 2), contextlib.redirect_stderr(io.StringIO()) as err:
+            result, took = self.probe("hangs")
+        self.assertTrue(result["ready"], result["issues"])
+        self.assertLess(took, 10)  # rig's own limit (timeout_s and the grace), not the hang
+        self.assertIn("reported and then did not exit within 4 s", err.getvalue())
+
+    def test_a_probe_that_reported_and_then_crashes_is_not_taken_as_ready(self):
+        """A crash is not a clean bill of health: rig says how the process ended."""
+        with self.assertRaises(RigError) as raised:
+            self.probe("crashes")
+        self.assertRegex(str(raised.exception), r"was killed by signal 11 \(SIGSEGV\) after \d+\.\d s "
+                                                r"although its result claims readiness")
+
+    def test_the_result_is_out_before_the_probe_leaves_the_graph(self):
+        """Seen from outside: the result line is readable while the close is still hanging."""
+        import subprocess
+        source = Path(sim.__file__).with_name("sim_probe.py").read_text()
+        request = dict(external.recipe()["simulation"])
+        request = {k: request[k] for k in ("ros", "publishes", "subscribes", "simulator")} | {"timeout_s": 2}
+        env = dict(os.environ, PYTHONPATH=self.tmp.name, ROS_DISTRO="lyrical", STAND_IN_CLOSE="hangs")
+        process = subprocess.Popen([sys.executable, "-c", source], stdin=subprocess.PIPE,
+                                   stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, env=env)
+        self.addCleanup(process.wait)
+        self.addCleanup(process.kill)
+        process.stdin.write(json.dumps(request))
+        process.stdin.close()
+        readable, _, _ = select.select([process.stdout], [], [], 8)
+        self.assertTrue(readable, "no result within 8 s: it is waiting for the close")
+        self.assertTrue(json.loads(process.stdout.readline())["ready"])
+        self.assertIsNone(process.poll())  # still alive, inside its close
+        process.stdout.close()
 
 
 class FailedProbeInASession(external.ExternalSession):

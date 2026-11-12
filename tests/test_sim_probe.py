@@ -352,6 +352,31 @@ class ProbeObserver(unittest.TestCase):
         self.assertTrue(contexts[0].stopped)
         self.assertEqual(result["topics"]["/camera/image"]["publishers"][0]["node"], "/isaac/bridge")
 
+    def test_leaving_the_graph_cannot_undo_the_observation(self):
+        """Each step of leaving is tried; a step that raises is noted and the rest still run."""
+        modules, contexts, nodes, _ = self.fake_ros()
+        context_class = modules["rclpy.context"].Context
+        executor_class = modules["rclpy.executors"].SingleThreadedExecutor
+
+        def close_fails(context):
+            context.stopped = True
+            raise RuntimeError("Failed to close the session(Error code: -128 )")
+
+        def stop_fails(executor):
+            raise RuntimeError("executor would not stop")
+        ticks = iter(i * .01 for i in range(100))
+        with patch.dict(sys.modules, modules), patch.dict(os.environ, ROS_DISTRO="jazzy"), \
+                patch.object(context_class, "try_shutdown", close_fails), \
+                patch.object(executor_class, "shutdown", stop_fails), \
+                patch.object(sim_probe.time, "monotonic", side_effect=lambda: next(ticks)), \
+                contextlib.redirect_stderr(io.StringIO()) as err:
+            result = sim_probe.evaluate(request(), sim_probe.observe(request()))
+        self.assertTrue(result["ready"], result["issues"])
+        self.assertTrue(nodes[0].destroyed)   # the step after the one that raised
+        self.assertTrue(contexts[0].stopped)
+        self.assertIn("Failed to close the session", err.getvalue())
+        self.assertIn("executor would not stop", err.getvalue())
+
     def test_observer_records_backward_clock_jump(self):
         modules, _, _, _ = self.fake_ros(reset=True)
         ticks = iter(i * .01 for i in range(100))
