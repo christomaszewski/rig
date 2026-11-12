@@ -79,7 +79,8 @@ workflow. The dated entries below are historical observations, not the current h
   with a manifest rebuilt from the saved session, which holds no vars. Found on the first
   live use of `rig sim`; covered by `tests/test_session_seal.py`, and confirmed live on
   2026-11-12 (an untouched session now seals without the flag).
-- **Per-vehicle roster values and provisioning records (after v0.2.85, not yet released).**
+- **v0.2.86 per-vehicle roster values and provisioning records (version and notes prepared
+  2026-11-12; not tagged).**
   Roster rows take `vars:`; a vehicle reads its own row from the pushed fleet.yaml, above the
   fleet-level `vars:` and below its machine file. `unique:` lists names no two vehicles may
   share a value for, checked across the whole roster with `--var` applied; duplicate ids are
@@ -89,12 +90,15 @@ workflow. The dated entries below are historical observations, not the current h
   snapshot keeps the machine file as `machine.local.yaml`. `rig provision --export` writes a
   record and `--apply` merges its vars and env into another machine, from the record or from a
   run. Written and tested on 2026-11-12 with local SIL rows and the ssh/scp shims only: no real
-  vehicle, no real `/etc/rig` under sudo and no live spare swap has exercised it. Known limits:
-  a vehicle whose bundled rig predates this ignores row values (it refuses a roster with
-  `unique:`); a vehicle keeps the last roster that reached it, so after a value moves the
-  vehicle it moved from renders the old one until a push reaches it (`rig fleet list` shows
-  `STALE`); `rig up` itself does not print a shell override of a row value (`rig doctor` and
-  the snapshot do); `rig reconstruct` does not use the captured machine file. See
+  vehicle, no real `/etc/rig` under sudo and no live spare swap has exercised it. `rig fleet
+  up` hands each vehicle the sha256 of the roster it checked (`up --roster`) and the vehicle
+  refuses any other. Known limits: a vehicle whose bundled rig predates this fails under
+  `rig fleet up` (it does not know the flag) but, booting on its own, ignores row values
+  unless the roster has `unique:`, which it refuses; a vehicle keeps the last roster that
+  reached it, so after a value moves the vehicle it moved from renders the old one until a
+  push reaches it (`rig fleet list` shows `STALE`); `rig reconstruct` does not use the
+  captured machine file. See
+  [v0.2.86](releases/v0.2.86.md),
   [the cheat sheet](CHEATSHEET.md#16--fleet-vehicles-one-artifact-n-vehicles-rig--v0148) and
   [the design note](DESIGN.md#vehicle-local-vars--fleet-artifacts-v014748).
 - The [offline Isaac walkthrough](ISAAC_OFFLINE.md) and [example](../examples/isaac-attach/README.md)
