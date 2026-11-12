@@ -6,7 +6,8 @@ ssh/scp are PATH shims (the docker-shim idiom): each logs its FULL argv (SHIM_SS
 SHIM_SCP_LOG — the transport-option contract stays checkable), then strips options; ssh runs the
 command locally via sh -c (SHIM_SSH_FAIL=<host> => exit 255, the transport-failure branch;
 SHIM_SSH_FAIL_CMD=<substring> fails only the hops whose command carries it), scp copies locally
-(SHIM_SCP_FAIL=<host> => exit 1, the copy-failure branch). rsync is the REAL one (the sync
+(SHIM_SCP_FAIL=<host> => exit 1, the copy-failure branch; SHIM_SCP_DROP=<host> => exit 0 with
+nothing copied, a push that reports success and delivers nothing). rsync is the REAL one (the sync
 transport): its remote hop rides the ssh shim, so `rsync --server` runs locally too.
 docker is shimmed to answer `compose ls` with [] and log network verbs to SHIM_DOCKER_LOG.
 """
@@ -62,6 +63,9 @@ if [ -n "$SHIM_SCP_FAIL" ]; then
   case "$1 $2" in
     *"$SHIM_SCP_FAIL":*) echo "scp: connect to host $SHIM_SCP_FAIL: refused" >&2; exit 1 ;;
   esac
+fi
+if [ -n "$SHIM_SCP_DROP" ]; then
+  case "$1 $2" in *"$SHIM_SCP_DROP":*) exit 0 ;; esac
 fi
 src="${1#*:}"; dst="${2#*:}"
 cp -r "$src" "$dst"
@@ -700,6 +704,81 @@ def test_fleet_up_holds_a_vehicle_the_roster_did_not_reach():
     with _env(SHIM_SCP_FAIL="farhost"):
         rc, _, err = _run("fleet", "up", "--fleet", str(fy), "--run", "plain", "-j", "1")
     assert rc == 0 and "roster push failed" in err and "fleet up: 2/2 ok" in err, err
+
+
+def test_fleet_up_hands_the_vehicle_the_roster_digest_to_check():
+    import hashlib
+    near, far = _band_tree("uav-03"), _remote_band_tree("uav-07", 7)
+    data_root = pathlib.Path(tempfile.mkdtemp()) / "sil-data"
+    log = pathlib.Path(tempfile.mkdtemp()) / "ssh.log"
+
+    def roster(band_07):
+        return _swarm([{"id": 3, "name": "uav-03", "path": str(near), "vars": {"altitude_band": 3}},
+                       {"id": 7, "name": "uav-07", "host": "farhost", "path": str(far),
+                        "vars": {"altitude_band": band_07}}], data_root=data_root)
+
+    def far_ups() -> int:
+        run_dir = sorted((far.parent / "data" / "runs").iterdir())[-1]
+        return len(yaml.safe_load((run_dir / "manifest.yaml").read_text())["ups"])
+
+    first = roster(4)
+    digest = hashlib.sha256(first.read_bytes()).hexdigest()
+    with _env(SHIM_SSH_LOG=str(log)):
+        rc, _, err = _run("fleet", "up", "--fleet", str(first), "--dry-run", "-j", "1")
+        assert "--roster" not in (log.read_text() if log.exists() else "")   # nothing was pushed
+        rc, _, err = _run("fleet", "up", "--fleet", str(first), "--run", "link", "-j", "1")
+        assert rc == 0, err
+    assert f"--roster {digest}" in log.read_text()                  # the roster that was checked
+    assert far_ups() == 1
+    # the vehicle's own half: its copy, or nothing
+    with _env(RIG_VEHICLE_LOCAL=str(pathlib.Path(tempfile.mkdtemp()) / "absent.yaml")):
+        rc, _, err = _run("--root", str(far), "up", "--dry-run", "--roster", digest)
+        assert rc == 0, err
+        rc, _, err = _run("--root", str(far), "up", "--dry-run", "--roster", "0" * 64)
+        assert rc == 1 and "another roster" in err and "not starting" in err, err
+        rc, _, err = _run("--root", str(far), "up", "--dry-run", "--force", "--roster", "0" * 64)
+        assert rc == 1, err                                         # not a preflight error: no --force
+        held = (far / "fleet.yaml").read_bytes()
+        (far / "fleet.yaml").unlink()
+        rc, _, err = _run("--root", str(far), "up", "--dry-run", "--roster", digest)
+        assert rc == 1 and "no fleet.yaml" in err, err
+        (far / "fleet.yaml").write_bytes(held)
+    # a push that reports success and delivers nothing: the ground station cannot tell, the
+    # vehicle can — it still holds band 4 while the roster now says 5
+    with _env(SHIM_SCP_DROP="farhost"):
+        rc, _, err = _run("fleet", "up", "--fleet", str(roster(5)), "--run", "link", "-j", "1")
+    assert rc == 1 and "fleet up: 1/2 ok" in err, err
+    assert "another roster" in err and far_ups() == 1
+    # a roster without row values sends no flag: vehicles on an older rig keep working with it
+    plain_far = _sil_tree("veh_b")
+    (plain_far / "vehicle.local.yaml").write_text(
+        f"vehicle: veh_b\nvehicle_id: 2\ndata_dir: {plain_far.parent / 'data'}\n")
+    fy = _fleet_yaml([{"id": 2, "name": "veh_b", "host": "farhost", "path": str(plain_far)}],
+                     data_root=pathlib.Path(tempfile.mkdtemp()) / "sil-data")
+    plain_log = pathlib.Path(tempfile.mkdtemp()) / "ssh.log"
+    with _env(SHIM_SSH_LOG=str(plain_log)):
+        rc, _, err = _run("fleet", "up", "--fleet", str(fy), "--run", "plain", "-j", "1")
+    assert rc == 0 and "--roster" not in plain_log.read_text(), err
+
+
+def test_fleet_up_says_when_a_vehicles_rig_predates_the_roster_check():
+    """A rig from before row values does not know `up --roster`. It must fail on the flag, and
+    the ground station says what that usage error means. The stand-in is a run.sh that answers
+    as the v0.2.85 release does."""
+    old = _band_tree("uav-03")
+    (old / "run.sh").write_text(
+        '#!/bin/sh\ncase " $* " in *" --roster "*)\n'
+        '  echo "usage: rig [-h] [--version] [--root ROOT] <command> ..." >&2\n'
+        '  echo "rig: error: unrecognized arguments: --roster" >&2; exit 2 ;;\nesac\n'
+        'touch started\n')
+    (old / "run.sh").chmod(0o755)
+    data_root = pathlib.Path(tempfile.mkdtemp()) / "sil-data"
+    fy = _swarm([{"id": 3, "name": "uav-03", "path": str(old), "vars": {"altitude_band": 3}}],
+                data_root=data_root)
+    rc, _, err = _run("fleet", "up", "--fleet", str(fy), "--run", "old", "-j", "1")
+    assert rc == 1 and "fleet up: 0/1 ok" in err, err
+    assert "predates roster row values" in err and "re-bake" in err, err
+    assert not (old / "started").exists()
 
 
 def test_fleet_list_shows_row_values():

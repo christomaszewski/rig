@@ -18,6 +18,9 @@ Invariants (settled):
   ride that pushed file and nothing else: forwarded as ``RIG_VAR_*`` they would outrank the
   machine file and be gone after a reboot. So a vehicle that did not receive a roster carrying
   row values is not started: it would come up on the values of the roster it already holds.
+  ``fleet up`` also hands each vehicle the roster's sha256 (``up --roster``), and the vehicle
+  refuses to start on any other; a rig too old to read its row does not know the flag and
+  fails on it.
   A vehicle keeps the last roster that reached it, whatever the ground station has since
   changed; ``fleet list`` says which vehicles hold the current one.
 - The roster is checked WHOLE before anything is pushed or started, whichever vehicles a verb
@@ -91,6 +94,7 @@ class Fleet:
     path: Path                    # the fleet.yaml this was loaded from
     unique: tuple[str, ...] = ()  # var names no two vehicles may share a value for
     vars: dict = field(default_factory=dict)  # the fleet-level values (a row's own outrank them)
+    digest: str = ""              # sha256 of the roster file as it was read and checked here
 
 
 def find_fleet(explicit: str | None) -> Path:
@@ -115,9 +119,36 @@ def find_fleet(explicit: str | None) -> Path:
                    "— the roster convention is CHEATSHEET §1.6")
 
 
+def roster_digest(path: Path) -> str | None:
+    """sha256 of a roster file's bytes — how the ground station and a vehicle tell that they
+    hold the same roster. None when the file is not there."""
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def check_roster(root: Path, expected: str) -> None:
+    """The VEHICLE's half of `fleet up` (`rig up --roster <sha256>`): refuse unless the
+    deployment root holds exactly the roster the ground station checked. It runs before the
+    manifest is loaded, so a roster that is not the expected one is never rendered from. A rig
+    that predates the flag fails on it as an unknown argument, which is the point: it would
+    not read its roster row either."""
+    held = roster_digest(root / "fleet.yaml")
+    if held == expected.strip().lower():
+        return
+    what = "holds no fleet.yaml" if held is None else f"holds another roster ({held[:12]})"
+    raise RigError(f"up --roster: this deployment {what}, not the one the ground station "
+                   f"checked and sent ({expected.strip()[:12]}) — not starting on values it did "
+                   f"not check. Run `rig fleet up` again once the roster reaches this vehicle")
+
+
 def load_fleet(explicit: str | None) -> Fleet:
     path = find_fleet(explicit)
     data = load_yaml(path)
+    digest = roster_digest(path)
+    if digest is None:  # gone between two reads: there is no roster to check or to send
+        raise RigError(f"fleet: {path} disappeared while it was being read")
     unknown = set(data) - FLEET_KEYS
     if unknown:
         raise RigError(f"{path}: unknown key(s): {', '.join(sorted(unknown))} — fleet.yaml "
@@ -168,7 +199,8 @@ def load_fleet(explicit: str | None) -> Fleet:
                   gcs_ip=(str(data["gcs_ip"]) if data.get("gcs_ip") else None),
                   data_root=(str(sil["data_root"]) if sil.get("data_root") else None),
                   network=network, vehicles=tuple(vehicles), path=path,
-                  unique=_unique_names(data.get("unique"), path), vars=dict(data.get("vars") or {}))
+                  unique=_unique_names(data.get("unique"), path), vars=dict(data.get("vars") or {}),
+                  digest=digest)
     for name in fleet.unique:
         if not any(name in v.vars for v in vehicles):
             raise RigError(f"{path}: unique: no vehicle row sets '{name}' (a typo?) — rows set: "
@@ -414,7 +446,7 @@ def cmd_list(fleet: Fleet, *, jobs: int) -> int:
                 f"{{ sha256sum < {roster} || shasum -a 256 < {roster}; }} 2>/dev/null; exit 0")
 
     outcomes = _fan_out(list(fleet.vehicles), probe, jobs=jobs, timeout=30)
-    current = hashlib.sha256(fleet.path.read_bytes()).hexdigest()
+    current = fleet.digest
     rows = [("ID", "NAME", "HOST", "PATH") + (("VARS", "ROSTER") if with_vars else ())
             + ("STATE",)]
     problems = 0
@@ -648,10 +680,19 @@ def cmd_up(fleet: Fleet, names: list[str], *, run_label: str | None, set_vars: l
         + (["--force"] if force else []) + (["--dry-run"] if dry_run else [])
     # A vehicle that did not get a roster carrying row values still holds the last one it was
     # sent — and would render THAT one's values. It is not started; the rest of the sweep is.
+    # The vehicle checks too: it is handed the digest of the roster that was validated here and
+    # refuses any other (a push that reported success and delivered nothing, a file edited
+    # between the check and the push). A dry run pushed nothing, so it has nothing to match.
+    if row_values and not dry_run:
+        argv += ["--roster", fleet.digest]
     held = {name for name in missed if row_values}
     started = _fan_out([v for v in vehicles if v.name not in held],
                        lambda v: _chooser(v, argv, _vehicle_env(fleet, v, extra)),
                        jobs=jobs, timeout=600)
+    for o in started:  # a rig from before the flag: say what the usage error means here
+        if o.rc != 0 and "unrecognized arguments" in o.err and "--roster" in o.err:
+            o.err += ("\nfleet up: this vehicle's rig predates roster row values (it does not "
+                      "know `up --roster`) and would ignore its row — re-bake and redeploy it")
     by_name = {o.vehicle.name: o for o in started}
     outcomes = [by_name.get(v.name) or Outcome(
         v, 1, "", "not started: the roster did not reach this vehicle, and its row values would "

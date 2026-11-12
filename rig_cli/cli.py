@@ -897,6 +897,10 @@ def build_parser() -> argparse.ArgumentParser:
     up.add_argument("--force", action="store_true", help="bring up even if preflight reports errors")
     up.add_argument("--run", default=None, metavar="LABEL",
                     help="join the open run with this label, or rotate to a new one (bare up never rotates)")
+    up.add_argument("--roster", default=None, metavar="SHA256",
+                    help="refuse unless this deployment's fleet.yaml has this sha256 — `rig fleet "
+                         "up` passes it when roster rows carry values, so a vehicle never starts "
+                         "on a roster the ground station did not check")
     posture = up.add_mutually_exclusive_group()
     posture.add_argument("--standby", action="store_const", const="standby", dest="target_state",
                          help="come up parked: export RIG_TARGET_STATE=standby (overrides each "
@@ -2004,6 +2008,8 @@ def main(argv=None) -> int:
                     raise RigError("Use rig down for this session's exact saved selection; "
                                    "partial teardown and --purge are not supported")
                 return down(root, dry_run=args.dry_run, end_run=args.end_run)
+        if args.cmd == "up" and args.roster is not None:  # fleet up's roster check, before any render
+            fleet_mod.check_roster(root, args.roster)
         args.rig_root = root  # handlers that touch the run registry need the deployment root (provenance)
         if args.cmd in ("up", "down", "new-run", "end-run") and not getattr(args, "dry_run", False):
             # Shared startup can spend minutes capturing a run before publishing its
