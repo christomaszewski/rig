@@ -155,6 +155,7 @@ class Manifest:
     #                               LAZY so management verbs (pkg list/remove/…) work on any box;
     #                               identity-CONSUMING commands (up/render/…) enforce via require_identity
     row_overrides: tuple = ()     # RowOverride entries: roster row values a higher tier outranks
+    unresolved_vars: tuple = ()   # (name, value as written): vars set aside by a tolerant load
     stale_renders: tuple = ()     # (instance, why): rows that no longer render and stand on the
     #                               config of their last `up` (resolve.materialize_manifest)
 
@@ -551,7 +552,12 @@ def _bench_domain_warning(local, vehicle_id, domain: int, source: str) -> str | 
 
 
 def load_manifest(root: Path, *, context: str = "execution", target_overrides: dict | None = None,
-                  validate_configs: bool = True) -> Manifest:
+                  validate_configs: bool = True, tolerate_vars: bool = False) -> Manifest:
+    """`tolerate_vars` is for the verbs that act on what is ALREADY running (down, status,
+    logs, end-run): a var that no longer resolves (it was built from a roster value since moved
+    to another vehicle) is set aside instead of failing the load, and recorded in
+    Manifest.unresolved_vars. A config that uses it then fails to render and stands on the
+    render of its last `up`; everything else loads as usual. `up` never passes it."""
     if context not in ("execution", "deployment"):
         raise ValueError(f"unknown manifest context: {context}")
     data = load_yaml(root / "vehicle.yaml")
@@ -649,7 +655,14 @@ def load_manifest(root: Path, *, context: str = "execution", target_overrides: d
     for key, value in (("platform", eff_platform), ("arch", eff_arch)):
         if value is not None:
             raw_ctx[key] = value
-    ctx = resolve_map(raw_ctx, where="vars", allow_unresolved=context == "deployment")
+    ctx = resolve_map(raw_ctx, where="vars",
+                      allow_unresolved=context == "deployment" or tolerate_vars)
+    unresolved_vars: tuple = ()
+    if tolerate_vars:  # identity keys keep their own gate (require_identity)
+        stuck = sorted(key for key, value in ctx.items()
+                       if isinstance(value, str) and MARKER.search(value)
+                       and key not in ("vehicle", "vehicle_id", "platform", "arch"))
+        unresolved_vars = tuple((key, ctx.pop(key)) for key in stuck)
 
     vehicle = str(ctx.get("vehicle", "vehicle"))
     vehicle_id = ctx.get("vehicle_id")
@@ -794,4 +807,5 @@ def load_manifest(root: Path, *, context: str = "execution", target_overrides: d
                     extra_env=extra_env, host_data_dir=host_data_dir,
                     export_profiles=_parse_export_profiles(data.get("export_profiles")),
                     replay_policy=replay_policy,
-                    missing_identity=tuple(unresolved), row_overrides=tuple(row_overrides))
+                    missing_identity=tuple(unresolved), row_overrides=tuple(row_overrides),
+                    unresolved_vars=unresolved_vars)

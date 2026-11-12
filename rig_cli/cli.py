@@ -49,7 +49,11 @@ def _load(root: Path, *, identity: bool = True,
           render: bool = True, context: str = "execution", target_overrides=None,
           last_rendered: bool = False
           ) -> tuple[Manifest, dict[str, ServiceEntry], dict[str, Descriptor]]:
-    manifest = load_manifest(root, context=context, target_overrides=target_overrides)
+    manifest = load_manifest(root, context=context, target_overrides=target_overrides,
+                             tolerate_vars=last_rendered)
+    for name, written in manifest.unresolved_vars:  # only ever set for the running verbs
+        eprint(f"rig: warning: var '{name}' ({written}) no longer resolves — a config that uses "
+               f"it stands on the render of its last `up`")
     # Most of what routes through _load CONSUMES identity (renders configs, names compose
     # projects, exports fleet env) — the mandatory-marker gate lives here, so management verbs
     # that load the manifest directly (pkg list/remove/…) keep working on an unprovisioned box.
