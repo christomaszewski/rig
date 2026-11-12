@@ -123,6 +123,10 @@ def _probe_failure(simulation, argv, what, *, returncode, duration, stdout, stde
                                       timed_out=timed_out))
 
 
+class _Contradiction(ValueError):
+    """A result that claims readiness from a process that did not end well."""
+
+
 def _probe_result(result):
     doc = json.loads(result.stdout)
     if (not isinstance(doc, dict) or type(doc.get("version")) is not int or doc["version"] != 1
@@ -135,7 +139,7 @@ def _probe_result(result):
     if doc["ready"] and any(i["status"] == "error" for i in doc["issues"]):
         raise ValueError("probe claims readiness with unresolved errors")
     if result.returncode and doc["ready"]:
-        raise ValueError("probe exited unsuccessfully despite claiming readiness")
+        raise _Contradiction("probe exited unsuccessfully despite claiming readiness")
     return doc
 
 
@@ -162,9 +166,19 @@ def probe(simulation, env, *, require_type_hashes=False, await_counterparts=Fals
     except OSError as exc:  # the probe was never run: the one case the interpreter is to blame
         raise RigError(f"{_name(simulation)} ROS probe failed: {exc}. {_INTERPRETER_ADVICE}") from exc
     except subprocess.TimeoutExpired as exc:
-        raise _probe_failure(simulation, argv, f"printed no result in {limit:g} s and was stopped",
-                             returncode=None, duration=time.monotonic() - began,
-                             stdout=_text(exc.stdout), stderr=_text(exc.stderr), timed_out=True) from exc
+        # The probe reports before it leaves the graph. One that reported and then would not
+        # exit (a middleware teardown that hangs) is taken at its word.
+        printed, logged = _text(exc.stdout), _text(exc.stderr)
+        try:
+            document = _probe_result(subprocess.CompletedProcess(argv, 0, printed, logged))
+        except ValueError:
+            raise _probe_failure(simulation, argv, f"printed no result in {limit:g} s and was stopped",
+                                 returncode=None, duration=time.monotonic() - began,
+                                 stdout=printed, stderr=logged, timed_out=True) from exc
+        eprint(f"rig sim: warning: the {_name(simulation)} probe reported and then did not exit "
+               f"within {limit:g} s; it was stopped. {_last_words(logged)}")
+        return ProbeResult(document, _last_words(logged, "The probe's")
+                           if not document["ready"] and logged.strip() else "")
     duration = time.monotonic() - began
     try:
         document = _probe_result(result)
@@ -180,7 +194,10 @@ def probe(simulation, env, *, require_type_hashes=False, await_counterparts=Fals
         else:
             ended = f"exited {result.returncode} after {duration:.1f} s"
         printed = [line for line in result.stdout.splitlines() if line.strip()]
-        if not printed:
+        if isinstance(exc, _Contradiction):
+            what = (f"{ended} although its result claims readiness: the probe exited "
+                    "unsuccessfully, so its result is not taken")
+        elif not printed:
             what = ended + " and printed nothing"
         else:
             what = (f"{ended} and printed something other than a probe result ({exc}); "

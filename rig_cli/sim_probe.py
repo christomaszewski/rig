@@ -224,8 +224,29 @@ def _qos_check(publisher, subscriber, checker):
                 status=status, reason=reason)
 
 
-def observe(request):
-    """Inspect the sourced ROS environment for a bounded period; never publish commands."""
+def _release(executor, node, context):
+    """Leave the graph. By now the observation is complete and reported, so nothing here may
+    raise: closing a Zenoh session can run into its ten-second timeout (seen when the probe
+    leaves while peers that have just joined are still connecting to it), rclpy then raises
+    "Failed to close the session", and that error used to replace a good observation. Every
+    step is tried; a failure is noted on stderr."""
+    for what, target, method in (("stopping the executor", executor, "shutdown"),
+                                 ("destroying the node", node, "destroy_node"),
+                                 ("shutting down the context", context, "try_shutdown")):
+        if target is None:
+            continue
+        try:
+            getattr(target, method)()
+        except Exception as exc:
+            print(f"rig probe: {what} failed after the observation was complete: {exc}",
+                  file=sys.stderr)
+
+
+def observe(request, completed=None):
+    """Inspect the sourced ROS environment for a bounded period; never publish commands.
+
+    `completed` is called with the observation as soon as it is complete, before the probe
+    leaves the graph: leaving can be slow or fail, and must not hold the result back."""
     validate_request(request)
     import rclpy
     from rclpy.context import Context
@@ -248,6 +269,8 @@ def observe(request):
                                    advance_age_s=None),
                         topics={})
         if observed["ros"] != request["ros"]:
+            if completed is not None:
+                completed(observed)
             return observed
         node = rclpy.create_node("_rig_sim_probe_" + uuid.uuid4().hex[:12],
                                  namespace="/rig/probe", context=context,
@@ -306,13 +329,11 @@ def observe(request):
                 if result["ready"] and not any(i["code"] == "type_hash_unverified"
                                                for i in result["issues"]):
                     break
+        if completed is not None:
+            completed(observed)
         return observed
     finally:
-        if executor is not None:
-            executor.shutdown()
-        if node is not None:
-            node.destroy_node()
-        context.try_shutdown()
+        _release(executor, node, context)
 
 
 def _reserve_stdout():
@@ -339,11 +360,21 @@ def _reserve_stdout():
 
 
 def main(result_stream=None):
+    out = result_stream or sys.stdout
+    reported = []
+
+    def report(result):
+        """Write the one result. It goes out as soon as it is known, before the probe leaves
+        the graph, so a slow or failed departure cannot change it or lose it."""
+        if not reported:
+            reported.append(result)
+            print(json.dumps(result, sort_keys=True), file=out, flush=True)
+
     try:
         request = validate_request(json.load(sys.stdin))
     except (ValueError, TypeError) as exc:
-        result = dict(version=1, ready=False,
-                      issues=[dict(status="error", code="request", message=str(exc))])
+        report(dict(version=1, ready=False,
+                    issues=[dict(status="error", code="request", message=str(exc))]))
     else:
         old_log_stream = os.environ.get("RCUTILS_LOGGING_USE_STDOUT")
         try:
@@ -351,20 +382,19 @@ def main(result_stream=None):
             # prints a diagnostic or the caller routed native ROS logs to stdout.
             os.environ["RCUTILS_LOGGING_USE_STDOUT"] = "0"
             with contextlib.redirect_stdout(sys.stderr):
-                result = evaluate(request, observe(request))
+                observe(request, completed=lambda observation: report(evaluate(request, observation)))
         except ImportError as exc:
-            result = dict(version=1, ready=False, issues=[dict(status="error", code="ros_unavailable",
-                          message=f"Probe interpreter needs sourced ROS with rclpy and rosgraph_msgs: {exc}")])
+            report(dict(version=1, ready=False, issues=[dict(status="error", code="ros_unavailable",
+                        message=f"Probe interpreter needs sourced ROS with rclpy and rosgraph_msgs: {exc}")]))
         except Exception as exc:
-            result = dict(version=1, ready=False, issues=[dict(status="error", code="probe",
-                          message=f"ROS probe failed: {exc}")])
+            report(dict(version=1, ready=False, issues=[dict(status="error", code="probe",
+                        message=f"ROS probe failed: {exc}")]))
         finally:
             if old_log_stream is None:
                 os.environ.pop("RCUTILS_LOGGING_USE_STDOUT", None)
             else:
                 os.environ["RCUTILS_LOGGING_USE_STDOUT"] = old_log_stream
-    print(json.dumps(result, sort_keys=True), file=result_stream or sys.stdout, flush=True)
-    return 0 if result["ready"] else 1
+    return 0 if reported[0]["ready"] else 1
 
 
 if __name__ == "__main__":
