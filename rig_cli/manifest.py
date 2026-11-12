@@ -20,7 +20,7 @@ from pathlib import Path
 import yaml
 
 from . import RigError
-from .common import load_yaml
+from .common import eprint, load_yaml
 from .interpolate import MAP, MARKER, resolve_map, substitute_scalar
 
 # THE machine's identity file — a property of the vehicle computer, not of any deployment tree
@@ -154,6 +154,8 @@ class Manifest:
     #                               LAZY so management verbs (pkg list/remove/…) work on any box;
     #                               identity-CONSUMING commands (up/render/…) enforce via require_identity
     row_overrides: tuple = ()     # RowOverride entries: roster row values a higher tier outranks
+    stale_renders: tuple = ()     # (instance, why): rows that no longer render and stand on the
+    #                               config of their last `up` (resolve.materialize_manifest)
 
     @property
     def var_sources(self) -> dict:
@@ -471,13 +473,25 @@ def _missing_mandatory(key: str, effective, base) -> bool:
     return effective is None and _self_referencing(base, key)
 
 
-def require_identity(manifest: "Manifest", *, what: str) -> None:
+def require_identity(manifest: "Manifest", *, what: str, tolerate_env: bool = False) -> None:
     """The gate identity-CONSUMING commands call: per-vehicle values (mandatory identity markers,
     or manifest scalars whose vars nothing provides) must be resolved before anything renders
-    configs, names compose projects, or exports the fleet env — never vehicle 0."""
-    if not manifest.missing_identity:
+    configs, names compose projects, or exports the fleet env — never vehicle 0.
+
+    `tolerate_env` is for the verbs that act on what is ALREADY running (down, status, logs):
+    an `env:` value whose var is gone — a roster value moved to another vehicle — is said and
+    left out of the environment. Stopping a stack does not need it, and refusing would leave
+    the stack running with no way to stop it through rig."""
+    missing = manifest.missing_identity
+    if tolerate_env:
+        gone = [key for key in missing if key.startswith("env.")]
+        missing = tuple(key for key in missing if not key.startswith("env."))
+        if gone:
+            eprint(f"rig: warning: {', '.join(gone)} can no longer be resolved and is not "
+                   f"exported — `up` would refuse; this verb goes on")
+    if not missing:
         return
-    keys = ", ".join(manifest.missing_identity)
+    keys = ", ".join(missing)
     machine = os.environ.get("RIG_VEHICLE_LOCAL") or MACHINE_LOCAL_DEFAULT
     raise RigError(f"{what}: unresolved per-vehicle value(s): {keys} — "
                    + _PROVISION_HINT.format(machine=machine))

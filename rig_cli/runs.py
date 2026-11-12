@@ -224,6 +224,22 @@ def running_projects(manifest: Manifest, *, env=None) -> list[str]:
     return sorted(live)
 
 
+def still_running_note(manifest: Manifest) -> str | None:
+    """A sentence for an `up` that was refused while stacks of an EARLIER `up` are still
+    running: they keep running on the configs they were started with — on a vehicle whose
+    roster value has just been moved to another one, on that value — until `rig down`.
+    None when nothing is running, or when docker cannot say (no claim without evidence)."""
+    try:
+        live = running_projects(manifest)
+    except RigError:
+        return None
+    if not live:
+        return None
+    return (f"NOTE: {', '.join(live)} from an earlier `up` {'is' if len(live) == 1 else 'are'} "
+            f"still running here, on the configs of that `up`. `rig down` stops "
+            f"{'it' if len(live) == 1 else 'them'}; it does not need the missing value")
+
+
 def launched_names(manifest: Manifest) -> list[str]:
     """The instance names the OPEN run's latest `up` launched (its manifest's last `ups:` entry) —
     a replay session's player and source rows are disabled rows started by explicit name, and a

@@ -15,6 +15,7 @@ from pathlib import Path
 
 import yaml  # PyYAML — already required by common
 
+from . import RigError
 from .common import load_yaml
 from .interpolate import substitute
 from .manifest import Manifest, Sensor
@@ -159,10 +160,27 @@ def materialize(sensor: Sensor, root: Path, variables: dict | None = None,
     return out
 
 
-def materialize_manifest(manifest: Manifest, root: Path) -> Manifest:
+def materialize_manifest(manifest: Manifest, root: Path, *, last_rendered: bool = False) -> Manifest:
     """Rewrite each sensor's ``config`` to its resolved path (rendering profiles/overrides/overlays/
     vars as needed), so the rest of rig (dispatch, status, doctor) just uses ``sensor.config`` and
-    never sees the templating."""
-    sensors = [dataclasses.replace(s, config=materialize(s, root, manifest.vars))
-               for s in manifest.sensors]
-    return dataclasses.replace(manifest, sensors=sensors)
+    never sees the templating.
+
+    ``last_rendered`` is for the verbs that act on what is ALREADY running (down, status, logs).
+    A row that no longer renders — a value it needs is gone, such as a roster value moved to
+    another vehicle — then stands on ``var/rendered/<name>.yaml`` as its last `up` wrote it:
+    what is running is what was last rendered, and a failed render never touches that file.
+    The rows concerned are listed in ``stale_renders``. A row that was never rendered still
+    raises: nothing of it can be running from this tree."""
+    sensors, stale = [], []
+    for sensor in manifest.sensors:
+        try:
+            config = materialize(sensor, root, manifest.vars)
+        except RigError as exc:
+            previous = root / "var" / "rendered" / f"{sensor.name}.yaml"
+            if not (last_rendered and previous.is_file()):
+                raise
+            config = previous
+            stale.append((sensor.name, str(exc)))
+        sensors.append(dataclasses.replace(sensor, config=config))
+    return dataclasses.replace(manifest, sensors=sensors,
+                               stale_renders=manifest.stale_renders + tuple(stale))

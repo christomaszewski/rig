@@ -39,8 +39,15 @@ def find_root() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
+# Verbs that act on what is ALREADY running. They must keep working when the tree no longer
+# renders (a roster value this vehicle used has been moved to another one), or a running stack
+# could not be stopped or even looked at through rig. They stand on the last rendered configs.
+_RUNNING_VERBS = ("down", "status", "logs", "end-run")
+
+
 def _load(root: Path, *, identity: bool = True,
-          render: bool = True, context: str = "execution", target_overrides=None
+          render: bool = True, context: str = "execution", target_overrides=None,
+          last_rendered: bool = False
           ) -> tuple[Manifest, dict[str, ServiceEntry], dict[str, Descriptor]]:
     manifest = load_manifest(root, context=context, target_overrides=target_overrides)
     # Most of what routes through _load CONSUMES identity (renders configs, names compose
@@ -50,9 +57,24 @@ def _load(root: Path, *, identity: bool = True,
     # (rig build: images have no vehicle identity).
     if identity:
         from .manifest import require_identity
-        require_identity(manifest, what="this command needs a resolved vehicle identity")
+        require_identity(manifest, what="this command needs a resolved vehicle identity",
+                         tolerate_env=last_rendered)
+        if last_rendered:  # said once, above: the fleet env's own gate must not refuse on it again
+            import dataclasses
+            manifest = dataclasses.replace(manifest, missing_identity=tuple(
+                key for key in manifest.missing_identity if not key.startswith("env.")))
     if render:
-        manifest = resolve.materialize_manifest(manifest, root)  # profiles/overlays/vars -> rendered
+        try:  # profiles/overlays/vars -> rendered
+            manifest = resolve.materialize_manifest(manifest, root, last_rendered=last_rendered)
+        except RigError as exc:
+            note = runs_mod.still_running_note(manifest) if context == "execution" else None
+            if note is None:
+                raise
+            raise RigError(f"{exc}\n  {note}") from None
+        for name, why in manifest.stale_renders:
+            eprint(f"rig: warning: {name} no longer renders ({why.split(' — ')[0]}) — using the "
+                   f"config of its last `up` (var/rendered/{name}.yaml): what is running is what "
+                   f"was last rendered")
     catalog = load_catalog(root)
     descriptors: dict[str, Descriptor] = {}
     for sensor in manifest.sensors:
@@ -2035,10 +2057,11 @@ def main(argv=None) -> int:
             with session_lock(root):
                 if active_session(root):
                     raise RigError("A saved session is active; use rig down --end-run before changing its run")
-                manifest, catalog, descriptors = _load(root)
+                manifest, catalog, descriptors = _load(root, last_rendered=args.cmd in _RUNNING_VERBS)
                 return _HANDLERS[args.cmd](args, manifest, catalog, descriptors)
         manifest, catalog, descriptors = _load(root, render=not (
-            args.cmd == "run-export" and (args.service or args.recipe)))
+            args.cmd == "run-export" and (args.service or args.recipe)),
+            last_rendered=args.cmd in _RUNNING_VERBS)
         return _HANDLERS[args.cmd](args, manifest, catalog, descriptors)
     except RigError as exc:
         eprint(f"rig: {exc}")
