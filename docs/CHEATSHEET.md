@@ -295,18 +295,22 @@ rig does not know what the value means, only that it must differ.
 - A value the row sets and the vehicle's own machine file (or tree-local file) sets differently
   is a preflight ERROR on that vehicle (`--force` passes): an old `rig provision --var` would
   otherwise beat the roster unseen. Delete the stale entry from the file, or make the two agree.
-  A `RIG_VAR_` override is a `rig doctor` warning and is recorded as `shell`.
+  A `RIG_VAR_` override is never blocked: `rig up` says it, `rig doctor` warns, and the
+  snapshot records it as `shell`.
 - `rig fleet up` does not start a vehicle the roster did not reach when rows carry values: it
-  would come up on the roster it already holds. `--dry-run` pushes nothing, so it previews with
-  the roster each vehicle already holds.
+  would come up on the roster it already holds. It also hands each vehicle the sha256 of the
+  roster it checked (`rig up --roster <sha256>`), and the vehicle refuses to start on any
+  other. `--dry-run` pushes nothing, so it previews with the roster each vehicle already holds.
 - A vehicle keeps the LAST roster that reached it, and `fleet up` pushes only to the vehicles it
   names. After a value moves from one row to another, the vehicle it moved FROM still holds the
   old row until a push reaches it, and a reboot there renders the old value. `rig fleet list`
   shows it: the `ROSTER` column reads `current`, `STALE` or `none` per vehicle. Check it before
   a run, and `rig fleet up` the stale ones.
 - The VEHICLE's rig reads the row, and a baked artifact bundles its own rig: re-bake before using
-  row values. An older bundled rig ignores them and comes up on whatever its other tiers say. It
-  refuses a roster that has `unique:`, so list every per-vehicle name there.
+  row values. Under `rig fleet up` an older bundled rig does not start: it does not know
+  `up --roster`, and the ground station says so. Booting on its own it ignores row values and
+  comes up on whatever its other tiers say, unless the roster has `unique:`, which it refuses.
+  So list every per-vehicle name there.
 
 Sources, most-specific wins: shell (`RIG_VEHICLE_ID`, `RIG_VAR_<name>`) > `vehicle.local.yaml`
 beside vehicle.yaml (bench trees) > **`/etc/rig/vehicle.local.yaml`** (THE machine's identity) >
