@@ -216,6 +216,44 @@ swap through the normal tiering) plus the derived built-in `fleet_peer_ids` (`fl
 THIS `vehicle_id`) — peer endpoints from a fleet roster, self excluded, one artifact for all.
 Still no arithmetic, no conditionals, no nesting.
 
+v0.2.86 closes three gaps around values that must differ per vehicle (the motivating case: each
+aircraft of a swarm in its own altitude band, a spare swapped in with the wrong one). rig stays
+ignorant of what such a value means; it learns only that a named value must differ.
+
+- **A fleet-wide view that can refuse a duplicate.** Roster rows carry `vars:`, and `unique:`
+  names the ones no two vehicles may share. The ground station checks the whole roster on every
+  `rig fleet` verb, selected rows or not, on the value each vehicle's fleet tier resolves to (its
+  row's, else the fleet-level one) with `--var` applied to the selected rows first. Duplicate
+  ids are refused for the same reason: one id is one ROS domain.
+- **Row values rank in the fleet tier**, the row above the fleet-level `vars:`. The vehicle
+  reads its own row from the pushed fleet.yaml, found by id (the id is settled by the tiers
+  above; the roster never supplies it). They are not forwarded as `RIG_VAR_*`: the shell tier
+  would outrank the machine file and be gone after a reboot. The pushed roster is the one
+  carve-out from "no config side-channel", and row values ride it. A vehicle the roster did not
+  reach is therefore not started when rows carry values.
+- **No default.** A row without a value the deployment references fails the render, by name.
+- **A stale value is an error, not a winner.** The machine file outranks the fleet tier by
+  design, so an old `rig provision --var` would silently beat the roster. A row value that the
+  machine file or the tree-local file sets differently is a preflight ERROR (`--force` passes);
+  the shell tier, an explicit choice for one invocation, is a warning.
+- **Provenance per value.** The resolved var context remembers the tier that supplied each
+  entry, and carries that record wherever the context is handed on whole (a session's seal
+  takes only `vars` from the deployment). The run snapshot writes it as `sources:` in
+  `vars.yaml` and copies the machine file verbatim as `machine.local.yaml`. Both change the
+  capture set, so each `ups:` entry is stamped with the set it was taken under and the seal's
+  dirty-check compares digests only under the same stamp.
+- **Handover.** `rig provision --export` splits the machine file into `values` (vars, env) and
+  `machine` (everything else); nothing is dropped. `--apply` merges `values` only, unless
+  `--with-identity` is given. rig has no declaration of which values are a vehicle's role and
+  which belong to its airframe: the operator says so at apply time with `--only`/`--except`,
+  and every apply prints old and new per key. A run can stand in for a record through the
+  machine file it captured; `vars.yaml` is never used for that, because it is every tier mixed.
+
+Not done: a `rig fleet swap` verb (the edit is one roster line), marking role values in
+vehicle.yaml, and using the captured machine file in `rig reconstruct`. A reconstructed tree
+still takes its identity from the capture's resolved vehicle.yaml, or with `--config` from
+whatever the bench's own tiers supply.
+
 ## The QoL & currency layer (v0.2.5–0.2.9)
 
 The registry layer's daily-use surface (decision log: the QoL plan document; workflows:

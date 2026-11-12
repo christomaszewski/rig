@@ -283,10 +283,32 @@ fleet policy like `peer_endpoint` (field IPs vs SIL ports = editing ONE file, or
 `RIG_VAR_peer_endpoint='tcp/127.0.0.1:744{}'` override). rig derives `{{fleet_peer_ids}}` =
 fleet_ids minus THIS vehicle's id.
 
+**Per-vehicle values live in the roster rows** (rig ≥ v0.2.86): a row's own `vars:` reach that
+vehicle only. The vehicle finds its row in the pushed fleet.yaml by `id` and reads it above the
+fleet-level `vars:`. Both are the fleet tier, so the machine file still outranks them and a reboot
+renders them with no ground station. `unique:` lists names no two vehicles may hold one value for:
+`rig fleet` checks the WHOLE roster before it pushes or starts anything, also when a verb names a
+subset, and applies `--var` to the selected vehicles first. Two rows with one `id` are refused. A
+row with no value for a variable the deployment references does not come up: there is no default.
+rig does not know what the value means, only that it must differ.
+
+- A value the row sets and the vehicle's own machine file (or tree-local file) sets differently
+  is a preflight ERROR on that vehicle (`--force` passes): an old `rig provision --var` would
+  otherwise beat the roster unseen. Delete the stale entry from the file, or make the two agree.
+  A `RIG_VAR_` override is a `rig doctor` warning and is recorded as `shell`.
+- `rig fleet up` does not start a vehicle the roster did not reach when rows carry values: it
+  would come up on the roster it already holds. `--dry-run` pushes nothing, so it previews with
+  the roster each vehicle already holds.
+- The VEHICLE's rig reads the row, and a baked artifact bundles its own rig: re-bake before using
+  row values. An older bundled rig ignores them and comes up on whatever its other tiers say. It
+  refuses a roster that has `unique:`, so list every per-vehicle name there.
+
 Sources, most-specific wins: shell (`RIG_VEHICLE_ID`, `RIG_VAR_<name>`) > `vehicle.local.yaml`
 beside vehicle.yaml (bench trees) > **`/etc/rig/vehicle.local.yaml`** (THE machine's identity) >
-**`fleet.yaml`** (the fleet tempo tier) > vehicle.yaml. Unknown var = hard error listing what's
-available.
+**`fleet.yaml`** (the fleet tempo tier: this vehicle's row, then the fleet-level `vars:`) >
+vehicle.yaml. Unknown var = hard error listing what's available. `rig doctor` lists every
+resolved value under the tier that supplied it, and bare `rig provision` does so for the values
+the deployment references (v0.2.86).
 
 ROS domain: a vehicle-local `ros: {domain_id: N}` (tree or machine file; nothing else under `ros`)
 > vehicle.yaml `ros.domain_id` > a numeric `vehicle_id` > 0. `rig doctor` names the source. A bench
@@ -294,7 +316,10 @@ tree whose own `vehicle.local.yaml` sets a numeric `vehicle_id` other than vehic
 domain is warned by `rig doctor` and `rig up`; its own `ros.domain_id` (even the same number)
 silences the warning (v0.2.75). Everything lands in every run's config snapshot — per-run fleet composition is
 recorded per vehicle automatically, and a mid-test REBOOT re-renders from the pushed fleet.yaml,
-not stale defaults.
+not stale defaults. Since v0.2.86 the snapshot's `vars.yaml` names the tier behind each value
+under `sources:` (`fleet.yaml row uav-03`, the machine file's path, `shell`, …), and the machine
+file itself is kept verbatim as `machine.local.yaml`. Its `env:` values may be sensitive; they
+were already recorded, resolved, in `vars.yaml`.
 
 **Fleet roster + `rig fleet` (v0.1.66):** `fleet.yaml` on the GCS box is OPERATIONAL state
 (gitignored by init; commit only by choice) and drives the fan-out verbs — the ssh loop,
@@ -309,19 +334,27 @@ sil:                         # SIL block (mode: sil required)
   network: {name: rig-sil, subnet: 10.160.1.0/24}   #   identity file (<data_root>/.identity/)
 vars:                        # FLEET-level {{var}} values, pushed to every vehicle at `fleet up`
   peer_endpoint: tcp/10.160.1.{}:7447   # SIL? tcp/127.0.0.1:744{} — one file, whole fleet
+unique: [altitude_band]      # names no two vehicles may hold one value for (whole roster)
 vehicles:                    # THE roster -> {{fleet_ids}} derived ([3, 7]); never hand-listed
-  - {id: 3, name: veh3, host: localhost, path: ~/sil/veh3, ip: 10.160.1.3}   # local = no ssh
-  - {id: 7, name: skiff-07, host: orin, path: ~/ws/v3, data_dir: /home/uxv/logs}
+  - {id: 3, name: veh3, host: localhost, path: ~/sil/veh3, ip: 10.160.1.3,   # local = no ssh
+     vars: {altitude_band: 3}}          # THIS vehicle's own values (a row beats `vars:` above)
+  - {id: 7, name: skiff-07, host: orin, path: ~/ws/v3, data_dir: /home/uxv/logs,
+     vars: {altitude_band: 4}}
+  - {id: 9, name: spare-1, host: orin2, path: ~/ws/v3}   # no band yet: it will not come up
 ```
 
 ```bash
-rig fleet list                        # roster + reachability
+rig fleet list                        # roster + reachability, with each row's own vars
 rig fleet status [-v]                 # aggregates `status --format json` per vehicle
 rig fleet up --run tuesday-swarm --var gcs_ip=192.168.44.10
                                       # CORRELATED run label on every vehicle; --var rides the
-                                      #   RIG_VAR_* tier into each run's snapshot. SIL: ensures
-                                      #   the docker network + the shared run-dir VIEW
-                                      #   (<data_root>/runs/<label>-<date>/<vehicle> symlinks)
+                                      #   RIG_VAR_* tier into each run's snapshot (it outranks a
+                                      #   row's own value, so a `unique:` name is checked first).
+                                      #   SIL: ensures the docker network + the shared run-dir
+                                      #   VIEW (<data_root>/runs/<label>-<date>/<vehicle> symlinks)
+                                      # spare swap: move `vars: {altitude_band: 3}` to the spare's
+                                      #   row, then `rig fleet up` — the spare renders band 3 and
+                                      #   the vehicle it came from will not start without one
 rig fleet down --end-run              # tear down + seal everywhere (full success rms the network)
 rig fleet sync --into fleet-runs      # harvest SEALED runs (ended: = safe) into
                                       #   fleet-runs/<label>/<vehicle>/<run-id> — the SAME tree
@@ -367,6 +400,20 @@ sudo ./provision.sh --id 7 --name skiff-07     # or: sudo rig provision …  (wr
 # forever after, ANY artifact:
 tar xzf v3.tar.gz && cd v3 && ./run.sh up
 rig provision                                   # no sudo: show identity + check the deployment's vars
+                                                #   and name the tier each one came from
+# handing a vehicle's values to its replacement (no roster, or values the vehicle owns):
+rig provision --export uav-03.yaml              # no sudo: this machine's file as a RECORD —
+                                                #   `values` (vars, env) + `machine` (the rest)
+sudo rig provision --apply uav-03.yaml --only altitude_band --dry-run
+                                                # merges vars/env only, prints old -> new per key;
+                                                #   --only/--except pick by name, --dry-run writes
+                                                #   nothing. --with-identity also applies `machine`:
+                                                #   a REPLACED computer, never a spare beside the
+                                                #   original (a changed id/name still needs --force)
+sudo rig provision --apply fleet-runs/survey/uav-03/<run-id> --only altitude_band
+                                                # the vehicle is unreachable: a run (dir, id or
+                                                #   label) stands for the machine file its last up
+                                                #   captured. Runs from rig < v0.2.86 hold none
 ```
 
 Re-identifying a machine needs `--force` (compose projects rename → running containers orphan —

@@ -307,7 +307,12 @@ Re-baking *inside an extracted artifact* (on the vehicle, after field edits) rec
 `rtsp://10.160.{{vehicle_id}}.80/…`), `rig bake` stages the tree *unresolved* and each vehicle
 renders it locally from its provisioned identity — one artifact serves the whole fleet
 (`sudo ./provision.sh --id 7 --name skiff-07` once per vehicle, then `./run.sh up` forever).
-CHEATSHEET §1.6 has the full lifecycle.
+A value that must differ on every vehicle can live in the fleet roster instead of on each
+machine: a row's own `vars:` reach that vehicle only, and `unique:` makes `rig fleet` refuse two
+vehicles holding one value. `rig provision --export` writes a vehicle's provisioned values as a
+record and `sudo rig provision --apply` hands them to its replacement, from the record or from
+the vehicle's last run. Every run snapshot names the tier behind each value and keeps the
+machine file. CHEATSHEET §1.6 has the full lifecycle.
 Bundled fleet artifacts require each enabled service's `verbs.images` planner so images can be selected
 without resolving vehicle identity. [The contract and scopes](docs/BUILD_AND_REPLAY.md#targets-and-scopes)
 describe the workflow and defaults.
