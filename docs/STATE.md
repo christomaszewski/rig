@@ -120,6 +120,14 @@ workflow. The dated entries below are historical observations, not the current h
   with a manifest rebuilt from the saved session, which holds no vars. Found on the first
   live use of `rig sim`; covered by `tests/test_session_seal.py`, and confirmed live on
   2026-11-12 (an untouched session now seals without the flag).
+- **v0.2.86 run comparison (prepared 2026-11-12; not tagged):** `rig run diff A B` says what
+  differs between two runs' records: packages, images by per-architecture digest, the
+  simulation block, values and their sources, the machine file and rendered configs. It is
+  read-only and exits 0, 1 or 2 as `diff` does. An index digest that differs over the same
+  per-architecture image is reported and not counted; run identity is listed apart. Tried by
+  hand on three v0.2.85 runs of one deployment; the suite uses written runs. It does not
+  compare recorded data, logs or probes, and does not verify a snapshot against its name.
+  See [v0.2.86](releases/v0.2.86.md).
 - **v0.2.86 per-vehicle roster values and provisioning records (version and notes prepared
   2026-11-12; not tagged).**
   Roster rows take `vars:`; a vehicle reads its own row from the pushed fleet.yaml, above the

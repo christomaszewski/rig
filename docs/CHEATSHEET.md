@@ -640,6 +640,12 @@ rig run archive <id…> --to /Volumes/nas/runs               # bytes to a drive/
                                                            #   stays (replay/TAB resolve it; rm unlinks)
 rig run tag <run> site:mojave event:demo-day               # tags ride in the run's manifest (untag
                                                            #   removes); `rig runs` shows a TAGS column
+rig run diff <run> <run> [--json]                          # what differs between two runs' RECORDS:
+                                                           #   packages, images (per-architecture
+                                                           #   digest; an index-only change is said,
+                                                           #   not counted), simulation, values,
+                                                           #   rendered configs. Read-only; ids,
+                                                           #   labels or paths; exit 0 same, 1 differs
 rig catalog --tag site: --since 2026-08                     # FIND a run anywhere rig has seen one
                                                            #   (machine registry, imports, fleet-sync
                                                            #   trees, workspaces); --paths feeds verbs
