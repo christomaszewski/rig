@@ -318,6 +318,92 @@ class BuilderDnsTests(unittest.TestCase):
                 registry._managed_builder(self.local, {HOST: 'http'})
 
 
+class SharedBuilderTests(unittest.TestCase):
+    """Two rig homes on one Docker engine share the managed builder: its name comes from the
+    engine and the registry policy, not from RIG_HOME. The builder itself carries a mark of the
+    settings it was created with, so a home that has never used it can tell they are its own."""
+
+    setUp = BuilderDnsTests.setUp  # a host that resolves through a loopback stub, as above
+
+    def engine(self):
+        """One engine's Buildx state as every home sees it; inspect prints the driver options."""
+        state = dict(options=None, calls=[], configs=[])
+
+        def run(cmd, **kwargs):
+            state["calls"].append(cmd[2])
+            if cmd[:3] == ['docker', 'buildx', 'inspect']:
+                if state["options"] is None:
+                    return completed(cmd, '', 1)
+                shown = ' '.join(f'{k}="{v}"' for k, v in sorted(state["options"].items()))
+                return completed(cmd, 'Name: shared\nDriver: docker-container\n\nNodes:\n'
+                                      f'Name: shared0\nDriver Options: {shown}\nStatus: inactive\n')
+            if cmd[:3] == ['docker', 'buildx', 'rm']:
+                state["options"] = None
+                return completed(cmd)
+            self.assertEqual(cmd[:3], ['docker', 'buildx', 'create'])
+            state["options"] = dict(cmd[i + 1].split('=', 1) for i, arg in enumerate(cmd)
+                                    if arg == '--driver-opt')
+            state["configs"].append(Path(cmd[cmd.index('--buildkitd-config') + 1]).read_text())
+            return completed(cmd)
+        return state, patch.object(registry.subprocess, 'run', side_effect=run)
+
+    def home(self, name):
+        os.environ["RIG_HOME"] = str(self.tmp / name)
+
+    def builds(self, state, verb):
+        return state["calls"].count(verb)
+
+    def test_a_second_home_with_the_same_settings_leaves_the_builder_alone(self):
+        state, runner = self.engine()
+        with runner, patch('sys.stderr', new_callable=io.StringIO):
+            self.home("rover")
+            name = registry._managed_builder(self.local, {HOST: 'http'})
+            self.home("gazebo")  # has no record of what the builder was created with
+            self.assertEqual(registry._managed_builder(self.local, {HOST: 'http'}), name)
+            self.assertEqual(registry._managed_builder(self.local, {HOST: 'http'}), name)
+        # v0.2.85 removed and re-created it here, under a build another home might be running
+        self.assertEqual((self.builds(state, 'create'), self.builds(state, 'rm')), (1, 0))
+        self.assertIn('[dns]', state["configs"][0])
+
+    def test_the_mark_is_a_digest_of_the_settings_on_the_builder_itself(self):
+        state, runner = self.engine()
+        with runner:
+            self.home("rover")
+            registry._managed_builder(self.local, {HOST: 'http'})
+        self.assertEqual(state["options"]["network"], "host")
+        self.assertRegex(state["options"]["env.RIG_BUILDER_SETTINGS"], r"^[0-9a-f]{64}$")
+
+    def test_a_home_with_other_settings_gets_them_and_the_first_home_sees_the_change(self):
+        snippet = self.tmp / "buildkitd.toml"
+        snippet.write_text('[worker.oci]\n  max-parallelism = 2\n')
+        state, runner = self.engine()
+        with runner, patch('sys.stderr', new_callable=io.StringIO):
+            self.home("rover")
+            registry._managed_builder(self.local, {HOST: 'http'})
+            self.home("gazebo")
+            with patch.dict(os.environ, {"RIG_BUILDKITD_CONFIG": str(snippet)}):
+                registry._managed_builder(self.local, {HOST: 'http'})
+            self.assertEqual((self.builds(state, 'create'), self.builds(state, 'rm')), (2, 1))
+            self.assertIn('max-parallelism', state["configs"][-1])
+            # The first home's own record still says its settings are applied. The builder says
+            # otherwise, and the builder is right.
+            self.home("rover")
+            registry._managed_builder(self.local, {HOST: 'http'})
+        self.assertEqual((self.builds(state, 'create'), self.builds(state, 'rm')), (3, 2))
+        self.assertNotIn('max-parallelism', state["configs"][-1])
+
+    def test_a_builder_without_the_mark_is_judged_by_this_homes_record_as_before(self):
+        state, runner = self.engine()
+        state["options"] = {"network": "host"}  # created by a rig that did not mark it
+        with runner, patch('sys.stderr', new_callable=io.StringIO):
+            self.home("new")
+            registry._managed_builder(self.local, {HOST: 'http'})  # no record, DNS applies: once
+            self.assertEqual((self.builds(state, 'create'), self.builds(state, 'rm')), (1, 1))
+            self.home("another")
+            registry._managed_builder(self.local, {HOST: 'http'})  # now marked: left alone
+        self.assertEqual((self.builds(state, 'create'), self.builds(state, 'rm')), (1, 1))
+
+
 class RegistryCallerTests(unittest.TestCase):
     def test_imagetools_uses_scoped_env_preserving_auth_context(self):
         access = registry.Access(registry_env={'BUILDX_BUILDER': 'rig-registry-test'})
