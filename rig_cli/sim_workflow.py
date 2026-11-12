@@ -183,8 +183,15 @@ def _image_report(plan, inspection):
         for message in inspection["errors"]:
             _issue(plan, "error", "images", message)
     elif not inspection["ready"]:
-        _issue(plan, "not_checked", "images", "Native runtime images must be acquired: " +
-               ", ".join(inspection["proposed_pulls"]))
+        # Check and dry-run never pull; `rig sim up` does, before the first launcher. Say so,
+        # and give the pull for whoever wants the images fetched first.
+        pulls = inspection["proposed_pulls"]
+        platform = f"linux/{plan['architecture']}"
+        _issue(plan, "not_checked", "images",
+               f"Runtime images for {platform} are not on this host: {', '.join(pulls)}. "
+               "rig sim up pulls them before it starts anything; rig sim check never pulls. "
+               "To fetch them now: " +
+               "; ".join(f"docker pull --platform {platform} {ref}" for ref in pulls))
     else:
         _issue(plan, "ok", "images", "Selected runtime images verified and pinned")
 
