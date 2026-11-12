@@ -1650,7 +1650,8 @@ def build_parser() -> argparse.ArgumentParser:
     fl = sub.add_parser("fleet", help="GCS-side fan-out over the fleet roster (fleet.yaml): the "
                                       "ssh loop, automated — never a control plane")
     flsub = fl.add_subparsers(dest="fleet_cmd", required=True)
-    flsub.add_parser("list", parents=[flc], help="roster + reachability table")
+    flsub.add_parser("list", parents=[flc], help="roster + reachability table (with each "
+                                                 "row's own vars, when rows carry any)")
     fls = flsub.add_parser("status", parents=[flc],
                            help="aggregate `status --format json` across the fleet")
     fls.add_argument("names", nargs="*", default=[], help="vehicle name(s); default: all")
@@ -1662,7 +1663,9 @@ def build_parser() -> argparse.ArgumentParser:
     flu.add_argument("--run", default=None, metavar="LABEL",
                      help="run label stamped on EVERY vehicle (post-test data groups itself)")
     flu.add_argument("--var", action="append", default=[], metavar="K=V",
-                     help="forwarded as RIG_VAR_<k> (the vars tier — lands in each run's "
+                     help="forwarded as RIG_VAR_<k> to every selected vehicle, for this "
+                          "invocation (the shell tier: it outranks a roster row's own value, "
+                          "so a name under unique: is checked first; lands in each run's "
                           "snapshot; never a config push)")
     flu.add_argument("--force", action="store_true", help="forwarded to each vehicle's up")
     flu.add_argument("--dry-run", action="store_true", help="forwarded; no network/roster/view "
@@ -1746,6 +1749,24 @@ def build_parser() -> argparse.ArgumentParser:
     pv.add_argument("--force", action="store_true",
                     help="allow CHANGING an existing identity (renames compose projects — "
                          "bring the vehicle down first)")
+    pv.add_argument("--export", nargs="?", const="-", default=None, metavar="FILE",
+                    help="write this machine's file as a provisioning record (no sudo): "
+                         "`values` a replacement vehicle may adopt, `machine` this computer; "
+                         "standard output unless FILE is given")
+    pv.add_argument("--apply", default=None, metavar="SOURCE",
+                    help="merge a record's vars and env into this machine's file; SOURCE is a "
+                         "record file or a run (directory, id or label) — a run stands for the "
+                         "machine file its last up captured")
+    pv.add_argument("--only", default=None, metavar="K,K",
+                    help="with --apply: only these names")
+    pv.add_argument("--except", dest="except_names", default=None, metavar="K,K",
+                    help="with --apply: every name but these")
+    pv.add_argument("--with-identity", action="store_true", dest="with_identity",
+                    help="with --apply: also the record's machine block (vehicle, vehicle_id, "
+                         "platform, data_dir, …) — a replaced computer, not a spare that runs "
+                         "beside the original")
+    pv.add_argument("--dry-run", action="store_true", dest="dry_run",
+                    help="with --apply: print each key's old and new value, write nothing")
 
     cmp_ = sub.add_parser("completion", help="print the TAB-completion script for a shell — "
                                              "`rig setup --shell` wires it, or eval/install it "
@@ -1889,7 +1910,9 @@ def main(argv=None) -> int:
                 vehicle_id=args.vehicle_id, name=args.name, set_vars=args.var,
                 platform=args.platform, arch=args.arch, data_dir=args.data_dir, registry=args.registry,
                 migrate=args.migrate, keep_old=args.keep_old,
-                force=args.force)
+                force=args.force, export=args.export, apply=args.apply, only=args.only,
+                except_names=args.except_names, with_identity=args.with_identity,
+                dry_run=args.dry_run)
         root = (args.root or find_root()).resolve()
         if args.cmd == "add":  # edits the deployment files themselves — routes its own manifest load
             return cmd_add(args, root)

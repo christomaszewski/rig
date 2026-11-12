@@ -370,9 +370,21 @@ adaptation without a historical deployment capture.
   Release builds still default to the full matrix. Deployment builds and baked
   targets come from vehicle.yaml or explicit build/bake overrides.
 
+Handover:
+  --export writes this machine's file as a record (no sudo): `values` holds its
+  vars and env, `machine` every other key. --apply merges a record's values into
+  this machine's file and prints each key's old and new value. --only / --except
+  pick values by name; --with-identity also applies the machine block, for a
+  replaced computer, never for a spare that runs beside the original. A run
+  directory, id or label works as the source: it stands for the machine file
+  its last `up` captured.
+
 Examples:
   sudo rig provision --platform dev --arch amd64
   rig image build --scope host --tag laptop-1
+  rig provision --export uav-03.yaml
+  sudo rig provision --apply uav-03.yaml --only altitude_band --dry-run
+  sudo rig provision --apply ~/fleet-runs/survey/uav-03/20261112T101500Z_survey
 """,
     "certify": """Portable build checks:
   Checks declared runtime/CPU matrices, image override propagation and the build
