@@ -317,6 +317,19 @@ def test_a_replay_is_compared_by_what_it_replayed_not_by_how_long_it_took():
         {"section": "replay", "key": "(recorded)", "a": "no", "b": "yes"}]
 
 
+def test_two_vehicles_of_one_fleet_run_are_told_apart_in_the_header():
+    """A fleet run gives every vehicle the same run id and label, so the header names the
+    vehicle too."""
+    a = _write_run(pathlib.Path(tempfile.mkdtemp()) / "data", _spec(vehicle="uav-07"))
+    b = _write_run(pathlib.Path(tempfile.mkdtemp()) / "data", _spec(vehicle="spare-1"))
+    rc, out, err = _rig("run", "diff", str(a), str(b))
+    assert rc == 1, err
+    head = [ln for ln in out.splitlines() if ln.startswith(("  A  ", "  B  "))]
+    assert "uav-07" in head[0] and "spare-1" in head[1] and head[0][5:] != head[1][5:], head
+    doc = json.loads(_rig("run", "diff", str(a), str(b), "--json")[1])
+    assert (doc["a"]["vehicle"], doc["b"]["vehicle"]) == ("uav-07", "spare-1")
+
+
 def test_run_diff_writes_nothing():
     registry, a, b, _ = _three_runs()
 

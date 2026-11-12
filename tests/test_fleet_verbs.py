@@ -761,17 +761,51 @@ def test_fleet_up_hands_the_vehicle_the_roster_digest_to_check():
     assert rc == 0 and "--roster" not in plain_log.read_text(), err
 
 
-def test_fleet_up_says_when_a_vehicles_rig_predates_the_roster_check():
-    """A rig from before row values does not know `up --roster`. It must fail on the flag, and
-    the ground station says what that usage error means. The stand-in is a run.sh that answers
-    as the v0.2.85 release does."""
-    old = _band_tree("uav-03")
-    (old / "run.sh").write_text(
-        '#!/bin/sh\ncase " $* " in *" --roster "*)\n'
+def _old_rig_tree(name: str, version: str) -> pathlib.Path:
+    """A tree whose entry point answers as a rig from before roster row values: it says its
+    version, rejects `up --roster` as the v0.2.85 release does, and leaves `started` behind
+    for any other verb it is given."""
+    tree = _band_tree(name)
+    (tree / "run.sh").write_text(
+        '#!/bin/sh\n'
+        f'[ "$1" = "--version" ] && {{ echo "{version}"; exit 0; }}\n'
+        'case " $* " in *" --roster "*)\n'
         '  echo "usage: rig [-h] [--version] [--root ROOT] <command> ..." >&2\n'
         '  echo "rig: error: unrecognized arguments: --roster" >&2; exit 2 ;;\nesac\n'
         'touch started\n')
-    (old / "run.sh").chmod(0o755)
+    (tree / "run.sh").chmod(0o755)
+    return tree
+
+
+def test_fleet_up_does_not_push_a_roster_an_older_rig_cannot_read():
+    """A rig from before row values ignores its row, and refuses every verb, `down` included,
+    once its deployment holds a roster with `unique:`. So the roster must not reach it: the
+    ground station asks each vehicle for its version before it pushes anything."""
+    old = _old_rig_tree("uav-03", "rig 0.2.85")
+    data_root = pathlib.Path(tempfile.mkdtemp()) / "sil-data"
+    row = {"id": 3, "name": "uav-03", "path": str(old)}
+    fy = _swarm([dict(row, vars={"altitude_band": 3})], data_root=data_root)
+    rc, _, err = _run("fleet", "up", "--fleet", str(fy), "--run", "old", "-j", "1")
+    assert rc == 1 and "fleet up: 0/1 ok" in err, err
+    assert "0.2.85" in err and "re-bake" in err, err
+    assert not (old / "fleet.yaml").exists()                        # nothing it cannot read
+    assert not (old / "started").exists()                           # and not started
+    unknown = _old_rig_tree("uav-07", "something else entirely")    # cannot tell: same caution
+    fy = _swarm([{"id": 7, "name": "uav-07", "path": str(unknown), "vars": {"altitude_band": 4}}],
+                data_root=data_root)
+    rc, _, err = _run("fleet", "up", "--fleet", str(fy), "--run", "old", "-j", "1")
+    assert rc == 1 and "could not tell" in err, err
+    assert not (unknown / "fleet.yaml").exists() and not (unknown / "started").exists()
+    plain = _fleet_yaml([row], data_root=data_root)                 # no row values: as before
+    rc, _, err = _run("fleet", "up", "--fleet", str(plain), "--run", "old", "-j", "1")
+    assert rc == 0, err
+    assert (old / "fleet.yaml").exists() and (old / "started").exists()
+
+
+def test_fleet_up_says_when_a_vehicles_rig_rejects_the_roster_check():
+    """The second line: an entry point that claims a new enough version and still does not
+    know `up --roster` fails on the flag, and the ground station says what that means."""
+    old = _old_rig_tree("uav-03", "rig 9.9.9")
     data_root = pathlib.Path(tempfile.mkdtemp()) / "sil-data"
     fy = _swarm([{"id": 3, "name": "uav-03", "path": str(old), "vars": {"altitude_band": 3}}],
                 data_root=data_root)
@@ -779,6 +813,38 @@ def test_fleet_up_says_when_a_vehicles_rig_predates_the_roster_check():
     assert rc == 1 and "fleet up: 0/1 ok" in err, err
     assert "predates roster row values" in err and "re-bake" in err, err
     assert not (old / "started").exists()
+
+
+def test_a_vehicle_whose_value_was_moved_away_can_still_be_brought_down():
+    """Move a value from one row to another while its first holder is up: that vehicle must not
+    come up again, and must still answer `status` and `down`. It no longer renders, so those
+    verbs use the configs of its last `up`: what is running is what was last rendered."""
+    trees = {name: _band_tree(name) for name in ("uav-03", "spare-1")}
+    data_root = pathlib.Path(tempfile.mkdtemp()) / "sil-data"
+
+    def roster(holder: str) -> pathlib.Path:
+        rows = [{"id": 3, "name": "uav-03", "path": str(trees["uav-03"])},
+                {"id": 9, "name": "spare-1", "path": str(trees["spare-1"])}]
+        next(r for r in rows if r["name"] == holder)["vars"] = {"altitude_band": 3}
+        return _swarm(rows, data_root=data_root)
+
+    rc, _, err = _run("fleet", "up", "uav-03", "--fleet", str(roster("uav-03")), "--run", "one", "-j", "1")
+    assert rc == 0, err
+    swapped = roster("spare-1")
+    rc, _, err = _run("fleet", "up", "--fleet", str(swapped), "--run", "two", "-j", "1")
+    assert rc == 1 and "fleet up: 1/2 ok" in err, err               # the spare is up; uav-03 is not
+    rc, out, err = _run("fleet", "status", "--fleet", str(swapped), "-j", "1")
+    held = next(ln for ln in out.splitlines() if ln.startswith("uav-03"))
+    assert "needs rig" not in held and "_one" in held, out          # it still answers, run one open
+    rc, _, err = _run("fleet", "down", "uav-03", "--fleet", str(swapped), "--end-run", "-j", "1")
+    assert rc == 0 and "fleet down: 1/1 ok" in err, err
+    assert "altitude_band" in err and "last" in err, err            # says why, and what it used
+    run_dir = next((data_root / "uav-03" / "runs").iterdir())
+    assert "ended:" in (run_dir / "manifest.yaml").read_text()
+    rendered = yaml.safe_load((trees["uav-03"] / "var" / "rendered" / "sim.yaml").read_text())
+    assert rendered["band"] == 3                                    # torn down as it was started
+    rc, _, err = _run("fleet", "up", "uav-03", "--fleet", str(swapped), "--run", "three", "-j", "1")
+    assert rc == 1 and "altitude_band" in err, err                  # and `up` is still refused
 
 
 def test_fleet_list_shows_row_values():

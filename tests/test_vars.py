@@ -507,6 +507,29 @@ def test_row_without_a_referenced_value_fails_at_render():
             assert "unknown var" in str(exc) and "altitude_band" in str(exc)
 
 
+def test_down_does_not_need_an_exported_value_that_is_gone_but_up_does():
+    """`env:` may export a roster value. When the roster stops supplying it, `up` must refuse
+    and `down` must not: stopping what is running needs no such value."""
+    import io
+    from rig_cli.cli import main
+    root = _deployment('vehicle: t\nvehicle_id: 3\nenv: {ALT_BAND: "{{altitude_band}}"}\nsensors: []\n',
+                       files={"services.yaml": "services: {}\n"})
+    (root / "fleet.yaml").write_text(_SWARM.replace("vars: {altitude_band: 10}\n", "").replace(
+        ", vars: {altitude_band: 30}", ""))
+
+    def rig(*argv) -> tuple[int, str]:
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+            rc = main(["--root", str(root), *argv])
+        return rc, err.getvalue()
+
+    with _env(RIG_VEHICLE_LOCAL=_NO_MACHINE, RIG_VEHICLE_ID=None, RIG_VAR_altitude_band=None):
+        rc, err = rig("up", "--dry-run")
+        assert rc == 1 and "env.ALT_BAND" in err, err
+        rc, err = rig("down", "--dry-run")
+        assert rc == 0 and "env.ALT_BAND" in err, err               # said, not fatal
+
+
 def test_stale_higher_tier_value_blocks_up_and_a_shell_override_is_only_reported():
     import io
     from rig_cli.cli import main

@@ -602,6 +602,19 @@ def test_seal_clean_on_a_provisioned_machine_with_no_edits():
     assert "ended" in doc and "config_dirty_at_seal" not in doc
 
 
+def test_still_running_note_names_what_an_earlier_up_left_running():
+    data = pathlib.Path(tempfile.mkdtemp())
+    m = _manifest(data)
+    _mark_idle()
+    assert runs.still_running_note(m) is None
+    _mark_running(m)
+    note = runs.still_running_note(m)
+    assert note and project_name("cam", m.vehicle_id) in note and "rig down" in note
+    os.environ["SHIM_COMPOSE_LS"] = "__fail__"                      # docker cannot say: no claim
+    assert runs.still_running_note(m) is None
+    _mark_idle()
+
+
 def _run_0_2_84() -> tuple[pathlib.Path, pathlib.Path, pathlib.Path, str, dict]:
     """(root, data, machine file, run id, run manifest) — a private copy of the run rig v0.2.84
     wrote (tests/fixtures/run-v0.2.84), open again in the deployment that opened it."""
