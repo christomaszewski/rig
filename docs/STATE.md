@@ -128,6 +128,13 @@ current host state.
   per-architecture image is reported and not counted; run identity is listed apart. Tried by
   hand on three v0.2.85 runs of one deployment; the suite uses written runs. It does not
   compare recorded data, logs or probes, and does not verify a snapshot against its name.
+  Two different image digests count as one image only when each run's lock records the
+  digest its daemon held and the two locks list the same per-architecture digests. A build
+  that keeps an unchanged image's earlier index (v0.2.82) can leave the daemon holding the
+  fresh one, and such a run then differs from a rebuild of the same source: on the three
+  hand-checked runs the rebuild pair now reports the planner image as a difference, where it
+  read "no difference of substance" before. Rig does not record which per-architecture image
+  a daemon's index holds; closing that gap is open.
   See [v0.2.86](releases/v0.2.86.md).
 - **v0.2.86 an open run names its deployment directory:** deployment directories on one
   machine share the run registry, and a run left open with its stacks up had to be traced back
@@ -159,7 +166,15 @@ current host state.
   down, and a v0.2.85 vehicle that had received a roster with `unique:` refused every verb.
   `down`, `status`, `logs` and `run end` now stand on the last rendered configs when a tree no
   longer renders, and `fleet up` asks each vehicle's rig version before it pushes a roster
-  with per-vehicle values. No second host, no running containers, no `/etc/rig` under sudo
+  with per-vehicle values. An independent review of the prepared release then reproduced six
+  more faults on stand-in deployments, fixed the same day: a vehicle that could not be asked
+  its version was still sent the roster (it is now held); `unique:` compared values as
+  written (it now compares what each vehicle would render, refuses a value the roster
+  cannot resolve, and the vehicle refuses a local file that changes what a unique value is
+  built from); a variable built from a moved value blocked teardown; a local row whose
+  directory holds the roster could not start; `rig run diff` called an image the same on
+  the word of a lock that did not describe it; `rig provision --apply` skipped a change of
+  YAML type. `unique:` is a statement about the values the roster hands out. No second host, no running containers, no `/etc/rig` under sudo
   and no swap between physical vehicles has exercised it. `rig fleet
   up` hands each vehicle the sha256 of the roster it checked (`up --roster`) and the vehicle
   refuses any other. Known limits: move a value only after bringing its vehicle down, since a

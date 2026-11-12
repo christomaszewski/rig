@@ -224,7 +224,14 @@ ignorant of what such a value means; it learns only that a named value must diff
   names the ones no two vehicles may share. The ground station checks the whole roster on every
   `rig fleet` verb, selected rows or not, on the value each vehicle's fleet tier resolves to (its
   row's, else the fleet-level one) with `--var` applied to the selected rows first. Duplicate
-  ids are refused for the same reason: one id is one ROS domain.
+  ids are refused for the same reason: one id is one ROS domain. "Resolves to" is meant
+  literally: the ground station interpolates each `unique:` value and what it is built from
+  with the vehicle's own rules and its name and id, and compares the results. A value it
+  cannot resolve from the roster is refused, because nothing could be compared. The guarantee
+  is about the values the roster hands out. What a vehicle's own files or shell do to them
+  only the vehicle can see, so the vehicle refuses a local value for a `unique:` name or
+  for anything such a value is built from, and a name of its own that differs from its
+  row's when a unique value is built from the name.
 - **Row values rank in the fleet tier**, the row above the fleet-level `vars:`. The vehicle
   reads its own row from the pushed fleet.yaml, found by id (the id is settled by the tiers
   above; the roster never supplies it). They are not forwarded as `RIG_VAR_*`: the shell tier

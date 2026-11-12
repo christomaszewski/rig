@@ -290,7 +290,13 @@ renders them with no ground station. `unique:` lists names no two vehicles may h
 `rig fleet` checks the WHOLE roster before it pushes or starts anything, also when a verb names a
 subset, and applies `--var` to the selected vehicles first. Two rows with one `id` are refused. A
 row with no value for a variable the deployment references does not come up: there is no default.
-rig does not know what the value means, only that it must differ.
+rig does not know what the value means, only that it must differ. It compares what each vehicle
+would RENDER (fleet-level `vars:`, then the row, then `--var`, with the vehicle's name and id):
+`"{{band}}"` with `band: 30` clashes with a plain `30`, a fleet-level `"{{vehicle_id}}0"` is a
+value per vehicle, and `30`, `30.0` and `"30"` are one number. A `unique:` value built from
+something the roster does not set (or only the vehicle knows, like `ros_domain_id`) is refused.
+This is a check of the ROSTER; the vehicle refuses, at preflight, a file of its own that sets a
+`unique:` name or anything such a value is built from.
 
 - A value the row sets and the vehicle's own machine file (or tree-local file) sets differently
   is a preflight ERROR on that vehicle (`--force` passes): an old `rig provision --var` would
