@@ -655,6 +655,27 @@ def test_a_simulator_left_running_through_a_replay_is_not_claimed():
     assert not any("gazebo" in line for line in lines)
 
 
+def test_rigs_own_probe_node_is_listed_as_rigs():
+    """The check after startup runs while the logger is already taking snapshots, so the probe's
+    node is in the recording. It is rig's own: that is known, not inferred."""
+    probed = EPOCH_SIM + ("  /rig/probe/_rig_sim_probe_aa69213c5a50:\n"
+                          "    pubs: []\n"
+                          "    subs:\n"
+                          "    - {topic: /clock, type: rosgraph_msgs/msg/Clock}\n"
+                          "    provides: []\n"
+                          "    requires: []\n")
+    lines = _graphed(probed, {"simulation": _EXTERNAL})
+    assert _section(lines, "rig (") == ["/rig/probe/_rig_sim_probe_aa69213c5a50"], lines
+    assert _section(lines, "gazebo 10.5.0") == ["/ros_gz_bridge"]
+    assert _section(lines, graph.UNASSIGNED) == ["/stray_tool"]
+    order = [line.strip().split(" (")[0] for line in lines if line.startswith("  ") and line[2] != " "]
+    assert order[-3:] == ["gazebo 10.5.0", "rig", "(unassigned)"], order
+    # It needs no record to be recognised, and a node that merely sits under /rig does not count.
+    assert _section(_graphed(probed, {}), "rig (") == ["/rig/probe/_rig_sim_probe_aa69213c5a50"]
+    other = probed.replace("/rig/probe/_rig_sim_probe_aa69213c5a50", "/rig/other_node")
+    assert "/rig/other_node" in _section(_graphed(other, {}), graph.UNASSIGNED)
+
+
 def test_placing_outside_nodes_changes_neither_the_contract_nor_the_check():
     import yaml
     run = _run_dir(EPOCH_REPLAY)
