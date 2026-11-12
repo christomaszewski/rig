@@ -60,9 +60,16 @@ workflow. The dated entries below are historical observations, not the current h
   attach to a simulator other than Isaac and record it as the recipe states it:
   `provider: external`, `simulator: {name, version}` and `clock: external` in the plan, the run
   metadata and the saved session. Scene, seed, name and version are recorded as stated and not
-  verified. Isaac recipes and saved Isaac sessions are unchanged. This provider is covered by
-  unit tests only (`tests/test_sim_external.py`, `tests/test_sim_external_replace.py`). It has
-  not been exercised against a live simulator. See the
+  verified. Isaac recipes and saved Isaac sessions are unchanged. Unit tests cover it
+  (`tests/test_sim_external.py`, `tests/test_sim_external_replace.py`). **Exercised live on
+  2026-11-12** against one private, mission-level simulator on one amd64 host (Lyrical,
+  `rmw_zenoh_cpp`; `/clock` and two `std_msgs/msg/String` topics out, one in): `rig sim check`,
+  `rig sim up` with a bag logger and one autonomy service, `rig sim down --end-run`, over several
+  sessions, and `rig replay --recipe` of a recorded run under the shared recipe. The
+  probe ran in a container through `simulation.probe`. **Not exercised:** a simulator on
+  another host or another ROS distribution, a DDS middleware, sensor replacement, a failed
+  startup and its rollback, and a clock that stops during a session. Live Isaac acceptance is
+  still pending and is not changed by this. See the
   [reference](SIMULATION.md#an-external-simulator) and
   [example](../examples/external-attach/README.md).
 - The [offline Isaac walkthrough](ISAAC_OFFLINE.md) and [example](../examples/isaac-attach/README.md)

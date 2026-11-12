@@ -234,9 +234,22 @@ recipe states them. Rig does not ask the simulator what it is running, so a wron
 the recipe is a wrong value in the record. `rig sim down` and bare `rig down` stop the
 session and leave the simulator running.
 
+Two arrangements from the first live use, both for a single host:
+
+- **Zenoh.** The simulator needs a router before the session starts, and `rig replay` needs
+  the deployment's router among the session's services. Give the simulator its own router on
+  another port, and connect the deployment's router to it with the router's `connect`
+  endpoints. The same recipe, listing the deployment's router, then serves `rig sim` and
+  `rig replay`. Point the probe's Zenoh session at the simulator's router.
+- **A host without ROS.** `simulation.probe` is an argument list, so it can name a wrapper
+  that runs Python in a ROS image: for example a script that ends in
+  `exec docker run --rm -i --network host -e ROS_DOMAIN_ID -e RMW_IMPLEMENTATION IMAGE python3 "$@"`.
+  Rig appends `-c` and the probe's source, and sends the request on standard input.
+
 [examples/external-attach](../examples/external-attach/README.md) has a recipe to copy.
 Automated tests cover this provider's recipes, plans, records and session lifecycle. It has
-not been run against a live simulator; [State](STATE.md) records what has been exercised.
+been run against one live simulator on one host; [State](STATE.md) records what was and was
+not exercised.
 
 ## Frames, versions and current limits
 

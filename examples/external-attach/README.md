@@ -29,5 +29,5 @@ rig sim down --end-run
 rig replay check --recipe world    # the same consumers, now fed from the recording
 ```
 
-The provider is experimental and covered by unit tests only. No result against a live
-simulator is implied by the checked-in example.
+The provider is experimental. [State](../../docs/STATE.md) says what has been exercised
+against a live simulator; this checked-in example itself has not been run.
