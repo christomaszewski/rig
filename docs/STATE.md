@@ -91,7 +91,9 @@ workflow. The dated entries below are historical observations, not the current h
   run. Written and tested on 2026-11-12 with local SIL rows and the ssh/scp shims only: no real
   vehicle, no real `/etc/rig` under sudo and no live spare swap has exercised it. Known limits:
   a vehicle whose bundled rig predates this ignores row values (it refuses a roster with
-  `unique:`); `rig up` itself does not print a shell override of a row value (`rig doctor` and
+  `unique:`); a vehicle keeps the last roster that reached it, so after a value moves the
+  vehicle it moved from renders the old one until a push reaches it (`rig fleet list` shows
+  `STALE`); `rig up` itself does not print a shell override of a row value (`rig doctor` and
   the snapshot do); `rig reconstruct` does not use the captured machine file. See
   [the cheat sheet](CHEATSHEET.md#16--fleet-vehicles-one-artifact-n-vehicles-rig--v0148) and
   [the design note](DESIGN.md#vehicle-local-vars--fleet-artifacts-v014748).

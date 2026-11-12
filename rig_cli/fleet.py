@@ -18,6 +18,8 @@ Invariants (settled):
   ride that pushed file and nothing else: forwarded as ``RIG_VAR_*`` they would outrank the
   machine file and be gone after a reboot. So a vehicle that did not receive a roster carrying
   row values is not started: it would come up on the values of the roster it already holds.
+  A vehicle keeps the last roster that reached it, whatever the ground station has since
+  changed; ``fleet list`` says which vehicles hold the current one.
 - The roster is checked WHOLE before anything is pushed or started, whichever vehicles a verb
   names: no two rows share an ``id``, and no two vehicles hold one value for a name listed
   under ``unique:``. rig does not know what such a value means, only that it must differ.
@@ -35,6 +37,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import datetime
+import hashlib
 import json
 import os
 import re
@@ -382,16 +385,38 @@ def _fan_out(vehicles: list[Vehicle], make_script, *, jobs: int, timeout: int = 
 
 # --- verbs --------------------------------------------------------------------------------------
 
+def _held_roster(out: str, current: str) -> str:
+    """What a vehicle's deployment root holds, from the list probe's output: the roster this
+    ground station would push (`current`), another one (`STALE`), or none."""
+    lines = out.split()
+    if "roster" not in lines:
+        return "none"
+    digest = next((word for word in lines if re.fullmatch(r"[0-9a-f]{64}", word)), None)
+    if digest is None:
+        return "?"  # a roster is there, but the host has neither sha256sum nor shasum
+    return "current" if digest == current else "STALE"
+
+
 def cmd_list(fleet: Fleet, *, jobs: int) -> int:
+    # Row values side by side, so a duplicate or a gap is visible in one table — and whether
+    # each vehicle HOLDS this roster: a vehicle keeps the last one that reached it, and renders
+    # its row from that copy. Both columns appear only when some row carries values: a plain
+    # roster is probed and listed exactly as before.
+    with_vars = any(v.vars for v in fleet.vehicles)
+
     def probe(v: Vehicle) -> str:
-        path = str(Path(v.path).expanduser()) if v.is_local else v.path
-        return (f"test -e {_pathexpr(path)}/vehicle.yaml -o -x {_pathexpr(path)}/run.sh")
+        path = _pathexpr(str(Path(v.path).expanduser()) if v.is_local else v.path)
+        there = f"test -e {path}/vehicle.yaml -o -x {path}/run.sh"
+        if not with_vars:
+            return there
+        roster = f"{path}/fleet.yaml"
+        return (f"{there} || exit 1; [ -f {roster} ] || exit 0; echo roster; "
+                f"{{ sha256sum < {roster} || shasum -a 256 < {roster}; }} 2>/dev/null; exit 0")
 
     outcomes = _fan_out(list(fleet.vehicles), probe, jobs=jobs, timeout=30)
-    # Row values side by side, so a duplicate or a gap is visible in one table. The column
-    # appears only when some row carries values: a plain roster lists exactly as before.
-    with_vars = any(v.vars for v in fleet.vehicles)
-    rows = [("ID", "NAME", "HOST", "PATH") + (("VARS",) if with_vars else ()) + ("STATE",)]
+    current = hashlib.sha256(fleet.path.read_bytes()).hexdigest()
+    rows = [("ID", "NAME", "HOST", "PATH") + (("VARS", "ROSTER") if with_vars else ())
+            + ("STATE",)]
     problems = 0
     for o in outcomes:
         if not o.reachable:
@@ -400,8 +425,8 @@ def cmd_list(fleet: Fleet, *, jobs: int) -> int:
             state, problems = "no deployment at path", problems + 1
         else:
             state = "ok"
-        shown = (", ".join(f"{k}={v}" for k, v in sorted(o.vehicle.vars.items())) or "—",) \
-            if with_vars else ()
+        shown = (", ".join(f"{k}={v}" for k, v in sorted(o.vehicle.vars.items())) or "—",
+                 _held_roster(o.out, current) if state == "ok" else "—") if with_vars else ()
         rows.append((str(o.vehicle.id), o.vehicle.name, o.vehicle.host or "localhost",
                      o.vehicle.path) + shown + (state,))
     print(f"fleet: {fleet.name} ({fleet.mode})" + (f"  gcs: {fleet.gcs_ip}" if fleet.gcs_ip else "")

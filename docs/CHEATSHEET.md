@@ -299,6 +299,11 @@ rig does not know what the value means, only that it must differ.
 - `rig fleet up` does not start a vehicle the roster did not reach when rows carry values: it
   would come up on the roster it already holds. `--dry-run` pushes nothing, so it previews with
   the roster each vehicle already holds.
+- A vehicle keeps the LAST roster that reached it, and `fleet up` pushes only to the vehicles it
+  names. After a value moves from one row to another, the vehicle it moved FROM still holds the
+  old row until a push reaches it, and a reboot there renders the old value. `rig fleet list`
+  shows it: the `ROSTER` column reads `current`, `STALE` or `none` per vehicle. Check it before
+  a run, and `rig fleet up` the stale ones.
 - The VEHICLE's rig reads the row, and a baked artifact bundles its own rig: re-bake before using
   row values. An older bundled rig ignores them and comes up on whatever its other tiers say. It
   refuses a roster that has `unique:`, so list every per-vehicle name there.
@@ -344,7 +349,8 @@ vehicles:                    # THE roster -> {{fleet_ids}} derived ([3, 7]); nev
 ```
 
 ```bash
-rig fleet list                        # roster + reachability, with each row's own vars
+rig fleet list                        # roster + reachability; with row vars also each row's
+                                      #   values and ROSTER: current | STALE | none on the vehicle
 rig fleet status [-v]                 # aggregates `status --format json` per vehicle
 rig fleet up --run tuesday-swarm --var gcs_ip=192.168.44.10
                                       # CORRELATED run label on every vehicle; --var rides the

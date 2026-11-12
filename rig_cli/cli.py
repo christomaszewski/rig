@@ -1650,8 +1650,9 @@ def build_parser() -> argparse.ArgumentParser:
     fl = sub.add_parser("fleet", help="GCS-side fan-out over the fleet roster (fleet.yaml): the "
                                       "ssh loop, automated — never a control plane")
     flsub = fl.add_subparsers(dest="fleet_cmd", required=True)
-    flsub.add_parser("list", parents=[flc], help="roster + reachability table (with each "
-                                                 "row's own vars, when rows carry any)")
+    flsub.add_parser("list", parents=[flc], help="roster + reachability table; when rows "
+                                                 "carry vars, also each row's values and "
+                                                 "whether the vehicle holds this roster")
     fls = flsub.add_parser("status", parents=[flc],
                            help="aggregate `status --format json` across the fleet")
     fls.add_argument("names", nargs="*", default=[], help="vehicle name(s); default: all")

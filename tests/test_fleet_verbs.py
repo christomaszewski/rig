@@ -719,6 +719,40 @@ def test_fleet_list_shows_row_values():
     assert "altitude_band" not in row("spare-1")                    # the gap shows as a gap
 
 
+def test_fleet_list_says_who_holds_the_current_roster():
+    """A vehicle renders its row from the last roster that reached it. After a value moves, the
+    vehicle it moved from still holds the old one until a push reaches it: list shows that."""
+    trees = {name: _band_tree(name) for name in ("uav-03", "spare-1")}
+    data_root = pathlib.Path(tempfile.mkdtemp()) / "sil-data"
+
+    def roster(holder: str) -> pathlib.Path:
+        rows = [{"id": 3, "name": "uav-03", "path": str(trees["uav-03"])},
+                {"id": 9, "name": "spare-1", "path": str(trees["spare-1"])}]
+        next(r for r in rows if r["name"] == holder)["vars"] = {"altitude_band": 3}
+        return _swarm(rows, data_root=data_root)
+
+    def held(fy: pathlib.Path) -> dict:
+        rc, out, err = _run("fleet", "list", "--fleet", str(fy))
+        assert rc == 0, err
+        head = next(ln for ln in out.splitlines() if "NAME" in ln).split()
+        assert "ROSTER" in head
+        return {ln.split()[1]: ln.split()[-2] for ln in out.splitlines()
+                if ln.split()[:1] in (["3"], ["9"])}
+
+    first = roster("uav-03")
+    assert held(first) == {"uav-03": "none", "spare-1": "none"}     # nothing pushed yet
+    rc, _, err = _run("fleet", "up", "uav-03", "--fleet", str(first), "--run", "a", "-j", "1")
+    assert rc == 0, err
+    assert held(first) == {"uav-03": "current", "spare-1": "none"}
+    swapped = roster("spare-1")                                     # the band moves to the spare
+    rc, _, err = _run("fleet", "up", "spare-1", "--fleet", str(swapped), "--run", "b", "-j", "1")
+    assert rc == 0, err
+    assert held(swapped) == {"uav-03": "STALE", "spare-1": "current"}   # uav-03 still holds band 3
+    plain = _fleet_yaml([{"id": 3, "name": "uav-03", "path": str(trees["uav-03"])}], mode="field")
+    rc, out, _ = _run("fleet", "list", "--fleet", str(plain))
+    assert rc == 0 and "ROSTER" not in out and "VARS" not in out    # a plain roster: as before
+
+
 @contextlib.contextmanager
 def _no_rsync():
     """The scp fallback branch: a laptop without rsync."""

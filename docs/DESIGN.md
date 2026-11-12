@@ -230,7 +230,10 @@ ignorant of what such a value means; it learns only that a named value must diff
   above; the roster never supplies it). They are not forwarded as `RIG_VAR_*`: the shell tier
   would outrank the machine file and be gone after a reboot. The pushed roster is the one
   carve-out from "no config side-channel", and row values ride it. A vehicle the roster did not
-  reach is therefore not started when rows carry values.
+  reach is therefore not started when rows carry values. The copy on the vehicle is what keeps
+  a reboot correct, and also what can go stale: a vehicle that was off, or not named, when a
+  value moved still holds the old row. rig does not chase it (never a control plane); `rig
+  fleet list` compares each vehicle's copy with the ground station's and says `STALE`.
 - **No default.** A row without a value the deployment references fails the render, by name.
 - **A stale value is an error, not a winner.** The machine file outranks the fleet tier by
   design, so an old `rig provision --var` would silently beat the roster. A row value that the
