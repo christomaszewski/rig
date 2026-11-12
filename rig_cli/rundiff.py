@@ -225,35 +225,46 @@ def _vouched(run: dict, ref: str, held) -> bool:
 
 def _compare_images(report: _Report, a: dict, b: dict) -> None:
     """.rig/images.yaml: the digest the docker daemon held for each ref when the run opened —
-    an INDEX digest for a multi-architecture image. Two different digests are the same image
-    only where the record shows it, by the first of these that applies: both runs recorded the
-    per-platform manifest the daemon held (`held:`), and it is one manifest; both recorded
-    docker's image id, and it is one id; each run's lock describes the image that ran (see
-    _vouched) and the two locks list the same per-architecture digests. Anything less is a
-    difference."""
-    if not a["images"] and not b["images"]:
+    an INDEX digest for a multi-architecture image. Compare the platform and image the daemon
+    held before the index: one index can select different platform images. A local build's id
+    also counts when no repository digest exists. Different indexes describe the same image
+    only when held manifests or ids agree, or each lock vouches for the image that ran (see
+    _vouched) and the locks list the same per-architecture digests."""
+    refs = set(a["images"]) | set(b["images"]) | set(a["held"]) | set(b["held"])
+    if not refs:
         return
     report.section("images")
-    for ref in sorted(set(a["images"]) | set(b["images"])):
+    for ref in sorted(refs):
         va, vb = a["images"].get(ref, _MISSING), b["images"].get(ref, _MISSING)
+        ran_a, ran_b = _ran_manifest(a, ref), _ran_manifest(b, ref)
+        platform_a, platform_b = _held(a, ref).get("platform"), _held(b, ref).get("platform")
+        id_a, id_b = _held(a, ref).get("id"), _held(b, ref).get("id")
+        platform_changed = platform_a and platform_b and platform_a != platform_b
+        manifest_changed = ran_a and ran_b and ran_a != ran_b
+        if platform_changed or manifest_changed:
+            report.index_only.pop(ref, None)
+            if va != vb:
+                report.change("images", ref, va, vb)
+            if platform_changed:
+                report.change("images", f"{ref} platform held", platform_a, platform_b)
+            if manifest_changed:
+                report.change("images", f"{ref} manifest held", ran_a, ran_b)
+            continue
+        if (ran_a and ran_b and ran_a == ran_b) or (isinstance(id_a, str) and id_a and id_a == id_b):
+            # Equal containerd ids can name an index, so platform differences must win above.
+            report.index_only.pop(ref, None)
+            if isinstance(va, str) and isinstance(vb, str) and va != vb:
+                report.index_only[ref] = {"section": "images", "key": ref, "a": va, "b": vb}
+            continue
+        if (not isinstance(va, str) or not isinstance(vb, str)) and id_a != id_b and (id_a or id_b):
+            # Classic-store local builds have no RepoDigests; their available ids still differ.
+            report.index_only.pop(ref, None)
+            if va != vb:
+                report.change("images", ref, va, vb)
+            report.change("images", f"{ref} image id held", id_a, id_b)
+            continue
         if va == vb:
             continue
-        if isinstance(va, str) and isinstance(vb, str):
-            ran_a, ran_b = _ran_manifest(a, ref), _ran_manifest(b, ref)
-            same_platform = _held(a, ref).get("platform") == _held(b, ref).get("platform")
-            id_a, id_b = _held(a, ref).get("id"), _held(b, ref).get("id")
-            if ran_a and ran_b and same_platform:  # the image itself, as each daemon held it
-                report.index_only.pop(ref, None)
-                if ran_a == ran_b:
-                    report.index_only[ref] = {"section": "images", "key": ref, "a": va, "b": vb}
-                else:
-                    report.change("images", ref, va, vb)
-                    report.change("images", f"{ref} manifest held ({_held(a, ref)['platform']})",
-                                  ran_a, ran_b)
-                continue
-            if isinstance(id_a, str) and id_a and id_a == id_b:  # one image id: one image
-                report.index_only[ref] = {"section": "images", "key": ref, "a": va, "b": vb}
-                continue
         kids_a, kids_b = _children(a["lock"], ref), _children(b["lock"], ref)
         unnamed = [name for name, run, held in (("A", a, va), ("B", b, vb))
                    if not _vouched(run, ref, held)]

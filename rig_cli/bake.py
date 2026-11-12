@@ -190,12 +190,13 @@ def _held_image(ref: str) -> dict | None:
 
 def image_record(refs) -> dict:
     """The ``.rig/images.yaml`` document for a run: under ``images`` the digest the local daemon
-    holds for each ref (an INDEX digest for a multi-architecture image; null when it holds
-    none), and under ``held`` what is behind that digest (see _held_image) for the refs it does
-    hold. ``held`` is absent when the daemon said nothing more; readers treat it as optional."""
+    holds for each ref (an INDEX digest for a multi-architecture image; null when no repository
+    digest is known), and under ``held`` the local image's identity (see _held_image). A local
+    build need not have been pushed to have an image id. ``held`` is absent when the daemon
+    said nothing more; readers treat it as optional."""
     images = {ref: _resolve_digest(ref, local_only=True) for ref in sorted(refs)}
     doc: dict = {"schema": 1, "images": images}
-    held = {ref: got for ref, digest in images.items() if digest and (got := _held_image(ref))}
+    held = {ref: got for ref in images if (got := _held_image(ref))}
     if held:
         doc["held"] = held
     return doc
