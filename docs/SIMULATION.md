@@ -201,6 +201,62 @@ use the active shared session's saved selection and environment for either provi
 Teardown verifies the original Docker engine and session identity before changing services;
 changing the shell's Docker connection cannot redirect it to another engine.
 
+## The simulator's statement
+
+An optional `simulation.statement_file` names a file the simulator writes about its run:
+
+```yaml
+simulation:
+  # Alongside the provider, ROS bindings, scene and other simulation settings:
+  statement_file: ../world-output/meta.json
+```
+
+The path is on the machine running Rig. A relative path is relative to the recipe file's
+directory; an absolute path is accepted. The location is saved when the session starts,
+so editing the recipe afterwards cannot redirect the capture. The file need not exist at
+check or startup time. Rig does not launch the simulator, request this file from it, or
+interpret its contents.
+
+When the run is sealed, Rig copies the file's bytes to `.rig/simulation/statement` and records
+their SHA-256 in the run's `manifest.yaml`:
+
+```yaml
+simulation:
+  statement:
+    source: /srv/world-output/meta.json
+    path: .rig/simulation/statement
+    sha256: <SHA-256 of the copied bytes>
+    reported_by: simulator
+    verified: false
+```
+
+**This is the simulator's word, not a fact verified by Rig.** The digest identifies the
+copied bytes; it does not verify the family, version, commit, dirty flag, scenario, seed,
+output hashes, label or any other claim in them. Any regular file is accepted, including
+non-JSON and binary content. The simulator is responsible for making the named file describe
+this run. Rig cannot tell whether an existing file belongs to an earlier run.
+
+Let the simulator finish writing before `rig sim down --end-run`. If its statement becomes
+available only after consumers stop, use `rig sim down`, wait for the file, then `rig run end`.
+An absent, unreadable or nonregular source leaves a `warning` in `simulation.statement`, with
+no copied `path` or `sha256`; it does not fail the run or prevent sealing. Dry runs do not copy
+anything. A run already sealed keeps its captured statement even if the simulator file changes.
+
+`rig run diff A B` compares the recorded digest and capture outcome in a separate
+**simulator statement** section. It does not parse the file or interpret any fields as
+incidental. Source file locations are listed with per-run differences; different statement
+bytes count as a difference. Inspect the copied files separately when a simulator's own
+format distinguishes run identity from experimental settings or outcomes.
+
+Agrarium's bench writes `meta.json` beside its output. In the local acceptance run, its
+183-day `m1-typical` scenario with seed 7 and planners `0.1.0` and `0.2.0` produced statements
+that differed in exactly four fields: `run`, `sources`, `planners` and `rover_log_sha256`.
+The first two identify the run; the latter two describe the changed planner and its output.
+All other fields matched. Repeating `0.1.0` produced identical rover-log bytes and changed
+only `run` and `sources` in the statement. The world ran in process; Rig's session capture
+and diff checks used those real files with stand-ins for ROS and Docker. This does not
+establish a live ROS attachment, and the captured claims remain the simulator's word.
+
 ## Replay the recording or run the world again
 
 After stopping and sealing the simulation run, stop Isaac or disconnect its ROS graph so
