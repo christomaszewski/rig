@@ -800,6 +800,48 @@ def test_safe_extract_refuses_members_that_leave_the_destination():
             sys.modules["tarfile"] = tarfile
 
 
+def test_reconstruct_overlays_a_snapshot_written_by_v0_2_84():
+    """tests/fixtures/run-v0.2.84 holds a run as that release wrote it: its snapshot has no
+    machine file and no value sources. It must still verify against its own name and overlay."""
+    import contextlib as ctx
+    import shutil
+    from rig_cli.manifest import load_manifest
+    from rig_cli.resolve import materialize_manifest
+    base = pathlib.Path(tempfile.mkdtemp())
+    shutil.copytree(pathlib.Path(__file__).resolve().parent / "fixtures" / "run-v0.2.84", base / "fx")
+    root, data = base / "fx" / "tree", base / "fx" / "data"
+    run_dir = next((data / "runs").iterdir())
+    doc = load_yaml(run_dir / "manifest.yaml")
+    assert doc["rig_version"] == "0.2.84"
+    snap = run_dir / ".rig" / "config" / doc["config"]
+    before = {q.relative_to(snap).as_posix(): q.read_bytes() for q in snap.rglob("*") if q.is_file()}
+    # the fixture carries no tarball (it would bundle all of rig): capture the tree now, as
+    # `rig run retrofit` would for a run that has none
+    (root / "services.yaml").write_text(
+        f"services:\n  navsvc: {{ path: {_service_repo(base, 'navsvc')} }}\n")
+    old = {k: os.environ.get(k) for k in ("RIG_VEHICLE_LOCAL", "RIG_VEHICLE_ID", "RIG_VEHICLE_NAME")}
+    os.environ["RIG_VEHICLE_LOCAL"] = str(base / "fx" / "machine.yaml")
+    os.environ.pop("RIG_VEHICLE_ID", None)
+    os.environ.pop("RIG_VEHICLE_NAME", None)
+    try:
+        manifest = materialize_manifest(load_manifest(root), root)
+        import yaml as _y
+        doc["capture"] = bake.capture_run(root, manifest, run_dir)
+        (run_dir / "manifest.yaml").write_text(_y.safe_dump(doc, sort_keys=False))
+        dest = base / "bench"
+        with ctx.redirect_stdout(io.StringIO()), ctx.redirect_stderr(io.StringIO()):
+            rc = reconstruct.cmd_reconstruct(None, run_ref=str(run_dir), into=str(dest),
+                                             config=doc["config"])
+    finally:
+        for k, v in old.items():
+            os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
+    assert rc == 0
+    assert (dest / "vehicle.yaml").read_bytes() == before["vehicle.yaml"]
+    assert (dest / "config" / "sensors" / "nav.yaml").read_bytes() == before["rendered/nav.yaml"]
+    after = {q.relative_to(snap).as_posix(): q.read_bytes() for q in snap.rglob("*") if q.is_file()}
+    assert after == before                                      # read, never rewritten
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

@@ -496,6 +496,149 @@ def test_deployment_id_minted_once_and_stable():
     assert runs.deployment_id(other) != a                       # a fresh tree is a fresh instance
 
 
+# --- provenance: where values came from, and the machine file itself ----------------------------
+
+import contextlib  # noqa: E402
+
+_RUN_0_2_84 = pathlib.Path(__file__).resolve().parent / "fixtures" / "run-v0.2.84"
+
+
+@contextlib.contextmanager
+def _identity(machine: pathlib.Path, **shell):
+    """The machine tier at `machine`, the shell tier exactly `shell` — nothing of the host's."""
+    keep = {"RIG_VEHICLE_LOCAL": str(machine), **shell}
+    drop = [k for k in os.environ
+            if k in ("RIG_VEHICLE_ID", "RIG_VEHICLE_NAME") or k.startswith("RIG_VAR_")]
+    old = {k: os.environ.get(k) for k in [*keep, *drop]}
+    for k in drop:
+        os.environ.pop(k)
+    os.environ.update(keep)
+    try:
+        yield
+    finally:
+        for k, v in old.items():
+            os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
+
+
+def _loaded(root: pathlib.Path) -> Manifest:
+    from rig_cli.manifest import load_manifest
+    from rig_cli.resolve import materialize_manifest
+    return materialize_manifest(load_manifest(root), root)
+
+
+def _field_world(provisioned: bool = True) -> tuple[pathlib.Path, pathlib.Path, pathlib.Path]:
+    """(root, data, machine file) — a fleet-style tree: identity and one value come from the
+    machine file, as on a vehicle. `provisioned=False` leaves the machine file absent."""
+    base = pathlib.Path(tempfile.mkdtemp())
+    root, data, machine = base / "tree", base / "data", base / "etc" / "vehicle.local.yaml"
+    (root / "config").mkdir(parents=True)
+    (root / "vehicle.yaml").write_text(
+        'vehicle: "{{vehicle}}"\nvehicle_id: "{{vehicle_id}}"\nrun_capture: false\n'
+        "vars: {mosaic_rate_hz: 2}\n"
+        "sensors:\n  - {name: nav, service: navsvc, config: config/nav.yaml}\n")
+    (root / "config" / "nav.yaml").write_text(
+        'service: navsvc\nname: nav\nband: "{{altitude_band}}"\n')
+    machine.parent.mkdir()
+    if provisioned:  # hand-edited on purpose: the copy must be the file, not a re-dump of it
+        machine.write_text(f"# uav-03, bench 2\nvehicle_id: 3\nvehicle:   uav-03\n"
+                           f"data_dir: {data}\nvars: {{altitude_band: 3}}\n")
+    return root, data, machine
+
+
+def _snap(data: pathlib.Path, rid: str, digest: str) -> pathlib.Path:
+    return data / "runs" / rid / ".rig" / "config" / digest
+
+
+def test_snapshot_vars_yaml_names_a_source_for_every_variable():
+    _mark_idle()
+    root, data, machine = _field_world()
+    with _identity(machine):
+        m = _loaded(root)
+        rid = runs.ensure(m, root)
+        digest = runs.snapshot(m, root, stacks=["nav"])
+    assert digest
+    doc = yaml.safe_load((_snap(data, rid, digest) / "vars.yaml").read_text())
+    assert set(doc) == {"vars", "env", "sources"}
+    assert doc["vars"]["altitude_band"] == 3
+    assert set(doc["sources"]) == set(doc["vars"])              # every resolved variable
+    assert doc["sources"]["altitude_band"] == str(machine)
+    assert doc["sources"]["mosaic_rate_hz"] == "vehicle.yaml"
+    assert doc["sources"]["ros_domain_id"] == "derived"
+
+
+def test_snapshot_holds_the_machine_file_byte_for_byte():
+    _mark_idle()
+    root, data, machine = _field_world()
+    with _identity(machine):
+        m = _loaded(root)
+        rid = runs.ensure(m, root)
+        digest = runs.snapshot(m, root, stacks=["nav"])
+    assert digest
+    snap = _snap(data, rid, digest)
+    assert (snap / "machine.local.yaml").read_bytes() == machine.read_bytes()
+    assert not (snap / "vehicle.local.yaml").exists()           # that name is the tree's own file
+
+
+def test_snapshot_of_an_unprovisioned_machine_holds_no_machine_file():
+    _mark_idle()
+    root, data, machine = _field_world(provisioned=False)
+    with _identity(machine, RIG_VEHICLE_ID="3", RIG_VEHICLE_NAME="uav-03", RIG_VAR_altitude_band="3"):
+        m = dataclasses.replace(_loaded(root), data_dir=str(data))
+        rid = runs.ensure(m, root)
+        digest = runs.snapshot(m, root, stacks=["nav"])
+    assert digest
+    assert not (_snap(data, rid, digest) / "machine.local.yaml").exists()
+
+
+def test_seal_clean_on_a_provisioned_machine_with_no_edits():
+    _mark_idle()
+    root, data, machine = _field_world()
+    with _identity(machine):
+        m = _loaded(root)
+        rid = runs.ensure(m, root)
+        assert runs.snapshot(m, root, stacks=["nav"])
+        assert runs.end_run(_loaded(root), root) == rid         # the seal loads the tree afresh
+    doc = _run_doc(data, rid)
+    assert "ended" in doc and "config_dirty_at_seal" not in doc
+
+
+def _run_0_2_84() -> tuple[pathlib.Path, pathlib.Path, pathlib.Path, str, dict]:
+    """(root, data, machine file, run id, run manifest) — a private copy of the run rig v0.2.84
+    wrote (tests/fixtures/run-v0.2.84), open again in the deployment that opened it."""
+    base = pathlib.Path(tempfile.mkdtemp()) / "fx"
+    shutil.copytree(_RUN_0_2_84, base)
+    root, data = base / "tree", base / "data"
+    rid = next((data / "runs").iterdir()).name
+    doc = _run_doc(data, rid)
+    (root / "var").mkdir()
+    (root / "var" / "deployment-id").write_text(doc["deployment"] + "\n")
+    (data / "current").symlink_to(pathlib.Path("runs") / rid)
+    return root, data, base / "machine.yaml", rid, doc
+
+
+def _files(directory: pathlib.Path) -> dict[str, bytes]:
+    return {p.relative_to(directory).as_posix(): p.read_bytes()
+            for p in sorted(directory.rglob("*")) if p.is_file()}
+
+
+def test_run_snapshotted_by_v0_2_84_seals_clean_and_is_left_as_written():
+    _mark_idle()
+    root, data, machine, rid, doc = _run_0_2_84()
+    assert doc["rig_version"] == "0.2.84"
+    snap = _snap(data, rid, doc["config"])
+    before = _files(snap)
+    assert sorted(before) == ["rendered/nav.yaml", "vars.yaml", "vehicle.yaml"]
+    with _identity(machine):
+        m = dataclasses.replace(_loaded(root), data_dir=str(data))
+        assert runs.end_run(m, root) == rid
+    sealed = _run_doc(data, rid)
+    assert "ended" in sealed
+    assert "config_dirty_at_seal" not in sealed                 # a newer rig is not an edit
+    assert _files(snap) == before                               # nothing added after the fact
+    from rig_cli.reconstruct import _snapshot_digest_ok
+    assert _snapshot_digest_ok(snap)
+
+
 def _ps(names: list[str]) -> None:
     """Point the shim's `docker ps` at these container names (and reset `docker logs` to succeed)."""
     if names:

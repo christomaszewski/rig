@@ -402,6 +402,146 @@ def test_fleet_roster_to_peer_endpoints_with_zero_duplication():
         assert cfg["connect"] == ["tcp/10.0.0.9:7447"]  # no fleet vars in vehicle.yaml at ALL
 
 
+# --- which tier supplied a value, and per-vehicle values in the roster --------------------------
+
+_SWARM = """\
+fleet: swarm
+vars: {altitude_band: 10}
+vehicles:
+  - {id: 3, name: uav-03, path: /x, vars: {altitude_band: 30}}
+  - {id: 7, name: uav-07, path: /y, vars: {altitude_band: 40}}
+  - {id: 9, name: spare-1, path: /z}
+"""
+
+
+def _machine(body: str) -> pathlib.Path:
+    path = pathlib.Path(tempfile.mkdtemp()) / "vehicle.local.yaml"
+    path.write_text(body)
+    return path
+
+
+def test_var_sources_names_the_tier_that_supplied_each_value():
+    machine = pathlib.Path(tempfile.mkdtemp()) / "vehicle.local.yaml"
+    root = _deployment("vehicle: t\nvehicle_id: 1\nvars: {band: 1, only_here: base}\nsensors: []\n")
+    with _env(RIG_VEHICLE_LOCAL=str(machine), RIG_VEHICLE_ID=None, RIG_VAR_band=None):
+        m = load_manifest(root)
+        assert (m.vars["band"], m.var_sources["band"]) == (1, "vehicle.yaml")
+        assert m.var_sources["vehicle_id"] == "vehicle.yaml"
+        assert m.var_sources["ros_domain_id"] == "derived"
+        (root / "fleet.yaml").write_text(
+            "fleet: t\nvehicles: [{id: 1, name: a, path: /x}, {id: 2, name: b, path: /y}]\n"
+            "vars: {band: 2}\n")
+        m = load_manifest(root)
+        assert (m.vars["band"], m.var_sources["band"]) == (2, "fleet.yaml")
+        assert m.var_sources["fleet_ids"] == "fleet.yaml"          # read off the roster
+        assert m.var_sources["fleet_peer_ids"] == "derived"
+        assert m.var_sources["only_here"] == "vehicle.yaml"        # a lower tier's value survives
+        machine.write_text("vehicle_id: 3\nvars: {band: 3}\n")
+        m = load_manifest(root)
+        assert (m.vars["band"], m.var_sources["band"]) == (3, str(machine))
+        assert m.var_sources["vehicle_id"] == str(machine)
+        (root / "vehicle.local.yaml").write_text("vars: {band: 4}\n")
+        m = load_manifest(root)
+        assert (m.vars["band"], m.var_sources["band"]) == (4, "vehicle.local.yaml")
+        assert m.var_sources["vehicle_id"] == str(machine)         # per key, not per file
+    with _env(RIG_VEHICLE_LOCAL=str(machine), RIG_VEHICLE_ID="9", RIG_VAR_band="5"):
+        m = load_manifest(root)
+        assert (m.vars["band"], m.var_sources["band"]) == ("5", "shell")
+        assert m.var_sources["vehicle_id"] == "shell"
+        assert set(m.var_sources) == set(m.vars)                   # nothing resolved goes unnamed
+
+
+def test_row_value_beats_fleet_level_and_the_machine_file_beats_the_row():
+    root = _deployment('vehicle: t\nvehicle_id: "{{vehicle_id}}"\nsensors: []\n')
+    (root / "fleet.yaml").write_text(_SWARM)
+    for vid, band, source in ((3, 30, "fleet.yaml row uav-03"), (7, 40, "fleet.yaml row uav-07"),
+                              (9, 10, "fleet.yaml")):   # a row without one: the fleet-level value
+        with _env(RIG_VEHICLE_LOCAL=_NO_MACHINE, RIG_VEHICLE_ID=vid, RIG_VAR_altitude_band=None):
+            m = load_manifest(root)                     # the shell id is "3", the roster's is 3
+            assert (m.vars["altitude_band"], m.var_sources["altitude_band"]) == (band, source), vid
+    with _env(RIG_VEHICLE_LOCAL=_NO_MACHINE, RIG_VEHICLE_ID=None, RIG_VAR_altitude_band=None):
+        m = load_manifest(root)                         # no id yet: no row is this vehicle's
+        assert m.missing_identity == ("vehicle_id",)
+        assert (m.vars["altitude_band"], m.var_sources["altitude_band"]) == (10, "fleet.yaml")
+    machine = _machine("vehicle_id: 3\nvars: {altitude_band: 50}\n")
+    with _env(RIG_VEHICLE_LOCAL=str(machine), RIG_VEHICLE_ID=None, RIG_VAR_altitude_band=None):
+        m = load_manifest(root)
+        assert (m.vars["altitude_band"], m.var_sources["altitude_band"]) == (50, str(machine))
+        from rig_cli import doctor
+        errors = [i.message for i in doctor.collect(m, {}, {}) if i.level == doctor.ERROR]
+        assert any("altitude_band" in e for e in errors), errors   # the roster's 30 is not lost quietly
+
+
+def test_vehicle_refuses_a_roster_that_holds_its_id_twice():
+    root = _deployment("vehicle: t\nvehicle_id: 3\nsensors: []\n")
+    (root / "fleet.yaml").write_text(
+        "fleet: swarm\nvehicles:\n"
+        "  - {id: 3, name: uav-03, path: /x, vars: {altitude_band: 30}}\n"
+        "  - {id: '3', name: spare-1, path: /y, vars: {altitude_band: 40}}\n")
+    with _env(RIG_VEHICLE_LOCAL=_NO_MACHINE, RIG_VEHICLE_ID=None):
+        try:
+            load_manifest(root)
+            raise AssertionError("expected RigError")
+        except RigError as exc:
+            assert "uav-03" in str(exc) and "spare-1" in str(exc), exc
+
+
+def test_row_without_a_referenced_value_fails_at_render():
+    root = _deployment(
+        """
+        vehicle: t
+        vehicle_id: "{{vehicle_id}}"
+        sensors:
+          - {name: nav, service: navsvc, config: config/sensors/nav.yaml}
+        """,
+        files={"config/sensors/nav.yaml": 'service: navsvc\nname: nav\nband: "{{altitude_band}}"\n'})
+    (root / "fleet.yaml").write_text(_SWARM.replace("vars: {altitude_band: 10}\n", ""))
+    with _env(RIG_VEHICLE_LOCAL=_NO_MACHINE, RIG_VEHICLE_ID="3", RIG_VAR_altitude_band=None):
+        m = materialize_manifest(load_manifest(root), root)
+        assert yaml.safe_load(pathlib.Path(m.sensors[0].config).read_text())["band"] == 30
+    with _env(RIG_VEHICLE_LOCAL=_NO_MACHINE, RIG_VEHICLE_ID="9", RIG_VAR_altitude_band=None):
+        try:                                            # the spare: no band of its own, and it
+            materialize_manifest(load_manifest(root), root)   # must not borrow a neighbour's
+            raise AssertionError("expected RigError")
+        except RigError as exc:
+            assert "unknown var" in str(exc) and "altitude_band" in str(exc)
+
+
+def test_stale_higher_tier_value_blocks_up_and_a_shell_override_is_only_reported():
+    import io
+    from rig_cli.cli import main
+    root = _deployment("vehicle: t\nvehicle_id: 3\nsensors: []\n",
+                       files={"services.yaml": "services: {}\n"})
+    (root / "fleet.yaml").write_text(_SWARM)
+
+    def up(*extra) -> tuple[int, str]:
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+            rc = main(["--root", str(root), "up", "--dry-run", *extra])
+        return rc, err.getvalue()
+
+    machine = _machine("vars: {altitude_band: 50}\n")   # an old `rig provision --var`
+    with _env(RIG_VEHICLE_LOCAL=str(machine), RIG_VEHICLE_ID=None, RIG_VAR_altitude_band=None):
+        rc, err = up()
+        assert rc == 1 and "preflight failed" in err, err
+        assert "altitude_band" in err and "50" in err and "30" in err       # both values…
+        assert str(machine) in err and "fleet.yaml row uav-03" in err       # …and both tiers
+        rc, err = up("--force")
+        assert rc == 0, err
+        machine.write_text("vars: {altitude_band: 30}\n")                   # the same value twice
+        rc, err = up()
+        assert rc == 0 and "preflight" not in err, err
+    (root / "vehicle.local.yaml").write_text("vars: {altitude_band: 50}\n")
+    with _env(RIG_VEHICLE_LOCAL=_NO_MACHINE, RIG_VEHICLE_ID=None, RIG_VAR_altitude_band=None):
+        rc, err = up()
+        assert rc == 1 and "vehicle.local.yaml" in err and "altitude_band" in err, err
+    (root / "vehicle.local.yaml").unlink()
+    with _env(RIG_VEHICLE_LOCAL=_NO_MACHINE, RIG_VEHICLE_ID=None, RIG_VAR_altitude_band="50"):
+        rc, err = up()                                  # one invocation, on purpose: say so, go on
+        assert rc == 0, err
+        assert "altitude_band" in err and "shell" in err, err
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

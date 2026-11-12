@@ -1,0 +1,4 @@
+service: navsvc
+name: nav
+band: "{{altitude_band}}"
+rate_hz: "{{mosaic_rate_hz}}"

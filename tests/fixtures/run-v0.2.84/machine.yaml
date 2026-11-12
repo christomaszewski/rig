@@ -1,0 +1,6 @@
+# Machine vehicle identity — written by `rig provision`; read by every rig/artifact
+# on this machine (precedence: shell > deployment-local > THIS file > vehicle.yaml).
+vehicle_id: 3
+vehicle: uav-03
+vars:
+  altitude_band: 3

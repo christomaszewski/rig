@@ -46,7 +46,10 @@ def _env(**over):
 def _run(*argv) -> tuple[int, str, str]:
     out, err = io.StringIO(), io.StringIO()
     with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-        rc = main(list(argv))
+        try:
+            rc = main(list(argv))
+        except SystemExit as exc:  # argparse
+            rc = int(exc.code or 0)
     return rc, out.getvalue(), err.getvalue()
 
 
@@ -277,6 +280,256 @@ def test_provision_show_checks_deployment():
         _run("provision", "--id", "4", "--name", "skiff")
         rc, _, err = _run("--root", str(root), "provision")
         assert rc == 0 and "all vars satisfied" in err and "vehicle_id=4" in err
+
+# --- provisioning records: export from one vehicle, apply to another -----------------------------
+
+_DONOR = {
+    "vehicle": "uav-03", "vehicle_id": 3, "platform": "jp7", "arch": "arm64",
+    "data_dir": "/home/uxv/logs", "images": {"registry": "depot.lan:5000"},
+    "ros": {"domain_id": 42}, "run_capture": False,
+    "replay": {"services": {"camsvc": {"start": False}}},
+    "vars": {"altitude_band": 3, "camera_ip": "10.160.3.25"},
+    "env": {"SIYI_IP": "10.160.3.25"},
+}
+_SPARE = {
+    "vehicle": "spare-1", "vehicle_id": 9, "platform": "jp8", "arch": "amd64",
+    "data_dir": "/data/spare", "images": {"registry": "bench.lan:5000"},
+    "ros": {"domain_id": 9},
+    "vars": {"camera_ip": "10.160.9.25", "gimbal_trim": 12},
+    "env": {"KEEP": "x"},
+}
+
+
+def _machine_file(data=None) -> pathlib.Path:
+    path = pathlib.Path(tempfile.mkdtemp()) / "vehicle.local.yaml"
+    if data is not None:
+        path.write_text(yaml.safe_dump(data, sort_keys=False))
+    return path
+
+
+def _export(data: dict) -> tuple[pathlib.Path, dict]:
+    """Export a machine file holding `data`; (record path, parsed record)."""
+    record = pathlib.Path(tempfile.mkdtemp()) / "record.yaml"
+    with _env(RIG_VEHICLE_LOCAL=str(_machine_file(data))):
+        rc, _, err = _run("provision", "--export", str(record))
+    assert rc == 0, err
+    return record, yaml.safe_load(record.read_text())
+
+
+def test_export_then_apply_with_identity_rebuilds_the_machine_file():
+    import datetime
+    from rig_cli import __version__
+    donor = _machine_file(_DONOR)
+    with _env(RIG_VEHICLE_LOCAL=str(donor)):
+        rc, out, err = _run("provision", "--export")                    # standard output by default
+        assert rc == 0, err
+        record = yaml.safe_load(out)
+        assert record["rig_provision"] == 1 and record["rig"] == __version__
+        datetime.datetime.strptime(record["exported"], "%Y-%m-%dT%H:%M:%SZ")
+        assert record["source"] == {"vehicle": "uav-03", "vehicle_id": 3, "file": str(donor)}
+        assert record["values"] == {"vars": _DONOR["vars"], "env": _DONOR["env"]}
+        assert record["machine"] == {k: v for k, v in _DONOR.items() if k not in ("vars", "env")}
+        assert yaml.safe_load(donor.read_text()) == _DONOR              # export only reads
+        path = pathlib.Path(tempfile.mkdtemp()) / "uav-03.yaml"
+        rc, _, err = _run("provision", "--export", str(path))           # or into a file
+        assert rc == 0, err
+        written = yaml.safe_load(path.read_text())
+        assert {k: written[k] for k in ("rig_provision", "source", "values", "machine")} == \
+            {k: record[k] for k in ("rig_provision", "source", "values", "machine")}
+    with _env(RIG_VEHICLE_LOCAL=str(_machine_file())):                  # nothing to export
+        rc, _, err = _run("provision", "--export")
+        assert rc == 1 and "NOT PROVISIONED" in err
+    fresh = _machine_file()
+    with _env(RIG_VEHICLE_LOCAL=str(fresh)):
+        rc, _, err = _run("provision", "--apply", str(path), "--with-identity")
+        assert rc == 0, err
+    assert yaml.safe_load(fresh.read_text()) == _DONOR                  # nothing was dropped
+
+
+def test_apply_by_default_moves_values_and_leaves_the_machine_alone():
+    record, _ = _export(_DONOR)
+    spare = _machine_file(_SPARE)
+    with _env(RIG_VEHICLE_LOCAL=str(spare)):
+        rc, _, err = _run("provision", "--apply", str(record))
+    assert rc == 0, err
+    got = yaml.safe_load(spare.read_text())
+    assert got["vars"] == {"camera_ip": "10.160.3.25", "gimbal_trim": 12,
+                           "altitude_band": 3}                          # merged, as --var merges
+    assert got["env"] == {"KEEP": "x", "SIYI_IP": "10.160.3.25"}
+    for key in ("vehicle", "vehicle_id", "platform", "arch", "data_dir", "images", "ros"):
+        assert got[key] == _SPARE[key], key
+    assert "run_capture" not in got and "replay" not in got             # the donor's own
+
+
+def test_apply_only_and_except_select_by_name():
+    record, _ = _export(_DONOR)
+    spare = _machine_file(_SPARE)
+    with _env(RIG_VEHICLE_LOCAL=str(spare)):
+        rc, _, err = _run("provision", "--apply", str(record), "--only", "altitude_band")
+        assert rc == 0, err
+        got = yaml.safe_load(spare.read_text())
+        assert got["vars"] == {"camera_ip": "10.160.9.25", "gimbal_trim": 12, "altitude_band": 3}
+        assert got["env"] == _SPARE["env"]                              # not named, not applied
+    spare = _machine_file(_SPARE)
+    with _env(RIG_VEHICLE_LOCAL=str(spare)):
+        rc, _, err = _run("provision", "--apply", str(record), "--except", "camera_ip")
+        assert rc == 0, err
+        got = yaml.safe_load(spare.read_text())
+        assert got["vars"] == {"camera_ip": "10.160.9.25", "gimbal_trim": 12, "altitude_band": 3}
+        assert got["env"] == {"KEEP": "x", "SIYI_IP": "10.160.3.25"}
+        before = spare.read_bytes()
+        for flag in ("--only", "--except"):                             # a typo applies nothing
+            rc, _, err = _run("provision", "--apply", str(record), flag,
+                              "altitude_band,altitude_bnad")
+            assert rc == 1 and "altitude_bnad" in err, err
+            assert spare.read_bytes() == before
+
+
+def test_apply_dry_run_prints_every_change_and_writes_nothing():
+    donor = dict(_DONOR, vars={**_DONOR["vars"], "gimbal_trim": 12})    # one value both hold
+    record, _ = _export(donor)
+    spare = _machine_file(_SPARE)
+    before = spare.read_bytes()
+
+    def line(text: str, key: str) -> str:
+        return next((ln for ln in text.splitlines() if key in ln), "")
+
+    with _env(RIG_VEHICLE_LOCAL=str(spare)):
+        rc, out, err = _run("provision", "--apply", str(record), "--dry-run")
+        assert rc == 0, err
+        assert spare.read_bytes() == before
+        said = out + err
+        assert "10.160.9.25" in line(said, "camera_ip") and "10.160.3.25" in line(said, "camera_ip")
+        assert "3" in line(said, "altitude_band")                       # new here
+        assert "unchanged" in line(said, "gimbal_trim")
+        assert "10.160.3.25" in line(said, "SIYI_IP")
+        rc, out, err = _run("provision", "--apply", str(record))        # the real one says it too
+        assert rc == 0, err
+        assert "10.160.9.25" in line(out + err, "camera_ip")
+        assert spare.read_bytes() != before
+
+
+def _runs_under_two_provisionings() -> tuple[pathlib.Path, pathlib.Path, pathlib.Path]:
+    """(root, data, run dir): one run, two `up`s — the band was re-provisioned in between."""
+    from rig_cli import runs
+    root = _fleet_deployment()
+    data = pathlib.Path(tempfile.mkdtemp()) / "data"
+    machine = _machine_file()
+    with _env(RIG_VEHICLE_LOCAL=str(machine)):
+        for band in (3, 4):
+            machine.write_text(yaml.safe_dump(
+                {"vehicle": "uav-03", "vehicle_id": 3, "data_dir": str(data), "run_capture": False,
+                 "vars": {"altitude_band": band}}, sort_keys=False))
+            m = materialize_manifest(load_manifest(root), root)
+            rid = runs.ensure(m, root)
+            assert runs.snapshot(m, root, stacks=["cam"])
+    return root, data, data / "runs" / rid
+
+
+def test_apply_from_a_run_reads_the_machine_file_it_captured():
+    root, data, run_dir = _runs_under_two_provisionings()
+    spare = _machine_file({"vehicle": "spare-1", "vehicle_id": 9, "data_dir": str(data)})
+    with _env(RIG_VEHICLE_LOCAL=str(spare)):
+        rc, _, err = _run("provision", "--apply", str(run_dir))         # a run directory
+        assert rc == 0, err
+        got = yaml.safe_load(spare.read_text())
+        assert got["vars"] == {"altitude_band": 4}                      # the LAST up's file
+        assert (got["vehicle"], got["vehicle_id"]) == ("spare-1", 9)    # values only, as ever
+        spare.write_text(yaml.safe_dump({"vehicle": "spare-1", "vehicle_id": 9,
+                                         "data_dir": str(data)}, sort_keys=False))
+        rc, _, err = _run("--root", str(root), "provision", "--apply", run_dir.name)  # or its id
+        assert rc == 0, err
+        assert yaml.safe_load(spare.read_text())["vars"] == {"altitude_band": 4}
+        # a run made by an older rig captured no machine file; vars.yaml mixes every tier and
+        # is no substitute
+        old = next((pathlib.Path(__file__).resolve().parent / "fixtures" / "run-v0.2.84"
+                    / "data" / "runs").iterdir())
+        before = spare.read_bytes()
+        rc, _, err = _run("provision", "--apply", str(old))
+        assert rc == 1 and "machine file" in err and "0.2.84" in err, err
+        assert spare.read_bytes() == before
+
+
+def test_apply_with_identity_keeps_the_force_gate():
+    record, _ = _export(_DONOR)
+    spare = _machine_file(_SPARE)
+    before = spare.read_bytes()
+    with _env(RIG_VEHICLE_LOCAL=str(spare)):
+        rc, _, err = _run("provision", "--apply", str(record), "--with-identity")
+        assert rc == 1 and "ORPHANING" in err, err
+        assert spare.read_bytes() == before
+        rc, _, err = _run("provision", "--apply", str(record), "--with-identity", "--force")
+        assert rc == 0, err
+    got = yaml.safe_load(spare.read_text())
+    assert (got["vehicle"], got["vehicle_id"], got["platform"]) == ("uav-03", 3, "jp7")
+    assert got["data_dir"] == "/home/uxv/logs" and got["ros"] == {"domain_id": 42}
+
+
+def test_export_needs_no_root_and_apply_names_sudo_when_it_cannot_write():
+    if os.geteuid() == 0:
+        return  # root writes anywhere: there is no refusal to observe
+    record, _ = _export(dict(_DONOR, vars={"altitude_band": 8}))
+    machine = _machine_file(_DONOR)
+    before = machine.read_bytes()
+    machine.chmod(0o444)
+    machine.parent.chmod(0o555)
+    try:
+        with _env(RIG_VEHICLE_LOCAL=str(machine)):
+            rc, out, err = _run("provision", "--export")
+            assert rc == 0, err
+            assert yaml.safe_load(out)["source"]["vehicle"] == "uav-03"
+            rc, _, err = _run("provision", "--apply", str(record), "--dry-run")
+            assert rc == 0, err                                         # looking needs no root
+            rc, _, err = _run("provision", "--apply", str(record))
+            assert rc == 1 and "sudo" in err, err
+            assert machine.read_bytes() == before
+    finally:
+        machine.parent.chmod(0o755)
+        machine.chmod(0o644)
+
+
+def test_apply_refuses_a_record_it_cannot_validate():
+    import copy
+    _, good = _export(_DONOR)
+    spare = _machine_file(_SPARE)
+    before = spare.read_bytes()
+
+    def newer(r): r["rig_provision"] = 2
+
+    def stray_key(r): r["machine"]["sensors"] = []
+
+    def bad_name(r): r["values"]["vars"]["Altitude-Band"] = 3
+
+    def relative_dir(r): r["machine"]["data_dir"] = "logs"
+
+    with _env(RIG_VEHICLE_LOCAL=str(spare)):
+        for edit, said in ((newer, "rig_provision"), (stray_key, "sensors"),
+                           (bad_name, "Altitude-Band"), (relative_dir, "absolute")):
+            record = copy.deepcopy(good)
+            edit(record)
+            path = pathlib.Path(tempfile.mkdtemp()) / "record.yaml"
+            path.write_text(yaml.safe_dump(record, sort_keys=False))
+            rc, _, err = _run("provision", "--apply", str(path), "--with-identity", "--force")
+            assert rc == 1 and said in err.replace("ABSOLUTE", "absolute"), (said, err)
+            assert spare.read_bytes() == before
+
+
+def test_provision_show_and_doctor_name_where_each_value_comes_from():
+    root = _fleet_deployment()
+    machine = _machine_file({"vehicle": "skiff", "vehicle_id": 4})
+
+    def names(text: str, key: str, source: str) -> bool:
+        return any(key in ln and source in ln for ln in text.splitlines())
+
+    with _env(RIG_VEHICLE_LOCAL=str(machine)):
+        rc, _, err = _run("--root", str(root), "provision")
+        assert rc == 0 and "all vars satisfied" in err, err
+        assert names(err, "rtsp_port", "vehicle.yaml"), err
+        assert names(err, "vehicle_id", str(machine)), err
+        rc, _, err = _run("--root", str(root), "doctor")
+        assert names(err, "rtsp_port", "vehicle.yaml"), err
+        assert names(err, "vehicle_id", str(machine)), err
+
 
 # --- v0.2.51: fleet-ness is decided by VALUES, not text (finding 8) ------------------------------
 

@@ -474,6 +474,184 @@ def test_fleet_vars_flow_and_reboot_persistence():
     assert rendered["connect"] == ["tcp/10.0.0.9:7447"]          # the PUSHED fleet.yaml persisted
 
 
+# --- per-vehicle values in the roster ------------------------------------------------------------
+
+def _band_tree(name: str) -> pathlib.Path:
+    """_sil_tree, but its one config needs a value no two vehicles may share."""
+    root = _sil_tree(name)
+    (root / "config" / "infra" / "sim.yaml").write_text(
+        'service: simsvc\nname: sim\nrate: 1\nband: "{{altitude_band}}"\n')
+    return root
+
+
+def _swarm(rows: list[dict], *, data_root=None, unique=("altitude_band",), mode="sil") -> pathlib.Path:
+    fy = _fleet_yaml(rows, data_root=data_root, mode=mode)
+    doc = yaml.safe_load(fy.read_text())
+    if unique:
+        doc["unique"] = list(unique)
+    fy.write_text(yaml.safe_dump(doc, sort_keys=False))
+    return fy
+
+
+def _last_snapshot(data_root: pathlib.Path, name: str) -> pathlib.Path:
+    run_dir = sorted((data_root / name / "runs").iterdir())[-1]
+    doc = yaml.safe_load((run_dir / "manifest.yaml").read_text())
+    return run_dir / ".rig" / "config" / doc["config"]
+
+
+def test_fleet_up_renders_each_rows_own_value_and_records_its_source():
+    trees = {name: _band_tree(name) for name in ("uav-03", "uav-07")}
+    data_root = pathlib.Path(tempfile.mkdtemp()) / "sil-data"
+    fy = _swarm([{"id": 3, "name": "uav-03", "path": str(trees["uav-03"]),
+                  "vars": {"altitude_band": 3}},
+                 {"id": 7, "name": "uav-07", "path": str(trees["uav-07"]),
+                  "vars": {"altitude_band": 4}}], data_root=data_root)
+    rc, _, err = _run("fleet", "up", "--fleet", str(fy), "--run", "bands", "-j", "1")
+    assert rc == 0, err
+    for name, band in (("uav-03", 3), ("uav-07", 4)):               # one tree layout, two bands
+        snap = _last_snapshot(data_root, name)
+        assert yaml.safe_load((snap / "rendered" / "sim.yaml").read_text())["band"] == band
+        vars_doc = yaml.safe_load((snap / "vars.yaml").read_text())
+        assert vars_doc["vars"]["altitude_band"] == band
+        assert vars_doc["sources"]["altitude_band"] == f"fleet.yaml row {name}"
+        assert (snap / "fleet.yaml").read_bytes() == fy.read_bytes()    # the roster it ran under
+
+
+def test_reboot_style_up_still_renders_the_row_value():
+    import subprocess
+    tree = _band_tree("uav-03")
+    data_root = pathlib.Path(tempfile.mkdtemp()) / "sil-data"
+    fy = _swarm([{"id": 3, "name": "uav-03", "path": str(tree), "vars": {"altitude_band": 3}},
+                 {"id": 7, "name": "uav-07", "path": "/nope/nowhere", "vars": {"altitude_band": 4}}],
+                data_root=data_root)
+    rc, _, err = _run("fleet", "up", "uav-03", "--fleet", str(fy), "--run", "boot", "-j", "1")
+    assert rc == 0, err
+    fy.unlink()                                                     # no ground station any more
+    env = {**os.environ, "RIG_VEHICLE_LOCAL": str(data_root / ".identity" / "uav-03.yaml")}
+    env = {k: v for k, v in env.items() if not k.startswith("RIG_VAR_")}
+    proc = subprocess.run(["rig", "--root", str(tree), "up"], capture_output=True, text=True, env=env)
+    assert proc.returncode == 0, proc.stderr
+    snap = _last_snapshot(data_root, "uav-03")
+    assert yaml.safe_load((snap / "rendered" / "sim.yaml").read_text())["band"] == 3
+    sources = yaml.safe_load((snap / "vars.yaml").read_text())["sources"]
+    assert sources["altitude_band"] == "fleet.yaml row uav-03"      # the pushed roster persisted
+
+
+def test_roster_refuses_a_shared_unique_value_and_a_shared_id():
+    from rig_cli import RigError
+    from rig_cli.fleet import load_fleet
+
+    def rows(band_07=30, id_07=7):
+        return [{"id": 3, "name": "uav-03", "path": "/x", "vars": {"altitude_band": 30}},
+                {"id": id_07, "name": "uav-07", "path": "/y", "vars": {"altitude_band": band_07}},
+                {"id": 9, "name": "spare-1", "path": "/z"}]
+
+    def refusal(doc: dict) -> str:
+        p = pathlib.Path(tempfile.mkdtemp()) / "fleet.yaml"
+        p.write_text(yaml.safe_dump(doc))
+        try:
+            load_fleet(str(p))
+        except RigError as exc:
+            return str(exc)
+        return ""
+
+    said = refusal({"fleet": "swarm", "unique": ["altitude_band"], "vehicles": rows()})
+    assert all(part in said for part in ("altitude_band", "30", "uav-03", "uav-07")), said
+    assert "spare-1" not in said                                    # no value is not a duplicate
+    assert refusal({"fleet": "swarm", "vehicles": rows()}) == ""    # not listed: rig has no opinion
+    assert refusal({"fleet": "swarm", "unique": ["altitude_band"],
+                    "vehicles": rows(band_07=40)}) == ""
+    said = refusal({"fleet": "swarm", "vehicles": rows(band_07=40, id_07="3")})
+    assert "id" in said and "uav-03" in said and "uav-07" in said, said     # 3 and "3": one id
+    said = refusal({"fleet": "swarm", "unique": ["altitude_bnad"], "vehicles": rows(band_07=40)})
+    assert "altitude_bnad" in said, said                            # a name no row sets: a typo
+
+
+def test_unique_check_covers_rows_fleet_up_did_not_select():
+    tree = _band_tree("uav-03")
+    data_root = pathlib.Path(tempfile.mkdtemp()) / "sil-data"
+    fy = _swarm([{"id": 3, "name": "uav-03", "path": str(tree), "vars": {"altitude_band": 3}},
+                 {"id": 7, "name": "uav-07", "path": "/nope/a", "vars": {"altitude_band": 4}},
+                 {"id": 9, "name": "spare-1", "path": "/nope/b", "vars": {"altitude_band": 4}}],
+                data_root=data_root)
+    rc, _, err = _run("fleet", "up", "uav-03", "--fleet", str(fy), "--run", "subset", "-j", "1")
+    assert rc == 1, err
+    assert "altitude_band" in err and "uav-07" in err and "spare-1" in err, err
+    assert not (tree / "fleet.yaml").exists()                       # nothing pushed…
+    assert not (data_root / "uav-03").exists()                      # …and nothing started
+
+
+def test_fleet_up_leaves_a_row_without_the_value_down_and_names_the_variable():
+    trees = {name: _band_tree(name) for name in ("uav-03", "spare-1")}
+    data_root = pathlib.Path(tempfile.mkdtemp()) / "sil-data"
+    fy = _swarm([{"id": 3, "name": "uav-03", "path": str(trees["uav-03"]),
+                  "vars": {"altitude_band": 3}},
+                 {"id": 9, "name": "spare-1", "path": str(trees["spare-1"])}], data_root=data_root)
+    rc, _, err = _run("fleet", "up", "--fleet", str(fy), "--run", "gap", "-j", "1")
+    assert rc == 1 and "fleet up: 1/2 ok" in err, err
+    assert "altitude_band" in err                                   # the spare says what it lacks
+    assert not (data_root / "spare-1" / "runs").exists()            # no default band, no run
+    snap = _last_snapshot(data_root, "uav-03")
+    assert yaml.safe_load((snap / "rendered" / "sim.yaml").read_text())["band"] == 3
+
+
+def test_row_vars_are_validated_and_plain_rosters_load_as_before():
+    from rig_cli import RigError
+    from rig_cli.fleet import Vehicle, load_fleet
+    from rig_cli.manifest import load_manifest
+    base = {"id": 1, "name": "a", "path": "/x"}
+    for doc, msg in (
+        ({"fleet": "f", "vehicles": [dict(base, extra=1)]}, "unknown key"),
+        ({"fleet": "f", "vehicles": [dict(base, vars=[1, 2])]}, "must be a mapping"),
+        ({"fleet": "f", "vehicles": [dict(base, vars={"Altitude-Band": 3})]}, "Altitude-Band"),
+        ({"fleet": "f", "unique": "altitude_band",
+          "vehicles": [dict(base, vars={"altitude_band": 3})]}, "unique"),
+    ):
+        p = pathlib.Path(tempfile.mkdtemp()) / "fleet.yaml"
+        p.write_text(yaml.safe_dump(doc))
+        try:
+            load_fleet(str(p))
+            raise AssertionError(f"expected RigError for {doc}")
+        except RigError as exc:
+            assert msg in str(exc), f"{doc}: {exc}"
+    # a roster from before rows had values: the same Fleet here, the same vars on the vehicle
+    root = pathlib.Path(tempfile.mkdtemp())
+    (root / "vehicle.yaml").write_text("vehicle: t\nvehicle_id: 3\nsensors: []\n")
+    (root / "fleet.yaml").write_text(yaml.safe_dump({
+        "fleet": "f", "mode": "field", "gcs_ip": "10.0.0.10",
+        "vars": {"peer_endpoint": "tcp/10.0.0.{}:7447"},
+        "vehicles": [{"id": 3, "name": "a", "host": "h3", "path": "~/ws", "data_dir": "/d",
+                      "ip": "10.0.0.3"},
+                     {"id": 9, "name": "b", "path": "/y"}]}))
+    fleet = load_fleet(str(root / "fleet.yaml"))
+    assert (fleet.name, fleet.mode, fleet.gcs_ip, fleet.data_root, fleet.network) == \
+        ("f", "field", "10.0.0.10", None, None)
+    assert fleet.vehicles == (
+        Vehicle(id=3, name="a", host="h3", path="~/ws", data_dir="/d", ip="10.0.0.3"),
+        Vehicle(id=9, name="b", host="", path="/y", data_dir=None, ip=None))
+    assert load_manifest(root).vars == {
+        "vehicle": "t", "vehicle_id": 3, "ros_domain_id": 3, "fleet_ids": [3, 9],
+        "fleet_peer_ids": [9], "gcs_ip": "10.0.0.10", "fleet_mode": "field",
+        "peer_endpoint": "tcp/10.0.0.{}:7447"}
+
+
+def test_fleet_list_shows_row_values():
+    tree = _band_tree("shared")
+    fy = _swarm([{"id": 3, "name": "uav-03", "path": str(tree), "vars": {"altitude_band": 3}},
+                 {"id": 7, "name": "uav-07", "path": str(tree), "vars": {"altitude_band": 4}},
+                 {"id": 9, "name": "spare-1", "path": str(tree)}], mode="field")
+    rc, out, err = _run("fleet", "list", "--fleet", str(fy))
+    assert rc == 0, err
+    lines = out.splitlines()
+
+    def row(name: str) -> str:
+        return next((ln for ln in lines if name in ln), "")
+
+    assert "VARS" in row("NAME")                                    # a column of its own
+    assert "altitude_band=3" in row("uav-03") and "altitude_band=4" in row("uav-07")
+    assert "altitude_band" not in row("spare-1")                    # the gap shows as a gap
+
+
 @contextlib.contextmanager
 def _no_rsync():
     """The scp fallback branch: a laptop without rsync."""

@@ -1,0 +1,6 @@
+vehicle: "{{vehicle}}"
+vehicle_id: "{{vehicle_id}}"
+run_capture: false
+vars: {mosaic_rate_hz: 2}
+sensors:
+  - {name: nav, service: navsvc, config: config/sensors/nav.yaml}

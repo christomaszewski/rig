@@ -1,0 +1,7 @@
+env: {}
+vars:
+  altitude_band: 3
+  mosaic_rate_hz: 2
+  ros_domain_id: 3
+  vehicle: uav-03
+  vehicle_id: 3

@@ -1,0 +1,16 @@
+run: 20261112T170944Z_auto
+vehicle: uav-03
+vehicle_id: 3
+rig_version: 0.2.84
+started: '2026-11-12T17:09:44+00:00'
+stacks:
+- nav
+deployment: 69cf2f98885c
+config: 3ae4113e0921
+ups:
+- at: '2026-11-12T17:09:44+00:00'
+  stacks:
+  - nav
+  config: 3ae4113e0921
+  deployment: 69cf2f98885c
+  root: /home/uxv/ws/v1
