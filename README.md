@@ -1,12 +1,13 @@
 # rig — vehicle-level stack orchestrator (infra · sensors · autonomy)
 
-`rig` brings up and manages every stack on a robot/vehicle computer or replay host —
+`rig` brings up and manages every service on a robot/vehicle computer or replay host —
 shared **infra** (zenoh router, bag loggers, dashboard), **sensors** (cameras, GNSS/INS, lidar), and
-**autonomy** (planners, SLAM, perception) — driven by config. It is **"a loop + a manifest"**: it
-reads a vehicle manifest and *delegates* the bring-up of each stack to that service's own launcher
-(`<service>-up`), in tier order. It never reimplements per-stack logic. Stacks come from sibling
-checkouts or from **package registries** (pinned services, profiles, overlays, suites, and — since
-v0.2.17 — whole-vehicle plans), and a deployment bakes into a tagged artifact that runs on bare Docker.
+**autonomy** (planners, SLAM, perception) — driven by config. It reads a vehicle manifest, the list of
+services that make up this vehicle's stack, and *delegates* the bring-up of each service to that
+service's own launcher (`<service>-up`), in tier order. It never reimplements a service's own logic.
+Services come from sibling checkouts or from **package registries** (pinned services, profiles,
+overlays, suites, and — since v0.2.17 — whole-vehicle plans), and a deployment bakes into a tagged
+artifact that runs on bare Docker.
 
 The dependency is strictly one-way: `rig` depends on the service repos; **a service never knows about
 `rig`**. `rig` learns each service only through its `rigging.yaml` descriptor + the launcher CLI, so
@@ -15,11 +16,11 @@ services evolve independently and new ones drop in by adding two files (a launch
 
 ```
    registries (public / internal)                vehicle.yaml                 services.yaml
-   services · profiles · overlays ·            which stacks, in 3 tiers;     where each repo lives
+   services · profiles · overlays ·            which services, in 3 tiers;   where each repo lives
    suites · vehicle plans (pinned)             identity, platform, ROS env   (checkout or vendored)
                 │  rig pkg add / upgrade               │                            │
                 └──────────────────────────────────────► rig ◄──────────────────────┘
-                                                         │   per stack: <launcher> <config> <verb>
+                                                         │   per service: <launcher> <config> <verb>
                                                          │   + fleet env (ROS_DOMAIN_ID, RMW, VEHICLE_ID,
                                                          │     RIG_IMAGE_REGISTRY/TAG, RIG_TARGET_PLATFORM, RIG_DATA_DIR)
         ┌────────────────────────────────────────────────┼────────────────────────────────────────────────┐
@@ -39,11 +40,11 @@ workflows, current validation status, and the historical design notes.
 
 ## What rig owns vs. what the launcher owns
 
-- **Launcher (`<service>-up`)** owns everything per-stack: parse the config, derive the ROS namespace
-  (`/<name>`), render driver params, select/parameterize its static compose, wire devices/network, run
-  `docker compose`. It **honors** the rig-provided `COMPOSE_PROJECT_NAME` (never passes `-p`), falling
-  back to its own `<service>_<name>` only when run standalone.
-- **rig** owns the cross-cutting concerns: which stacks run (the manifest, in three tiers),
+- **Launcher (`<service>-up`)** owns everything about its own service: parse the config, derive the
+  ROS namespace (`/<name>`), render driver params, select/parameterize its static compose, wire
+  devices/network, run `docker compose`. It **honors** the rig-provided `COMPOSE_PROJECT_NAME`
+  (never passes `-p`), falling back to its own `<service>_<name>` only when run standalone.
+- **rig** owns the cross-cutting concerns: which services run (the manifest, in three tiers),
   **globally-unique instance names**, the compose project name (`<name>-vehicle-<vehicle_id>`),
   bring-up order (infra → sensors → autonomy; reversed on the way down, so the decider dies before
   its eyes), the fleet env (`ROS_DOMAIN_ID`/`RMW_IMPLEMENTATION`, `VEHICLE_ID`, `RIG_IMAGE_REGISTRY`/
@@ -365,7 +366,7 @@ rig certify --diff /tmp/mac.yaml /tmp/orin.yaml   # identical = `config` output 
 ## Layout
 
 ```
-vehicle.yaml            # which stacks THIS machine runs + fleet-wide ROS settings (+ vars:/env:
+vehicle.yaml            # which services THIS machine runs + fleet-wide ROS settings (+ vars:/env:
                         #   fleet defaults; {{var}} markers = supplied per vehicle)
 vehicle.local.yaml      # OPTIONAL, gitignored, never baked: THIS machine's identity/values for
                         #   bench trees; vehicles use /etc/rig/vehicle.local.yaml (rig provision)

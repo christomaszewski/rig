@@ -46,10 +46,11 @@ Depends: python3 (>= 3.9), python3-yaml
 Maintainer: Chris Tomaszewski <christomaszewski@gmail.com>
 Homepage: https://github.com/christomaszewski/rig
 Description: vehicle-level stack orchestrator (infra, sensors, autonomy)
- A loop + a manifest: rig reads vehicle.yaml and delegates bring-up/teardown
- of each sensor/infra/autonomy stack to that service's own launcher. Includes
- the package-registry layer (profiles, overlays, suites) and deployment
- artifacts (bake). Run 'rig setup' once per user to initialize ~/.rig.
+ rig reads vehicle.yaml, the list of services that make up a vehicle's stack,
+ and delegates bring-up/teardown of each service to that service's own
+ launcher. Includes the package-registry layer (profiles, overlays, suites)
+ and deployment artifacts (bake). Run 'rig setup' once per user to initialize
+ ~/.rig.
 CONTROL
 
 dpkg-deb --build --root-owner-group "$STAGE" "build/deb/rig_${VERSION}_all.deb" >/dev/null

@@ -1,8 +1,8 @@
 """rig — a vehicle-level stack orchestrator (infra · sensors · autonomy).
 
-`rig` is "a loop + a manifest": it reads a vehicle manifest (which sensors this machine runs) and
-*delegates* the bring-up/teardown of each to that service's own per-sensor launcher (``<service>-up``).
-It never reimplements per-stack logic — it owns only the cross-cutting concerns (instance-name
+`rig` reads a vehicle manifest (which services this machine runs) and *delegates* the
+bring-up/teardown of each to that service's own launcher (``<service>-up``). It never
+reimplements a service's own logic — it owns only the cross-cutting concerns (instance-name
 uniqueness, fleet-wide ROS env, ordering, status/health aggregation, lifecycle/cleanup).
 
 The dependency is strictly one-way: rig depends on the service repos; a service never knows about rig.
