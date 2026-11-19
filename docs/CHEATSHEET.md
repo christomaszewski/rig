@@ -95,7 +95,9 @@ rig setup --show                   # where everything is: ~/.rig, machine identi
                                    #   effective data_dir + which file set it, host registry, catalog
 rig setup --data-dir /Volumes/ssd/rig-data --migrate   # outgrew the disk: move the registry (hardlinks
                                    #   kept, verified, a symlink left at the old path); `provision
-                                   #   --data-dir NEW --migrate` for a machine-level registry
+                                   #   --data-dir NEW --migrate` for a machine-level registry. An old
+                                   #   path that is a mount point or a symlink is refused before any
+                                   #   copy: add --keep-old (copy + repoint; the old tree stays)
 rig registry sync                  # clone/ff-pull the caches; everything below is offline after this,
                                    #   except a service's first install at a new pin (fetched into the
                                    #   local git mirror, $RIG_HOME/cache/git)

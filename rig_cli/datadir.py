@@ -96,6 +96,20 @@ def migrate_registry(old: Path, new: Path, *, keep_old: bool = False) -> None:
         raise RigError(f"migrate: {new} already is the registry")
     if (old / "current").exists() or (old / "current").is_symlink():
         raise RigError(f"migrate: {old} has an OPEN run (`current`) — `rig down --end-run` first")
+    if not keep_old:
+        # The move ends by removing the old tree and leaving a symlink in its place. A mount point
+        # cannot be removed and a symlink cannot be rmtree'd, and both used to fail only AFTER the
+        # copy: the old registry emptied, no link left, and the data_dir setting still naming it.
+        if old.is_symlink():
+            raise RigError(f"migrate: {old} is a symlink (to {old.resolve()}) — rig cannot replace "
+                           f"it with the link a move leaves behind. Re-run with --keep-old: the "
+                           f"registry is copied and the setting repointed, and the old tree stays "
+                           f"for you to remove (or repoint the symlink yourself)")
+        if os.path.ismount(old):
+            raise RigError(f"migrate: {old} is a mount point — it cannot be removed and replaced "
+                           f"by a symlink. Re-run with --keep-old: the registry is copied and the "
+                           f"setting repointed, and the old filesystem keeps its copy until you "
+                           f"clear it")
     if new.exists() and not new.is_dir():
         raise RigError(f"migrate: {new} exists and is not a directory")
     if new.is_dir() and any(new.iterdir()):
@@ -120,10 +134,18 @@ def migrate_registry(old: Path, new: Path, *, keep_old: bool = False) -> None:
     if keep_old:
         eprint(f"rig migrate: copied; {old} kept as-is (--keep-old) — no symlink left behind")
     else:
-        shutil.rmtree(old)
-        old.symlink_to(new.resolve())
-        eprint(f"rig migrate: moved; {old} is now a symlink to {new} (links into the old path "
-               f"keep resolving)")
+        try:
+            shutil.rmtree(old)
+            old.symlink_to(new.resolve())
+            eprint(f"rig migrate: moved; {old} is now a symlink to {new} (links into the old path "
+                   f"keep resolving)")
+        except OSError as exc:
+            # The copy is complete and verified, so the registry IS at `new` from here on: the
+            # caller must still repoint the setting. Raising would leave it naming a tree that
+            # is partly gone.
+            eprint(f"rig migrate: warning: the copy at {new} is complete and verified, but {old} "
+                   f"could not be removed and replaced by a symlink ({exc}) — the registry is "
+                   f"now {new}; remove what is left of {old} by hand")
     try:  # the catalog follows (best-effort)
         from . import runcatalog
         rows = runcatalog._read_roots()

@@ -349,6 +349,72 @@ def test_migrate_never_merges_into_or_deletes_another_registry():
         assert (new2 / "runs" / "20260901T100000Z_a" / "bags" / "big.mcap").is_file()
 
 
+def test_migrate_refuses_a_mount_point_or_symlink_before_copying_anything():
+    """The move ends by removing the old tree and leaving a symlink there. On a mount point
+    (the usual /data of a vehicle) or a symlink that failed only after the copy: the old
+    registry emptied, no link, and the setting still naming it. Both are refused up front, and
+    --keep-old (copy, repoint, leave the old tree) still works."""
+    home, absent = _fresh()
+    with _env(RIG_HOME=home, RIG_VEHICLE_LOCAL=absent):
+        real = pathlib.Path(tempfile.mkdtemp()) / "disk" / "real"
+        _run_dir(real, "20260901T100000Z_a")
+        link = real.parent.parent / "data"
+        link.symlink_to(real)
+        new = pathlib.Path(tempfile.mkdtemp()) / "new"
+        try:
+            datadir.migrate_registry(link, new)
+            raise AssertionError("migrated a symlinked registry")
+        except RigError as exc:
+            assert "is a symlink" in str(exc) and "--keep-old" in str(exc), exc
+        assert not new.exists() and link.is_symlink()
+        assert (real / "runs" / "20260901T100000Z_a" / "bags" / "big.mcap").is_file()
+
+        mounted = pathlib.Path(tempfile.mkdtemp()) / "mnt"
+        _run_dir(mounted, "20260901T100000Z_a")
+        is_mount = datadir.os.path.ismount
+        datadir.os.path.ismount = lambda p: str(p) == str(mounted) or is_mount(p)
+        try:
+            try:
+                datadir.migrate_registry(mounted, new)
+                raise AssertionError("migrated a mount point")
+            except RigError as exc:
+                assert "mount point" in str(exc) and "--keep-old" in str(exc), exc
+            assert not new.exists()
+            assert (mounted / "runs" / "20260901T100000Z_a" / "bags" / "big.mcap").is_file()
+            with contextlib.redirect_stderr(io.StringIO()):
+                datadir.migrate_registry(mounted, new, keep_old=True)
+        finally:
+            datadir.os.path.ismount = is_mount
+        assert (new / "runs" / "20260901T100000Z_a" / "bags" / "big.mcap").is_file()
+        assert (mounted / "runs" / "20260901T100000Z_a" / "bags" / "big.mcap").is_file()
+
+
+def test_migrate_that_cannot_remove_the_old_tree_still_reports_the_move():
+    """After a verified copy the registry is at the new path. A failure to remove the old tree
+    is said, and the call returns, so the caller repoints the setting."""
+    home, absent = _fresh()
+    with _env(RIG_HOME=home, RIG_VEHICLE_LOCAL=absent):
+        old = pathlib.Path(tempfile.mkdtemp()) / "old"
+        new = pathlib.Path(tempfile.mkdtemp()) / "new"
+        _run_dir(old, "20260901T100000Z_a")
+        rmtree = datadir.shutil.rmtree
+
+        def refuse(path, *a, **k):
+            if str(path) == str(old):
+                raise PermissionError(13, "Permission denied", str(old))
+            return rmtree(path, *a, **k)
+
+        datadir.shutil.rmtree = refuse
+        err = io.StringIO()
+        try:
+            with contextlib.redirect_stderr(err):
+                datadir.migrate_registry(old, new)
+        finally:
+            datadir.shutil.rmtree = rmtree
+        assert "complete and verified" in err.getvalue() and "by hand" in err.getvalue(), err.getvalue()
+        assert (new / "runs" / "20260901T100000Z_a" / "bags" / "big.mcap").is_file()
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

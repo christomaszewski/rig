@@ -762,7 +762,10 @@ which SMB/NFS honor, and bags write at disk speed. Two moves, for two situations
 rig setup --data-dir /Volumes/ssd/rig-data --migrate   # a bigger LOCAL disk: the whole registry
                                                        #   moves (hardlinks kept, verified), a
                                                        #   symlink stays at the old path so
-                                                       #   workspace links keep resolving
+                                                       #   workspace links keep resolving. A
+                                                       #   mount point (a vehicle's /data) or a
+                                                       #   symlink cannot become that link:
+                                                       #   it is refused; use --keep-old
 rig run archive <id…> --to /Volumes/nas/runs           # a drive or NAS for OLD runs: the bytes
                                                        #   move to <to>/<vehicle>/<id>, a LINKED
                                                        #   entry stays — runs/replay/TAB still

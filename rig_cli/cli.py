@@ -1809,7 +1809,8 @@ def build_parser() -> argparse.ArgumentParser:
     pv.add_argument("--migrate", action="store_true",
                     help="with --data-dir: MOVE the machine's existing registry there first "
                          "(hardlinks kept, verified, a symlink left at the old path); refuses "
-                         "with an OPEN run")
+                         "with an OPEN run, and when the old path is a mount point or a symlink "
+                         "(use --keep-old there)")
     pv.add_argument("--keep-old", action="store_true", dest="keep_old",
                     help="with --migrate: copy, leave the old tree in place (no symlink)")
     pv.add_argument("--force", action="store_true",
@@ -1861,7 +1862,8 @@ def build_parser() -> argparse.ArgumentParser:
     st.add_argument("--migrate", action="store_true",
                     help="with --data-dir: MOVE the current registry (this user's, else the "
                          "machine's) there first — hardlinks kept, verified, a symlink left at "
-                         "the old path; refuses with an OPEN run")
+                         "the old path; refuses with an OPEN run, and when the old path is a "
+                         "mount point or a symlink (use --keep-old there)")
     st.add_argument("--keep-old", action="store_true", dest="keep_old",
                     help="with --migrate: copy, leave the old tree in place (no symlink)")
     st.add_argument("--skip-data-dir", action="store_true", dest="skip_data_dir",
