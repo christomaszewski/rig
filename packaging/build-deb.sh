@@ -13,7 +13,22 @@ command -v dpkg-deb >/dev/null 2>&1 || { echo "build-deb: dpkg-deb not found (ru
 VERSION=$(python3 -c "import rig_cli; print(rig_cli.__version__)")
 STAGE="build/deb/rig_${VERSION}_all"
 rm -rf "$STAGE"
-mkdir -p "$STAGE/DEBIAN" "$STAGE/usr/bin" "$STAGE/usr/lib/python3/dist-packages"
+mkdir -p "$STAGE/DEBIAN" "$STAGE/usr/bin" "$STAGE/usr/lib/python3/dist-packages" \
+         "$STAGE/usr/share/doc/rig"
+
+# Debian policy 12.5: the licence travels as /usr/share/doc/<package>/copyright. Apache-2.0 is in
+# base-files' common-licenses on every Debian/Ubuntu host, so the file points there.
+cat > "$STAGE/usr/share/doc/rig/copyright" <<'COPYRIGHT'
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: rig
+Source: https://github.com/christomaszewski/rig
+
+Files: *
+Copyright: 2026 Chris Tomaszewski
+License: Apache-2.0
+ On Debian systems, the full text of the Apache License 2.0 is in
+ /usr/share/common-licenses/Apache-2.0, and it ships with rig as LICENSE.
+COPYRIGHT
 
 cp -R rig_cli "$STAGE/usr/lib/python3/dist-packages/rig_cli"
 find "$STAGE" -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true

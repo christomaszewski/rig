@@ -606,3 +606,7 @@ excluding targets with a known selected client, after request-content inspection
 `playback.services: []` to disable recorded calls or a nonempty list to select targets manually.
 
 `cam-up`, `novatel-up`, and `sbg-up` all satisfy this. See `docs/DESIGN.md` for the full rationale.
+
+## License
+
+rig is licensed under the [Apache License 2.0](LICENSE).

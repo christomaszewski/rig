@@ -3,13 +3,15 @@
 # builds on — pipx/uv from git today, the arch=all deb and the Homebrew formula later (M7). The
 # ./rig shim stays alongside forever: dev checkouts and baked deployment artifacts run uninstalled.
 [build-system]
-requires = ["setuptools>=61"]
+requires = ["setuptools>=77"]  # SPDX `license` expression (PEP 639)
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "rig-cli"
 description = "vehicle-level stack orchestrator (infra, sensors, autonomy): reads a vehicle manifest and starts each service through its own launcher"
 readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 requires-python = ">=3.9"
 dependencies = ["pyyaml"]
 dynamic = ["version"]
