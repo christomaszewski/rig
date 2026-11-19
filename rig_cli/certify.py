@@ -309,6 +309,20 @@ def certify_target(desc: Descriptor, config_path: Path, base_env: dict[str, str]
             if junk:
                 compose = None
                 fail("discipline", f"non-compose top-level keys on stdout (human lines go to stderr): {junk}")
+        if compose is not None:
+            # Contract O2: every service names the image it runs. A vehicle pulls and never
+            # builds, and `rig bake` strips `build:` — a service with only a build context
+            # certified green and then baked into a stack that could not start.
+            imageless = sorted(str(name) for name, svc in compose["services"].items()
+                               if not (isinstance(svc, dict) and isinstance(svc.get("image"), str)
+                                       and svc["image"].strip()))
+            if imageless:
+                compose = None
+                fail("discipline", f"service(s) {', '.join(imageless)} name no `image:` — every "
+                                   f"compose service must name the image it runs (a vehicle pulls, "
+                                   f"it never builds, and `rig bake` drops `build:`). Add `image:` "
+                                   f"beside `build:`, e.g. ${{RIG_IMAGE_REGISTRY:+$RIG_IMAGE_REGISTRY/}}"
+                                   f"<image>:${{RIG_IMAGE_TAG:-latest}}")
         if compose is None:
             _cleanup(desc)
             return checks  # everything below reads the compose; one failure at a time

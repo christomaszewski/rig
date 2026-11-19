@@ -840,6 +840,23 @@ def test_compose_only_is_all_or_nothing():
         raise AssertionError("--bundle-images accepted a partial capture")
 
 
+def test_bake_refuses_a_compose_service_that_names_no_image():
+    """Bake strips `build:` (a vehicle pulls, it never builds). A service with only a build
+    context was then written with neither, and the bake exited 0 with an artifact whose stack
+    could not start. It is refused and the service named."""
+    from rig_cli import RigError
+
+    root, m, cat, descs = _deployment_fixture(
+        '#!/bin/sh\n[ "$2" = config ] || exit 0\n'
+        "printf 'services:\\n  core:\\n    image: reg.test/foo:t1\\n  app:\\n    build: .\\n'\n")
+    try:
+        _bake_quiet(root, m, cat, descs, {"PATH": os.environ["PATH"]}, "t")
+        raise AssertionError("baked a service with neither image nor build")
+    except RigError as exc:
+        assert "app" in str(exc) and "name no `image:`" in str(exc) and "a:" in str(exc), exc
+    assert not (root / "var" / "artifacts" / "t.tar.gz").exists()
+
+
 def test_compose_capture_renders_with_the_instance_env():
     """Capture rendered with service_env() alone — no COMPOSE_PROJECT_NAME — so a launcher that
     interpolates the project into a VALUE (a container env var, a volume name) froze the wrong

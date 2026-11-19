@@ -38,6 +38,21 @@ def _services(compose: dict):
     return (compose.get("services") or {}).items()
 
 
+def _require_images(compose: dict, instance: str) -> None:
+    """Every service must name an image before `build:` is stripped: a service with only a build
+    context would be baked with neither, into an artifact whose stack cannot start. Refuse the
+    bake and name the services, instead of shipping it."""
+    imageless = sorted(str(name) for name, svc in _services(compose)
+                       if not (isinstance(svc, dict) and isinstance(svc.get("image"), str)
+                               and svc["image"].strip()))
+    if imageless:
+        raise RigError(f"bake: {instance}: compose service(s) {', '.join(imageless)} name no "
+                       f"`image:` — a vehicle pulls images and never builds, so the baked stack "
+                       f"could not start. Give each one an `image:` (the ref `rig build` pushes; "
+                       f"`build:` may stay beside it) — `rig certify` reports this as "
+                       f"`discipline`")
+
+
 def _strip_build(compose: dict) -> None:
     """A vehicle pulls images; it never builds. Drop build contexts (gige's core-driver carries one)."""
     for _, svc in _services(compose):
@@ -700,6 +715,7 @@ def _compose_only(manifest, descriptors, env, staging: Path, images: dict, *,
             skipped.append(sensor.name)
             continue
 
+        _require_images(compose, sensor.name)
         _strip_build(compose)
         _strip_profiles(compose)
         if manifest.arch:

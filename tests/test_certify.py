@@ -429,6 +429,18 @@ def test_discipline_yaml_without_services_short_circuits():
     assert any("no `services:`" in c.detail for c in checks)
 
 
+def test_a_service_with_a_build_context_and_no_image_fails_discipline():
+    """Contract O2: every compose service names an `image`. The usual pre-rig shape is
+    `build: .` alone, which certified green; `rig bake` then stripped `build:` and shipped a
+    service with neither."""
+    extra = "  sidecar:\n    build: .\n    restart: unless-stopped"
+    checks, errors, _, _ = run_certify(make_service(**{"@EXTRASVC@": extra}))
+    assert errors == {"discipline"}
+    assert {c.name for c in checks} == {"discipline"}      # short-circuits like its siblings
+    detail = next(c.detail for c in checks)
+    assert "sidecar" in detail and "name no `image:`" in detail and "core" not in detail, detail
+
+
 def test_missing_ros_env_warns_for_ros_service():
     # Absence is only a WARN: rig can't know whether this config runs a ROS node (plugin-less camera,
     # ros1 without RMW). A WRONG value, by contrast, is proof of hardcoding -> ERROR (next test).
