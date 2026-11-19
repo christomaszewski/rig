@@ -21,6 +21,11 @@ and `--apply`, and compares two runs' records with `rig run diff`. A `rig sim` p
 loses its result to the middleware, and an attach that fails says what went wrong and is not
 listed as a recording. A vehicle reads its roster row with its own bundled rig: re-bake before
 putting values in roster rows.
+Rig **v0.2.87** fixes the ten most serious findings of a review of v0.2.86, among them inputs
+that could reach outside their target directory, `rig status` reporting an unreadable stack as
+`down`, and typos in `vehicle.yaml` and `rigging.yaml` that were accepted silently. Some
+configurations that loaded before are now refused with a message; see its upgrade notes. rig
+is licensed under Apache-2.0.
 Use the Rig executable shipped with your deployment; updating another installation does not
 upgrade a baked artifact. Simulator attachment, Isaac's and an external simulator's, remains
 explicitly **experimental**.
@@ -73,6 +78,7 @@ totals should not be read as current operator requirements:
 - [v0.2.84 release notes](releases/v0.2.84.md) (service contract, rigification guide and stricter certify)
 - [v0.2.85 release notes](releases/v0.2.85.md) (external simulation provider and session seal fix)
 - [v0.2.86 release notes](releases/v0.2.86.md) (roster values, provisioning records, run comparison and simulation attach fixes)
+- [v0.2.87 release notes](releases/v0.2.87.md) (review fixes: confined inputs, `unknown` status, checked config files, atomic state writes)
 - [Coordinated replay readiness, 2026-10-27](releases/coordinated-replay-readiness-2026-10-27.md)
 
 The release readiness report establishes replay evidence on its stated machines/versions.

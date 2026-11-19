@@ -1,9 +1,21 @@
 # rig — project state & handoff (resume here)
 
-Released checkpoint: **v0.2.86 — roster values, provisioning records, run comparison and
-simulation attach fixes**, reviewed **2026-11-12**. Use the [documentation index](README.md)
-to choose an operator workflow. The dated entries below are historical observations, not the
-current host state.
+Released checkpoint: **v0.2.87 — review fixes: confined inputs, `unknown` status, checked
+config files, atomic state writes; Apache-2.0**, prepared **2026-11-19**. Use the
+[documentation index](README.md) to choose an operator workflow. The dated entries below are
+historical observations, not the current host state.
+
+- **v0.2.87 review fixes.** A full review of v0.2.86 found the ten issues this release fixes:
+  repository URLs read by git as options; registry payload paths, suite plan row names,
+  reconstructed trees and run ids reported by a vehicle reaching outside their target
+  directory; `rig status` reporting an unreadable stack as `down`; unknown keys and wrong types
+  in `vehicle.yaml` and `rigging.yaml` accepted silently; `certify` passing and `bake` shipping
+  a Compose service with no image; `rig fleet down --force` rejected by every vehicle;
+  `--migrate` emptying a mount-point registry; state files truncated by an interrupted write;
+  and two documentation errors (`./run.sh up` in HOST_SETUP, the example recipes without a
+  router). rig is now Apache-2.0. Several fixes refuse what used to be accepted: see
+  [v0.2.87](releases/v0.2.87.md#upgrade). Tested against stand-ins for Docker, ssh and scp
+  only; no daemon, ROS graph or vehicle exercised it. The review's other findings remain open.
 
 - **v0.2.83 preparation improvement:** real `replay prepare` acquires the recipe's runtime
   images using `--pull missing|always|never`, defaulting to `missing`, before image-dependent
