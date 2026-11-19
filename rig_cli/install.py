@@ -238,6 +238,10 @@ def _fetch_source(name: str, source: dict) -> Path:
     checks out — submodules included, each through its own mirror. Returns the service dir
     (source.path aware)."""
     repo_url, rev = str(source.get("repo") or ""), str(source.get("rev") or "")
+    # The repo comes from a registry manifest or rig.lock and is handed to git: it must read as a
+    # URL or a path, never as an option.
+    from .common import checked_git_url
+    checked_git_url(repo_url, what=f"install {name}: source.repo")
     # The rev names a cache directory (and a failed checkout's cleanup): only a full commit id
     # may reach the path — a registry or rig.lock value like "/../../.." must never.
     if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", rev):

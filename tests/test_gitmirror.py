@@ -236,6 +236,73 @@ def test_fetch_source_checks_out_a_new_rev_offline_from_the_mirror():
             assert _git("rev-parse", "HEAD", cwd=got) == rev
 
 
+def test_a_url_git_would_read_as_an_option_is_refused_before_git_runs():
+    """A repo URL comes from a registry manifest, a rigging.yaml or another repository's
+    .gitmodules. git reads an argument beginning with `-` as an option, so such a value is
+    refused by name before any git command is built, and a real fetch passes `--` first."""
+    with _home():
+        calls = []
+        real = gitmirror._git
+
+        def spy(*args, **kwargs):
+            calls.append(args)
+            return real(*args, **kwargs)
+
+        gitmirror._git = spy
+        try:
+            dest = pathlib.Path(tempfile.mkdtemp())
+            for bad in ("-x@host:path", "--option=value", "-", ""):
+                for fn in (lambda: gitmirror.ensure(bad),
+                           lambda: gitmirror.resolve(bad, "main"),
+                           lambda: gitmirror.clone(bad, "0" * 40, dest / "c"),
+                           lambda: gitmirror.export(bad, "0" * 40, dest / "e"),
+                           lambda: _fetch_source("svc", {"repo": bad, "rev": "0" * 40})):
+                    try:
+                        fn()
+                        raise AssertionError(f"accepted {bad!r}")
+                    except RigError as exc:
+                        assert "git URL" in str(exc), exc
+            assert calls == [], calls                      # nothing reached git
+            up = _repo()
+            gitmirror.resolve(str(up), "main")
+            fetches = [a for a in calls if "fetch" in a]
+            assert fetches, calls
+            for args in fetches:                            # options end before the URL
+                assert "--" in args and args.index("--") < args.index(str(up)), args
+        finally:
+            gitmirror._git = real
+
+
+def test_a_submodule_url_that_reads_as_an_option_is_refused():
+    """rig reads .gitmodules itself to mirror submodules, so git's own check of submodule URLs
+    never sees them. The same refusal applies."""
+    with _home():
+        up = _repo()
+        (up / ".gitmodules").write_text('[submodule "s"]\n\tpath = s\n\turl = "-x@host:sub"\n')
+        _git("add", ".gitmodules", cwd=up)
+        _git("update-index", "--add", "--cacheinfo", f"160000,{'1' * 40},s", cwd=up)
+        _git("commit", "-q", "-m", "sub", cwd=up)
+        sha = gitmirror.resolve(str(up), "main")
+        try:
+            gitmirror.sync_submodules(str(up), sha)
+            raise AssertionError("mirrored a submodule whose URL reads as an option")
+        except RigError as exc:
+            assert "git URL" in str(exc), exc
+
+
+def test_descriptor_refuses_source_repos_that_read_as_options():
+    from rig_cli.descriptor import load_descriptor
+    for block in ('build: {command: b.sh, sources: [{name: dep, repo: "-x@host:p", ref: v1}]}',
+                  'msgs: {source: [{repo: "-x@host:p", ref: v1, packages: [m]}]}'):
+        repo = pathlib.Path(tempfile.mkdtemp())
+        (repo / "rigging.yaml").write_text(f"service: svc\n{block}\n")
+        try:
+            load_descriptor("svc", repo)
+            raise AssertionError(f"accepted {block}")
+        except RigError as exc:
+            assert "git URL" in str(exc), exc
+
+
 def test_absolute_submodule_urls():
     cases = [("../c.git", "https://h/a/b.git", "https://h/a/c.git"),
              ("./c", "https://h/a/b", "https://h/a/b/c"),

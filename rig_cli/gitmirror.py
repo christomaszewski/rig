@@ -23,7 +23,7 @@ import time
 from pathlib import Path
 
 from . import RigError
-from .common import eprint
+from .common import checked_git_url, eprint
 
 offline = False             # `rig build --offline`: never fetch
 _fetched: set[str] = set()  # mirror paths refreshed by this process
@@ -50,7 +50,8 @@ def _detail(proc: subprocess.CompletedProcess) -> str:
 
 def _remote(url: str) -> str:
     """The URL as git would read it from the caller's cwd: fetches run with `-C <mirror>`, so a
-    relative local path must be made absolute first."""
+    relative local path must be made absolute first. Never an option: see checked_git_url."""
+    checked_git_url(url, what="git source")
     if re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://|^[^/@:]+@[^:/]+:", url) or os.path.isabs(url):
         return url
     return os.path.abspath(os.path.expanduser(url))
@@ -63,7 +64,7 @@ def _fetch(url: str, path: Path, *refspecs: str) -> None:
     prune = () if refspecs else ("--prune",)
     refspecs = refspecs or ("+refs/heads/*:refs/heads/*", "+refs/tags/*:refs/tags/*")
     for attempt in range(3):  # another rig process may hold a ref lock in the same mirror
-        proc = _git("-C", str(path), "fetch", "-q", *prune, _remote(url), *refspecs)
+        proc = _git("-C", str(path), "fetch", "-q", *prune, "--", _remote(url), *refspecs)
         if proc.returncode == 0 or not re.search(r"cannot lock ref|Another git process|\.lock'",
                                                   proc.stderr or ""):
             break
@@ -77,7 +78,9 @@ def _fetch(url: str, path: Path, *refspecs: str) -> None:
 
 
 def ensure(url: str) -> Path:
-    """The repo's mirror, created and fetched when online; offline it must already exist."""
+    """The repo's mirror, created and fetched when online; offline it must already exist.
+    Every route to a fetch, clone or submodule URL passes here, so the URL is checked here."""
+    checked_git_url(url, what="git source")
     path = mirror_path(url)
     if path.is_dir():
         return path
@@ -132,7 +135,7 @@ def resolve(url: str, ref: str) -> str:
         _fetch(url, path)
         sha = _rev(path, ref)
         if sha is None and immutable:  # a commit no branch/tag reaches: ask for it by id
-            proc = _git("-C", str(path), "fetch", "-q", _remote(url), ref)
+            proc = _git("-C", str(path), "fetch", "-q", "--", _remote(url), ref)
             sha = _rev(path, ref) if proc.returncode == 0 else None
     if sha is None:
         where = (f"the local mirror (fetched {fetched_at(path)}) — {_HINT_SYNC}" if offline
@@ -149,14 +152,14 @@ def clone(url: str, sha: str, dest: Path) -> None:
     """A persistent working tree of ``sha`` at ``dest``, cloned from the mirror (objects
     hardlinked, no network) with ``origin`` reset to ``url``."""
     path = ensure(url)
-    for args in (("clone", "-q", "--no-checkout", str(path), str(dest)),
+    for args in (("clone", "-q", "--no-checkout", "--", str(path), str(dest)),
                  ("-C", str(dest), "remote", "set-url", "origin", url)):
         proc = _git(*args)
         if proc.returncode:
             raise RigError(f"cannot check out {url} from its mirror: {_detail(proc)}")
     if _git("-C", str(dest), "checkout", "-q", "--detach", sha).returncode:
         # Not reachable from a cloned branch/tag: bring the pin over from the mirror explicitly.
-        _git("-C", str(dest), "fetch", "-q", str(path), f"refs/rig/pins/{sha}")
+        _git("-C", str(dest), "fetch", "-q", "--", str(path), f"refs/rig/pins/{sha}")
         proc = _git("-C", str(dest), "checkout", "-q", "--detach", sha)
         if proc.returncode:
             raise RigError(f"cannot check out {url} at {sha[:12]}: {_detail(proc)}")
@@ -169,7 +172,7 @@ def export(url: str, sha: str, dest: Path, *, submodules: bool = False) -> None:
     work = Path(tempfile.mkdtemp(prefix="rig-export-"))
     try:
         # --shared: the mirror's whole object store is borrowed, so any commit in it checks out
-        for args in (("clone", "-q", "--shared", "--no-checkout", str(path), str(work / "t")),
+        for args in (("clone", "-q", "--shared", "--no-checkout", "--", str(path), str(work / "t")),
                      ("-C", str(work / "t"), "checkout", "-q", "--detach", sha),
                      ("-C", str(work / "t"), "remote", "set-url", "origin", url)):
             proc = _git(*args)

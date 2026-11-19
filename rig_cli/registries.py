@@ -104,6 +104,8 @@ def add_entry(name: str, *, url: str | None, path: str | None, front: bool) -> N
             raise RigError(f"registry add: {target} is not a registry (no registry.yaml)")
         entry = Entry(name=name, type="local-dir", location=str(target))
     else:
+        from .common import checked_git_url
+        checked_git_url(url, what="registry add")
         local = Path(url).expanduser()
         if "://" not in url and not re.match(r"^[^/@]+@[^/:]+:", url) and local.exists():
             # A local checkout given as the clone source: stored absolute, since sync runs from
@@ -310,7 +312,7 @@ def sync(names: list[str] | None = None) -> int:
         before: dict = {}
         if not (dest / ".git").is_dir():
             dest.parent.mkdir(parents=True, exist_ok=True)
-            res = _git("clone", "-q", entry.location, str(dest))
+            res = _git("clone", "-q", "--", entry.location, str(dest))
             action = "cloned"
         else:
             if (dest / "index.json").is_file():  # the "before" for the delta digest

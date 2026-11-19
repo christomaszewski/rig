@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import RigError
-from .common import load_yaml
+from .common import checked_git_url, load_yaml
 
 # The descriptor filename rig reads from each service repo. `rigging.yaml` is canonical; `deploy.yaml` is
 # accepted as a legacy fallback during the rename.
@@ -332,6 +332,7 @@ def load_descriptor(service: str, repo: Path) -> Descriptor:
                                f"(it names a directory and a BuildKit build context)")
             if any(s.name == str(name) for s in build_sources):
                 raise RigError(f"{path}: build.sources name '{name}' is declared twice")
+            checked_git_url(repo_url, what=f"{path}: build.sources '{name}' repo")
             build_sources.append(BuildSource(str(name), str(repo_url), str(ref)))
     else:
         build_command = None
@@ -382,6 +383,7 @@ def load_descriptor(service: str, repo: Path) -> Descriptor:
                 raise RigError(f"{path}: msgs.source #{i} needs `repo`, `ref` (the pin the service "
                                f"builds against — a drifted overlay pin is a silent schema mismatch "
                                f"in the bag), and `packages` (colcon --packages-up-to selection)")
+            checked_git_url(repo_url, what=f"{path}: msgs.source #{i} repo")
             msgs_source.append(MsgsSource(repo=str(repo_url), ref=str(ref),
                                           packages=tuple(str(p) for p in packages)))
 

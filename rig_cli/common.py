@@ -72,6 +72,23 @@ def safe_component(value: str, *, what: str) -> str:
     return value
 
 
+def checked_git_url(url, *, what: str) -> str:
+    """A git remote rig is about to hand to `git fetch` or `git clone`. It arrives from a registry
+    package manifest, a rigging.yaml or another repository's .gitmodules: data, never an option.
+    git reads any argument that begins with `-` as one (and some options name a program to run),
+    so such a value is refused here by name, before it is ever placed on a command line. Callers
+    also pass `--` before the URL; this check is what gives the user a sentence instead of a git
+    usage error. Returns the URL so a caller can bind it inline."""
+    text = "" if url is None else str(url)
+    if not text.strip():
+        raise RigError(f"{what}: a git URL is required")
+    if text.startswith("-") or any(ch in text for ch in "\n\r\0"):
+        raise RigError(f"{what}: {text!r} is not a git URL (it may not begin with '-' or hold "
+                       f"control characters) — use a URL (https://…, ssh://…, git@host:path) or "
+                       f"a path")
+    return text
+
+
 def safe_extract(tf, dest: Path) -> None:
     """Extract an archive rig did not necessarily write (a run copied off a vehicle, an artifact
     from someone else) without letting a member escape ``dest``: tarfile's ``data`` filter where

@@ -131,6 +131,14 @@ def test_rejects_short_or_branch_rev():
     _assert_issue(root2, "full commit SHA", check_index=False)
 
 
+def test_rejects_a_source_repo_git_would_read_as_an_option():
+    """The client hands `source.repo` to git. A value beginning with `-` would be read as an
+    option there, so validate refuses to call the registry publishable."""
+    root = _registry()
+    _service(root, source={"repo": "-x@host:path", "rev": "a" * 40})
+    _assert_issue(root, "is not a git URL", check_index=False)
+
+
 def test_rejects_tag_image_refs():
     root = _registry()
     _service(root, source=None, image={"ref": "ghcr.io/x/cam:latest"})

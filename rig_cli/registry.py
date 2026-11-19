@@ -154,6 +154,11 @@ def _validate_service(pkg: Package, reg: Registry, issues: list[Issue]) -> None:
         if not isinstance(source, dict) or not source.get("repo"):
             issues.append(Issue(where, "`source` must be a mapping with `repo`"))
         else:
+            try:  # the client hands this to git: it must be a URL or a path, never an option
+                from .common import checked_git_url
+                checked_git_url(source["repo"], what="`source.repo`")
+            except RigError as exc:
+                issues.append(Issue(where, str(exc)))
             rev = str(source.get("rev") or "")
             if not _REV.match(rev):
                 issues.append(Issue(where, f"`source.rev` must be a full commit SHA (40/64 hex), got '{rev}'"))
