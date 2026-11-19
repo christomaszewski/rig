@@ -33,7 +33,7 @@ from pathlib import Path
 import yaml
 
 from . import RigError
-from .common import eprint, load_yaml
+from .common import contained, eprint, load_yaml
 from .descriptor import load_descriptor
 from .init import _append_services_line, _append_tier_row, _route_span, _safe_name
 from .lock import load_lock, record_instance, record_package, record_registry, save_lock, sha256_file
@@ -41,7 +41,7 @@ from .manifest import load_manifest
 from .pkg import _each_index, _entries_or_hint, _sensor_hits
 from .refs import short_name, unqualified
 from .registries import Entry, rig_home
-from .registry import Package, Registry, _CONSTRAINT, constraint_satisfied
+from .registry import Package, Registry, _CONSTRAINT, constraint_satisfied, pkg_file
 from .vendor import vendor
 
 _INSTANCE_RE = re.compile(r"^[a-z][a-z0-9_]*$")
@@ -416,6 +416,14 @@ def _materialize_instance(root: Path, *, svc: str, desc, instance: str | None, b
     if name != embedded and not _INSTANCE_RE.match(name):
         raise RigError(f"install: instance name '{name}' must be ROS-safe ([a-z][a-z0-9_]*) — "
                        f"pass --as <name>")
+    # "Verbatim" still means a manifest row name. An embedded name arrives from a package's own
+    # payload, and a suite's vehicle plan can name its row to match: `../../x` in both skipped
+    # the check above and was written as config/<tier>/../../x.yaml — outside the deployment,
+    # and left behind by the rollback that followed the manifest's refusal.
+    from .manifest import ROW_NAME
+    if not ROW_NAME.match(name):
+        raise RigError(f"install: instance name {name!r} must match [a-z0-9][a-z0-9_-]* (it "
+                       f"names the working config file and the compose project)")
     if any(s.name == name for s in manifest.sensors):
         raise RigError(f"install: instance name '{name}' already exists in vehicle.yaml — "
                        f"pass --as <name> (duplicate hardware needs distinct names; updating an "
@@ -424,6 +432,8 @@ def _materialize_instance(root: Path, *, svc: str, desc, instance: str | None, b
         tier = desc.tier if desc.tier in ("infra", "autonomy") else "sensor"
     sub = {"infra": "infra", "sensor": "sensors", "autonomy": "autonomy"}[tier]
     dest = root / "config" / sub / f"{name}.yaml"
+    if not contained(dest, root / "config"):  # belt: a symlinked config/<tier> leaving the tree
+        raise RigError(f"install: {dest} would be written outside {root / 'config'} — refusing")
     if dest.exists():
         raise RigError(f"install: {dest} already exists — pass --as <name>")
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -539,7 +549,15 @@ def _install_planned(root: Path, suite_ref: str, plan: dict, v_entry, v_pkg, v_p
     """The vehicle-plan install: members are the SOURCES (fetched/vendored/pinned, never
     auto-instantiated), the plan's rows are the INSTANCES — their names, tier placement, order,
     enabled flags, overrides, and per-row overlay bindings in row order."""
+    from .manifest import ROW_NAME
     from .overlay import apply as overlay_apply, edit_row
+    # The plan's rows name files this install writes. Check every name BEFORE the first write:
+    # the plan is registry content.
+    for section in ("infra", "sensors", "autonomy"):
+        for row in plan.get(section) or []:
+            if isinstance(row, dict) and row.get("name") and not ROW_NAME.match(str(row["name"])):
+                raise RigError(f"suite {suite_ref}: plan row name {str(row['name'])!r} must match "
+                               f"[a-z0-9][a-z0-9_-]* — nothing installed")
     _write_vehicle_settings(root, plan)
     pins = load_lock(root)  # --locked: every member as rig.lock pins it
     service_descs: dict[str, object] = {}
@@ -632,7 +650,7 @@ def _install_suite(root: Path, entry: Entry, pkg: Package, *, locked: bool) -> i
     if vmembers:
         v_entry, _, v_pkg = _member_pkg(vmembers[0], pins, locked)
         vrel = (v_pkg.manifest.get("config") or {}).get("payload") or "config/vehicle.yaml"
-        v_payload = v_pkg.pkg_dir / str(vrel)
+        v_payload = pkg_file(v_pkg.pkg_dir, vrel, what=f"suite member {vmembers[0]}: config.payload")
         if not v_payload.is_file():
             raise RigError(f"suite member {vmembers[0]}: vehicle payload missing: {vrel}")
         _check_locked(pins, qualified(v_entry, v_pkg), locked=locked,
@@ -1166,7 +1184,7 @@ def _prep_profile(root: Path, entry: Entry, reg, pkg: Package, lock: dict,
     Shared by plain install (one default instance) and the vehicle-plan path (N named rows)."""
     ref = qualified(entry, pkg)
     payload_rel = (pkg.manifest.get("config") or {}).get("payload")
-    payload_path = pkg.pkg_dir / str(payload_rel)
+    payload_path = pkg_file(pkg.pkg_dir, payload_rel, what=f"install: {ref} config.payload")
     if not payload_path.is_file():
         raise RigError(f"install: {ref} payload missing in the synced registry: {payload_rel}")
     _check_locked(lock, ref, locked=locked, payload_sha=sha256_file(payload_path))

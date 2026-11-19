@@ -29,7 +29,7 @@ from .promote import (_carry_forward, _existing_manifest, _next_version, _regist
                       _target_entry, _write_pkg)
 from .refs import parse_ref, split_key
 from .registries import current_version_of
-from .registry import _CONSTRAINT, _QUALIFIED_EXACT, load_registry
+from .registry import _CONSTRAINT, _QUALIFIED_EXACT, load_registry, pkg_file
 
 
 def _current_of(reg, ns: str | None, name: str) -> str | None:
@@ -192,7 +192,7 @@ def _payload_surface(pkg) -> set | None:
         return None
     from .workingcopy import _flat
     payload_rel = (pkg.manifest.get("config") or {}).get("payload") or "config/payload.yaml"
-    path = pkg.pkg_dir / str(payload_rel)
+    path = pkg_file(pkg.pkg_dir, payload_rel, what="repin: config.payload")
     if not path.is_file():
         return None
     try:
@@ -214,7 +214,7 @@ def _overlay_key_check(reg, opkg, old_stamps, new_stamps, warnings) -> None:
     if new_surface is None:
         return
     delta_rel = (opkg.manifest.get("config") or {}).get("payload") or "config/delta.yaml"
-    delta_path = opkg.pkg_dir / str(delta_rel)
+    delta_path = pkg_file(opkg.pkg_dir, delta_rel, what="repin: overlay config.payload")
     if not delta_path.is_file():
         return
     try:

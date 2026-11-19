@@ -148,7 +148,8 @@ def apply(root: Path, instance: str, ref: str, *, clear_local: bool = False,
     replaced = next((o for o in sensor.overlays
                      if o != fq and o.split("@", 1)[0] == fq.split("@", 1)[0]), None)
     payload_rel = (pkg.manifest.get("config") or {}).get("payload")
-    src = pkg.pkg_dir / str(payload_rel)
+    from .registry import pkg_file
+    src = pkg_file(pkg.pkg_dir, payload_rel, what=f"overlay apply: {fq} config.payload")
     if not src.is_file():
         raise RigError(f"overlay apply: payload missing in the synced registry: {payload_rel}")
     lock = load_lock(root)

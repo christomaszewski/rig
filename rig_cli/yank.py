@@ -25,7 +25,7 @@ from . import RigError
 from .common import eprint
 from .promote import _registry_write_session, _target_entry
 from .refs import parse_ref, split_key
-from .registry import load_registry
+from .registry import load_registry, pkg_file
 
 
 def _resolve_pkg(reg, ref: str):
@@ -89,8 +89,10 @@ def yank(ref: str, *, from_: str, dry_run: bool = False, root: Path | None = Non
     if restored_pkg is not None:
         payload_rel = (restored_pkg.manifest.get("config") or {}).get("payload")
         payload = None
-        if payload_rel and (restored_pkg.pkg_dir / str(payload_rel)).is_file():
-            payload = (restored_pkg.pkg_dir / str(payload_rel)).read_bytes()
+        if payload_rel:
+            payload_file = pkg_file(restored_pkg.pkg_dir, payload_rel, what="yank: config.payload")
+            if payload_file.is_file():
+                payload = payload_file.read_bytes()
         restored = {"version": prev, "manifest": restored_pkg.manifest, "payload": payload}
     if root is not None:
         from .save import unsave_fixup

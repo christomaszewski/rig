@@ -406,7 +406,9 @@ def _upgrade_sweep(root: Path, manifest, lock: dict, packages: dict, anchors: di
                        f"(a save not merged yet?); upgrade never moves a pin backwards")
                 continue
             payload_rel = (pkg.manifest.get("config") or {}).get("payload")
-            payload_path = pkg.pkg_dir / str(payload_rel)
+            from .registry import pkg_file
+            payload_path = pkg_file(pkg.pkg_dir, payload_rel,
+                                    what=f"upgrade {sensor.name}: config.payload")
             if not payload_path.is_file():
                 raise RigError(f"upgrade {sensor.name}: payload missing in registry: {payload_rel}")
             new_ref = qualified(entry, pkg)
@@ -506,7 +508,8 @@ def _upgrade_sweep(root: Path, manifest, lock: dict, packages: dict, anchors: di
                 eprint(f"  {iname}: overlay {ref} kept — the registry carries older {pkg.version}")
                 continue
             payload_rel = (pkg.manifest.get("config") or {}).get("payload")
-            src = pkg.pkg_dir / str(payload_rel)
+            from .registry import pkg_file
+            src = pkg_file(pkg.pkg_dir, payload_rel, what=f"upgrade {iname}: overlay config.payload")
             if not src.is_file():
                 raise RigError(f"upgrade {iname}: overlay payload missing in registry: {payload_rel}")
             dest = overlay_payload_path(root, new_ref)

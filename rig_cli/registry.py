@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import RigError
-from .common import eprint, load_yaml
+from .common import contained, eprint, load_yaml
 
 SCHEMA = 2           # the registry schema version this rig writes (2: profiles nest by service)
 MAX_SUPPORTED = 2    # the highest schema this rig can read (client-side degrade-not-fail is M2)
@@ -99,18 +99,37 @@ def constraint_satisfied(constraint_ver: str, caret: bool, version: str) -> bool
 
 # --- per-kind validation ----------------------------------------------------------------------
 
+def pkg_file(pkg_dir: Path, rel: object, *, what: str) -> Path:
+    """``<pkg_dir>/<rel>`` for a file a package manifest names (`config.payload`, a schema),
+    CONFINED to the package directory. A registry is other people's content, and what this path
+    names is copied into the deployment: `../../…` or a symlink committed in its place would
+    hand rig any mapping-shaped file the user can read (a docker or kube config) to copy into
+    `config/` and `config/.pins/`, which are committed. Relative, no `..`, and — symlinks
+    resolved — still inside the package; anything else is refused by name. Every reader of a
+    package file goes through here, the registry validator included."""
+    text = "" if rel is None else str(rel)
+    path = Path(text)
+    if not text or path.is_absolute() or ".." in path.parts:
+        raise RigError(f"{what}: {text!r} must be a relative path inside the package directory")
+    full = pkg_dir / path
+    if not contained(full, pkg_dir):
+        raise RigError(f"{what}: {text!r} leaves the package directory (a symlink) — refusing "
+                       f"to read it")
+    return full
+
+
 def _rel_payload(pkg: Package, raw: object, field: str, issues: list[Issue], *, must_exist: bool = True):
-    """Validate a manifest-relative payload/schema path (inside the package dir, no .. / absolute);
-    return the resolved Path or None."""
+    """Validate a manifest-relative payload/schema path (inside the package dir, no .. / absolute,
+    no symlink out of it); return the Path or None."""
     where = f"{pkg_path(pkg.kind, pkg.name)}/manifest.yaml"
     if not isinstance(raw, str) or not raw:
         issues.append(Issue(where, f"`{field}` must be a relative path string"))
         return None
-    rel = Path(raw)
-    if rel.is_absolute() or ".." in rel.parts:
-        issues.append(Issue(where, f"`{field}`: path must stay inside the package dir: {raw}"))
+    try:
+        path = pkg_file(pkg.pkg_dir, raw, what=f"`{field}`")
+    except RigError as exc:
+        issues.append(Issue(where, f"{exc} — path must stay inside the package dir: {raw}"))
         return None
-    path = pkg.pkg_dir / rel
     if must_exist and not path.is_file():
         issues.append(Issue(where, f"`{field}`: file not found: {raw}"))
         return None
@@ -299,7 +318,9 @@ def _validate_vehicle(pkg: Package, reg: Registry, issues: list[Issue]) -> None:
     where = f"vehicles/{pkg.name}/manifest.yaml"
     cfg = pkg.manifest.get("config") if isinstance(pkg.manifest.get("config"), dict) else {}
     payload_rel = cfg.get("payload") or "config/vehicle.yaml"
-    path = pkg.pkg_dir / str(payload_rel)
+    path = _rel_payload(pkg, payload_rel, "config.payload", issues, must_exist=False)
+    if path is None:
+        return
     if not path.is_file():
         issues.append(Issue(where, f"vehicle payload missing: {payload_rel}"))
         return
@@ -376,7 +397,8 @@ def _validate_suite(pkg: Package, reg: Registry, issues: list[Issue]) -> None:
     if vpkg is not None and vpkg.kind == "vehicle":
         vcfg = vpkg.manifest.get("config") if isinstance(vpkg.manifest.get("config"), dict) else {}
         try:
-            payload = load_yaml(vpkg.pkg_dir / str(vcfg.get("payload") or "config/vehicle.yaml"))
+            payload = load_yaml(pkg_file(vpkg.pkg_dir, vcfg.get("payload") or "config/vehicle.yaml",
+                                         what=f"vehicles/{vpkg.name}: config.payload"))
         except RigError:
             payload = None  # the vehicle's own validation reports it
         if isinstance(payload, dict):

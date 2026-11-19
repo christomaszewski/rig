@@ -40,7 +40,7 @@ from .lock import load_lock
 from .manifest import load_manifest
 from .refs import parse_ref, short_name, split_key, unqualified
 from .registries import Entry, load_entries
-from .registry import validate_registry, write_index, load_registry
+from .registry import validate_registry, write_index, load_registry, pkg_file
 from .workingcopy import promote_delta
 
 def _target_entry(name: str) -> Entry:
@@ -561,9 +561,9 @@ def promote(root: Path, names: list[str], *, to: str, all_dirty: bool, name: str
                 if auto:
                     from .workingcopy import is_older, lost_updates, pin_path
                     current = str(existing.get("version") or "")
-                    upstream = (reg_root / "profiles" / pkg_name.replace(":", "/")
-                                / str((existing.get("config") or {}).get("payload")
-                                      or "config/payload.yaml"))
+                    upstream = pkg_file(reg_root / "profiles" / pkg_name.replace(":", "/"),
+                                        (existing.get("config") or {}).get("payload")
+                                        or "config/payload.yaml", what="promote: config.payload")
                     lost = (lost_updates(pin_path(root, sensor.name), upstream, payload)
                             if is_older(str(sensor.profile).rpartition("@")[2], current) else [])
                     if lost:
@@ -818,7 +818,8 @@ def _parent_payload(entry: Entry, name: str, version: str) -> tuple[dict, dict]:
     current = _existing_manifest(entry.root, "profiles", name)
     if current is not None and str(current.get("version")) == version:
         payload_rel = (current.get("config") or {}).get("payload") or "config/payload.yaml"
-        path = entry.root / "profiles" / name.replace(":", "/") / str(payload_rel)
+        path = pkg_file(entry.root / "profiles" / name.replace(":", "/"), payload_rel,
+                        what="rebase: parent config.payload")
         if not path.is_file():
             raise RigError(f"rebase: parent payload missing: {path}")
         return current, load_yaml(path)
@@ -829,7 +830,7 @@ def _parent_payload(entry: Entry, name: str, version: str) -> tuple[dict, dict]:
                        f"history cannot serve it — the three-way needs the OLD parent payload "
                        f"(git-backed registries keep every past version)")
     payload_rel = (pkg.manifest.get("config") or {}).get("payload") or "config/payload.yaml"
-    path = pkg.pkg_dir / str(payload_rel)
+    path = pkg_file(pkg.pkg_dir, payload_rel, what="rebase: parent config.payload")
     if not path.is_file():
         raise RigError(f"rebase: parent payload missing at the historical version: {payload_rel}")
     return pkg.manifest, load_yaml(path)
@@ -865,7 +866,8 @@ def rebase(name: str, *, to: str, onto: str | None) -> int:
 
     # the three payloads
     payload_rel = (existing.get("config") or {}).get("payload") or "config/payload.yaml"
-    my_path = reg_root / "profiles" / name.replace(":", "/") / str(payload_rel)
+    my_path = pkg_file(reg_root / "profiles" / name.replace(":", "/"), payload_rel,
+                       what="rebase: config.payload")
     if not my_path.is_file():
         raise RigError(f"rebase: payload missing: {my_path}")
     mine = _strip_identity(load_yaml(my_path))

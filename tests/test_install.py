@@ -426,6 +426,76 @@ def test_as_name_must_be_ros_safe():
         assert not (root / "services" / "camish").exists()         # rolled back, no leaked vendor
 
 
+def test_a_package_payload_may_not_leave_its_package_directory():
+    """`config.payload` is registry content, and what it names is copied into config/ and
+    config/.pins/ (which are committed). `../…` out of the package, or a symlink committed in
+    the payload's place, used to hand any mapping-shaped file the user can read to that copy.
+    The install, and `registry validate`, refuse both."""
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        root, reg = _world()
+        outside = reg.parent / "outside.yaml"
+        outside.write_text("token: s3cr3t-not-for-the-deployment\n")
+        pkg = reg / "profiles" / "camish" / "acme-cam"
+        manifest = yaml.safe_load((pkg / "manifest.yaml").read_text())
+
+        def leaked() -> bool:
+            return any("s3cr3t" in p.read_text() for p in (root / "config").rglob("*.yaml"))
+
+        manifest["config"]["payload"] = "../../../../outside.yaml"       # out through `..`
+        (pkg / "manifest.yaml").write_text(yaml.safe_dump(manifest))
+        rc, _, err = _run("--root", str(root), "pkg", "install", "testns/camish:acme-cam")
+        assert rc == 1 and "inside the package directory" in err, err
+        assert not leaked()
+        manifest["config"]["payload"] = "config/payload.yaml"           # out through a symlink
+        (pkg / "manifest.yaml").write_text(yaml.safe_dump(manifest))
+        (pkg / "config" / "payload.yaml").unlink()
+        (pkg / "config" / "payload.yaml").symlink_to(outside)
+        rc, _, err = _run("--root", str(root), "pkg", "install", "testns/camish:acme-cam")
+        assert rc == 1 and "leaves the package directory" in err, err
+        assert not leaked()
+        rc, _, err = _run("registry", "validate", str(reg))
+        assert rc == 1 and "leaves the package directory" in err, err
+
+
+def test_a_suite_plan_row_may_not_name_a_file_outside_the_deployment():
+    """A vehicle plan's row names are registry content and name the working config each row
+    gets. A row named `../../../x`, matched by the profile payload's own `name:`, skipped the
+    name check and was written outside the deployment; the manifest then refused the name and
+    the rollback, which walks only services/ and config/, left the file behind."""
+    with _env(RIG_HOME=tempfile.mkdtemp()):
+        root, reg = _world()
+        escape = "../../../escaped_plan"
+        p = reg / "profiles" / "camish" / "p1"
+        (p / "config").mkdir(parents=True)
+        (p / "manifest.yaml").write_text(yaml.safe_dump({
+            "kind": "profile", "name": "p1", "version": "1.0.0",
+            "requires": {"service": "camish@^1.0"}, "config": {"payload": "config/payload.yaml"}}))
+        (p / "config" / "payload.yaml").write_text(f"name: {escape}\nservice: camish\nx: 1\n")
+        v = reg / "vehicles" / "plan"
+        (v / "config").mkdir(parents=True)
+        (v / "manifest.yaml").write_text(yaml.safe_dump({
+            "kind": "vehicle", "name": "plan", "version": "1.0.0",
+            "config": {"payload": "config/vehicle.yaml"}}))
+        (v / "config" / "vehicle.yaml").write_text(yaml.safe_dump({
+            "vehicle": "{{vehicle}}", "vehicle_id": "{{vehicle_id}}",
+            "sensors": [{"name": escape, "service": "camish", "profile": "testns/camish:p1"}]}))
+        b = reg / "suites" / "boat"
+        b.mkdir(parents=True)
+        (b / "manifest.yaml").write_text(yaml.safe_dump({
+            "kind": "suite", "name": "boat", "version": "1.0.0",
+            "members": {"vehicles": ["testns/plan@1.0.0"], "profiles": ["testns/camish:p1@1.0.0"],
+                        "services": ["testns/camish@1.2.0"]}}))
+        _run("registry", "index", str(reg))
+        before = {q for q in root.parent.rglob("*") if root not in q.parents and q != root}
+        vehicle_before = (root / "vehicle.yaml").read_text()
+        rc, _, err = _run("--root", str(root), "pkg", "install", "testns/boat")
+        assert rc == 1 and "plan row name" in err and "nothing installed" in err, err
+        after = {q for q in root.parent.rglob("*") if root not in q.parents and q != root}
+        assert after == before, sorted(str(q) for q in after - before)
+        assert (root / "vehicle.yaml").read_text() == vehicle_before
+        assert not (root / "services" / "camish").exists()
+
+
 def test_collision_demands_as_name():
     with _env(RIG_HOME=tempfile.mkdtemp()):
         root, _ = _world()

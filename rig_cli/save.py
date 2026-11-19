@@ -130,8 +130,10 @@ def _save_overlay(root: Path, sensor, *, dry_run: bool) -> int:
     target = deep_merge(deep_merge(full, file_delta), overrides)
     new_delta = structural_diff(pre, target)
     from .workingcopy import is_older, lost_updates
-    upstream = (entry.root / "overlays" / okey
-                / str((existing.get("config") or {}).get("payload") or "config/delta.yaml"))
+    from .registry import pkg_file
+    upstream = pkg_file(entry.root / "overlays" / okey,
+                        (existing.get("config") or {}).get("payload") or "config/delta.yaml",
+                        what="save: overlay config.payload")
     lost = (lost_updates(old_copy, upstream, new_delta)
             if is_older(str(over), str(existing.get("version") or "")) else [])
     if lost:

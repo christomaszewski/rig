@@ -81,6 +81,12 @@ class RosSettings:
     domain_warning: str | None = None  # a bench tree still on the deployment's explicit domain
 
 
+# An instance name keys the compose project (docker accepts only [a-z0-9_-], lowercase first), the
+# rendered config's file name, the working config rig writes for an install, and generated scripts.
+# One grammar, checked wherever a name arrives from outside rig: vehicle.yaml rows here, and a
+# registry suite's vehicle plan or `--as` in install.py BEFORE it names a file.
+ROW_NAME = re.compile(r"[a-z0-9][a-z0-9_-]*\Z")
+
 # The hard ordering partition: every infra stack before every sensor before every autonomy stack,
 # regardless of per-entry `order`. Ordinary up/down run equal-order peers within each tier concurrently;
 # `down` reverses the list to reverse the group sequence. Other verbs consume the list serially.
@@ -250,7 +256,7 @@ def _parse_entries(entries, tier: str, root: Path, seen: dict[str, Path],
         # A name keys the compose project (docker accepts only [a-z0-9_-], lowercase first), the
         # rendered config's file name and generated scripts — "../../vehicle" once rendered over
         # vehicle.yaml itself. Refuse anything else here, before any of those are built.
-        if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", str(name)):
+        if not ROW_NAME.match(str(name)):
             raise RigError(f"vehicle.yaml: {tier} name {name!r} must match [a-z0-9][a-z0-9_-]* — it "
                            f"names the compose project (lowercase letters, digits, '_', '-'), the "
                            f"rendered config file and the ROS namespace")
