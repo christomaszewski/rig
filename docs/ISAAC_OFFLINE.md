@@ -125,25 +125,42 @@ during an offline run.
 
 ## 3. Establish transport before starting Rig
 
-The baseline uses a separately managed Zenoh router already reachable by Isaac, the probe and
-the containers. Start it before preflight. Do not start this deployment's normal hardware
-with `rig up` just to get its router. Simulation requires the deployment to be quiet, and
-listing `zenoh-router` in the session cannot satisfy the earlier probe. An external router
-must also avoid the ports/projects that selected services would claim.
+Two Zenoh routers are involved, as in the
+[Zenoh arrangement from live use](SIMULATION.md#an-external-simulator):
 
-On the single Linux host, in a dedicated sourced terminal:
+- **Isaac's router**, managed outside Rig and running before preflight. Isaac and the probe
+  connect to it. `rig sim check` probes the graph before any deployment service starts, so
+  listing a router in the session cannot satisfy that probe. Do not start this deployment's
+  normal hardware with `rig up` just to get a router: simulation requires the deployment to be
+  quiet.
+- **The deployment's own router** (`zenoh-router` in the recipe below). The session starts it
+  with the logger, for `rig sim up` and again for `rig replay`, which refuses a Zenoh session
+  that selects no router. Its `connect` endpoints name Isaac's router, so the logger receives
+  Isaac's topics through it.
+
+The two must not claim the same port. On a single host, run Isaac's router on a port other
+than the one the deployment's router listens on (Zenoh's default is 7447), using a router
+configuration file whose listen endpoint is that port. In a dedicated sourced terminal:
 
 ```sh
 source /opt/ros/jazzy/setup.bash
 export RMW_IMPLEMENTATION=rmw_zenoh_cpp
 export ROS_DOMAIN_ID=42
+export ZENOH_ROUTER_CONFIG_URI=/srv/isaac-zenoh/router.json5   # listen on, e.g., tcp/[::]:7448
 ros2 run rmw_zenoh_cpp rmw_zenohd
 ```
 
-In each Isaac/probe terminal, source Jazzy and set the same RMW/domain before launch. Check
-that every Isaac ROS Context uses the environment domain or explicitly uses 42. Restart
-Isaac after changing launch environment; exporting variables in another terminal cannot
-change an existing process.
+In each Isaac/probe terminal, source Jazzy, set the same RMW/domain, and point the session at
+that router before launch, in the same client-override form as the multiple-host example
+below (`connect/endpoints=["tcp/127.0.0.1:7448"]`). Check that every Isaac ROS Context uses
+the environment domain or explicitly uses 42. Restart Isaac after changing launch
+environment; exporting variables in another terminal cannot change an existing process.
+
+Give the deployment's router the same address in its `connect` endpoints, through its
+service's configuration (rig-infra's `zenoh-router` renders an inline `router_config:` into
+the `zenohd.json5` it mounts). Verify the link from inside the router container. This
+arrangement was exercised live with an external simulator (see [STATE](STATE.md)), not with
+Isaac.
 
 For multiple hosts, use an explicit router topology. The Jazzy RMW documentation describes
 router-to-router links and direct remote clients; a direct client needs client mode as well
@@ -228,7 +245,10 @@ Copy [camera-record.yaml](../examples/isaac-attach/camera-record.yaml) into
 ```yaml
 version: 2
 session:
-  instances: [bag_logger]
+  # zenoh-router is the deployment's own router row (use your row's name). With a Zenoh RMW,
+  # `rig replay` refuses a session that selects no router, so the recipe lists it for both
+  # commands. Isaac's router is a separate one: see docs/ISAAC_OFFLINE.md, section 3.
+  instances: [zenoh-router, bag_logger]
   clock: source
   overrides:
     bag_logger:
@@ -262,8 +282,8 @@ Here the driver is omitted, so `exclude_images: false` and the explicit camera t
 are essential. Size disk capacity and the logger's storage/cache settings for uncompressed
 ROS image traffic. The session overrides stay separate from normal deployment configuration.
 
-`session.instances` is exact: this recipe starts only the logger. It neither starts omitted
-physical sensors nor silently adds a router/controller. The shared replay path adds its
+`session.instances` is exact: this recipe starts only the deployment's router and the
+logger. It neither starts omitted physical sensors nor silently adds a controller. The shared replay path adds its
 managed bag player. `publishes`/`subscribes` describe Isaac's direction. `/clock` is owned by
 the session and must not be listed as a data binding.
 
@@ -280,7 +300,7 @@ explicit evidence file. Exit 0 indicates a ready plan; invalid/preflight errors 
 
 ## 6. Record, observe and stop
 
-Keep Isaac playing and the external router running:
+Keep Isaac playing and Isaac's router running:
 
 ```sh
 rig sim up --recipe camera-record --pull never --label isaac-camera
@@ -299,8 +319,8 @@ rig runs
 ```
 
 `status`, `logs` and teardown use the saved session's selection/configuration/environment.
-Teardown checks the original Docker engine and session ownership. It leaves Isaac and the
-external router running. Stop those separately after capture if desired. Do not edit saved
+Teardown checks the original Docker engine and session ownership. It stops the deployment's
+router with the logger and leaves Isaac and Isaac's router running. Stop those separately after capture if desired. Do not edit saved
 state to bypass an ownership or engine error. Restore the expected environment/launchers and
 retry teardown; failed startup retains evidence and can need this same cleanup command.
 Bare `rig down` also follows the shared session. `rig sim down` refuses an active replay
@@ -322,8 +342,8 @@ space or uninterrupted data for the remainder of the run.
 ## 7. Replay through the same recipe, without Isaac
 
 Stop Isaac or disconnect its ROS graph before replay so it cannot compete with the player
-for camera topics and `/clock`. Keep the external router available for this exact common
-selection. `isaac-camera` selects the newest run with that label; for reproducible acceptance,
+for camera topics and `/clock`. The session starts the deployment's router again with the
+logger; Isaac's router is not needed for replay. `isaac-camera` selects the newest run with that label; for reproducible acceptance,
 replace `replay.source` with the exact sealed run ID or its absolute path.
 
 ```sh

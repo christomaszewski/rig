@@ -269,6 +269,9 @@ using existing example instances, including the logger override needed to retain
 
 `session.instances` is exact: include the infrastructure, recording sources and consumers
 you want. The bag player remains managed automatically and must not appear in that list.
+With a Zenoh RMW (`rmw_zenoh_cpp`), replay refuses a session that selects no router:
+add the deployment's router row, as in `instances: [zenoh-router, bag_logger, planner]`.
+The `warehouse` example above omits it because its simulation section uses Fast DDS.
 `session.overrides` contains configuration patches for selected instances, applied only
 for the session; changing `name` or `service` is rejected. `session.clock` defaults to
 `source`, which requires a bag timeline for replay and enables the shared simulation clock.

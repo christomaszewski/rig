@@ -2,7 +2,10 @@
 # deployment and Isaac graph first. See docs/ISAAC_OFFLINE.md.
 version: 2
 session:
-  instances: [bag_logger]
+  # zenoh-router is the deployment's own router row (use your row's name). With a Zenoh RMW,
+  # `rig replay` refuses a session that selects no router, so the recipe lists it for both
+  # commands. Isaac's router is a separate one: see docs/ISAAC_OFFLINE.md, section 3.
+  instances: [zenoh-router, bag_logger]
   clock: source
   overrides:
     bag_logger:

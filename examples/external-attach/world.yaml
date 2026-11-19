@@ -2,7 +2,10 @@
 # See docs/SIMULATION.md, "An external simulator".
 version: 2
 session:
-  instances: [bag_logger, planner]
+  # zenoh-router is the deployment's own router row (use your row's name). With a Zenoh RMW,
+  # `rig replay` refuses a session that selects no router, so the recipe lists it for both
+  # commands. The simulator's router is a separate one: see the README.
+  instances: [zenoh-router, bag_logger, planner]
   clock: source
   overrides:
     bag_logger:

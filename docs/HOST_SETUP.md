@@ -123,14 +123,17 @@ required images and host dependencies are available locally or in that registry.
 ```
 rig unbake /tmp/<name>.tar.gz --into /opt/rig    # or just: tar xzf — it's a plain .tar.gz
 cd /opt/rig/<name>
-./run.sh up        # uses rig if Python+PyYAML present, else the static docker-compose scripts
+./run.sh up        # runs the baked, pre-rendered compose scripts (up.sh). The bundled rig runs
+                   #   only for a flagged form (`up --run X`) or an artifact without them (a
+                   #   fleet artifact renders on the vehicle, so it always uses rig)
 ./run.sh status
 ```
 Images pull from `devbox:5000` by digest on first `up`, then cache locally → the vehicle runs offline
 thereafter for those instances. Plain `./rig pull` covers enabled instances; explicitly pull a
 disabled player with `./rig pull bag_player` (use its actual name), and acquire native export
-helper images before disconnecting. To tweak on the vehicle, edit the unbaked tree and `./run.sh up`; `rig bake` again to capture a
-new tagged artifact.
+helper images before disconnecting. To tweak on the vehicle, edit the config and run `./rig up`, which renders it again. A bare
+`./run.sh up` starts the compose files frozen at bake time and does not see the edit. Then
+`rig bake` again to capture a new tagged artifact.
 
 **Fleet artifacts** (the deployment references `{{var}}` values — CHEATSHEET §1.6): the artifact
 ships *unresolved* and renders on-vehicle, so `python3-yaml` is REQUIRED there (no compose-only
