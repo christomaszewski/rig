@@ -348,6 +348,22 @@ def test_fleet_status_aggregates_and_survives_unreachable():
         assert "UNREACHABLE" in out                             # …and the sweep completed
 
 
+def test_fleet_status_says_when_a_vehicle_could_not_read_its_stacks():
+    """A vehicle that cannot reach Docker answers `unknown` for its stacks and exits 1. The
+    ground station's `0/1 up` alone would read as a stopped vehicle, so the count is shown."""
+    a = _sil_tree("veh_a")
+    data_root = pathlib.Path(tempfile.mkdtemp()) / "sil-data"
+    fy = _fleet_yaml([{"id": 1, "name": "veh_a", "path": str(a)}], data_root=data_root)
+    assert _run("fleet", "up", "--fleet", str(fy), "-j", "1")[0] == 0
+    svc = pathlib.Path(yaml.safe_load((a / "services.yaml").read_text())["services"]["simsvc"]["path"])
+    (svc / "sim-up").write_text('#!/bin/sh\n[ "$2" = ps ] || exit 0\n'
+                                'echo "Cannot connect to the Docker daemon" >&2\nexit 1\n')
+    rc, out, _ = _run("fleet", "status", "--fleet", str(fy))
+    assert rc == 1 and "0/1 up, 1 unknown" in out, out
+    rc, out, _ = _run("fleet", "status", "--fleet", str(fy), "-v")
+    assert "sim  unknown" in out, out
+
+
 def test_fleet_up_fails_soft_over_unreachable_row():
     """The MUTATING verbs share `list`/`status`'s DDIL posture: an unreachable row mars its line,
     never the sweep — the healthy vehicle's run still opens, and ssh rode BatchMode (never a

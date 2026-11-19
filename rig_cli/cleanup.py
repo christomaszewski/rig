@@ -109,7 +109,14 @@ def _projects_with_containers(projects: list[str]) -> dict[str, int]:
     found: dict[str, int] = {}
     for project in projects:
         proc = _docker(["ps", "-aq", "--filter", f"label=com.docker.compose.project={project}"])
-        count = len(proc.stdout.split()) if proc.returncode == 0 else 0
+        if proc.returncode != 0:
+            # "Could not ask" is not "none left": the gate exists so cleanup never removes the
+            # images and volumes of a stack that is still there. Fail closed.
+            said = (proc.stderr or "").strip().splitlines()
+            raise RigError(f"cleanup: cannot tell whether {project} still has containers — "
+                           f"`docker ps` failed" + (f" ({said[-1].strip()[:200]})" if said else "")
+                           + "; nothing removed. Is the Docker daemon reachable?")
+        count = len(proc.stdout.split())
         if count:
             found[project] = count
     return found

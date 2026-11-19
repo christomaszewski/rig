@@ -293,7 +293,9 @@ def test_as_json_op_state_is_additive():
     assert stacks[0]["op_state"] == "active"
     assert stacks[1]["op_state"] is None  # declared-nothing = null, distinct from "unknown"
     # the pre-existing contract keys survive untouched alongside the additive one
-    assert set(stacks[0]) == {"sensor", "service", "state", "health", "op_state", "running", "total"}
+    # (`error` is the second additive key: null unless the state could not be read)
+    assert set(stacks[0]) == {"sensor", "service", "state", "health", "op_state", "running", "total",
+                              "error"}
 
 
 if __name__ == "__main__":

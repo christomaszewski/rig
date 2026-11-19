@@ -246,7 +246,8 @@ def observe(args, root):
             if run_line:
                 print(run_line)
             print(status.render(rows, verbose=args.verbose))
-        return 0
+        from .cli import _status_exit
+        return _status_exit(rows)
     extra = []
     if args.follow:
         if len(pairs) != 1:

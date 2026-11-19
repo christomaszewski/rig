@@ -192,6 +192,35 @@ def test_guard_refuses_while_containers_exist():
             assert "rig down" in str(exc) and "cam_a-vehicle-1" in str(exc)
 
 
+def test_guard_refuses_when_docker_cannot_say_whether_containers_exist():
+    """A failed `docker ps` (daemon down, socket unreadable) used to count as "no containers",
+    so the gate that keeps cleanup away from a live stack opened on exactly the hosts where
+    nothing could be checked. Nothing may be removed."""
+    manifest, descriptors = _fixture()
+    root = pathlib.Path(tempfile.mkdtemp())
+    bin_dir = pathlib.Path(tempfile.mkdtemp(prefix="cleanup-bin-"))
+    log = bin_dir / "calls.log"
+    (bin_dir / "docker").write_text(
+        "#!/bin/sh\n"
+        f'echo "$@" >> {log}\n'
+        'echo "Cannot connect to the Docker daemon at unix:///var/run/docker.sock" >&2\n'
+        "exit 1\n")
+    (bin_dir / "docker").chmod(0o755)
+    old = os.environ["PATH"]
+    os.environ["PATH"] = f"{bin_dir}:{old}"
+    try:
+        try:
+            cleanup(root, manifest, descriptors, {}, names=[])
+            raise AssertionError("expected RigError")
+        except RigError as exc:
+            assert "cannot tell" in str(exc) and "Cannot connect" in str(exc), exc
+            assert "nothing removed" in str(exc)
+    finally:
+        os.environ["PATH"] = old
+    calls = log.read_text()
+    assert "rmi" not in calls and "volume rm" not in calls, calls
+
+
 def test_sweep_removes_images_declared_and_labeled_volumes():
     manifest, descriptors = _fixture()
     root = pathlib.Path(tempfile.mkdtemp())

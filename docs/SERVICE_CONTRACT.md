@@ -186,12 +186,18 @@ Compose files, `rig cleanup` and `rig image audit` read image references from it
 
 | ID | Level | Requirement | Checked by |
 | --- | --- | --- | --- |
-| O9 | MUST | `status --format json` prints what `docker compose ps --format json` prints: a JSON array, or one JSON object per line. Empty output means no containers. Rig reads `State` (a container counts as running when it is exactly `running`), `Health` (`healthy`, `unhealthy`, anything else, or empty for no healthcheck) and `Name` or `Service`. Any other text on stdout makes the instance read as down. | `certify: status` |
+| O9 | MUST | `status --format json` prints what `docker compose ps --format json` prints: a JSON array, or one JSON object per line. Empty output with exit status 0 means no containers. Rig reads `State` (a container counts as running when it is exactly `running`), `Health` (`healthy`, `unhealthy`, anything else, or empty for no healthcheck) and `Name` or `Service`. A non-zero exit, or any other text on stdout, makes the instance read as `unknown`: exit non-zero only when the question could not be answered, never because the stack is stopped. | `certify: status` |
 
 `rig status` rolls these up per instance. STATE is `running` when every container is
 running, `down` when none is and `partial` otherwise. HEALTH is `n/a` when no container has
 a healthcheck, `unhealthy` if any is, `healthy` when all checked containers are, and
 `starting` otherwise.
+
+STATE is `unknown` when the status call failed or printed something Rig could not read, for
+example because the Docker daemon is unreachable or its socket is not readable. Rig then
+prints the launcher's last error line, `rig status` exits 1, and `--format json` carries the
+reason in the stack's `error` field (null otherwise). `unknown` is not a report that the
+stack is down. `rig fleet status` shows the count beside the vehicle's `N/M up`.
 
 ## 5. Instance configuration
 

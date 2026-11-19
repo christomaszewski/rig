@@ -4,6 +4,12 @@ This is the consumer of the launcher stdout/stderr discipline: the human status 
 JSON to stdout, so we parse cleanly. Health comes from each service's baked Docker HEALTHCHECK; a project
 is healthy iff every *healthchecked* container is healthy and all are running (a plugin without a probe
 doesn't drag the sensor to "unknown").
+
+A question that could not be answered is never reported as "down". When the launcher's status call
+fails (the Docker daemon is unreachable, the socket is not readable, the compose model does not
+render) or prints something that is not `ps` output, the row's state is `unknown`, the reason rides
+on the row, and `rig status` exits non-zero: an operator who cannot reach Docker must not be told
+that a running stack has stopped.
 """
 from __future__ import annotations
 
@@ -35,6 +41,9 @@ def _parse_ps(stdout: str) -> list[dict]:
         return rows
 
 
+UNKNOWN = "unknown"  # the state of a row whose status could not be read (see the module docstring)
+
+
 @dataclass
 class Row:
     sensor: Sensor
@@ -49,6 +58,9 @@ class Row:
     # (transitioning+healthy = wait, e.g. a post-activate self-reset; transitioning+unhealthy =
     # stuck). rig prints the pair; it never re-interprets it.
     op_state: str | None = None
+    # Why `state` is "unknown": the launcher's status call failed, or its output could not be
+    # read. None whenever the question was answered (a stopped stack is an answer: "down").
+    error: str | None = None
 
 
 def _rollup(containers: list[dict]) -> tuple[str, str, int, int]:
@@ -91,13 +103,32 @@ def gather(pairs: list[tuple[Sensor, Descriptor]], env: dict[str, str]) -> list[
         except RigError:
             rows.append(Row(sensor, "no launcher", "-", 0, 0, [], None))
             continue
+        error = None
+        containers: list[dict] = []
         try:  # the SAME per-instance env up/down ran with — platform routing AND the compose
             #     project, or we'd ask the launcher about a stack rig never started
             proc = subprocess.run(cmd, env=instance_env(env, sensor, desc), cwd=str(desc.repo),
                                   capture_output=True, text=True)
-            containers = _parse_ps(proc.stdout)
-        except Exception:
-            containers = []
+        except Exception as exc:  # noqa: BLE001 — status must render on a half-broken vehicle
+            error = f"the launcher could not be run: {exc}"
+        else:
+            if proc.returncode != 0:
+                said = (proc.stderr or "").strip().splitlines()
+                error = (f"the launcher's status call exited {proc.returncode}"
+                         + (f": {said[-1].strip()[:200]}" if said else ""))
+            else:
+                try:
+                    containers = _parse_ps(proc.stdout)
+                    if not all(isinstance(c, dict) for c in containers):
+                        raise ValueError("not a list of containers")
+                except ValueError:  # json.JSONDecodeError is one
+                    containers = []
+                    error = ("the launcher's status call printed something other than "
+                             "`docker compose ps --format json` output")
+        if error is not None:  # we could not find out: never "down" (see the module docstring)
+            rows.append(Row(sensor, UNKNOWN, "-", 0, 0, [],
+                            UNKNOWN if desc.supports_states else None, error))
+            continue
         state, health, running, total = _rollup(containers)
         op = None
         if desc.supports_states:  # declared trio only — the declaration is the support claim
@@ -123,10 +154,23 @@ def as_json(manifest, rows: list[Row], run_line: str | None) -> str:
         # op_state is ADDITIVE (v0.2.35): observed operational state, null for services that don't
         # declare the trio. The pre-existing keys — `state` especially (the compose rollup) — are
         # the stable contract older consumers parse; never repurpose them.
+        # error is ADDITIVE too: null unless `state` is "unknown" (the status call failed or its
+        # output could not be read), then the reason. "unknown" is a new VALUE of `state`: a
+        # consumer counting `state == "running"` reads such a stack as not running, as before.
         "stacks": [{"sensor": r.sensor.name, "service": r.sensor.service, "state": r.state,
                     "health": r.health, "op_state": r.op_state,
-                    "running": r.running, "total": r.total} for r in rows],
+                    "running": r.running, "total": r.total, "error": r.error} for r in rows],
     }, sort_keys=True)
+
+
+def unknown(rows: list[Row]) -> list[Row]:
+    """The rows whose state could not be read — what makes `rig status` exit non-zero."""
+    return [r for r in rows if r.state == UNKNOWN]
+
+
+def explain(rows: list[Row]) -> list[str]:
+    """One sentence per unknown row, for stderr beside the table."""
+    return [f"{r.sensor.name}: state unknown — {r.error}" for r in unknown(rows)]
 
 
 def render(rows: list[Row], *, verbose: bool = False) -> str:
@@ -136,7 +180,7 @@ def render(rows: list[Row], *, verbose: bool = False) -> str:
     for row in rows:
         table.append(
             (row.sensor.name, row.sensor.service, row.state, row.health, row.op_state or "-",
-             f"{row.running}/{row.total}")
+             "?" if row.state == UNKNOWN else f"{row.running}/{row.total}")
         )
     widths = [max(len(r[i]) for r in table) for i in range(len(headers))]
     lines = []

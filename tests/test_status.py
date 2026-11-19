@@ -11,7 +11,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 from rig_cli.descriptor import Descriptor  # noqa: E402
 from rig_cli.manifest import Manifest, RosSettings, Sensor  # noqa: E402
-from rig_cli.status import Row, _parse_ps, _rollup, as_json, gather, render  # noqa: E402
+from rig_cli.status import Row, _parse_ps, _rollup, as_json, explain, gather, render  # noqa: E402
 
 
 def _sensor(name: str = "cam", service: str = "camsvc", order: int = 10) -> Sensor:
@@ -110,10 +110,12 @@ def test_as_json_stable_shape_and_sorted_keys():
         "stacks": [
             # op_state joined in v0.2.35 (ADDITIVE — the pre-existing keys are the stable contract):
             # null for services that don't declare the operational-state trio.
+            # error joined with the "unknown" state (ADDITIVE as well): null whenever the status
+            # question was answered, the reason when it was not.
             {"sensor": "cam", "service": "camsvc", "state": "running", "health": "healthy",
-             "op_state": None, "running": 2, "total": 2},
+             "op_state": None, "running": 2, "total": 2, "error": None},
             {"sensor": "gnss", "service": "gnsssvc", "state": "down", "health": "-",
-             "op_state": None, "running": 0, "total": 0},
+             "op_state": None, "running": 0, "total": 0, "error": None},
         ],
     }
     # Byte-for-byte against a sort_keys dump: proves the exact keys/values AND that the
@@ -176,9 +178,71 @@ def test_gather_rolls_up_healthy_and_failed_launchers():
     ok = rows[0]
     assert (ok.state, ok.health, ok.running, ok.total) == ("running", "healthy", 1, 1)
     assert ok.containers[0]["Name"] == "cam-vehicle-1-core-1"  # containers kept for verbose render
-    bad = rows[1]  # launcher exits 1 with nothing on stdout -> no containers -> "down", never a crash
-    assert (bad.state, bad.health, bad.running, bad.total) == ("down", "-", 0, 0)
+    # The launcher exits 1 with nothing on stdout: rig could not find out. That used to read as
+    # no containers -> "down", which told an operator who cannot reach Docker that a running
+    # stack had stopped. It is "unknown", with the launcher's own last line as the reason.
+    bad = rows[1]
+    assert (bad.state, bad.health, bad.running, bad.total) == ("unknown", "-", 0, 0)
     assert bad.containers == []
+    assert "exited 1" in bad.error and "cannot reach docker" in bad.error, bad.error
+    assert ok.error is None
+    assert explain(rows) == [f"gnss: state unknown — {bad.error}"]
+
+
+_CHATTY_LAUNCHER = """\
+#!/bin/sh
+[ "$2" = ps ] || exit 0
+echo "camsvc: 1 container up"
+"""
+
+_STOPPED_LAUNCHER = """\
+#!/bin/sh
+exit 0
+"""
+
+
+def test_gather_reads_unparseable_status_output_as_unknown_and_empty_output_as_down():
+    pairs = [(_sensor("cam", "camsvc"), _desc("camsvc", _CHATTY_LAUNCHER)),
+             (_sensor("gnss", "gnsssvc", order=20), _desc("gnsssvc", _STOPPED_LAUNCHER))]
+    chatty, stopped = gather(pairs, {"PATH": os.environ["PATH"]})
+    assert chatty.state == "unknown" and "docker compose ps --format json" in chatty.error
+    # Exit 0 with nothing on stdout IS an answer: the project has no containers.
+    assert (stopped.state, stopped.error) == ("down", None)
+    table = render([chatty, stopped])
+    assert "unknown" in table and "?" in table and "0/0" in table
+    doc = json.loads(as_json(Manifest(vehicle="boat", ros=RosSettings(1, "rmw_zenoh_cpp", None),
+                                      sensors=[]), [chatty, stopped], None))
+    assert [(x["state"], x["error"] is None) for x in doc["stacks"]] == [("unknown", False),
+                                                                        ("down", True)]
+
+
+def test_rig_status_exits_nonzero_and_says_why_when_a_stack_cannot_be_read():
+    """`rig status` exited 0 with `down 0/0` when the Docker daemon was unreachable, and
+    `rig fleet status` passed that on. A stopped stack still exits 0."""
+    import contextlib
+    import io
+    from types import SimpleNamespace
+    from rig_cli.cli import cmd_status
+
+    def run(launcher, fmt):
+        sensor = _sensor("cam", "camsvc")
+        manifest = Manifest(vehicle="boat", ros=RosSettings(1, "rmw_zenoh_cpp", None),
+                            sensors=[sensor], vehicle_id=1)
+        args = SimpleNamespace(names=[], verbose=False, format=fmt, rig_root=None)
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = cmd_status(args, manifest, {}, {"camsvc": _desc("camsvc", launcher)})
+        return rc, out.getvalue(), err.getvalue()
+
+    rc, out, err = run(_BROKEN_LAUNCHER, "table")
+    assert rc == 1 and "unknown" in out, (rc, out)
+    assert "cam: state unknown" in err and "cannot reach docker" in err and "not a report" in err, err
+    rc, out, err = run(_BROKEN_LAUNCHER, "json")
+    assert rc == 1 and json.loads(out)["stacks"][0]["state"] == "unknown", out
+    rc, out, err = run(_STOPPED_LAUNCHER, "table")
+    assert rc == 0 and "down" in out and "unknown" not in out + err, (out, err)
+    rc, out, err = run(_OK_LAUNCHER, "json")
+    assert rc == 0 and json.loads(out)["stacks"][0]["state"] == "running"
 
 
 def test_gather_reports_a_missing_launcher_as_its_own_row():

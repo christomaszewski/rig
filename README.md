@@ -117,7 +117,9 @@ python3 -m venv .venv && .venv/bin/pip install pyyaml
 ./rig pull bag_player     # explicitly pull a disabled replay player (use its actual instance name)
 ./rig status             # one rolled-up row per sensor (state + health from compose ps; OP =
                           #   observed operational state for services declaring the state verbs —
-                          #   read OP and HEALTH as a pair)
+                          #   read OP and HEALTH as a pair). A stack whose status could not be
+                          #   read (Docker unreachable) shows `unknown`, never `down`, with the
+                          #   reason on stderr and exit status 1
 ./rig status -v           # expand per-container detail
 ./rig standby             # park declared stacks (reverse order): ready but quiet — lifecycle idle,
                           #   devices low-power (ouster: motor stopped, laser off); HEALTH unaffected.

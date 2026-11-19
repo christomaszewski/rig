@@ -257,6 +257,21 @@ def cmd_pull(args, manifest, catalog, descriptors) -> int:
     return _summarize(dispatch.run_verb(pairs, env, "pull", dry_run=args.dry_run))
 
 
+def _status_exit(rows) -> int:
+    """`rig status` exits 1 when a stack's state could not be read, and says why on stderr: an
+    unreachable Docker daemon must never look like a stopped vehicle (to a person or to
+    `rig fleet status`, which counts this exit as a problem)."""
+    reasons = status_mod.explain(rows)
+    if not reasons:
+        return 0
+    sys.stdout.flush()  # the table first, when both streams share a pipe
+    for line in reasons:
+        eprint(f"rig status: {line}")
+    eprint(f"rig status: {len(reasons)} of {len(rows)} could not be read — this is not a report "
+           f"that they are down")
+    return 1
+
+
 def cmd_status(args, manifest, catalog, descriptors) -> int:
     env = dispatch.fleet_env(manifest, descriptors)
     pairs = _pairs(manifest, descriptors, args.names)
@@ -264,11 +279,11 @@ def cmd_status(args, manifest, catalog, descriptors) -> int:
     run_line = runs_mod.status_line(manifest, getattr(args, "rig_root", None))
     if getattr(args, "format", "table") == "json":  # the machine contract fleet tooling parses
         print(status_mod.as_json(manifest, rows, run_line))
-        return 0
-    if run_line is not None:
-        print(run_line)
-    print(status_mod.render(rows, verbose=args.verbose))  # stdout: the report
-    return 0
+    else:
+        if run_line is not None:
+            print(run_line)
+        print(status_mod.render(rows, verbose=args.verbose))  # stdout: the report
+    return _status_exit(rows)
 
 
 def cmd_new_run(args, manifest, catalog, descriptors) -> int:
@@ -1284,7 +1299,8 @@ def build_parser() -> argparse.ArgumentParser:
     rf.add_argument("--copy", action="store_true",
                     help="with --recordings: copy the files (default: move — the parts are large)")
 
-    st = add("status", "fleet status table")
+    st = add("status", "fleet status table; exits 1 when a stack's state could not be read "
+                       "(shown as `unknown`, never as `down`)")
     st.add_argument("-v", "--verbose", action="store_true", help="expand per-container detail")
     st.add_argument("--format", choices=["table", "json"], default="table",
                     help="json = one stable object (vehicle/run/stacks) — the machine contract "

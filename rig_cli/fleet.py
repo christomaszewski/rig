@@ -602,8 +602,12 @@ def cmd_status(fleet: Fleet, names: list[str], *, verbose: bool, jobs: int) -> i
             problems += 1
             continue
         up = sum(1 for s in stacks if s.get("state") == "running")
+        # A vehicle that could not ask Docker reports those stacks as "unknown" (and exits 1):
+        # say so here, or "0/N up" would read as a stopped vehicle.
+        blind = sum(1 for s in stacks if s.get("state") == "unknown")
         run = str(doc.get("run") or "no active run").replace("run: ", "")
-        rows.append((o.vehicle.name, "ok", run, f"{up}/{len(stacks)} up"))
+        rows.append((o.vehicle.name, "ok", run,
+                     f"{up}/{len(stacks)} up" + (f", {blind} unknown" if blind else "")))
         if o.rc != 0:
             problems += 1
         if verbose:
