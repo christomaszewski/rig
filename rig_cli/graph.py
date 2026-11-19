@@ -1,7 +1,6 @@
-"""Graph topology — reading the graph-snapshotter's epoch files (rig-graph-capture handoff §1).
+"""Graph topology from rig-infra observer and legacy bag-logger graph snapshots.
 
-The ros2-bag-logger's graph-snapshotter sidecar (rig-infra ≥ v1.7.0, enabled by the logger config's
-`graph:` block) walks the live ROS 2 graph and appends append-only, change-deduped EPOCH files under
+The observer walks the live ROS 2 graph and writes an epoch for each change under
 ``<run>/graph/<writer>/epoch_<UTCstamp>.yaml`` — per node FQN, its pubs/subs/service servers/clients
 with types, plus the window (`first`/`last`) that graph state was observed. Bags record data; epochs
 record who talked to what.
@@ -64,7 +63,7 @@ class Edge:
 @dataclass
 class Epoch:
     path: Path
-    writer: str  # graph/<writer>/ — the sidecar's config name (usually the logger instance's)
+    writer: str  # graph/<writer>/ uses the observer or legacy logger instance name
     first: str   # ISO8601 UTC, second resolution
     last: str
     nodes: dict[str, tuple[Edge, ...]]  # node FQN -> edges
@@ -453,8 +452,8 @@ def cmd(manifest, descriptors, *, run_ref: str | None, do_check: bool,
     run_id, run_dir = resolve_run(manifest, run_ref)
     epochs = load_epochs(run_dir)
     if not epochs:
-        eprint(f"rig graph: no epochs under {run_dir / 'graph'} — enable the bag-logger's "
-               f"`graph:` block (rig-infra ≥ v1.7.0) to capture topology into future runs")
+        eprint(f"rig graph: no epochs under {run_dir / 'graph'} — enable graph capture and "
+               "recording in the rig-infra observer to capture topology in future runs")
         return 1
     u = union(epochs)
     namespaces = {s.name: resolve_ros_namespace(descriptors.get(s.service), s.name)

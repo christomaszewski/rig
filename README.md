@@ -130,8 +130,8 @@ python3 -m venv .venv && .venv/bin/pip install pyyaml
                           #   instead be activated by the mission layer via ROS lifecycle directly
 ./rig logs cam_front -f   # follow one sensor's logs
 ./rig config gnss_primary # render a sensor's merged compose (delegates to the launcher's `config`)
-./rig graph               # observed pub/sub/service topology from a run's graph epochs (the bag
-                          #   logger's `graph:` sidecar, rig-infra ≥ v1.7.0); --check compares vs the
+./rig graph               # observed pub/sub/service topology from a run's graph epochs
+                          #   (rig-infra observer or legacy logger). --check compares vs the
                           #   riggings' declared interface: (WARN-only), --contract <instance>
                           #   scaffolds that block from observation, -o writes the union YAML
 ./rig run rm <id> / run import <path>  # registry lifecycle: reclaim disk (sealed freely,
@@ -484,6 +484,9 @@ sensor/autonomy services get a commented menu row to uncomment):
   `output` block (storage/compression/split). Place at order ~1 so it records from startup. The ros2
   logger defaults to `fleet-ros` (rosbag2 + mcap + rmw_zenoh, ~1 GB — no camera image on camera-less
   vehicles).
+- **`observer/`** (rig-infra v1.21.0+) records graph epochs, system samples and host settings
+  in the run directory. The example vehicle starts it after the recorder so the bag includes
+  the observer's `/diagnostics` messages. See the [observer config](config/infra/observer.yaml).
 - **`base/`** — the `fleet-ros` image; `rig build` builds + pushes it via the riggings' `build:`
   declaration, and certify enforces the composes pull the same tag. The zenoh-router and
   ros2-bag-logger riggings mark it `provides: base`, making it the DEPLOYMENT's base image: `rig build` builds it first and exports it

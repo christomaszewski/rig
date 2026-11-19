@@ -372,8 +372,8 @@ def select_topics(source_dir: Path, with_names: list[str],
             notices.append("fallback: the with-set has no external subscribes in the source "
                            "epochs — namespace heuristic")
     else:
-        notices.append("fallback: source run has no graph epochs — namespace heuristic (enable "
-                       "the bag-logger's `graph:` block, rig-infra ≥ v1.7.0, for exact selection)")
+        notices.append("fallback: source run has no graph epochs — namespace heuristic "
+                       "(enable graph capture and recording in the rig-infra observer for future runs)")
     pattern = _namespace_pattern(with_names, namespaces)
     return "exclude", pattern, notices
 

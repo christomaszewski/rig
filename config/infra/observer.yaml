@@ -1,0 +1,22 @@
+service: observer
+name: observer
+
+graph:
+  enabled: true
+  interval_s: 60
+  settle_s: 2
+  endpoints: true
+
+system:
+  enabled: true
+  interval_s: 1
+  settings_interval_s: 30
+
+recording:
+  enabled: true
+
+diagnostics:
+  enabled: true
+  topic: /diagnostics
+  interval_s: 1
+  publish_during_replay: false
