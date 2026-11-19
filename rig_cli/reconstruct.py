@@ -34,7 +34,7 @@ import tempfile
 from pathlib import Path
 
 from . import RigError
-from .common import contained, eprint, load_yaml
+from .common import atomic_write_text, contained, eprint, load_yaml
 
 
 def _run_manifest(run_dir: Path) -> dict:
@@ -569,7 +569,7 @@ def retrofit_recordings(run_dir: Path, specs: list[str], *, all_sessions: bool =
         if name not in stacks:   # the instance ran (it recorded); the old manifest never listed it
             stacks.append(name)
     doc["stacks"] = stacks
-    (run_dir / "manifest.yaml").write_text(yaml.safe_dump(doc, sort_keys=False))
+    atomic_write_text(run_dir / "manifest.yaml", yaml.safe_dump(doc, sort_keys=False))
     return record
 
 
@@ -622,7 +622,7 @@ def cmd_retrofit(root: Path, *, run_refs: list[str], artifact: str | None,
             doc["capture"] = {"sha256": _sha256(rig_dir / "artifact.tar.gz"),
                               "rig_version": doc.get("rig_version"),
                               "retrofitted": datetime.date.today().isoformat()}
-            (run_dir / "manifest.yaml").write_text(yaml.safe_dump(doc, sort_keys=False))
+            atomic_write_text(run_dir / "manifest.yaml", yaml.safe_dump(doc, sort_keys=False))
             eprint(f"rig retrofit: {run_dir.name} <- {tarpath.name} "
                    f"(capture stamped, retrofitted)")
         except RigError as exc:

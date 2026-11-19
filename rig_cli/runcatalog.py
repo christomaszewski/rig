@@ -56,10 +56,11 @@ def _read_roots() -> list[dict]:
 def _write_roots(rows: list[dict]) -> None:
     path = roots_file()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("# rig catalog roots — registries and harvest trees `rig catalog` scans.\n"
-                    "# rig appends what it touches (a registry it opens/imports into, a `fleet sync`\n"
-                    "# tree, a reconstruct workspace); `rig catalog add|remove <dir>` edits by hand.\n"
-                    + yaml.safe_dump({"roots": rows}, sort_keys=False))
+    from .common import atomic_write_text
+    atomic_write_text(path, "# rig catalog roots — registries and harvest trees `rig catalog` scans.\n"
+                            "# rig appends what it touches (a registry it opens/imports into, a `fleet sync`\n"
+                            "# tree, a reconstruct workspace); `rig catalog add|remove <dir>` edits by hand.\n"
+                            + yaml.safe_dump({"roots": rows}, sort_keys=False))
 
 
 def remember(path: Path | str, *, kind: str = "registry") -> None:

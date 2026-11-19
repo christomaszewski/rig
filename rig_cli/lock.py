@@ -28,7 +28,7 @@ from pathlib import Path
 import yaml
 
 from . import RigError
-from .common import load_yaml
+from .common import atomic_write_text, load_yaml
 
 LOCK_SCHEMA = 1
 _HEADER = ("# rig.lock — GENERATED provenance: registries@commit, package pins + hashes, instance\n"
@@ -56,7 +56,8 @@ def save_lock(root: Path, lock: dict) -> Path:
     path = lock_path(root)
     body = {key: lock[key] for key in sorted(lock) if lock[key] not in (None, {}, [])}
     body["schema"] = lock.get("schema", LOCK_SCHEMA)
-    path.write_text(_HEADER + yaml.safe_dump(body, sort_keys=True, default_flow_style=False))
+    # One file holds every pin of the deployment: never leave it half written.
+    atomic_write_text(path, _HEADER + yaml.safe_dump(body, sort_keys=True, default_flow_style=False))
     return path
 
 

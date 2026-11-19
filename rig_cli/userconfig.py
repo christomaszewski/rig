@@ -64,9 +64,10 @@ def save_user_config(**updates) -> Path:
             doc[key] = value
     path = user_config_file()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("# rig user settings — written by `rig setup` (data_dir: this user's run registry;\n"
-                    "# precedence: tree-local vehicle.local.yaml > THIS file > /etc/rig > vehicle.yaml).\n"
-                    + (yaml.safe_dump(doc, sort_keys=False) if doc else ""))
+    from .common import atomic_write_text
+    atomic_write_text(path, "# rig user settings — written by `rig setup` (data_dir: this user's run registry;\n"
+                            "# precedence: tree-local vehicle.local.yaml > THIS file > /etc/rig > vehicle.yaml).\n"
+                            + (yaml.safe_dump(doc, sort_keys=False) if doc else ""))
     return path
 
 

@@ -72,6 +72,47 @@ def safe_component(value: str, *, what: str) -> str:
     return value
 
 
+def atomic_write_bytes(path: Path, data: bytes) -> None:
+    """Replace ``path`` with ``data`` so that a reader, a power cut or an interrupt sees the old
+    file or the new one, never a truncated one: write a temporary file in the same directory,
+    flush it to disk, and rename it over the target. For every file rig owns and reads back —
+    a run's manifest.yaml sealed just before a vehicle is powered off, rig.lock, the machine
+    identity file, a pushed roster.
+
+    A symlink at ``path`` is written THROUGH (its target is replaced), as an in-place write
+    would. A hard link is not: the rename gives ``path`` its own file, so a write to an export's
+    hardlinked copy no longer reaches into the run it was linked from. An existing file keeps
+    its mode; a new one gets the mode a plain open() would have given it."""
+    import os
+    import tempfile
+    path = Path(os.path.realpath(path))
+    try:
+        mode = path.stat().st_mode & 0o7777
+    except OSError:
+        umask = os.umask(0)
+        os.umask(umask)
+        mode = 0o666 & ~umask
+    fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def atomic_write_text(path: Path, text: str) -> None:
+    """atomic_write_bytes for text (UTF-8)."""
+    atomic_write_bytes(path, text.encode("utf-8"))
+
+
 def checked_git_url(url, *, what: str) -> str:
     """A git remote rig is about to hand to `git fetch` or `git clone`. It arrives from a registry
     package manifest, a rigging.yaml or another repository's .gitmodules: data, never an option.

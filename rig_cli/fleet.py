@@ -55,7 +55,7 @@ from pathlib import Path
 import yaml
 
 from . import RigError
-from .common import eprint, load_yaml, print_table
+from .common import atomic_write_bytes, eprint, load_yaml, print_table
 from .interpolate import MARKER, resolve_map
 
 FLEET_KEYS = {"fleet", "mode", "gcs_ip", "sil", "vehicles", "vars", "unique"}
@@ -654,6 +654,9 @@ def _remove_network(fleet: Fleet, *, dry_run: bool) -> None:
                f"({(gone.stderr or '').strip().splitlines()[-1][:120] if gone.stderr else 'in use?'})")
 
 
+_ROSTER_TMP = ".fleet.yaml.rig-push"  # the name a roster travels under until it is complete
+
+
 def _push_roster(fleet: Fleet, vehicles: list[Vehicle], *, dry_run: bool) -> set[str]:
     """The roster carve-out: fleet.yaml lands beside each deployment, where the run snapshot
     captures the roster the run was launched under and the vehicle reads its fleet tier.
@@ -667,13 +670,21 @@ def _push_roster(fleet: Fleet, vehicles: list[Vehicle], *, dry_run: bool) -> set
                 dest = Path(v.path).expanduser() / "fleet.yaml"
                 if dest.exists() and os.path.samefile(fleet.path, dest):
                     continue  # the roster IS this deployment's own file: nothing to deliver
-                shutil.copyfile(fleet.path, dest)
+                atomic_write_bytes(dest, Path(fleet.path).read_bytes())
             else:
+                # Copy under a temporary name, then rename on the vehicle: a link that drops
+                # mid-transfer leaves the roster the vehicle already holds, never half of the
+                # new one for a later boot to read.
                 scp = subprocess.run(["scp", "-q", *_SSH_OPTS, str(fleet.path),
-                                      f"{v.host}:{v.path}/fleet.yaml"],
+                                      f"{v.host}:{v.path}/{_ROSTER_TMP}"],
                                      capture_output=True, text=True, timeout=60)
                 if scp.returncode != 0:
                     raise OSError((scp.stderr or "").strip()[:120] or "scp failed")
+                placed = _run_script(v, f"cd {_pathexpr(v.path)} && mv -f {_ROSTER_TMP} fleet.yaml",
+                                     timeout=60)
+                if placed.rc != 0:
+                    raise OSError((placed.err or "").strip()[:120]
+                                  or "the copied roster could not be put in place")
         except (OSError, subprocess.TimeoutExpired) as exc:
             missed.add(v.name)
             eprint(f"  {v.name}: warning — roster push failed ({exc}); this vehicle keeps the "

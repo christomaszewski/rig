@@ -29,7 +29,7 @@ from pathlib import Path
 import yaml
 
 from . import RigError, dispatch, runs as runs_mod
-from .common import eprint, load_yaml
+from .common import atomic_write_text, eprint, load_yaml
 
 EXPORTS_DIR = "exports"
 
@@ -332,7 +332,7 @@ def in_place(manifest, descriptors, run_id: str, run_dir: Path, *, profile: str 
     doc["rewrites"] = [h for h in (doc.get("rewrites") or []) if isinstance(h, dict)] + records
     if "disk_kb" in doc:
         doc["disk_kb"] = (tree_bytes(run_dir) + 1023) // 1024
-    mpath.write_text(yaml.safe_dump(doc, sort_keys=False))
+    atomic_write_text(mpath, yaml.safe_dump(doc, sort_keys=False))
     return rc
 
 
@@ -411,7 +411,10 @@ def cmd(manifest, catalog, descriptors, root: Path, *, run_ref: str, profile: st
     exp_bytes = tree_bytes(dest)
     rig_dir = dest / ".rig"
     rig_dir.mkdir(parents=True, exist_ok=True)
-    (rig_dir / "export.yaml").write_text(yaml.safe_dump({"export": {
+    # Atomic, and therefore its own file: when the source run is itself an export, its
+    # .rig/export.yaml was hardlinked into this tree above, and an in-place write here
+    # rewrote the SOURCE's provenance.
+    atomic_write_text(rig_dir / "export.yaml", yaml.safe_dump({"export": {
         "profile": profile,
         "of": run_id,
         "source": str(run_dir),

@@ -316,6 +316,24 @@ def test_export_refusals_and_exporter_failure_recorded():
     assert (run / "exports" / "review" / "manifest.yaml").is_file()
 
 
+def test_exporting_an_export_leaves_its_source_provenance_alone():
+    """A slim export hardlinks what it keeps, its source's .rig/export.yaml included when the
+    source is itself an export (a harvested or imported one). The new export then wrote its own
+    provenance in place, through the link: the SOURCE now claimed the new profile, of itself."""
+    root, data = tree(profiles=PROFILES)
+    run = run_dir(data)
+    rc, err = _cli(root, "run", "export", str(run), "--profile", "review")
+    assert rc == 0, err
+    first = run / "exports" / "review"
+    before = (first / ".rig" / "export.yaml").read_text()
+    assert yaml.safe_load(before)["export"]["profile"] == "review"
+    rc, err = _cli(root, "run", "export", str(first), "--profile", "novideo")
+    assert rc == 0, err
+    second = first / "exports" / "novideo"
+    assert yaml.safe_load((second / ".rig" / "export.yaml").read_text())["export"]["profile"] == "novideo"
+    assert (first / ".rig" / "export.yaml").read_text() == before
+
+
 def test_export_dry_run_touches_nothing_and_names_unknown_profile_keys():
     root, data = tree(profiles=PROFILES + "  odd:\n    ghost: { preset: x }\n")
     run = run_dir(data)

@@ -32,7 +32,7 @@ from pathlib import Path
 import yaml
 
 from . import RigError, __version__
-from .common import eprint, load_yaml
+from .common import atomic_write_text, eprint, load_yaml
 from .manifest import LOCAL_KEYS, MACHINE_LOCAL_DEFAULT, RIG_OWNED_ENV
 
 RECORD_VERSION = 1  # the `rig_provision:` a record carries; apply refuses any other
@@ -111,7 +111,10 @@ def _identity_gate(existing: dict, data: dict, force: bool) -> None:
 def _write(target: Path, data: dict) -> None:
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(
+        # Atomic: a power cut mid-write must leave the old identity, never an empty file that
+        # boots the vehicle unprovisioned.
+        atomic_write_text(
+            target,
             "# Machine vehicle identity — written by `rig provision`; read by every rig/artifact\n"
             "# on this machine (precedence: shell > deployment-local > THIS file > vehicle.yaml).\n"
             + yaml.safe_dump(data, sort_keys=False))

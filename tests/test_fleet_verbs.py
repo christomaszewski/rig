@@ -863,12 +863,16 @@ def test_fleet_up_hands_the_vehicle_the_roster_digest_to_check():
         rc, _, err = _run("--root", str(far), "up", "--dry-run", "--roster", digest)
         assert rc == 1 and "no fleet.yaml" in err, err
         (far / "fleet.yaml").write_bytes(held)
-    # a push that reports success and delivers nothing: the ground station cannot tell, the
-    # vehicle can — it still holds band 4 while the roster now says 5
+    assert not (far / ".fleet.yaml.rig-push").exists()             # the travelling name is gone
+    # a push that reports success and delivers nothing. The roster travels under a temporary
+    # name and is renamed on the vehicle (a dropped link must never leave half a roster), so
+    # the ground station now sees the rename fail and holds the vehicle; before, it started
+    # the vehicle and the vehicle refused. Either way it still holds band 4, whole.
     with _env(SHIM_SCP_DROP="farhost"):
         rc, _, err = _run("fleet", "up", "--fleet", str(roster(5)), "--run", "link", "-j", "1")
     assert rc == 1 and "fleet up: 1/2 ok" in err, err
-    assert "another roster" in err and far_ups() == 1
+    assert "roster push failed" in err and "did not reach this vehicle" in err, err
+    assert far_ups() == 1 and (far / "fleet.yaml").read_bytes() == held
     # a roster without row values sends no flag: vehicles on an older rig keep working with it
     plain_far = _sil_tree("veh_b")
     (plain_far / "vehicle.local.yaml").write_text(

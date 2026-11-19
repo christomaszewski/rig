@@ -60,7 +60,7 @@ from pathlib import Path
 import yaml
 
 from . import RigError, __version__
-from .common import eprint, load_yaml
+from .common import atomic_write_text, eprint, load_yaml
 from .lock import sha256_bytes
 from .manifest import Manifest, machine_file, project_name
 
@@ -522,7 +522,7 @@ def snapshot(manifest: Manifest, root: Path, *, stacks: list[str]) -> str | None
         if not isinstance(ups, list):
             ups = doc["ups"] = []
         ups.append(entry)
-        (run_dir / "manifest.yaml").write_text(yaml.safe_dump(doc, sort_keys=False))
+        atomic_write_text(run_dir / "manifest.yaml", yaml.safe_dump(doc, sort_keys=False))
         return digest
     except Exception as exc:  # noqa: BLE001 — fail SOFT: never wedge `up` on provenance
         eprint(f"rig: warning: config snapshot failed ({exc}) — continuing without it")
@@ -579,7 +579,7 @@ def capture_docker_logs(manifest: Manifest, also: set[str] = frozenset(), *, env
                     eprint(f"rig: warning: could not capture logs for {name}: {exc}")
         if captured:
             doc["docker_logs"] = {"at": _iso_now(), "containers": captured}
-            (run_dir / "manifest.yaml").write_text(yaml.safe_dump(doc, sort_keys=False))
+            atomic_write_text(run_dir / "manifest.yaml", yaml.safe_dump(doc, sort_keys=False))
             eprint(f"rig: run {run_id}: captured docker logs for {captured} container(s) "
                    f"-> runs/{run_id}/.rig/logs/")
     except Exception as exc:  # noqa: BLE001 — fail SOFT: never wedge `down` on provenance
@@ -625,7 +625,7 @@ def _open_run(manifest: Manifest, root: Path, data: Path, label: str | None,
             eprint(f"rig: warning: run capture failed ({exc}) — opening without "
                    f".rig/artifact.tar.gz (config snapshots still cover the config layer; "
                    f"`rig run retrofit` can supply the tree later)")
-    (run_dir / "manifest.yaml").write_text(yaml.safe_dump(doc, sort_keys=False))
+    atomic_write_text(run_dir / "manifest.yaml", yaml.safe_dump(doc, sort_keys=False))
     cur = _current(data)
     if cur.exists() and not cur.is_symlink():
         raise RigError(f"{cur} exists but is not a symlink — remove it (the registry owns this path)")
@@ -669,7 +669,7 @@ def _seal(run_dir: Path, status_text: str | None, *, live_digest: str | None = N
         pass
     if status_text:
         doc["status_at_end"] = status_text
-    mpath.write_text(yaml.safe_dump(doc, sort_keys=False))
+    atomic_write_text(mpath, yaml.safe_dump(doc, sort_keys=False))
 
 
 def mark_failed(run_dir: Path, *, stage: str, error: str) -> None:
@@ -680,7 +680,7 @@ def mark_failed(run_dir: Path, *, stage: str, error: str) -> None:
     mpath = run_dir / "manifest.yaml"
     doc = load_yaml(mpath)
     doc["failed"] = {"stage": stage, "at": _iso_now(), "error": error}
-    mpath.write_text(yaml.safe_dump(doc, sort_keys=False))
+    atomic_write_text(mpath, yaml.safe_dump(doc, sort_keys=False))
 
 
 def failure(doc: dict) -> tuple[str, str] | None:
@@ -896,7 +896,7 @@ def tag_runs(manifest: Manifest, ref: str, tags: list[str], *, remove: bool = Fa
         doc["tags"] = sorted(want)
     else:
         doc.pop("tags", None)
-    mpath.write_text(yaml.safe_dump(doc, sort_keys=False))
+    atomic_write_text(mpath, yaml.safe_dump(doc, sort_keys=False))
     eprint(f"rig run {'untag' if remove else 'tag'}: {run_id}: tags now "
            f"[{', '.join(sorted(want)) or '—'}]")
     return 0

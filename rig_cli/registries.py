@@ -86,7 +86,9 @@ def save_entries(entries: list[Entry]) -> None:
     registries_file().parent.mkdir(parents=True, exist_ok=True)
     rows = [{"name": e.name, "type": e.type, ("url" if e.type == "git" else "path"): e.location}
             for e in entries]
-    registries_file().write_text(
+    from .common import atomic_write_text
+    atomic_write_text(
+        registries_file(),
         "# Ordered registry list — ORDER IS PRIORITY for unqualified-name resolution.\n"
         "# Managed by `rig registry add|remove` (hand-editing is fine; keep it a list).\n"
         + yaml.safe_dump({"registries": rows}, sort_keys=False))
