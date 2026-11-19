@@ -54,6 +54,73 @@ RIG_OWNED_ENV = {"RIG_BUILD_PLATFORMS", "RIG_BUILD_RESULT", "RIG_BUILD_PULL", "R
                  "RIG_TARGET_STATE"}
 
 
+# What vehicle.yaml may carry. A key outside these sets used to be ignored without a word, so a
+# typo changed what the vehicle runs: `enable: false` left the stack enabled, and `sensor:`
+# for `sensors:` loaded an empty deployment that `rig doctor` passed. A top-level key starting
+# with `x-` is the place for notes and YAML anchors, as in compose.
+TOP_KEYS = {"vehicle", "vehicle_id", "ros", "images", "platform", "arch", "data_dir", "vars", "env",
+            "export_profiles", "replay", "run_capture", "infra", "sensors", "autonomy"}
+ROW_KEYS = {"name", "service", "config", "enabled", "order", "overrides", "overlays", "profile",
+            "replay"}
+ROS_KEYS = {"domain_id", "rmw", "distro"}
+IMAGES_KEYS = {"registry", "tag", "base"}
+
+
+def _unknown(keys, allowed: set, where: str) -> list[str]:
+    """One sentence per key outside ``allowed``, with the nearest known key when there is one."""
+    import difflib
+    out = []
+    for key in keys:
+        if key in allowed:
+            continue
+        near = difflib.get_close_matches(str(key), sorted(allowed), n=1, cutoff=0.6)
+        out.append(f"{where}: unknown key `{key}`"
+                   + (f" — did you mean `{near[0]}`?" if near else
+                      f" (known: {', '.join(sorted(allowed))})"))
+    return out
+
+
+def check_shape(data: dict, path: Path) -> list[str]:
+    """Problems in a vehicle.yaml's keys and types, as sentences. Raises RigError when the file's
+    STRUCTURE cannot be read at all (a tier that is not a list, a row that is not a mapping):
+    nothing can be done with that, on any verb. The returned problems are the ones a verb acting
+    on running stacks may warn about and carry on past — never a reason to refuse `rig down`."""
+    problems = _unknown([k for k in data if not str(k).startswith("x-")], TOP_KEYS, str(path))
+    for key, allowed in (("ros", ROS_KEYS), ("images", IMAGES_KEYS)):
+        block = data.get(key)
+        if block is None:
+            continue
+        if not isinstance(block, dict):
+            raise RigError(f"{path}: `{key}` must be a mapping ({', '.join(sorted(allowed))}), "
+                           f"not {type(block).__name__}")
+        problems += _unknown(block, allowed, f"{path}: {key}")
+    if "run_capture" in data and not isinstance(data["run_capture"], bool):
+        problems.append(f"{path}: `run_capture` must be true or false, not {data['run_capture']!r}")
+    for tier in ("infra", "sensors", "autonomy"):
+        rows = data.get(tier)
+        if rows is None:
+            continue
+        if not isinstance(rows, list):
+            raise RigError(f"{path}: `{tier}` must be a list of rows (`- {{name: …, service: …, "
+                           f"config: …}}`), not {type(rows).__name__}")
+        for index, row in enumerate(rows):
+            if row is None:
+                continue
+            if not isinstance(row, dict):
+                raise RigError(f"{path}: {tier} #{index} must be a mapping with name, service "
+                               f"and config, not {row!r}")
+            where = f"{path}: {tier} row '{row.get('name', f'#{index}')}'"
+            problems += _unknown(row, ROW_KEYS, where)
+            if "enabled" in row and not isinstance(row["enabled"], bool):
+                problems.append(f"{where}: `enabled` must be true or false, not "
+                                f"{row['enabled']!r} (a quoted \"false\" is a string, and counts "
+                                f"as enabled)")
+            if "order" in row and (isinstance(row["order"], bool)
+                                   or not isinstance(row["order"], int)):
+                problems.append(f"{where}: `order` must be an integer, not {row['order']!r}")
+    return problems
+
+
 @dataclass(frozen=True)
 class Sensor:
     name: str
@@ -293,9 +360,14 @@ def _parse_entries(entries, tier: str, root: Path, seen: dict[str, Path],
                            f"across the vehicle — they key the compose project, volumes, and ROS namespace")
         seen[name] = cfg_path
 
+        order = entry.get("order", (index + 1) * 10)
+        if isinstance(order, bool) or not isinstance(order, int):
+            # Only a tolerant load (a verb acting on running stacks) gets here: check_shape has
+            # warned. Keep what an older rig did with a numeric string; otherwise the default.
+            order = int(order) if str(order).strip().lstrip("-").isdigit() else (index + 1) * 10
         out.append(Sensor(name=name, service=service, config=cfg_path,
                           enabled=bool(entry.get("enabled", True)),
-                          order=int(entry.get("order", (index + 1) * 10)),
+                          order=order,
                           overrides=overrides, tier=tier,
                           profile=(str(entry["profile"]) if entry.get("profile") else None),
                           overlays=tuple(overlays), replay_start=replay.get("start")))
@@ -559,7 +631,10 @@ def _bench_domain_warning(local, vehicle_id, domain: int, source: str) -> str | 
 
 def load_manifest(root: Path, *, context: str = "execution", target_overrides: dict | None = None,
                   validate_configs: bool = True, tolerate_vars: bool = False) -> Manifest:
-    """`tolerate_vars` is for the verbs that act on what is ALREADY running (down, status,
+    """vehicle.yaml's keys and types are checked first (check_shape): an unknown key or a wrong
+    type refuses the load, except under `tolerate_vars`, where it is a warning.
+
+    `tolerate_vars` is for the verbs that act on what is ALREADY running (down, status,
     logs, end-run): a var that no longer resolves (it was built from a roster value since moved
     to another vehicle) is set aside instead of failing the load, and recorded in
     Manifest.unresolved_vars. A config that uses it then fails to render and stands on the
@@ -567,6 +642,13 @@ def load_manifest(root: Path, *, context: str = "execution", target_overrides: d
     if context not in ("execution", "deployment"):
         raise ValueError(f"unknown manifest context: {context}")
     data = load_yaml(root / "vehicle.yaml")
+    problems = check_shape(data, root / "vehicle.yaml")
+    if problems and not tolerate_vars:
+        raise RigError("\n  ".join(problems)
+                       + ("\n  (nothing was started or changed; fix vehicle.yaml and retry)"
+                          if len(problems) > 1 else ""))
+    for problem in problems:  # a verb acting on what is ALREADY running: said, never a refusal
+        eprint(f"rig: warning: {problem} — ignored for this command; `up` would refuse")
     # Explicit target arguments participate before interpolation, so dependent vars/env agree.
     if target_overrides:
         if set(target_overrides) - {"platform", "arch"}:

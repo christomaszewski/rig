@@ -320,10 +320,20 @@ feature that needs it.
 
 ## 11. Descriptor reference
 
-Unknown top-level keys are ignored, so a misspelled top-level key silently does nothing.
-Inside `build.capabilities`, `build.variants.<p>`, `build.msgs_overlay`, `build.sources[]`,
-`platform`, `msgs`, `replay`, `replay.source`, `export` and `interface` an unknown key is an
-error.
+A key Rig does not read, at the top level or directly under `build:` or `images:`, does
+nothing. `rig doctor` and `rig certify` (check `descriptor`) report it as a warning and name
+the nearest known key; it is a warning and not an error because a service may carry a key
+from a newer contract than the Rig reading it. A top-level key starting with `x-` is never
+reported. Inside `build.capabilities`, `build.variants.<p>`, `build.msgs_overlay`,
+`build.sources[]`, `platform`, `msgs`, `replay`, `replay.source`, `export` and `interface` an
+unknown key is an error.
+
+A wrong type is an error. `examples` may be one path or a list; `launch_surface`,
+`external_volumes`, `host_ports`, `mirror`, `build.images` and `build.platforms` must be
+lists (a bare `mirror: image:tag` is one string, not a list); each `verbs` value must be a
+string; and an `external_volumes` pattern may hold volume-name characters and the `{name}`
+placeholder only. `repo` in `build.sources[]` and `msgs.source[]` must be a URL or a path and
+may not begin with `-`.
 
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |

@@ -279,6 +279,14 @@ def certify_target(desc: Descriptor, config_path: Path, base_env: dict[str, str]
     if not lp.stat().st_mode & 0o111:
         return [Check(ERROR, "launcher", f"not executable: {lp}")]
 
+    if getattr(desc, "unknown_keys", None):
+        # A key rig does not read does nothing: `external_volume:` for `external_volumes:`
+        # declared no volume, and nothing said so. A warning, since a service repo may carry a
+        # key from a newer contract than this rig's.
+        checks.append(Check(WARN, "descriptor",
+                            f"rigging.yaml key(s) rig does not read: "
+                            f"{', '.join(desc.unknown_keys)} — a misspelled key does nothing"))
+
     base_cfg = load_yaml(config_path)
     # A matrix service runs the whole suite AS its first declared platform (the env rig would
     # actually export); the remaining entries are exercised by the `platform` check below.

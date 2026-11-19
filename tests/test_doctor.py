@@ -177,6 +177,50 @@ def _collect_from(vehicle_body: str, repos: dict, configs: dict):
     return collect(load_manifest(d), load_catalog(d), descs)
 
 
+def test_warns_on_descriptor_keys_rig_does_not_read():
+    repo = _svc_repo("s", "service: s\nlauncher: s-up\nhost_port: [a.b]\nx-note: fine\n"
+                          "build: {command: b.sh, imagse: [s]}\n")
+    issues = _collect_from("vehicle: t\nsensors: [{name: a, service: s, config: config/a.yaml}]\n",
+                           {"s": repo}, {"a.yaml": "service: s\nname: a\n"})
+    said = [i.message for i in issues if i.level == "WARN" and "does not read" in i.message]
+    assert len(said) == 1, [i.message for i in issues]
+    assert "host_port (did you mean host_ports?)" in said[0]
+    assert "build.imagse (did you mean build.images?)" in said[0] and "x-note" not in said[0]
+
+
+def test_descriptor_list_fields_refuse_a_bare_string_and_bad_volume_patterns():
+    """YAML reads `mirror: eclipse/zenoh:1.2.1` as one string and list() of a string is its
+    characters: `rig build` planned `docker pull e`, `docker pull c`, …, and with
+    `external_volumes: data_{name}` a `rig down --purge` ran `docker volume rm d`."""
+    from rig_cli import RigError
+    from rig_cli.descriptor import load_descriptor
+
+    def refused(rigging: str, needle: str) -> None:
+        try:
+            load_descriptor("s", _svc_repo("s", "service: s\n" + rigging))
+            raise AssertionError(f"accepted {rigging!r}")
+        except RigError as exc:
+            assert needle in str(exc), exc
+
+    refused("mirror: eclipse/zenoh:1.2.1\n", "`mirror` must be a list")
+    refused("external_volumes: data_{name}\n", "`external_volumes` must be a list")
+    refused("host_ports: a.b\n", "`host_ports` must be a list")
+    refused("launch_surface: s-up\n", "`launch_surface` must be a list")
+    refused("build: {command: b.sh, images: s}\n", "`build.images` must be a list")
+    refused("build: {command: b.sh, platforms: jp7}\n", "`build.platforms` must be a list")
+    refused("mirror: [1, 2]\n", "`mirror` must be a list")
+    refused('external_volumes: ["cam_{instance}_sock"]\n', "placeholder {name} only")
+    refused('external_volumes: ["cam_{name}_sock}"]\n', "placeholder {name} only")
+    refused("verbs: {status: [ps]}\n", "verbs.status must be a nonempty launcher argument string")
+    refused("verbs: [ps]\n", "`verbs` must map")
+    desc = load_descriptor("s", _svc_repo(
+        "s", "service: s\nmirror: [eclipse/zenoh:1.2.1]\nexternal_volumes: ['s_{name}_data']\n"
+             "host_ports: [a.b]\nexamples: config/s.example.yaml\nverbs: {status: ps -a}\n"))
+    assert desc.mirror == ["eclipse/zenoh:1.2.1"] and desc.external_volumes == ["s_{name}_data"]
+    assert desc.examples == ["config/s.example.yaml"] and desc.unknown_keys == []
+    assert desc.verb_args("status") == ["ps", "-a"]
+
+
 def test_errors_on_host_port_clash_across_instances():
     # two instances of a host_ports-declaring service claiming ONE port -> ERROR naming both
     svc = _svc_repo("dash", "service: dash\nlauncher: dash-up\nhost_ports: [server.port]\n")

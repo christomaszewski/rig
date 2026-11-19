@@ -247,6 +247,10 @@ def collect(
 
     # Launchers present + executable.
     for svc, desc in descriptors.items():
+        if getattr(desc, "unknown_keys", None):
+            issues.append(Issue(WARN, f"{svc}: rigging.yaml has key(s) rig does not read: "
+                                      f"{', '.join(desc.unknown_keys)} — a misspelled key does "
+                                      f"nothing (a key from a newer contract needs a newer rig)"))
         lp = desc.launcher_path
         if not lp.exists():
             issues.append(Issue(ERROR, f"{svc}: launcher missing: {lp}"))

@@ -393,6 +393,12 @@ docs/                   # index · command reference · worked workflows · desi
 ```
 
 ### `vehicle.yaml` (per machine)
+The file's keys and types are checked on every load. A key rig does not know (`enable:` for
+`enabled:`, `sensor:` for `sensors:`) or a wrong type (`enabled: "false"`, `order: abc`) is an
+error that names the nearest known key, so a typo cannot change what the vehicle runs. `rig down`,
+`status` and `logs` warn and carry on, so a typo never stops a running vehicle from being
+stopped. A top-level key starting with `x-` is ignored: use it for notes and YAML anchors.
+
 Lists active stacks (`name`, `service`, `config`, `enabled`, `order`) and the fleet ROS settings, in three
 tiers: `infra:` (substrate — routers, loggers, dashboards; up FIRST, down last), `sensors:` (producers),
 and `autonomy:` (graph consumers — planners, SLAM, perception; up after ALL sensors, down FIRST, so the

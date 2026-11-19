@@ -459,6 +459,17 @@ def test_stale_volume_pattern_warns():
     assert not errors and warns == {"volumes"}
 
 
+def test_a_descriptor_key_rig_does_not_read_warns():
+    """A misspelled top-level key, or one under `build:`, did nothing and nothing said so."""
+    rigging = RIGGING.replace("external_volumes:", "external_volume:").replace(
+        "images: [fak-core] }", "images: [fak-core], platfroms: [alpha] }")
+    checks, errors, warns, _ = run_certify(make_service(rigging))
+    assert not errors and "descriptor" in warns
+    detail = next(c.detail for c in checks if c.name == "descriptor")
+    assert "external_volume (did you mean external_volumes?)" in detail, detail
+    assert "build.platfroms (did you mean build.platforms?)" in detail, detail
+
+
 def test_repo_dir_bind_warns():
     repo = make_service()
     body = (repo / "fak-up").read_text().replace("$RIG_DATA_DIR/recordings/$NAME", "$REPO/output")

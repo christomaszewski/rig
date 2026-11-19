@@ -433,6 +433,7 @@ different Compose overlay.
 | `discipline: config exited N` | The launcher failed. The message carries its stderr. | Run `./<service>-up <config> config` by hand. |
 | `discipline: non-compose top-level keys on stdout` | The launcher printed a human line to stdout. | Send it to stderr with `>&2`. |
 | `discipline: stdout is not a compose document` | `config` printed something other than `docker compose config` output. | Forward the verb to `docker compose`. |
+| `descriptor: rigging.yaml key(s) rig does not read` (warning) | A key is misspelled (`external_volume:` for `external_volumes:`, `build.platfroms`), so it does nothing. | Correct the key; the message names the nearest known one. |
 | `discipline: service(s) … name no image:` | A Compose service has a `build:` context and no `image:`. A vehicle pulls and never builds, and `rig bake` drops `build:`, so the baked service would have neither; `rig bake` refuses it too. | Add `image:` beside `build:`, built from `RIG_IMAGE_REGISTRY` and `RIG_IMAGE_TAG`. |
 | `project-name: compose project is '…', not COMPOSE_PROJECT_NAME` | The launcher passes `-p`, or overwrites the variable. | Remove `-p`; set the variable only when it is unset. |
 | `registry: images the service builds/mirrors are not pulled from RIG_IMAGE_REGISTRY` | A built or mirrored image is referenced without the registry. | Use the image form from step 5. |

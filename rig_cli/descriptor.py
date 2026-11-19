@@ -28,6 +28,49 @@ def find_descriptor(repo: Path) -> Path | None:
     return None
 
 
+# What rigging.yaml may carry at its top level and directly under `build:` / `images:`. A key
+# outside these sets does nothing, and a service repo may be ahead of this rig (a key a newer
+# contract added), so it is not an error: it is collected (Descriptor.unknown_keys) and reported
+# by `rig doctor` and `rig certify`, where a misspelled `external_volume:` used to pass unseen.
+TOP_KEYS = {"service", "launcher", "verbs", "tier", "ros_distro", "ros_namespace", "examples",
+            "launch_surface", "external_volumes", "host_ports", "mirror", "platform", "images",
+            "build", "msgs", "replay", "export", "interface"}
+BUILD_KEYS = {"command", "images", "platforms", "architectures", "capabilities", "variants",
+              "provides", "msgs_overlay", "sources"}
+IMAGES_KEYS = {"override_env"}
+# An external volume name pattern: docker's volume-name characters plus the one placeholder.
+_VOLUME_PATTERN = re.compile(r"(?:[A-Za-z0-9_.-]|\{name\})+\Z")
+
+
+def _strings(value, path: Path, key: str, *, what: str) -> list[str]:
+    """A descriptor field that is a LIST of strings. YAML reads `mirror: eclipse/zenoh:1.2.1` as
+    one string, and list() of a string is its characters: `rig build` then planned
+    `docker pull e`, `docker pull c`, … and `rig down --purge` ran `docker volume rm d`."""
+    if value is None:
+        return []
+    if not isinstance(value, list) or not all(isinstance(v, str) and v.strip() for v in value):
+        raise RigError(f"{path}: `{key}` must be a list of {what} (write `{key}: [x]` — a bare "
+                       f"`{key}: x` is one string, not a list), got {value!r}")
+    return list(value)
+
+
+def _unknown_keys(data: dict) -> list[str]:
+    """Keys rig does not read, each with the nearest known key when there is one."""
+    import difflib
+    out: list[str] = []
+    for prefix, block, allowed in (("", data, TOP_KEYS),
+                                   ("build.", data.get("build"), BUILD_KEYS),
+                                   ("images.", data.get("images"), IMAGES_KEYS)):
+        if not isinstance(block, dict):
+            continue
+        for key in block:
+            if key in allowed or (not prefix and str(key).startswith("x-")):
+                continue
+            near = difflib.get_close_matches(str(key), sorted(allowed), n=1, cutoff=0.6)
+            out.append(f"{prefix}{key}" + (f" (did you mean {prefix}{near[0]}?)" if near else ""))
+    return out
+
+
 # Logical verb -> default launcher arg string. Overridable per repo via the descriptor's `verbs:`.
 DEFAULT_VERBS = {
     "up": "up -d",
@@ -192,6 +235,8 @@ class Descriptor:
     examples: list[str] = field(default_factory=list)  # optional repo-relative example configs — copied by
     #                                              `rig init --discover`; default --config for `certify --repo`
     ros_namespace: str | None = None  # observed ROS ownership namespace; optional {name} template
+    unknown_keys: list[str] = field(default_factory=list)  # keys rig does not read (a typo, or a
+    #                                              newer contract): doctor and certify WARN
 
     @property
     def launcher_path(self) -> Path:
@@ -273,13 +318,22 @@ def load_descriptor(service: str, repo: Path) -> Descriptor:
                  if isinstance(ros_namespace, str) else ros_namespace)
         _validate_ros_namespace(probe, f"{path}: ros_namespace")
     verbs = dict(DEFAULT_VERBS)
-    verbs.update(data.get("verbs") or {})
+    declared_verbs = data.get("verbs") or {}
+    if not isinstance(declared_verbs, dict):
+        raise RigError(f"{path}: `verbs` must map each verb to a launcher argument string "
+                       f"(`status: ps`), got {declared_verbs!r}")
+    for key, value in declared_verbs.items():  # a list here crashed the first verb that ran
+        if not isinstance(value, str) or not value.strip():
+            raise RigError(f"{path}: verbs.{key} must be a nonempty launcher argument string "
+                           f"(`{key}: ps`, not a list), got {value!r}")
+    verbs.update(declared_verbs)
     for key in ("images", "runtime-images"):
         if key in verbs and (not isinstance(verbs[key], str) or not verbs[key].strip()):
             raise RigError(f"{path}: verbs.{key} must be a nonempty launcher argument string")
 
     examples_raw = data.get("examples")  # a single path or a list of them
-    examples = [examples_raw] if isinstance(examples_raw, str) else list(examples_raw or [])
+    examples = ([examples_raw] if isinstance(examples_raw, str)
+                else _strings(examples_raw, path, "examples", what="example config paths"))
 
     tier = str(data.get("tier") or "sensor")
     if tier not in ("sensor", "infra", "autonomy"):  # a typo must not silently demote a service to sensor
@@ -297,8 +351,13 @@ def load_descriptor(service: str, repo: Path) -> Descriptor:
         build_command = build_raw
     elif isinstance(build_raw, dict):
         build_command = build_raw.get("command")
-        build_images = list(build_raw.get("images") or [])
-        build_platforms = [str(p) for p in (build_raw.get("platforms") or [])]
+        build_images = _strings(build_raw.get("images"), path, "build.images",
+                                what="image repository names")
+        platforms_raw = build_raw.get("platforms")
+        if platforms_raw is not None and not isinstance(platforms_raw, list):
+            raise RigError(f"{path}: `build.platforms` must be a list of runtime names (write "
+                           f"`platforms: [jp7]`), got {platforms_raw!r}")
+        build_platforms = [str(p) for p in (platforms_raw or [])]
         if build_raw.get("provides") is not None:
             build_provides = str(build_raw["provides"])
         overlay_raw = build_raw.get("msgs_overlay")
@@ -560,6 +619,16 @@ def load_descriptor(service: str, repo: Path) -> Descriptor:
             raise RigError(f"{path}: platform.override_env '{override_env}' collides with a rig-owned "
                            f"variable — declare the service's OWN env name (e.g. CAM_PLATFORM)")
 
+    _strings(data.get("launch_surface"), path, "launch_surface", what="paths")  # vendor reads it
+    external_volumes = _strings(data.get("external_volumes"), path, "external_volumes",
+                                what="volume name patterns")
+    for pattern in external_volumes:
+        # `{name}` is the only placeholder: the names are built with str.format, where any other
+        # brace raised in the middle of `rig down --purge`, after some volumes were removed.
+        if not _VOLUME_PATTERN.match(pattern):
+            raise RigError(f"{path}: external_volumes pattern {pattern!r} may hold volume-name "
+                           f"characters ([A-Za-z0-9_.-]) and the placeholder {{name}} only")
+
     from .build_contract import parse_contract
     return Descriptor(
         **parse_contract(data, path),
@@ -568,8 +637,8 @@ def load_descriptor(service: str, repo: Path) -> Descriptor:
         launcher=data.get("launcher") or f"{service}-up",
         verbs=verbs,
         ros_distro=data.get("ros_distro"),
-        external_volumes=list(data.get("external_volumes") or []),
-        host_ports=list(data.get("host_ports") or []),
+        external_volumes=external_volumes,
+        host_ports=_strings(data.get("host_ports"), path, "host_ports", what="config paths"),
         build_command=build_command,
         build_images=build_images,
         build_platforms=build_platforms,
@@ -589,7 +658,8 @@ def load_descriptor(service: str, repo: Path) -> Descriptor:
         platform_auto_detect=(str(platform_raw["auto_detect"]) if platform_raw.get("auto_detect")
                               else None),
         platform_override_env=override_env,
-        mirror=list(data.get("mirror") or []),
+        mirror=_strings(data.get("mirror"), path, "mirror", what="image references"),
+        unknown_keys=_unknown_keys(data),
         tier=tier,
         examples=examples,
         ros_namespace=ros_namespace,

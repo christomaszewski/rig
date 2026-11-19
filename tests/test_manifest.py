@@ -66,6 +66,83 @@ def test_instance_names_must_be_compose_and_path_safe():
     assert load_manifest(root).sensors[0].name == "front_cam-2"
 
 
+_ROW = "{name: cam, service: cam, config: c.yaml%s}"
+
+
+def _shape(body: str) -> pathlib.Path:
+    return _root_with({"vehicle.yaml": body, "c.yaml": "service: cam\n"})
+
+
+def test_unknown_keys_are_refused_with_the_nearest_known_key():
+    """A key rig does not read used to be ignored without a word, so a typo changed what the
+    vehicle runs: `enable: false` left the stack enabled, and `sensor:` for `sensors:` loaded an
+    empty deployment that `rig doctor` passed."""
+    _expect_error(_shape("vehicle: t\nsensors: [%s]\n" % (_ROW % ", enable: false")),
+                  "row 'cam': unknown key `enable` — did you mean `enabled`?")
+    _expect_error(_shape("vehicle: t\nsensor: [%s]\n" % (_ROW % "")),
+                  "unknown key `sensor` — did you mean `sensors`?")
+    _expect_error(_shape("vehicle: t\nros: {rwm: rmw_zenoh_cpp}\nsensors: [%s]\n" % (_ROW % "")),
+                  "ros: unknown key `rwm` — did you mean `rmw`?")
+    _expect_error(_shape("vehicle: t\nimages: {registery: r:5000}\nsensors: [%s]\n" % (_ROW % "")),
+                  "images: unknown key `registery` — did you mean `registry`?")
+    # every problem at once, not one per run
+    try:
+        load_manifest(_shape("vehicle: t\nautonmy: []\nsensors: [%s]\n" % (_ROW % ", ordr: 5")))
+        raise AssertionError("expected RigError")
+    except RigError as exc:
+        assert "`autonmy`" in str(exc) and "`ordr`" in str(exc), exc
+    # an `x-` key is the place for notes and anchors; every documented key loads
+    m = load_manifest(_shape(
+        "x-notes: {a: 1}\nvehicle: t\nvehicle_id: 3\nplatform: jp7\narch: arm64\n"
+        "data_dir: /data\nrun_capture: false\nvars: {a: 1}\nenv: {A: b}\n"
+        "ros: {domain_id: 4, rmw: rmw_zenoh_cpp, distro: lyrical}\n"
+        "images: {registry: r:5000, tag: v1, base: r:5000/base:v1}\n"
+        "export_profiles: {review: {omit: ['*.mkv']}}\nreplay: {instances: {cam: {start: false}}}\n"
+        "infra: []\nautonomy:\n"
+        "sensors: [{name: cam, service: cam, config: c.yaml, enabled: false, order: 5,\n"
+        "           overrides: {a: 1}, overlays: [], profile: p/cam:x@1.0.0, replay: {start: false}}]\n"))
+    assert (m.sensors[0].enabled, m.sensors[0].order, m.run_capture) == (False, 5, False)
+
+
+def test_wrong_types_are_refused_instead_of_coerced_or_crashing():
+    """`enabled: "false"` is a non-empty string, which counted as enabled. The shapes below
+    it used to end in a traceback."""
+    _expect_error(_shape("vehicle: t\nsensors: [%s]\n" % (_ROW % ', enabled: "false"')),
+                  "`enabled` must be true or false, not 'false'")
+    _expect_error(_shape("vehicle: t\nsensors: [%s]\n" % (_ROW % ", order: abc")),
+                  "`order` must be an integer, not 'abc'")
+    _expect_error(_shape("vehicle: t\nsensors: [%s]\n" % (_ROW % ", order: true")),
+                  "`order` must be an integer")
+    _expect_error(_shape("vehicle: t\nrun_capture: nope\nsensors: [%s]\n" % (_ROW % "")),
+                  "`run_capture` must be true or false")
+    _expect_error(_shape("vehicle: t\nsensors: {cam: {service: cam}}\n"),
+                  "`sensors` must be a list of rows")
+    _expect_error(_shape("vehicle: t\nsensors: [cam]\n"), "sensors #0 must be a mapping")
+    _expect_error(_shape("vehicle: t\nros: zenoh\n"), "`ros` must be a mapping")
+    _expect_error(_shape("vehicle: t\nimages: v1\n"), "`images` must be a mapping")
+
+
+def test_a_verb_acting_on_running_stacks_warns_and_carries_on():
+    """`rig down`, `status` and `logs` load tolerantly: a typo added while the vehicle is up
+    must be said, never a reason the stacks cannot be stopped. The structure itself still has
+    to be readable."""
+    import contextlib
+    import io
+    root = _shape("vehicle: t\nsensor: []\nsensors: [%s]\n" % (_ROW % ', enable: false, order: "7"'))
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        m = load_manifest(root, tolerate_vars=True)
+    assert [s.name for s in m.sensors] == ["cam"] and m.sensors[0].order == 7
+    said = err.getvalue()
+    assert said.count("rig: warning:") == 3 and "`up` would refuse" in said, said
+    assert "`enable`" in said and "`sensor`" in said and "`order`" in said
+    try:
+        load_manifest(_shape("vehicle: t\nsensors: {cam: {}}\n"), tolerate_vars=True)
+        raise AssertionError("expected RigError")
+    except RigError as exc:
+        assert "must be a list of rows" in str(exc)
+
+
 def test_ros_domain_must_be_a_literal_in_range():
     for ros, needle in (("ros: {domain_id: '{{vehicle_id}}'}", "must be an integer 0..232"),
                         ("ros: {domain_id: 7x}", "must be an integer 0..232"),
