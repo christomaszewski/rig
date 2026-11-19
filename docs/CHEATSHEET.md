@@ -398,6 +398,13 @@ rig fleet sync --profile review --export   # the SLIM version instead: each run'
                                       #   `fleet sync` later completes the slim copy to a full one
 ```
 
+`rig fleet up --run tuesday-swarm` gives participating run registries a shared `run_uuid`.
+A retry or a late-joining host can reuse it while a peer with that label is still open and
+reachable. Once those runs are sealed, using the label again starts a fresh UUID. Each host
+keeps its own run directory. Inspect `open_run.run_uuid` with `rig status --format json`.
+When starting a host separately, `rig up --run LABEL --run-uuid UUID` uses that same
+identity. An already-open run with that label must have the requested UUID.
+
 ```yaml
 # vehicle.yaml — export profiles: what `rig run export` / `fleet sync --profile` leave out
 export_profiles:
@@ -640,8 +647,8 @@ launched is still running and this `vehicle.yaml` does not declare it — `rig d
 stop it — and names the directory whose `rig down --end-run` does (`--force` seals anyway).
 `down --end-run` additionally captures every container's `docker logs` into the run
 (`.rig/logs/<sensor>/<container>.log`) before tearing down — compose down removes the containers, so
-that is the last moment their logs exist. With the bag logger's `graph:` sidecar enabled
-(rig-infra ≥ v1.7.0) the run also records the live graph TOPOLOGY as epoch files
+that is the last moment their logs exist. With graph capture and recording enabled on the
+rig-infra observer, the run also records the live graph topology as epoch files
 (`graph/<name>/epoch_*.yaml` — who published/subscribed/served what, when); `rig graph [run]`
 derives the union view at read time, `--check` WARNs on drift vs the riggings' `interface:` blocks,
 `--contract <instance>` scaffolds that block from observation:

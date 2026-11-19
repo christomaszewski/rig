@@ -19,6 +19,7 @@ import pathlib
 import sys
 import tempfile
 import textwrap
+import uuid
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
@@ -286,6 +287,134 @@ def test_fleet_up_sil_view_snapshot_and_sync_round_trip():
         assert "ended:" in (dest / "manifest.yaml").read_text()
     rc, _, err = _run("fleet", "sync", "--fleet", str(fy), "--into", str(into))
     assert rc == 0 and "0 run(s) pulled" in err                    # idempotent re-sync
+
+
+def test_fleet_run_uuid_survives_partial_start_late_join_and_rotation():
+    data = pathlib.Path(tempfile.mkdtemp())
+    left, right = data / "left", data / "right"
+    a, b = _export_tree("veh_a", left), _export_tree("veh_b", right)
+    fleet = _fleet_yaml([{"id": 1, "name": "veh_a", "path": str(a), "data_dir": str(left)},
+                         {"id": 2, "name": "veh_b", "path": str(b), "host": "edge",
+                          "data_dir": str(right)}], mode="field")
+
+    def run(verb, *args):
+        return _run("fleet", verb, "--fleet", str(fleet), *args)
+
+    def current(registry):
+        return yaml.safe_load((registry / "current/manifest.yaml").read_text())
+
+    with _env(SHIM_SSH_FAIL="edge"):
+        rc, _, err = run("up", "--run", "survey")
+    assert rc == 1 and "1/2 ok" in err, err
+    first = current(left)
+    assert uuid.UUID(first["run_uuid"]).version == 4 and not (right / "current").exists()
+    rc, _, err = run("up", "veh_b", "--run", "survey")
+    assert rc == 0, err
+    assert current(right)["run_uuid"] == first["run_uuid"]
+    assert len(current(left)["ups"]) == 1  # probed on late join, never started
+    assert run("up", "--run", "survey")[0] == 0
+    assert current(left)["run_uuid"] == current(right)["run_uuid"] == first["run_uuid"]
+    assert run("up", "--run", "next")[0] == 0
+    second = current(left)["run_uuid"]
+    assert second == current(right)["run_uuid"] and second != first["run_uuid"]
+    assert run("down", "--end-run")[0] == 0
+    assert run("up", "--run", "survey")[0] == 0
+    assert current(left)["run_uuid"] == current(right)["run_uuid"]
+    assert current(left)["run_uuid"] not in {first["run_uuid"], second}
+    assert run("down", "veh_a", "--end-run")[0] == 0
+    ssh_log = data / "lookup.log"
+    with _env(SHIM_SSH_LOG=str(ssh_log)):
+        rc, _, err = run("up", "veh_a", "--run", "survey", "--var", "selected_only=local")
+    assert rc == 0, err
+    assert current(left)["run_uuid"] == current(right)["run_uuid"]
+    assert "status --format json" in ssh_log.read_text() and "selected_only" not in ssh_log.read_text()
+
+
+def test_fleet_refuses_distinct_open_uuids_for_requested_label():
+    data = pathlib.Path(tempfile.mkdtemp())
+    rows = []
+    for i, name in enumerate(("a", "b"), 1):
+        registry = data / name
+        root = _export_tree(name, registry)
+        rc, _, err = _run("--root", str(root), "new-run", "survey")
+        assert rc == 0, err
+        rows.append({"id": i, "name": name, "path": str(root), "data_dir": str(registry)})
+    fleet = _fleet_yaml(rows, mode="field")
+    rc, _, err = _run("fleet", "up", "--fleet", str(fleet), "--run", "survey", "--force")
+    assert rc == 1 and "conflicting UUIDs" in err, err
+    for name in ("a", "b"):
+        current = yaml.safe_load((data / name / "current/manifest.yaml").read_text())
+        assert not current.get("ups")
+
+
+def test_fleet_holds_unreadable_registry_and_starts_other_rows():
+    data = pathlib.Path(tempfile.mkdtemp())
+    rows = [{"id": i, "name": n, "path": str(_export_tree(n, data / n)), "data_dir": str(data / n)}
+            for i, n in enumerate(("a", "b"), 1)]
+    bad = data / "b/current"
+    bad.write_text("keep")
+    before = set((data / "b/runs").iterdir())
+    fleet = _fleet_yaml(rows, mode="field")
+    rc, _, err = _run("fleet", "up", "--fleet", str(fleet))
+    assert rc == 1 and "1/2 ok" in err and "not a symlink" in err, err
+    assert bad.read_text() == "keep" and set((data / "b/runs").iterdir()) == before
+    current = yaml.safe_load((data / "a/current/manifest.yaml").read_text())
+    assert uuid.UUID(current["run_uuid"]).version == 4
+
+
+def test_bare_fleet_up_reuses_auto_uuid_and_leaves_labelled_runs_alone():
+    data = pathlib.Path(tempfile.mkdtemp())
+    rows = [{"id": i, "name": n, "path": str(_export_tree(n, data / n)), "data_dir": str(data / n)}
+            for i, n in enumerate(("a", "b", "c"), 1)]
+    fleet = _fleet_yaml(rows, mode="field")
+
+    def up(*args):
+        rc, _, err = _run("fleet", "up", "--fleet", str(fleet), *args)
+        assert rc == 0, err
+
+    def run_id(name):
+        return yaml.safe_load((data / name / "current/manifest.yaml").read_text())["run_uuid"]
+
+    up("a", "--run", "single")
+    named = run_id("a")
+    up("a", "b")
+    automatic = run_id("b")
+    assert automatic != named and run_id("a") == named
+    up("a", "b", "c")
+    assert run_id("a") == named and run_id("b") == run_id("c") == automatic
+
+
+def test_legacy_fleet_row_joins_without_uuid_flag():
+    root = pathlib.Path(tempfile.mkdtemp())
+    launcher = root / "run.sh"
+    launcher.write_text("#!/bin/sh\n"
+                        'if [ "$1" = status ]; then echo "${RIG_FLEET_RUN_IDENTITY:-unset}" >> probes; '
+                        'echo "{}"; else echo "$*" >> called; fi\n')
+    launcher.chmod(0o755)
+    fleet = _fleet_yaml([{"id": 1, "name": "old", "path": str(root)}], mode="field")
+    rc, _, err = _run("fleet", "up", "--fleet", str(fleet), "--run", "mission")
+    assert rc == 0 and "shared publication scope unavailable" in err, err
+    assert (root / "called").read_text().splitlines() == ["up --run mission"]
+    rc, _, err = _run("fleet", "up", "--fleet", str(fleet), "--dry-run", "--run", "mission")
+    assert rc == 0 and "shared publication scope unavailable" not in err
+    assert (root / "called").read_text().splitlines()[-1] == "up --run mission --dry-run"
+    assert _run("fleet", "up", "--fleet", str(fleet), "--force")[0] == 0
+    assert _run("fleet", "up", "--fleet", str(fleet))[0] == 0
+    assert (root / "probes").read_text().splitlines() == ["unset", "unset", "1"]
+
+
+def test_existing_legacy_run_keeps_its_scope_on_fleet_retry():
+    registry = pathlib.Path(tempfile.mkdtemp()) / "data"
+    root = _export_tree("legacy", registry)
+    old = registry / "runs" / "20261120T120000Z_same"
+    old.mkdir()
+    (old / "manifest.yaml").write_text(f"run: {old.name}\nlabel: same\n")
+    (registry / "current").symlink_to("runs/" + old.name)
+    fleet = _fleet_yaml([{"id": 1, "name": "legacy", "path": str(root)}], mode="field")
+    rc, _, err = _run("fleet", "up", "--fleet", str(fleet), "--run", "same")
+    assert rc == 0 and "keeping legacy run" in err, err
+    assert (registry / "current").resolve() == old.resolve()
+    assert not yaml.safe_load((old / "manifest.yaml").read_text()).get("run_uuid")
 
 
 def test_fleet_up_sil_rows_outrank_the_users_data_dir():
@@ -849,6 +978,10 @@ def test_fleet_up_hands_the_vehicle_the_roster_digest_to_check():
         rc, _, err = _run("fleet", "up", "--fleet", str(first), "--run", "link", "-j", "1")
         assert rc == 0, err
     assert f"--roster {digest}" in log.read_text()                  # the roster that was checked
+    run_uuid = yaml.safe_load((data_root / "uav-03/current/manifest.yaml").read_text())["run_uuid"]
+    assert yaml.safe_load((far.parent / "data/current/manifest.yaml").read_text())["run_uuid"] == run_uuid
+    assert f"--run-uuid {run_uuid}" in log.read_text()
+    assert "RIG_FLEET_RUN_IDENTITY" not in log.read_text()
     assert far_ups() == 1
     # the vehicle's own half: its copy, or nothing
     with _env(RIG_VEHICLE_LOCAL=str(pathlib.Path(tempfile.mkdtemp()) / "absent.yaml")):
@@ -888,11 +1021,12 @@ def test_fleet_up_hands_the_vehicle_the_roster_digest_to_check():
 def _old_rig_tree(name: str, version: str) -> pathlib.Path:
     """A tree whose entry point answers as a rig from before roster row values: it says its
     version, rejects `up --roster` as the v0.2.85 release does, and leaves `started` behind
-    for any other verb it is given."""
+    for each accepted up. Its status predates the run UUID fields."""
     tree = _band_tree(name)
     (tree / "run.sh").write_text(
         '#!/bin/sh\n'
         f'[ "$1" = "--version" ] && {{ echo "{version}"; exit 0; }}\n'
+        '[ "$1" = "status" ] && { echo "{}"; exit 0; }\n'
         'case " $* " in *" --roster "*)\n'
         '  echo "usage: rig [-h] [--version] [--root ROOT] <command> ..." >&2\n'
         '  echo "rig: error: unrecognized arguments: --roster" >&2; exit 2 ;;\nesac\n'

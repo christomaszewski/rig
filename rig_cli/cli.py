@@ -136,6 +136,9 @@ def cmd_up(args, manifest, catalog, descriptors) -> int:
     if args.target_state:  # --standby/--active: the up-dispatch-only posture token (fleet_env pops
         env["RIG_TARGET_STATE"] = args.target_state  # it on every other verb; launchers honor it at
         #                                              `up` only, over the config's initial_state)
+    run_uuid = getattr(args, "run_uuid", None)
+    if run_uuid is not None and not manifest.data_dir:
+        raise RigError("up --run-uuid requires a run registry (data_dir)")
     if args.run and not manifest.data_dir:  # an EXPLICIT --run must never be silently dropped
         raise RigError("up --run needs `data_dir` in vehicle.yaml (the run registry lives under it)")
     # Repeated explicit names must never launch the same Compose project twice
@@ -146,9 +149,9 @@ def cmd_up(args, manifest, catalog, descriptors) -> int:
         return 0
     if not args.dry_run and manifest.data_dir:  # runs: --run names/rotates; bare up only ENSURES
         if args.run:
-            runs_mod.up_run(manifest, args.rig_root, args.run, force=args.force)
+            runs_mod.up_run(manifest, args.rig_root, args.run, force=args.force, run_uuid=run_uuid)
         else:
-            runs_mod.ensure(manifest, args.rig_root)
+            runs_mod.ensure(manifest, args.rig_root, run_uuid=run_uuid)
         # every up logs the effective config against the run (dedup'd; fail-soft — never blocks up)
         runs_mod.snapshot(manifest, args.rig_root, stacks=[s.name for s, _ in pairs])
     eprint(f"rig up: {manifest.vehicle} — {stack_summary([p[0] for p in pairs])}")
@@ -276,9 +279,9 @@ def cmd_status(args, manifest, catalog, descriptors) -> int:
     env = dispatch.fleet_env(manifest, descriptors)
     pairs = _pairs(manifest, descriptors, args.names)
     rows = status_mod.gather(pairs, env)
-    run_line = runs_mod.status_line(manifest, getattr(args, "rig_root", None))
+    run_line, open_run, registry_error = runs_mod.status_info(manifest, getattr(args, "rig_root", None))
     if getattr(args, "format", "table") == "json":  # the machine contract fleet tooling parses
-        print(status_mod.as_json(manifest, rows, run_line))
+        print(status_mod.as_json(manifest, rows, run_line, open_run=open_run, run_registry_error=registry_error))
     else:
         if run_line is not None:
             print(run_line)
@@ -956,6 +959,9 @@ def build_parser() -> argparse.ArgumentParser:
     up.add_argument("--force", action="store_true", help="bring up even if preflight reports errors")
     up.add_argument("--run", default=None, metavar="LABEL",
                     help="join the open run with this label, or rotate to a new one (bare up never rotates)")
+    up.add_argument("--run-uuid", type=runs_mod.parse_run_uuid, metavar="UUID",
+                    help="use this shared UUID when opening the run, or require it to match on join "
+                         "(fleet up supplies it automatically)")
     up.add_argument("--roster", default=None, metavar="SHA256",
                     help="refuse unless this deployment's fleet.yaml has this sha256 — `rig fleet "
                          "up` passes it when roster rows carry values, so a vehicle never starts "
@@ -1130,9 +1136,9 @@ def build_parser() -> argparse.ArgumentParser:
                                     "order: 999), route and config; use a player/rig-infra checkout "
                                     "or registry ref pinned with @VERSION. Existing rows are kept")
 
-    gr = sub.add_parser("graph", help="observed pub/sub/service topology from a run's graph "
-                                      "epochs (the bag-logger's graph-snapshotter sidecar, "
-                                      "rig-infra ≥ v1.7.0)")
+    gr = sub.add_parser("graph", help="inspect observed pub/sub/service topology from a run",
+                        description="Inspect graph epochs recorded by the rig-infra observer "
+                                    "or the legacy bag logger.")
     gr.add_argument("run", nargs="?", default=None,
                     help="run id or run-dir path (default: the open run, else the newest)")
     gr.add_argument("--check", action="store_true",

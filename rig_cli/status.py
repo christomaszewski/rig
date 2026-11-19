@@ -143,7 +143,8 @@ def gather(pairs: list[tuple[Sensor, Descriptor]], env: dict[str, str]) -> list[
     return rows
 
 
-def as_json(manifest, rows: list[Row], run_line: str | None) -> str:
+def as_json(manifest, rows: list[Row], run_line: str | None, *, open_run: dict | None = None,
+            run_registry_error: str | None = None) -> str:
     """The MACHINE-READABLE status (one stable object) — `rig status --format json`. The remote
     half of `rig fleet status`: fleet tooling parses THIS, never the human table (the same
     contract discipline the run manifests follow)."""
@@ -151,6 +152,9 @@ def as_json(manifest, rows: list[Row], run_line: str | None) -> str:
         "vehicle": manifest.vehicle,
         "vehicle_id": manifest.vehicle_id,
         "run": run_line,
+        "run_registry": bool(manifest.data_dir),
+        "open_run": open_run,
+        **({"run_registry_error": run_registry_error} if run_registry_error else {}),
         # op_state is ADDITIVE (v0.2.35): observed operational state, null for services that don't
         # declare the trio. The pre-existing keys — `state` especially (the compose rollup) — are
         # the stable contract older consumers parse; never repurpose them.

@@ -11,6 +11,7 @@ import pathlib
 import shutil
 import sys
 import tempfile
+import uuid
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
@@ -76,6 +77,61 @@ def test_ensure_creates_auto_once_and_is_idempotent():
     assert len(list((data / "runs").iterdir())) == 1            # no second dir minted
     cur = data / "current"
     assert cur.is_symlink() and not os.readlink(cur).startswith("/")  # RELATIVE target (in-container)
+
+
+def test_run_uuid_belongs_to_acquisition_and_survives_restarts():
+    _mark_idle()
+    with tempfile.TemporaryDirectory() as tmp:
+        data = pathlib.Path(tmp)
+        manifest = _manifest(data)
+        first = runs.up_run(manifest, data, "survey")
+        scope = runs.parse_run_uuid(runs.current_run(data)[2]["run_uuid"])
+        assert scope.version == 4
+        assert runs.ensure(manifest, data, run_uuid=scope) == first
+        assert runs.up_run(manifest, data, "survey", run_uuid=scope) == first
+        for join in (lambda: runs.ensure(manifest, data, run_uuid=uuid.uuid4()),
+                     lambda: runs.up_run(manifest, data, "survey", force=True, run_uuid=uuid.uuid4())):
+            try:
+                join()
+            except RigError as exc:
+                assert "cannot join UUID" in str(exc)
+            else:
+                raise AssertionError("an open run accepted a different UUID")
+        assert runs.status_info(manifest)[1] == {"run": first, "label": "survey", "run_uuid": str(scope)}
+        runs.end_run(manifest, data)
+        assert runs.status_info(manifest)[1] is None
+        runs.up_run(manifest, data, "survey")
+        assert runs.current_run(data)[2]["run_uuid"] != str(scope)
+
+
+def test_run_uuid_parser_refuses_ambiguous_or_nil_values():
+    for value in (None, "survey", "00000000-0000-0000-0000-000000000000",
+                  "7097DF23-57AF-4370-AB1A-1CC5D7E030C5"):
+        try:
+            runs.parse_run_uuid(value)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"accepted {value!r}")
+
+
+def test_failed_or_sealed_current_never_lends_its_uuid():
+    _mark_idle()
+    with tempfile.TemporaryDirectory() as tmp:
+        data = pathlib.Path(tmp)
+        manifest = _manifest(data)
+        runs.new_run(manifest, data, "survey")
+        _, run_dir, doc = runs.current_run(data)
+        scope = runs.parse_run_uuid(doc["run_uuid"])
+        for mark in ({"ended": doc["started"]}, {"failed": {"stage": "startup", "error": "stopped"}}):
+            (run_dir / "manifest.yaml").write_text(yaml.safe_dump({**doc, **mark}))
+            assert runs.status_info(manifest)[1] is None
+            try:
+                runs.up_run(manifest, data, "survey", force=True, run_uuid=scope)
+            except RigError as exc:
+                assert "ended or failed" in str(exc)
+            else:
+                raise AssertionError("a stale run was reused as a recording scope")
 
 
 def test_ensure_is_inert_without_data_dir():

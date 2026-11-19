@@ -587,8 +587,31 @@ def capture_docker_logs(manifest: Manifest, also: set[str] = frozenset(), *, env
     return captured
 
 
+def parse_run_uuid(value: str) -> uuid.UUID:
+    """Read the canonical, non-nil UUID used across recording hosts."""
+    if not isinstance(value, str):
+        raise ValueError("expected a UUID string")
+    parsed = uuid.UUID(value)
+    if not parsed.int or str(parsed) != value:
+        raise ValueError("expected a canonical non-nil UUID")
+    return parsed
+
+
+def _join_run(current: tuple[str, Path, dict], root: Path, requested: uuid.UUID | None) -> str:
+    run_id, _, doc = current
+    if requested is not None:
+        if "ended" in doc or failure(doc):
+            raise RigError(f"run {run_id} cannot join UUID {requested}: it has already ended or failed")
+        if doc.get("run_uuid") != str(requested):
+            raise RigError(f"run {run_id} cannot join UUID {requested}: its manifest has "
+                           f"run_uuid={doc.get('run_uuid')!r}. Check the open runs on the participating hosts.")
+    _say_joined(current, root)
+    return run_id
+
+
 def _open_run(manifest: Manifest, root: Path, data: Path, label: str | None,
-              replay: dict | None = None, simulation: dict | None = None) -> str:
+              replay: dict | None = None, simulation: dict | None = None,
+              run_uuid: uuid.UUID | None = None) -> str:
     runs = data / "runs"
     runs.mkdir(parents=True, exist_ok=True)
     run_id = f"{_now()}_{label or 'auto'}"
@@ -601,6 +624,7 @@ def _open_run(manifest: Manifest, root: Path, data: Path, label: str | None,
     _remember(data)
     doc = {
         "run": run_dir.name,
+        "run_uuid": str(run_uuid or uuid.uuid4()),
         "vehicle": manifest.vehicle,
         "vehicle_id": manifest.vehicle_id,
         "rig_version": __version__,
@@ -699,22 +723,22 @@ def _say_joined(cur: tuple[str, Path, dict], root: Path) -> None:
         eprint(f"rig: joining run {cur[0]}, last brought up from {origin}")
 
 
-def ensure(manifest: Manifest, root: Path) -> str | None:
+def ensure(manifest: Manifest, root: Path, *, run_uuid: uuid.UUID | None = None) -> str | None:
     """`up`'s guard: make sure an open run exists — create `_auto` if absent. NEVER rotates. Returns the
     open run id, or None when data_dir is unset (feature inert)."""
     if not manifest.data_dir:
         return None
     data = _root(manifest)
     if (cur := current_run(data)) is not None:
-        _say_joined(cur, root)
-        return cur[0]
-    run_id = _open_run(manifest, root, data, None)
+        return _join_run(cur, root, run_uuid)
+    run_id = _open_run(manifest, root, data, None, run_uuid=run_uuid)
     eprint(f"rig: opened run {run_id} (no session was open — label one with `rig new-run <label>`)")
     return run_id
 
 
 def new_run(manifest: Manifest, root: Path, label: str | None, *, force: bool = False,
-            replay: dict | None = None, simulation: dict | None = None) -> str:
+            replay: dict | None = None, simulation: dict | None = None,
+            run_uuid: uuid.UUID | None = None) -> str:
     """Rotate: seal the open run (if any) and open a new one. Guarded while our stacks run.
     `replay` stamps the new run as a SIL replay session (replay.py passes it; see the manifest's
     `replay:` key)."""
@@ -728,7 +752,7 @@ def new_run(manifest: Manifest, root: Path, label: str | None, *, force: bool = 
         digest, dep = _live_state(manifest, root)
         _seal(cur[1], None, live_digest=digest, live_deployment=dep)
         eprint(f"rig: sealed run {cur[0]}")
-    run_id = _open_run(manifest, root, data, label, replay=replay, simulation=simulation)
+    run_id = _open_run(manifest, root, data, label, replay=replay, simulation=simulation, run_uuid=run_uuid)
     eprint(f"rig: opened run {run_id}")
     return run_id
 
@@ -752,7 +776,8 @@ def end_run(manifest: Manifest, root: Path, *, force: bool = False,
     return cur[0]
 
 
-def up_run(manifest: Manifest, root: Path, label: str, *, force: bool = False) -> str:
+def up_run(manifest: Manifest, root: Path, label: str, *, force: bool = False,
+           run_uuid: uuid.UUID | None = None) -> str:
     """`up --run <label>`: join the open run when its label matches (idempotent — never mints X-2),
     else rotate to a fresh run with that label (same guard as new-run)."""
     data = _root(manifest)
@@ -760,9 +785,8 @@ def up_run(manifest: Manifest, root: Path, label: str, *, force: bool = False) -
     # str() both sides: a label like `123` round-trips through YAML as an int in hand-written or
     # sh-generated manifests; a type mismatch must not cause a silent rotation.
     if cur is not None and str(cur[2].get("label", "")) == str(label):
-        _say_joined(cur, root)
-        return cur[0]
-    return new_run(manifest, root, label, force=force)
+        return _join_run(cur, root, run_uuid)
+    return new_run(manifest, root, label, force=force, run_uuid=run_uuid)
 
 
 @dataclass
@@ -1055,20 +1079,26 @@ def import_runs(manifest: Manifest, paths: list[str], *, move: bool = False) -> 
     return rc
 
 
-def status_line(manifest: Manifest, root: Path | None = None) -> str | None:
-    """The one-liner for `rig status`'s header (None when the feature is inert). Never raises — a broken
-    registry must not take `status` down with it. With `root` (the directory `status` runs in), an
-    open run last brought up from ANOTHER deployment directory names that directory."""
+def status_info(manifest: Manifest, root: Path | None = None) -> tuple[str | None, dict | None, str | None]:
+    """Describe the same registry observation for the human and JSON status outputs."""
     if not manifest.data_dir:
-        return None
+        return None, None, None
     try:
         cur = current_run(_root(manifest))
     except RigError as exc:
-        return f"run: registry problem — {exc}"
+        return f"run: registry problem — {exc}", None, str(exc)
     if cur is None:
-        return "run: none active"
+        return "run: none active", None, None
     run_id, _, doc = cur
-    label = doc.get("label") or run_id
-    origin = up_elsewhere(doc, root)
-    return (f"run: {label} (open since {doc.get('started', '?')}) -> runs/{run_id}"
-            + (f", last brought up from {origin}" if origin else ""))
+    if "ended" in doc or failure(doc):  # a stale pointer must never lend its UUID to a new acquisition
+        state = "failed" if failure(doc) else "sealed"
+        return f"run: current points to {state} run {run_id}", None, None
+    label = str(doc["label"]) if doc.get("label") is not None else None
+    line = f"run: {label or run_id} (open since {doc.get('started', '?')}) -> runs/{run_id}"
+    if (origin := up_elsewhere(doc, root)) is not None:
+        line += f", last brought up from {origin}"
+    return line, {"run": run_id, "label": label, "run_uuid": doc.get("run_uuid")}, None
+
+
+def status_line(manifest: Manifest, root: Path | None = None) -> str | None:
+    return status_info(manifest, root)[0]

@@ -101,8 +101,9 @@ Originals and proxies:
   repeat for several targets. Explicit selectors do not need --use-proxies.
   Generate selected profiles with: rig run export RUN --recipe analysis
   Bag profiles combine arrival/sent/sensor timing with off/conservative/aggressive
-  deduplication. Conservative retains ordinary byte-identical sensor repeats;
-  aggressive collapses likely cross-bag matches within its receive-time window.
+  deduplication. Conservative matches proven cross-bag copies, including scoped
+  publisher GID/sequence when recorded. Unmarked sensor repeats are retained.
+  Aggressive can collapse likely cross-bag matches within its receive-time window.
   Camera-service defines h264; each camera can choose a proxy or its original.
   playback.image_sources.CAMERA: bag keeps bag ROS images while the camera's
   selected video provides preview; camera instead uses that camera's ROS bridge.

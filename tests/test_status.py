@@ -98,14 +98,18 @@ def test_rollup_no_healthchecked_containers_is_na():
 def test_as_json_stable_shape_and_sorted_keys():
     manifest = Manifest(vehicle="boat", ros=RosSettings(domain_id=7, rmw="rmw_fastrtps_cpp",
                                                         distro=None),
-                        sensors=[], vehicle_id=7)
+                        sensors=[], vehicle_id=7, data_dir="/data")
     rows = [Row(_sensor("cam", "camsvc"), "running", "healthy", 2, 2,
                 [{"State": "running"}, {"State": "running"}]),
             Row(_sensor("gnss", "gnsssvc", order=20), "down", "-", 0, 0, [])]
-    out = as_json(manifest, rows, "20260101T000000Z_auto (open)")
+    open_run = {"run": "20260101T000000Z_auto", "label": None,
+                "run_uuid": "7097df23-57af-4370-ab1a-1cc5d7e030c5"}
+    out = as_json(manifest, rows, "20260101T000000Z_auto (open)", open_run=open_run)
     expected = {
         "vehicle": "boat",
         "vehicle_id": 7,
+        "run_registry": True,
+        "open_run": open_run,
         "run": "20260101T000000Z_auto (open)",
         "stacks": [
             # op_state joined in v0.2.35 (ADDITIVE — the pre-existing keys are the stable contract):

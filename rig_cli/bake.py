@@ -362,10 +362,26 @@ def _write_bundle_guard(staging: Path, bundle: dict) -> None:
         script.chmod(0o755)
 
 
+def _mint_run_uuid(indent: str = "") -> list[str]:
+    """Mint before sealing or creating anything, on the host running the baked script."""
+    return [indent + line for line in (
+        'if [ -r /proc/sys/kernel/random/uuid ]; then',
+        '  IFS= read -r run_uuid < /proc/sys/kernel/random/uuid',
+        'else',
+        '  run_uuid=$(uuidgen)',
+        '  run_uuid=$(printf "%s" "$run_uuid" | tr A-F a-f)',
+        'fi',
+        'printf \'%s\\n\' "$run_uuid" | grep -Eq \'^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$\' || {',
+        '  echo "could not generate a UUIDv4 for the new run" >&2; exit 1',
+        '}',
+    )]
+
+
 def _manifest_echo_lines(ctx: dict, indent: str = "  ") -> list[str]:
     """The provenance fields as sh echo lines (values shell-quoted — a vehicle name is data, not code).
     Mirrors runs.py's manifest so auto and labeled runs carry the same machine contract."""
-    lines = [f'{indent}echo {shlex.quote("vehicle: " + str(ctx["vehicle"]))}']
+    lines = [f'{indent}echo "run_uuid: $run_uuid"',
+             f'{indent}echo {shlex.quote("vehicle: " + str(ctx["vehicle"]))}']
     if ctx.get("vehicle_id") is not None:
         lines.append(f'{indent}echo {shlex.quote("vehicle_id: " + str(ctx["vehicle_id"]))}')
     lines.append(f'{indent}echo {shlex.quote("artifact: " + str(ctx["tag"]))}')
@@ -381,8 +397,19 @@ def _run_ensure_guard(ctx: dict) -> list[str]:
     d = shlex.quote(ctx["data_dir"])
     return [
         f'D={d}',
+        'run_uuid=',
+        'if [ "${1:-}" = "--run-uuid" ]; then',
+        '  run_uuid=${2:-}',
+        '  if [ "$#" -ne 2 ] || [ "${#run_uuid}" -ne 36 ] || [ "$run_uuid" = "00000000-0000-0000-0000-000000000000" ] ||',
+        '     ! printf \'%s\\n\' "$run_uuid" | LC_ALL=C grep -Eq \'^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$\'; then',
+        '    echo "up --run-uuid requires a canonical non-nil UUID" >&2; exit 2',
+        '  fi',
+        'fi',
         'if [ -L "$D/current" ] && [ ! -e "$D/current" ]; then rm -f "$D/current"; fi',
         'if [ ! -e "$D/current" ]; then',
+        '  if [ -z "$run_uuid" ]; then',
+        *_mint_run_uuid("    "),
+        '  fi',
         '  id="$(date -u +%Y%m%dT%H%M%SZ)_auto"',
         '  n=2; while [ -e "$D/runs/$id" ]; do id="$(date -u +%Y%m%dT%H%M%SZ)_auto-$n"; n=$((n+1)); done',
         '  mkdir -p "$D/runs/$id"',
@@ -392,6 +419,13 @@ def _run_ensure_guard(ctx: dict) -> list[str]:
         '  } > "$D/runs/$id/manifest.yaml"',
         '  ln -sfn "runs/$id" "$D/current"',
         '  echo "opened run $id (auto — label one with ./new-run.sh <label>)" >&2',
+        'elif [ -n "$run_uuid" ]; then',
+        # Both manifest writers emit the UUID as a flat scalar. A missing UUID,
+        # duplicate key or seal makes this an incompatible run. Leave it intact.
+        '  active=$(sed -n -e \'s/^run_uuid: //p\' -e \'s/^ended:.*/sealed/p\' -e \'s/^failed:.*/failed/p\' "$D/current/manifest.yaml")',
+        '  if [ "$active" != "$run_uuid" ]; then',
+        '    echo "open run cannot join UUID $run_uuid; check the run on this host" >&2; exit 1',
+        '  fi',
         'fi',
     ]
 
@@ -431,7 +465,7 @@ def _write_run_scripts(staging: Path, ctx: dict) -> None:
     new_run = (["#!/usr/bin/env sh", "set -e", f'D={d}',
                 'FORCE=0; if [ "$1" = "--force" ]; then FORCE=1; shift; fi',
                 'LABEL="${1:-auto}"']
-               + label_check + guard + seal +
+               + label_check + guard + _mint_run_uuid() + seal +
                ['id="$(date -u +%Y%m%dT%H%M%SZ)_$LABEL"',
                 'n=2; while [ -e "$D/runs/$id" ]; do id="$(date -u +%Y%m%dT%H%M%SZ)_$LABEL-$n"; n=$((n+1)); done',
                 'mkdir -p "$D/runs/$id"',
@@ -592,6 +626,54 @@ def _lifecycle_commands(entries: list[dict], *, verb: str, offline: bool = False
     return lines
 
 
+def _frozen_run_status(run_ctx: dict | None) -> list[str]:
+    """The small, read-only part of JSON status a fleet needs before starting frozen Compose."""
+    if not run_ctx:
+        return ['echo \'{"run_registry":false,"open_run":null}\'', 'exit 0']
+    return [f'D={shlex.quote(run_ctx["data_dir"])}', *r"""
+registry_error() {
+  echo '{"run_registry":true,"open_run":null,"run_registry_error":"cannot read the current run identity"}'
+  exit 1
+}
+# Distinguish a missing data directory (normal before first up) from an inaccessible ancestor.
+p=$D
+while [ ! -d "$p" ]; do
+  [ ! -e "$p" ] && [ ! -L "$p" ] || registry_error
+  p=$(dirname "$p")
+done
+[ -x "$p" ] || registry_error
+if [ ! -L "$D/current" ]; then
+  [ ! -e "$D/current" ] || registry_error
+  echo '{"run_registry":true,"open_run":null}'
+  exit 0
+fi
+runs=$(cd -P "$D/runs" && pwd -P) || registry_error
+active=$(cd -P "$D/current" && pwd -P) || registry_error
+[ "$(dirname "$active")" = "$runs" ] || registry_error
+id=$(basename "$active")
+case "$id" in ''|[!a-zA-Z0-9]*|*[!a-zA-Z0-9._+-]*) registry_error ;; esac
+# Both writers emit flat run, label and run_uuid keys. Only emit validated scalar values as JSON.
+identity=$(LC_ALL=C awk -v id="$id" '
+  /^run:/      { if (++runs > 1 || $0 != "run: " id) bad = 1 }
+  /^label:/    { label = substr($0, 8); if (++labels > 1 || $0 !~ /^label: /) bad = 1
+                 if (label ~ /^\047.*\047$/ || label ~ /^".*"$/) label = substr(label, 2, length(label)-2)
+                 if (label !~ /^[A-Za-z0-9][A-Za-z0-9_-]*$/) bad = 1 }
+  /^run_uuid:/ { uuid = ($0 ~ /^run_uuid: /) ? substr($0, 11) : ""; uuids++ }
+  /^(ended|failed):/ { bad = 1 }
+  END {
+    if (bad || runs != 1) exit 1
+    compact = uuid
+    valid = uuids == 1 && gsub(/-/, "", compact) == 4 && compact ~ /^[a-f0-9]+$/ &&
+            uuid ~ /^........-....-....-....-............$/ && compact != "00000000000000000000000000000000"
+    printf "{\"run_registry\":true,\"open_run\":{\"run\":\"%s\",\"label\":%s,\"run_uuid\":%s}}\n",
+           id, (labels ? "\"" label "\"" : "null"), (valid ? "\"" uuid "\"" : "null")
+  }
+' "$active/manifest.yaml") || registry_error
+printf '%s\n' "$identity"
+exit 0
+""".strip().splitlines()]
+
+
 def _write_scripts(staging: Path, entries: list[dict], *, bundle_ids: dict[str, str] | None = None,
                    bundle_accepted_ids: dict[str, list[str]] | None = None,
                    run_ctx: dict | None = None, aliases: dict[str, str] | None = None,
@@ -600,6 +682,8 @@ def _write_scripts(staging: Path, entries: list[dict], *, bundle_ids: dict[str, 
     up += _target_guard(target)
     if run_ctx:
         up += _run_ensure_guard(run_ctx)
+    else:
+        up.append('if [ "${1:-}" = "--run-uuid" ]; then echo "up --run-uuid requires data_dir" >&2; exit 1; fi')
     if bundle_ids:
         up += _load_guard(bundle_ids, accepted_ids=bundle_accepted_ids)
     up += _lifecycle_commands(entries, verb="up", offline=bool(bundle_ids))
@@ -627,6 +711,8 @@ def _write_scripts(staging: Path, entries: list[dict], *, bundle_ids: dict[str, 
                        'if [ -L "$D/current" ] && [ -e "$D/current" ]; then',  # dangling != open
                        '  echo "run: $(basename "$(readlink "$D/current")") (open)"',
                        'else echo "run: none active"; fi']
+    status[2:2] = ['if [ "${1:-}" = "--fleet-run-identity" ]; then',
+                   *_frozen_run_status(run_ctx), 'fi']
     scripts = [("up.sh", up), ("down.sh", down), ("status.sh", status), ("pull.sh", pull)]
     if cleanup_refs is not None:
         scripts.append(("cleanup.sh", _cleanup_script(entries, cleanup_refs)))
@@ -650,12 +736,19 @@ def _write_bootstrap(staging: Path) -> None:
         'cd "$(dirname "$0")"\n'
         '[ $# -eq 0 ] && set -- up\n'
         'verb="$1"\n'
-        '# bare verbs run the static scripts; FLAGGED forms (up --run X, down --end-run) fall through to\n'
-        '# the bundled rig, which owns those semantics.\n'
+        '# A bare fleet up may supply its run UUID to the frozen script. Other flagged forms\n'
+        '# (up --run X, down --end-run) go to the bundled rig.\n'
         'case "$verb" in\n'
-        "  up)     [ $# -eq 1 ] && [ -f ./up.sh ] && exec ./up.sh ;;\n"
+        '  up) if [ -f ./up.sh ]; then\n'
+        '        if [ $# -eq 1 ]; then exec ./up.sh; fi\n'
+        '        if [ $# -eq 3 ] && [ "$2" = "--run-uuid" ]; then exec ./up.sh "$2" "$3"; fi\n'
+        '      fi ;;\n'
         "  down)   [ $# -eq 1 ] && [ -f ./down.sh ]   && exec ./down.sh ;;\n"
-        "  status) [ $# -eq 1 ] && [ -f ./status.sh ] && exec ./status.sh ;;\n"
+        '  status) if [ -f ./status.sh ]; then\n'
+        '            if [ $# -eq 1 ]; then exec ./status.sh; fi\n'
+        '            if [ "${RIG_FLEET_RUN_IDENTITY:-}" = 1 ] && [ $# -eq 3 ] &&\n'
+        '               [ "$2" = "--format" ] && [ "$3" = json ]; then exec ./status.sh --fleet-run-identity; fi\n'
+        '          fi ;;\n'
         "  pull)   [ $# -eq 1 ] && [ -f ./pull.sh ]   && exec ./pull.sh ;;\n"
         "  cleanup) [ $# -eq 1 ] && [ -f ./cleanup.sh ] && exec ./cleanup.sh ;;\n"
         "  load)   [ -f ./load.sh ]   && exec ./load.sh ;;\n"

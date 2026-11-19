@@ -160,6 +160,159 @@ def test_bake_emits_run_scripts_when_data_dir_set():
     assert "new-run)" in boot and '[ $# -eq 1 ]' in boot             # flagged forms fall through to rig
 
 
+def test_baked_run_uuid_minted_at_open_and_stable_on_reentry():
+    import subprocess
+    import uuid
+
+    import yaml
+
+    from rig_cli.bake import _write_bootstrap, _write_run_scripts, _write_scripts
+
+    with tempfile.TemporaryDirectory() as directory:
+        staging = pathlib.Path(directory)
+        data = staging / "data"
+        ctx = {"data_dir": str(data), "vehicle": "test", "tag": "v9", "projects": []}
+        _write_run_scripts(staging, ctx)
+        _write_scripts(staging, [], run_ctx=ctx)
+        _write_bootstrap(staging)
+        run = staging / "run.sh"
+        manifest = data / "current" / "manifest.yaml"
+
+        subprocess.run([run, "up"], check=True)
+        first = yaml.safe_load(manifest.read_text())["run_uuid"]
+        assert str(uuid.UUID(first)) == first and uuid.UUID(first).version == 4
+        subprocess.run([run, "up"], check=True)
+        assert yaml.safe_load(manifest.read_text())["run_uuid"] == first
+
+        old = manifest.resolve()
+        subprocess.run([run, "new-run", "flight"], check=True)
+        second = yaml.safe_load(manifest.read_text())["run_uuid"]
+        assert str(uuid.UUID(second)) == second and uuid.UUID(second).version == 4
+        assert second != first and yaml.safe_load(old.read_text())["run_uuid"] == first
+
+        legacy = "run: existing\nlabel: flight\n"
+        manifest.write_text(legacy)
+        subprocess.run([run, "up"], check=True)
+        assert manifest.read_text() == legacy
+
+
+def test_bare_fleet_up_uses_frozen_compose_and_requires_a_matching_run_uuid():
+    import subprocess
+    import uuid
+
+    import yaml
+
+    from rig_cli.bake import _write_bootstrap, _write_scripts
+
+    with tempfile.TemporaryDirectory() as directory:
+        staging = pathlib.Path(directory)
+        data = staging / "data"
+        ctx = {"data_dir": str(data), "vehicle": "test", "tag": "v9", "projects": []}
+        entry = {"sensor": "logger", "project": "logger-vehicle-1",
+                 "compose": "compose/logger/docker-compose.yaml", "external_volumes": []}
+        _write_scripts(staging, [entry], run_ctx=ctx)
+        _write_bootstrap(staging)
+        # No bundled Python CLI here: success must go through up.sh and the baked Compose file.
+        docker = staging / "docker"
+        docker.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> docker.log\n')
+        docker.chmod(0o755)
+        env = {**os.environ, "PATH": str(staging) + os.pathsep + os.environ["PATH"]}
+
+        def up(value):
+            return subprocess.run([staging / "run.sh", "up", "--run-uuid", value],
+                                  env=env, capture_output=True, text=True)
+
+        shared = str(uuid.uuid4())
+        log = staging / "docker.log"
+        for invalid in ("", str(uuid.UUID(int=0)), shared + "\nbad"):
+            assert up(invalid).returncode != 0
+            assert not data.exists() and not log.exists()
+
+        result = up(shared)
+        assert result.returncode == 0, result.stderr
+        manifest = data / "current/manifest.yaml"
+        first = manifest.read_text()
+        assert yaml.safe_load(first)["run_uuid"] == shared
+        assert up(shared).returncode == 0 and manifest.read_text() == first
+        compose_up = "compose -p logger-vehicle-1 -f compose/logger/docker-compose.yaml up -d"
+        assert log.read_text().splitlines() == [compose_up, compose_up]
+        assert up(str(uuid.uuid4())).returncode != 0 and manifest.read_text() == first
+        for saved in ("run: legacy\n", first + 'ended: "2026-10-19T12:00:00Z"\n',
+                      first + "failed:\n  stage: start\n"):
+            manifest.write_text(saved)
+            assert up(shared).returncode != 0 and manifest.read_text() == saved
+        _write_scripts(staging, [entry])  # artifact with no configured run registry
+        assert up(shared).returncode != 0
+        assert log.read_text().splitlines() == [compose_up, compose_up]
+
+
+def test_docker_only_fleet_identity_and_normal_status_use_their_own_registry_and_output():
+    import json
+    import shutil
+    import subprocess
+    import uuid
+
+    from rig_cli.bake import _write_bootstrap, _write_scripts
+
+    with tempfile.TemporaryDirectory() as directory:
+        staging = pathlib.Path(directory)
+        data = staging / "recording data"
+        ctx = {"data_dir": str(data), "vehicle": "test", "tag": "v9", "projects": []}
+        _write_scripts(staging, [], run_ctx=ctx)
+        _write_bootstrap(staging)
+        # The deployed host initially has only a shell and the tools used by the frozen scripts.
+        bin_dir = staging / "bin"
+        bin_dir.mkdir()
+        for tool in ("sh", "awk", "basename", "date", "dirname", "grep", "ln", "mkdir", "readlink", "sed"):
+            (bin_dir / tool).symlink_to(shutil.which(tool))
+        env = {**os.environ, "PATH": str(bin_dir)}
+
+        def invoke(*args, fleet=False):
+            return subprocess.run([staging / "run.sh", *args], capture_output=True, text=True,
+                                  env={**env, "RIG_FLEET_RUN_IDENTITY": "1" if fleet else ""})
+
+        def probe(*, error=False):
+            result = invoke("status", "--format", "json", fleet=True)
+            assert (result.returncode != 0) == error, result.stderr
+            doc = json.loads(result.stdout)
+            assert ("run_registry_error" in doc) == error
+            return doc
+
+        assert probe() == {"run_registry": True, "open_run": None}
+        assert not data.exists()
+        shared = str(uuid.uuid4())
+        assert invoke("up", "--run-uuid", shared).returncode == 0
+        target = (data / "current").resolve()
+        manifest = target / "manifest.yaml"
+        first = manifest.read_text()
+        identity = {"run": target.name, "label": None, "run_uuid": shared}
+        assert probe()["open_run"] == identity and manifest.read_text() == first
+        assert target.name in invoke("status", fleet=True).stdout  # plain status still prints its table
+        assert invoke("status", "--format", "json").returncode != 0  # full JSON needs the bundled Rig
+        for label in ("'001'", '"true"', "run-1"):
+            manifest.write_text(first + f"label: {label}\n")
+            assert probe()["open_run"] == {**identity, "label": label.strip("'\"")}
+        for bad_uuid in (None, "wrong", str(uuid.UUID(int=0)), shared.upper()):
+            text = f"run: {target.name}\n" + (f"run_uuid: {bad_uuid}\n" if bad_uuid else "")
+            manifest.write_text(text)
+            assert probe()["open_run"] == {**identity, "run_uuid": None}
+        for field in ("ended: yesterday", "failed:\n  stage: up", 'label: bad"label'):
+            manifest.write_text(first + field + "\n")
+            assert probe(error=True)["open_run"] is None
+        manifest.unlink()
+        probe(error=True)
+        (data / "current").unlink()
+        (data / "current").symlink_to(staging)
+        probe(error=True)
+        _write_scripts(staging, [])
+        assert probe() == {"run_registry": False, "open_run": None}
+        # A host with Python uses the regular bundled CLI for full JSON, even with frozen Compose.
+        python = bin_dir / "python3"
+        python.write_text('#!/bin/sh\n[ "$1" = "-c" ] || printf "%s\\n" "$*"\n')
+        python.chmod(0o755)
+        assert invoke("status", "--format", "json").stdout.strip() == "./rig status --format json"
+
+
 def test_scripts_alias_digest_pins_back_to_tags():
     # A digest pull doesn't create the tag name locally, so the launcher path (tag refs) would miss a
     # digest-primed cache — re-pulling online, failing offline. pull.sh/up.sh must alias pins back.

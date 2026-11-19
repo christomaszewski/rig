@@ -1,6 +1,6 @@
 """``rig fleet`` — GCS-side fan-out over the per-vehicle surface (ROADMAP §4). NEVER a control
 plane: every verb is the ssh loop an operator writes by hand, plus aggregation, correlated run
-labels, and sealed-run harvest.
+labels and UUIDs, and sealed-run harvest.
 
 Invariants (settled):
 - Transport is the SYSTEM's ssh/scp — BatchMode (nothing ever prompts), no stored credentials,
@@ -49,6 +49,7 @@ import shlex
 import shutil
 import subprocess
 import tempfile
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -818,6 +819,93 @@ def _print_outcomes(outcomes: list[Outcome]) -> int:
     return problems
 
 
+def _probe_run_registries(fleet: Fleet, vehicles: list[Vehicle], extra_vars: dict[str, str],
+                          jobs: int, *, frozen: bool) -> tuple[dict[str, dict | None], dict[str, Outcome]]:
+    """Read run identity through the deployment that owns each registry."""
+    from .runs import parse_run_uuid
+    runs = {}
+    unavailable = {}
+    def probe_command(vehicle):
+        env = _vehicle_env(fleet, vehicle, extra_vars)
+        if frozen:  # a compose-only artifact's bare up uses its frozen data_dir
+            env["RIG_FLEET_RUN_IDENTITY"] = "1"
+        return _chooser(vehicle, ["status", "--format", "json"], env)
+
+    outcomes = _fan_out(vehicles, probe_command, jobs=jobs)
+    for result in outcomes:
+        name = result.vehicle.name
+        if not result.reachable:
+            unavailable[name] = result
+            continue
+        try:
+            status = json.loads(result.out)
+        except ValueError:
+            status = None
+        if not isinstance(status, dict) or "run_registry" not in status or "open_run" not in status:
+            eprint(f"fleet up: {name}: deployment did not report run UUID support; "
+                   "shared publication scope unavailable")
+            continue
+        if status.get("run_registry_error"):
+            unavailable[name] = Outcome(result.vehicle, 1, "", str(status["run_registry_error"]), reachable=True)
+            continue
+        if status["run_registry"] is False:
+            eprint(f"fleet up: {name}: no run registry; shared publication scope unavailable")
+            continue
+        current = status["open_run"]
+        if status["run_registry"] is not True or (current is not None and
+                (not isinstance(current, dict) or not current.get("run"))):
+            raise RigError(f"fleet up: {name}: invalid run registry status")
+        if current is not None and current.get("label") is not None:
+            current["label"] = str(current["label"])  # old manifests may have a numeric label
+        if current is not None and current.get("run_uuid") is not None:
+            try:
+                parse_run_uuid(current["run_uuid"])
+            except ValueError:
+                # An unreadable identity has the same recorder behavior as a legacy run.
+                eprint(f"fleet up: {name}: invalid run_uuid in the open manifest; ignoring its UUID")
+                current["run_uuid"] = None
+        runs[name] = current
+    return runs, unavailable
+
+
+def _fleet_run_uuids(fleet: Fleet, vehicles: list[Vehicle], label: str | None,
+                    extra_vars: dict[str, str], jobs: int, *,
+                    selected: list[Vehicle], frozen: bool) -> tuple[dict[str, str], dict[str, Outcome]]:
+    """Reuse a matching open run on retry/late join. Labels select runs; UUIDs identify them."""
+    runs, unavailable = _probe_run_registries(fleet, vehicles, extra_vars, jobs, frozen=frozen)
+    matching = set()
+    participants = []
+    for name, current in runs.items():
+        if current is None or (label is not None and current.get("label") != label):
+            participants.append(name)
+        elif current.get("label") == label and current.get("run_uuid"):
+            matching.add(current["run_uuid"])
+            participants.append(name)
+        elif not current.get("run_uuid"):
+            eprint(f"fleet up: {name}: keeping legacy run {current['run']} without a shared UUID")
+        # A bare up also preserves any open, explicitly labelled run on its own scope.
+
+    if participants and not matching:
+        remaining = [v for v in fleet.vehicles if v not in selected]
+        if remaining:
+            # Invocation overrides belong to the selected rows only.
+            others, _ = _probe_run_registries(fleet, remaining, {}, jobs, frozen=frozen)
+            matching.update(current["run_uuid"] for current in others.values()
+                            if current and current.get("label") == label and current.get("run_uuid"))
+    if len(matching) > 1:
+        if label is not None:
+            raise RigError(f"fleet up: open runs labelled '{label}' have conflicting UUIDs: "
+                           + ", ".join(sorted(matching)))
+        # Without a label there is no evidence which independent open session a new row belongs to.
+        eprint("fleet up: multiple automatic runs are open; new rows will share a fresh UUID")
+        participants = [name for name in participants if runs[name] is None]
+        matching.clear()
+    if not participants:
+        return {}, unavailable
+    shared = next(iter(matching)) if matching else str(uuid.uuid4())
+    return {name: shared for name in participants}, unavailable
+
+
 def cmd_up(fleet: Fleet, names: list[str], *, run_label: str | None, set_vars: list[str],
            force: bool, dry_run: bool, jobs: int) -> int:
     vehicles = _select(fleet, names)
@@ -862,14 +950,22 @@ def cmd_up(fleet: Fleet, names: list[str], *, run_label: str | None, set_vars: l
     if row_values and not dry_run:
         argv += ["--roster", fleet.digest]
     held = {name for name in missed if row_values} | set(old)
-    started = _fan_out([v for v in vehicles if v.name not in held],
-                       lambda v: _chooser(v, argv, _vehicle_env(fleet, v, extra)),
+    eligible = [v for v in vehicles if v.name not in held]
+    scopes, unavailable = ({}, {}) if dry_run else _fleet_run_uuids(
+        fleet, eligible, run_label, extra, jobs, selected=vehicles, frozen=argv == ["up"])
+
+    def up_command(vehicle):
+        scope = scopes.get(vehicle.name)
+        args = [*argv, "--run-uuid", scope] if scope else argv
+        return _chooser(vehicle, args, _vehicle_env(fleet, vehicle, extra))
+
+    started = _fan_out([v for v in eligible if v.name not in unavailable], up_command,
                        jobs=jobs, timeout=600)
     for o in started:  # a rig from before the flag: say what the usage error means here
         if o.rc != 0 and "unrecognized arguments" in o.err and "--roster" in o.err:
             o.err += ("\nfleet up: this vehicle's rig predates roster row values (it does not "
                       "know `up --roster`) and would ignore its row — re-bake and redeploy it")
-    by_name = {o.vehicle.name: o for o in started}
+    by_name = {**unavailable, **{o.vehicle.name: o for o in started}}
     outcomes = [by_name.get(v.name) or Outcome(
         v, 1, "", old.get(v.name) or
         "not started: the roster did not reach this vehicle, and its row values would be those "

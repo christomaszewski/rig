@@ -239,9 +239,9 @@ def observe(args, root):
     pairs = [(r, descriptors[r.service]) for r in manifest.select(args.names, enabled_only=True)]
     if args.cmd == "status":
         rows = status.gather(pairs, env)
-        run_line = runs.status_line(manifest)
+        run_line, open_run, registry_error = runs.status_info(manifest)
         if getattr(args, "format", "table") == "json":
-            print(status.as_json(manifest, rows, run_line))
+            print(status.as_json(manifest, rows, run_line, open_run=open_run, run_registry_error=registry_error))
         else:
             if run_line:
                 print(run_line)

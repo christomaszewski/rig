@@ -392,15 +392,19 @@ apply an explicit duplicate policy before replay. The player provider ships thes
 | `sent-off`, `sent-conservative`, `sent-aggressive` | Middleware send time | Error |
 | `sensor-off`, `sensor-conservative`, `sensor-aggressive` | Message `header.stamp`; TF handling below | Fall back to receive time |
 
-`off` retains every message. `conservative` removes cross-input copies only when identity evidence
-proves duplication; the current identity recognizer covers service events carrying valid client
-GID, sequence, event kind, and event timestamp, with matching topic/type/payload. Ordinary topic
-messages usually lack this identity. Equal payloads, equal header stamps, or close arrival times
-alone remain ambiguous and are preserved. Thus conservative mode does not promise one copy of
-every topic message recorded by two loggers.
-For example, byte-identical SBG sensor messages and PointCloud2 messages are preserved by
-`conservative`; their timestamps do not prove publisher/message identity. Choose `aggressive`
-if collapsing those likely cross-bag matches is appropriate for the analysis.
+`off` retains every message. With a provenance-aware rig-infra player, `conservative` matches
+ordinary MCAP messages recorded by different loggers when both carry the same scoped publisher
+GID and full publication sequence from the recorder. The ROS domain, RMW, topic, type, schema,
+send time and payload must agree. Conflicting evidence preserves every affected record. For the Lyrical
+Zenoh recorder, `rig fleet up --run LABEL` shares a run UUID across participating hosts.
+Each recorder uses the UUID in its open run's `manifest.yaml`, so cross-host matching
+works automatically when the ROS domain and RMW agree. Standalone recordings and older
+manifests use host-boot scope unless an explicit `RIG_PUBLICATION_SCOPE` is supplied.
+
+For older bags, SQLite, or messages without qualified identity, identical ordinary messages
+remain separate under `conservative`. Equal timestamps and payloads alone provide insufficient
+evidence. Service events can also match on client GID, sequence, event kind and event timestamp
+when topic, type and payload agree.
 
 `aggressive` additionally matches equal topic/type/payload across different input sessions within
 the receive-time window (100 ms by default). This is an explicitly lossy heuristic: independent
@@ -440,7 +444,7 @@ future transforms far enough ahead to evict needed history from the consumer's T
 Sensor scheduling preserves each retained message's serialized bytes, including PointCloud2
 fields, point order, per-point timestamps, and padding. It still changes delivery order across
 topics: snapshot triggers, consumers that select the latest cloud, and arrival-based windows
-can select different data. Conservative mode retains overlapping copies of ordinary clouds,
+can select different data. Conservative mode retains overlapping copies of clouds without publication evidence,
 which sensor scheduling can place at the same instant. To isolate timing effects, compare
 `arrival-conservative` with `sensor-conservative` using the same inputs and consumers; compare
 cloud payloads and counts independently of order.
