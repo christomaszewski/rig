@@ -148,6 +148,36 @@ def test_down_end_run_seals_without_enabled_stacks_but_bare_down_and_dry_run_do_
         assert cmd_down(args, m, {}, {}) == 0  # already sealed is still a no-op
 
 
+def test_down_end_run_takes_force_and_seals_past_the_running_guard():
+    """`rig fleet down --force` forwards `--force` to each vehicle's `rig down`, which used to
+    reject it as an unknown argument. It is the override `run end --force` gives the seal."""
+    from dataclasses import replace
+    from types import SimpleNamespace
+    from rig_cli.cli import build_parser, cmd_down
+
+    parsed = build_parser().parse_args(["down", "--end-run", "--force"])
+    assert parsed.force and parsed.end_run
+    assert build_parser().parse_args(["down"]).force is False
+    data = pathlib.Path(tempfile.mkdtemp())
+    m = _manifest(data)
+    m.sensors = [replace(m.sensors[0], enabled=False)]   # nothing for a bare down to stop here
+    _mark_idle()
+    rid = runs.ensure(m, data)
+    _mark_running(m)                                     # ...but the declared row's project is up
+    args = SimpleNamespace(names=[], end_run=True, dry_run=False, rig_root=data, force=False)
+    try:
+        cmd_down(args, m, {}, {})
+        raise AssertionError("expected the seal to refuse while a declared stack runs")
+    except RigError as exc:
+        assert "running" in str(exc)
+    assert (data / "current").is_symlink()
+    args.force = True
+    assert cmd_down(args, m, {}, {}) == 0
+    assert not (data / "current").exists()
+    assert "ended:" in (data / "runs" / rid / "manifest.yaml").read_text()
+    _mark_idle()
+
+
 def test_up_run_joins_same_label_and_rotates_different():
     _mark_idle()
     data = pathlib.Path(tempfile.mkdtemp())

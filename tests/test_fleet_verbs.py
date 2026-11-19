@@ -1001,6 +1001,22 @@ def test_a_vehicle_whose_value_was_moved_away_can_still_be_brought_down():
     assert rc == 1 and "altitude_band" in err, err                  # and `up` is still refused
 
 
+def test_fleet_down_force_reaches_a_vehicle_that_accepts_it():
+    """`fleet down --force` forwards the flag to each vehicle's `rig down`. That verb had no
+    such flag, so every vehicle answered with an argument error and the fleet down failed."""
+    tree = _band_tree("uav-03")
+    data_root = pathlib.Path(tempfile.mkdtemp()) / "sil-data"
+    fleet = _swarm([{"id": 3, "name": "uav-03", "path": str(tree), "vars": {"altitude_band": 3}}],
+                   data_root=data_root)
+    rc, _, err = _run("fleet", "up", "--fleet", str(fleet), "--run", "one", "-j", "1")
+    assert rc == 0, err
+    rc, _, err = _run("fleet", "down", "--fleet", str(fleet), "--end-run", "--force", "-j", "1")
+    assert rc == 0 and "fleet down: 1/1 ok" in err, err
+    assert "unrecognized arguments" not in err, err
+    run_dir = next((data_root / "uav-03" / "runs").iterdir())
+    assert "ended:" in (run_dir / "manifest.yaml").read_text()
+
+
 def test_a_moved_value_another_var_is_built_from_does_not_block_teardown():
     """vehicle.yaml builds a var from the roster value and the config uses the built one. When the
     value moves away, the built var no longer resolves. That fails while the manifest loads,

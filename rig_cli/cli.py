@@ -181,7 +181,7 @@ def cmd_down(args, manifest, catalog, descriptors) -> int:
     if not pairs:
         eprint("rig: no enabled stacks to tear down")
         if args.end_run and not args.dry_run:
-            runs_mod.end_run(manifest, args.rig_root)
+            runs_mod.end_run(manifest, args.rig_root, force=getattr(args, "force", False))
         return 0
     eprint(f"rig down: {manifest.vehicle} — {stack_summary([p[0] for p in pairs])}")
     if args.end_run and not args.dry_run and manifest.data_dir:
@@ -196,8 +196,9 @@ def cmd_down(args, manifest, catalog, descriptors) -> int:
         if rc != 0:
             eprint("rig: down failed — leaving the run open (cannot seal with stacks possibly live)")
             return rc
-        # end_run's own guard re-checks: a PARTIAL down leaves other stacks running -> it refuses.
-        runs_mod.end_run(manifest, args.rig_root)
+        # end_run's own guard re-checks: a PARTIAL down leaves other stacks running -> it refuses
+        # (unless --force, the override `run end --force` already gives).
+        runs_mod.end_run(manifest, args.rig_root, force=getattr(args, "force", False))
     return rc
 
 
@@ -965,6 +966,11 @@ def build_parser() -> argparse.ArgumentParser:
     down.add_argument("--end-run", action="store_true", dest="end_run",
                       help="capture every container's docker logs into the run (.rig/logs/), then "
                            "after a successful FULL down, seal it (stamps ended: + size)")
+    down.add_argument("--force", action="store_true",
+                      help="with --end-run: seal although stacks the run launched are still "
+                           "running (a partial down, or stacks another deployment directory "
+                           "started) — the same override `rig run end --force` gives; "
+                           "`rig fleet down --force` forwards it")
 
     cl = sub.add_parser("cleanup", help="decommission: remove this deployment's docker images + "
                                         "volumes from the host (after the final `rig down`, "
@@ -1733,7 +1739,10 @@ def build_parser() -> argparse.ArgumentParser:
     fld.add_argument("--end-run", action="store_true", dest="end_run",
                      help="forwarded: capture docker logs into each vehicle's run, then seal it "
                           "after a successful down")
-    fld.add_argument("--force", action="store_true", help="forwarded to each vehicle's down")
+    fld.add_argument("--force", action="store_true",
+                     help="forwarded to each vehicle's down: with --end-run, seal although "
+                          "stacks are still running (a vehicle on rig 0.2.86 or older does not "
+                          "take the flag and reports an argument error)")
     fld.add_argument("--dry-run", action="store_true")
     fly = flsub.add_parser("sync", parents=[flc], help="harvest SEALED runs (ended: present = "
                                                        "safe to sync) into <into>/<label>/<vehicle>/ "
