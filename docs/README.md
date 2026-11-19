@@ -26,6 +26,9 @@ that could reach outside their target directory, `rig status` reporting an unrea
 `down`, and typos in `vehicle.yaml` and `rigging.yaml` that were accepted silently. Some
 configurations that loaded before are now refused with a message; see its upgrade notes. rig
 is licensed under Apache-2.0.
+Rig **v0.2.88** gives fleet recordings a shared run UUID and enables the rig-infra v1.21.0
+observer in the example vehicle. The UUID lets compatible bag loggers on different hosts
+identify copies of the same ROS publication.
 Use the Rig executable shipped with your deployment; updating another installation does not
 upgrade a baked artifact. Simulator attachment, Isaac's and an external simulator's, remains
 explicitly **experimental**.
@@ -79,6 +82,7 @@ totals should not be read as current operator requirements:
 - [v0.2.85 release notes](releases/v0.2.85.md) (external simulation provider and session seal fix)
 - [v0.2.86 release notes](releases/v0.2.86.md) (roster values, provisioning records, run comparison and simulation attach fixes)
 - [v0.2.87 release notes](releases/v0.2.87.md) (review fixes: confined inputs, `unknown` status, checked config files, atomic state writes)
+- [v0.2.88 release notes](releases/v0.2.88.md) (shared run UUIDs and observer configuration)
 - [Coordinated replay readiness, 2026-10-27](releases/coordinated-replay-readiness-2026-10-27.md)
 
 The release readiness report establishes replay evidence on its stated machines/versions.

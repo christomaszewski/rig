@@ -1,6 +1,6 @@
 # rig — roadmap
 
-Released checkpoint: **v0.2.87** (see [STATE](STATE.md) for what each release since v0.2.82
+Released checkpoint: **v0.2.88** (see [STATE](STATE.md) for what each release since v0.2.82
 changed); this header last described **v0.2.82 — unchanged images keep their digest across
 builds**, reviewed 2026-11-10.
 Sections retain their original design scope and versioned milestones; their proposed schema

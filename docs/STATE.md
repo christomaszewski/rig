@@ -1,9 +1,13 @@
 # rig — project state & handoff (resume here)
 
-Released checkpoint: **v0.2.87 — review fixes: confined inputs, `unknown` status, checked
-config files, atomic state writes; Apache-2.0**, prepared **2026-11-19**. Use the
+Released checkpoint: **v0.2.88 — shared run UUIDs and observer configuration**, prepared
+**2026-11-19**. Use the
 [documentation index](README.md) to choose an operator workflow. The dated entries below are
 historical observations, not the current host state.
+
+- **v0.2.88** gives loggers in the same fleet session a common publication scope. The example
+  vehicle starts the standalone rig-infra observer after the recorder.
+  [Release notes](releases/v0.2.88.md)
 
 - **v0.2.87 review fixes.** A full review of v0.2.86 found the ten issues this release fixes:
   repository URLs read by git as options; registry payload paths, suite plan row names,
