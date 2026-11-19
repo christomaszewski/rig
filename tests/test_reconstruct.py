@@ -243,6 +243,53 @@ def test_reconstruct_lays_configs_out_by_tier():
     assert rows["nav"].endswith("config/autonomy/nav.yaml") and pathlib.Path(rows["nav"]).is_file()
 
 
+def test_reconstruct_refuses_a_captured_tree_whose_symlink_leaves_it():
+    """A run directory may come from anywhere. Extraction keeps every link inside the temporary
+    directory, not inside the tree: a relative link out of the tree was contained there and
+    pointed outside --into once the tree was moved, and the config overlay then wrote the
+    snapshot's bytes through it. Such a capture is refused and nothing outside is touched; a
+    link that stays inside the tree is still fine."""
+    import yaml
+    root, m = _deployment()
+    rid, data = _open(m, root)
+    run_dir = data / "runs" / rid
+    archive = run_dir / ".rig" / "artifact.tar.gz"
+    base = pathlib.Path(tempfile.mkdtemp())
+    with tarfile.open(archive) as tf:
+        tf.extractall(base / "x")
+    source = base / "x" / "capture"
+    victim = base / "into" / "victim.yaml"          # beside the tree --into will become
+    victim.parent.mkdir(parents=True)
+    victim.write_text("mine: untouched\n")
+
+    def repack(link_target: str) -> None:
+        link = source / "config" / "sensors" / "evil.yaml"
+        link.parent.mkdir(parents=True, exist_ok=True)
+        if link.is_symlink():
+            link.unlink()
+        link.symlink_to(link_target)
+        with tarfile.open(archive, "w:gz") as tf:
+            tf.add(source, arcname="capture")
+        doc = load_yaml(run_dir / "manifest.yaml")
+        doc["capture"]["sha256"] = bake._sha256(archive)
+        (run_dir / "manifest.yaml").write_text(yaml.safe_dump(doc))
+
+    repack("../../../victim.yaml")                  # capture/config/sensors -> out of capture/
+    dest = base / "into" / "tree"
+    try:
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            reconstruct.cmd_reconstruct(None, run_ref=str(run_dir), into=str(dest), config=None)
+        raise AssertionError("reconstructed a tree whose symlink leaves it")
+    except RigError as exc:
+        assert "symlink" in str(exc) and "config/sensors/evil.yaml" in str(exc), exc
+    assert victim.read_text() == "mine: untouched\n" and not dest.exists()
+    repack("../infra")                              # stays inside the tree: accepted
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        assert reconstruct.cmd_reconstruct(None, run_ref=str(run_dir), into=str(dest),
+                                           config=None) == 0
+    assert (dest / "config" / "sensors" / "evil.yaml").is_symlink()
+
+
 def test_reconstruct_detaches_vehicle_bundle_but_retains_source_provenance():
     import yaml
     from unittest.mock import patch

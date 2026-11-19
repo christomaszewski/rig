@@ -159,6 +159,26 @@ def safe_extract(tf, dest: Path) -> None:
     tf.extractall(dest, members=members)  # noqa: S202 — every member checked above
 
 
+def links_leaving(root: Path) -> list[tuple[str, str]]:
+    """(tree-relative path, link target) of every symlink under ``root`` whose resolved target is
+    not inside ``root`` — dangling ones included. For a tree that came out of an archive and is
+    about to be MOVED or written into: extraction only guarantees that a link stays inside the
+    directory it was extracted to, so a relative link that was contained there can point
+    outside once its tree is moved, and any later write to that path follows it."""
+    import os
+    base = os.path.realpath(root)
+    out: list[tuple[str, str]] = []
+    for folder, dirs, files in os.walk(root):  # never follows links
+        for name in dirs + files:
+            path = os.path.join(folder, name)
+            if not os.path.islink(path):
+                continue
+            target = os.path.realpath(path)
+            if target != base and not target.startswith(base + os.sep):
+                out.append((os.path.relpath(path, root), os.readlink(path)))
+    return sorted(out)
+
+
 def contained(path: Path, root: Path) -> bool:
     """True iff ``path`` resolves to somewhere STRICTLY inside ``root`` — symlinks resolved on
     both sides, so a link out of the tree fails too. The check behind every "write this under

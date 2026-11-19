@@ -1276,6 +1276,36 @@ def test_fleet_sync_rsync_updates_profile_pull_and_completion_to_full():
     assert rc == 1 and "--export needs --profile" in err
 
 
+def test_fleet_sync_refuses_a_run_id_that_is_not_one_directory_name():
+    """The run id is whatever the vehicle prints, and it names a directory on the ground
+    station. An absolute id replaced --into outright and `../` walked out of it, so a vehicle
+    chose where its bytes landed. Such an id is refused; the vehicle's honest runs still sync."""
+    from rig_cli import fleet as fleet_mod
+
+    dl = pathlib.Path(tempfile.mkdtemp()) / "dl"
+    a = _export_tree("veh_l", dl)
+    fy = _fleet_yaml([{"id": 1, "name": "veh_l", "path": str(a), "data_dir": str(dl)}], mode="field")
+    base = pathlib.Path(tempfile.mkdtemp())
+    into, outside = base / "harvest", base / "OUTSIDE"
+    real = fleet_mod._enumerate_runs
+
+    def lying(vehicle, data_dir):
+        honest = real(vehicle, data_dir)
+        extra = "".join(f"{bad}\t2026-09-01T11:00:00Z\t\n"
+                        for bad in (str(outside), "../../OUTSIDE", "..", "-rf", "a/b"))
+        return fleet_mod.Outcome(vehicle, honest.rc, extra + honest.out, honest.err, honest.reachable)
+
+    fleet_mod._enumerate_runs = lying
+    try:
+        rc, _, err = _run("fleet", "sync", "--fleet", str(fy), "--into", str(into))
+    finally:
+        fleet_mod._enumerate_runs = real
+    assert rc == 1 and err.count("refused a run id") == 5, err
+    assert "1 run(s) pulled" in err, err
+    assert not outside.exists() and sorted(p.name for p in base.iterdir()) == ["harvest"]
+    assert (into / "survey" / "veh_l" / "20260901T100000Z_survey" / "manifest.yaml").is_file()
+
+
 def test_fleet_sync_without_rsync_pulls_once_and_cannot_update():
     dl = pathlib.Path(tempfile.mkdtemp()) / "dl"
     a = _export_tree("veh_s", dl)

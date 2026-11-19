@@ -34,7 +34,7 @@ import tempfile
 from pathlib import Path
 
 from . import RigError
-from .common import atomic_write_text, contained, eprint, load_yaml
+from .common import atomic_write_text, contained, eprint, links_leaving, load_yaml
 
 
 def _run_manifest(run_dir: Path) -> dict:
@@ -110,7 +110,12 @@ def _overlay(tree: Path, snap_dir: Path) -> list[str]:
             rel = f"config/{sub}/{rendered.stem}.yaml"
             dest = tree / rel
             redirected[rendered.stem] = rel
+            if not contained(dest, tree):  # the redirect target itself leaves the tree (a link)
+                raise RigError(f"reconstruct: {rel} resolves outside the reconstructed tree — "
+                               f"refusing to overlay it")
         dest.parent.mkdir(parents=True, exist_ok=True)
+        if dest.is_symlink():  # replace a link, never write through one
+            dest.unlink()
         shutil.copy2(rendered, dest)
         written.append(rel)
     if redirected:
@@ -338,6 +343,17 @@ def cmd_reconstruct(root: Path | None, *, run_ref: str, into: str | None,
         if len(tops) != 1:
             raise RigError(f"reconstruct: {tarpath} does not contain a single tree "
                            f"({len(tops)} top-level dirs) — not a rig artifact?")
+        # Extraction kept every link inside `work`, not inside the tree: a relative link out of
+        # the tree was contained HERE and would point outside --into once the tree is moved
+        # there — and the overlay and localization below write to paths in it. rig's own
+        # captures hold no such link, so one is refused, not repaired.
+        leaving = links_leaving(tops[0])
+        if leaving:
+            shown = ", ".join(f"{rel} -> {target}" for rel, target in leaving[:5])
+            raise RigError(f"reconstruct: the captured tree in {tarpath} holds symlink(s) that "
+                           f"leave it ({shown}{' …' if len(leaving) > 5 else ''}) — refusing: "
+                           f"reconstructing would write through them, outside the tree. This is "
+                           f"not a capture rig made; do not use this run directory as it is")
         dest.parent.mkdir(parents=True, exist_ok=True)
         if dest.exists():
             # Validated empty above. shutil.move onto an EXISTING directory nests the source

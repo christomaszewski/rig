@@ -55,7 +55,7 @@ from pathlib import Path
 import yaml
 
 from . import RigError
-from .common import atomic_write_bytes, eprint, load_yaml, print_table
+from .common import atomic_write_bytes, contained, eprint, load_yaml, print_table
 from .interpolate import MARKER, resolve_map
 
 FLEET_KEYS = {"fleet", "mode", "gcs_ip", "sil", "vehicles", "vars", "unique"}
@@ -654,6 +654,10 @@ def _remove_network(fleet: Fleet, *, dry_run: bool) -> None:
                f"({(gone.stderr or '').strip().splitlines()[-1][:120] if gone.stderr else 'in use?'})")
 
 
+# What a run id reported by a vehicle may look like before it names a local directory: one
+# path component of the characters run ids and imported run directories use.
+_RUN_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]*\Z")
+
 _ROSTER_TMP = ".fleet.yaml.rig-push"  # the name a roster travels under until it is complete
 
 
@@ -1122,6 +1126,14 @@ def cmd_sync(fleet: Fleet, names: list[str], *, label: str | None, into: str, jo
             run_id = run_id.strip()
             if not run_id:
                 continue
+            # The id is whatever the vehicle printed, and it names a directory HERE. One path
+            # component and nothing else: an absolute id replaced --into outright, and `../`
+            # walked out of it, so a vehicle chose where on the ground station its bytes went.
+            if not _RUN_ID.match(run_id) or run_id in (".", ".."):
+                eprint(f"  {v.name}: refused a run id that is not one plain directory name "
+                       f"({run_id[:80]!r}) — nothing pulled for it")
+                problems += 1
+                continue
             if label and not label_matches(run_id, label):
                 continue
             run_label = run_id.split("_", 1)[1] if "_" in run_id else run_id
@@ -1131,6 +1143,10 @@ def cmd_sync(fleet: Fleet, names: list[str], *, label: str | None, into: str, jo
                 skipped += 1
                 continue
             dest = dest_root / run_label / v.name / run_id
+            if not contained(dest, dest_root):  # a roster name with `/` in it, or a link
+                eprint(f"  {v.name}/{run_id}: refused — {dest} would land outside {dest_root}")
+                problems += 1
+                continue
             existed = dest.exists()
             src = f"{data_dir}/runs/{run_id}"
             exclude: tuple[str, ...] = ()
