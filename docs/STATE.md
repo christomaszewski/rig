@@ -1,9 +1,14 @@
 # rig — project state & handoff (resume here)
 
-Released checkpoint: **v0.2.88 — shared run UUIDs and observer configuration**, prepared
-**2026-11-19**. Use the
+Released checkpoint **v0.2.89 — topic exclusions during bag export**, prepared
+**2026-11-20**. Use the
 [documentation index](README.md) to choose an operator workflow. The dated entries below are
 historical observations, not the current host state.
+
+- **v0.2.89** adds exact topic exclusions before bag decoding, sensor timestamp checks and
+  deduplication. The original bags remain unchanged. The selected exclusions identify the
+  derived proxy. Use rig-infra v1.22.0 and re-bake to update both the bundled Rig CLI and
+  bag-player launcher. [Release notes](releases/v0.2.89.md)
 
 - **v0.2.88** gives loggers in the same fleet session a common publication scope. The example
   vehicle starts the standalone rig-infra observer after the recorder.
