@@ -366,6 +366,30 @@ silently replace a prepared selection. A missing or changed pinned artifact fail
 switching to another generation. If a later conversion fails, completed immutable artifacts
 remain reusable, but a new completed export-pin set is not published.
 
+To drop topics while building the bag proxy, list their exact, absolute recorded ROS names:
+
+```yaml
+# Version 2 recipe, under replay:
+inputs:
+  bags: {profile: sensor-conservative}
+export:
+  bags:
+    exclude:
+      - /diagnostics/bad_stamp
+```
+
+Run `rig run export RUN --recipe replay/analysis.yaml` against the original run. The
+bag converter skips these topics across all selected sessions before decoding messages,
+checking sensor timestamps or deduplicating. Other topics still undergo the selected
+profile's checks. The conversion report records the excluded message counts. Camera
+recordings keep their own input settings. An empty or omitted list keeps the usual behavior.
+Changing the set selects a different bag proxy. Prepare and replay with the same recipe.
+
+`playback.exclude` filters publications during replay. Use `export.bags.exclude` when
+the topic must also be absent from the derived bag. This requires a bag proxy and a
+bag-player launcher bundle with export-time topic exclusion support. An exact proxy ID
+can be used when its recorded exclusions match the requested set.
+
 A changed requested profile definition or effective bag timing/deduplication policy invalidates
 its implicit pin and reports a fresh resolution. Exact `proxy` selectors remain exact and must
 still satisfy the configured timing constraints. Unpinned bag profiles also check the installed

@@ -45,7 +45,7 @@ def recorded_namespaces(doc):
 
 
 def validate(doc):
-    mapping(doc, {"version", "source", "bag", "bags", "inputs", "instances", "recordings", "playback", "proxies"}, "recipe")
+    mapping(doc, {"version", "source", "bag", "bags", "inputs", "export", "instances", "recordings", "playback", "proxies"}, "recipe")
     if type(doc.get("version")) is not int or doc["version"] != 1:
         raise RigError("recipe: unsupported version (expected version: 1)")
     if "source" in doc and (not isinstance(doc["source"], str) or not doc["source"]):
@@ -70,8 +70,11 @@ def validate(doc):
             if identity in seen:
                 raise RigError("recipe.bags: duplicate logger/session selection")
             seen.add(identity)
-    from .replay_inputs import validate as validate_inputs
-    validate_inputs(doc.get("inputs", {}))
+    from . import replay_inputs
+    replay_inputs.validate(doc.get("inputs", {}))
+    export = mapping(doc.get("export", {}), {"bags"}, "recipe.export")
+    mapping(export.get("bags", {}), {"exclude"}, "recipe.export.bags")
+    replay_inputs.bag_export_exclusions(doc)
     for kind in ("instances", "recordings"):
         values = doc.get(kind, {})
         if not isinstance(values, dict):

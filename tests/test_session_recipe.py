@@ -86,6 +86,21 @@ class SessionRecipes(unittest.TestCase):
         with self.assertRaises(RigError):
             replay_recipe.validate({"version": 1, "session": {"instances": ["idle"]}})
 
+    def test_bag_export_exclusions_in_v1_and_v2(self):
+        from rig_cli.replay_inputs import bag_export_exclusions
+        doc = recipe()
+        doc["replay"] = {"inputs": {"bags": {"profile": "sensor-conservative"}},
+                         "export": {"bags": {"exclude": ["/tf", "/fleet/imu", "/tf"]}}}
+        for form in (doc, {"version": 1, **doc["replay"]}):
+            provider = sessions.provider_recipe(form, "replay")
+            self.assertEqual(bag_export_exclusions(provider), ["/fleet/imu", "/tf"])
+        for export in (None, {"exclude": ["/tf"]}, {"bags": {"topics": []}},
+                       {"bags": {"exclude": None}}, {"bags": {"exclude": "/tf"}},
+                       {"bags": {"exclude": [12]}}, {"bags": {"exclude": ["relative"]}},
+                       {"bags": {"exclude": ["/camera/.*"]}}):
+            with self.subTest(export=export), self.assertRaises(RigError):
+                sessions.validate({**doc, "replay": {"export": export}})
+
     def test_selection_and_config_layers_do_not_mutate_the_deployment(self):
         manifest, _, _ = replay_workflow.load_context(self.f.root)
         row = next(r for r in manifest.sensors if r.name == "idle")

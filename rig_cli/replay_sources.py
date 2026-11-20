@@ -126,10 +126,14 @@ def bag_path(source, bag, runtime=None):
     return Path(root) / bag_relative_path(bag) if root else Path(bag["path"])
 
 
-def aggregate_bags(bags):
+def aggregate_bags(bags, *, exclude_topics=()):
     """Union metadata without modifying, merging, or deduplicating recorded messages."""
     if not bags:
         return None
+    if exclude_topics:
+        excluded = set(exclude_topics)
+        bags = [{**bag, "topics": {name: entry for name, entry in bag.get("topics", {}).items()
+                                   if name not in excluded}} for bag in bags]
     if len(bags) == 1:
         return bags[0]
     topics = {}
@@ -161,7 +165,7 @@ def aggregate_bags(bags):
                 prepared_index=any(b.get("prepared_index") for b in bags))
 
 
-def inspect_source(manifest, ref, bag_config=None, *, bags_config=None):
+def inspect_source(manifest, ref, bag_config=None, *, bags_config=None, aggregate=True):
     path = source_path(manifest, ref)
     if path.is_file() and path.suffix not in (".mcap", ".db3"):
         raise RigError(f"{path}: expected a ROS 2 .mcap/.db3 bag or a directory")
@@ -241,7 +245,8 @@ def inspect_source(manifest, ref, bag_config=None, *, bags_config=None):
     except RigError:
         doc = {}  # Legacy runs may have an incomplete manifest; never rewrite it.
     return dict(path=str(path), root=str(base), id=str(doc.get("run") or base.name),
-                kind="run" if native else "rosbag2", manifest=doc, bags=bags, bag=aggregate_bags(bags),
+                kind="run" if native else "rosbag2", manifest=doc, bags=bags,
+                bag=aggregate_bags(bags) if aggregate else None,
                 sessions=[{"logger": a, "session": b} for a, b, _ in candidates],
                 fingerprint=source_fingerprint(path))
 

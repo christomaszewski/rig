@@ -173,6 +173,8 @@ _EPILOGS = {
 
   The same recipe chooses processes, bag inputs and per-camera representations.
   Version 2 puts inputs under replay; version 1 puts them at the root.
+  export.bags.exclude lists exact recorded ROS topic names to drop from a bag
+  proxy before timestamp validation. In version 2, put export under replay.
   Use --input bags=profile:sensor-conservative or
   --input instance:cam_front=profile:h264 to override a target; repeatable.
   Omit RUN when the recipe supplies a source or has a prepared local binding.

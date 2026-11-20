@@ -8,6 +8,18 @@ from . import RigError
 
 _TARGET = re.compile(r"[A-Za-z][A-Za-z0-9_-]*(?::[A-Za-z0-9_.-]+)*(?:/[A-Za-z0-9_.-]+)*\Z")
 _NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
+_TOPIC = re.compile(r"(?:/[A-Za-z_][A-Za-z0-9_]*)+\Z")
+
+
+def normalize_excluded_topics(value):
+    if not isinstance(value, (list, tuple)) or any(
+            not isinstance(name, str) or not _TOPIC.fullmatch(name) for name in value):
+        raise RigError("bag export exclusions require a list of exact absolute ROS topic names")
+    return sorted(set(value))
+
+
+def bag_export_exclusions(recipe):
+    return normalize_excluded_topics(recipe.get("export", {}).get("bags", {}).get("exclude", []))
 
 
 def validate(inputs):

@@ -68,7 +68,8 @@ def command(args, root):
         player = rows[planned["player"]]
         bag_binding = bag_proxies.build(planned["source"], bag_choice, player,
             descriptors[player.service], manifest, descriptors, dry_run=args.dry_run,
-            force=args.force, verification=verification, root=root)
+            force=args.force, verification=verification, root=root,
+            exclude_topics=replay_inputs.bag_export_exclusions(provider))
         if bag_binding:
             options["_prepared_bag_proxy"] = bag_binding
             # Recompute camera sessions and image-source policy against the actual bag

@@ -15,14 +15,15 @@ import tempfile
 
 from . import RigError
 from .common import eprint, load_yaml
+from .replay_inputs import normalize_excluded_topics
 from . import service_exports as artifacts
 
 KIND = "rig-bag-proxy"
 FORMAT = "rosbag2-proxy/v1"
 POLICY_KEYS = {"time_source", "deduplication", "sensor_timestamp_field", "timestamp_fallback",
                "topic_timestamp_fields", "max_clock_skew_s", "dedup_window_ms"}
-OPTIONAL_POLICY_KEYS = {"tf_lead_time_ms"}
-CONFIG_KEYS = (POLICY_KEYS | OPTIONAL_POLICY_KEYS) - {"deduplication"}
+OPTIONAL_POLICY_KEYS = {"tf_lead_time_ms", "exclude_topics"}
+CONFIG_KEYS = (POLICY_KEYS | OPTIONAL_POLICY_KEYS) - {"deduplication", "exclude_topics"}
 
 
 class MissingProxy(RigError):
@@ -46,11 +47,15 @@ def _policy(value):
     for field in [value["sensor_timestamp_field"], *fields.values()]:
         if not isinstance(field, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z_0-9]*(?:\.[A-Za-z_][A-Za-z_0-9]*)*", field):
             raise RigError("bag proxy: invalid sensor timestamp field")
-    for key in ("max_clock_skew_s", "dedup_window_ms", *OPTIONAL_POLICY_KEYS):
+    for key in ("max_clock_skew_s", "dedup_window_ms", "tf_lead_time_ms"):
         if key not in value:
             continue
         if type(value[key]) not in (int, float) or not math.isfinite(value[key]) or value[key] < 0:
             raise RigError(f"bag proxy: {key} must be finite and nonnegative")
+    if "exclude_topics" in value:
+        excluded = value["exclude_topics"]
+        if not isinstance(excluded, list) or excluded != normalize_excluded_topics(excluded):
+            raise RigError("bag proxy: exclude_topics must be a sorted, unique list of exact ROS topic names")
     return value
 
 
@@ -61,7 +66,8 @@ def _config(row, root=None):
     return resolved_dict(row, Path(root) if root else None).get("play", {})
 
 
-def profile_for(descriptor, name, row=None, root=None):
+def profile_for(descriptor, name, row=None, root=None, *, exclude_topics=()):
+    excluded = normalize_excluded_topics(exclude_topics)
     if descriptor is None or "replay-export-bags" not in descriptor.verbs:
         raise RigError("bag proxies require a bag-player provider with replay-export-bags support")
     if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", name):
@@ -73,14 +79,38 @@ def profile_for(descriptor, name, row=None, root=None):
     artifacts._validate_profile(definition, name)
     if definition["format"] != FORMAT:
         raise RigError("bag proxy: unsupported profile format")
-    selected = dict(_policy(definition.get("policy")))
+    policy = definition.get("policy")
+    if isinstance(policy, dict) and "exclude_topics" in policy:
+        policy = {**policy, "exclude_topics": normalize_excluded_topics(policy["exclude_topics"])}
+    selected = dict(_policy(policy))
     config = _config(row, root)
     if "time_source" in config and config["time_source"] != selected["time_source"]:
         raise RigError(f"bag proxy profile {name} time_source conflicts with the bag-player configuration")
     selected.update({key: config[key] for key in CONFIG_KEYS if key in config})
+    if excluded:
+        selected["exclude_topics"] = sorted(set(selected.get("exclude_topics", ())) | set(excluded))
     definition = {**definition, "policy": _policy(selected)}
+    if selected.get("exclude_topics"):
+        definition["lossy"] = True
     return dict(id=name, sha256=artifacts.digest(definition), revision=definition["revision"],
                 definition=definition)
+
+
+def _requested_exclusions(selector, exclude_topics):
+    excluded = normalize_excluded_topics(exclude_topics)
+    if excluded and selector == {"use": "original"}:
+        raise RigError("export.bags.exclude requires a bag proxy profile or matching proxy ID; "
+                       "use: original cannot remove topics from the recorded bags")
+    return excluded
+
+
+def _metadata(path, policy):
+    from .replay_sources import metadata
+    result = metadata(path)
+    remaining = sorted(set(policy.get("exclude_topics", ())) & set(result["topics"]))
+    if remaining:
+        raise RigError("bag proxy: excluded topics remain in output metadata: " + ", ".join(remaining))
+    return result
 
 
 def _originals(source):
@@ -178,6 +208,8 @@ def _load_artifact(folder, *, source_root=None, verify=True, verification=None):
         if source_root is not None:
             for item in doc["inputs"]:
                 artifacts._verify_files(source_root, item["files"], verification=verification)
+        if definition["policy"].get("exclude_topics"):
+            _metadata(folder / "bag", definition["policy"])
     return doc
 
 
@@ -216,10 +248,13 @@ def verify_binding(binding, source_root, verification=None):
     return doc
 
 
-def resolve(source, selector, row, descriptor, *, pin=None, root=None, verification=None):
+def resolve(source, selector, row, descriptor, *, pin=None, root=None, verification=None,
+            exclude_topics=()):
+    excluded = _requested_exclusions(selector, exclude_topics)
     source_root = Path(source["root"]).resolve()
     selected_inputs = _inputs(source, verification)
-    profile = profile_for(descriptor, selector["profile"], row, root) if "profile" in selector else None
+    profile = (profile_for(descriptor, selector["profile"], row, root, exclude_topics=excluded)
+               if "profile" in selector else None)
     if profile and pin and pin.get("profile", {}).get("sha256") != profile["sha256"]:
         eprint("rig replay: bag profile policy changed; resolving the requested policy again")
         pin = None
@@ -243,6 +278,9 @@ def resolve(source, selector, row, descriptor, *, pin=None, root=None, verificat
             continue
         config = _config(row, root)
         settings = doc["profile"]["definition"]["policy"]
+        if "proxy" in selector and excluded and excluded != settings.get("exclude_topics", []):
+            raise RigError(f"bag proxy {doc['export_id']}: requested exclude_topics conflicts with the "
+                           "pinned policy; request exactly its stored exclusions or select a profile")
         for key in CONFIG_KEYS:
             # An older artifact without an optional setting does not attest that setting.
             if key in config and config[key] != settings.get(key):
@@ -260,7 +298,9 @@ def resolve(source, selector, row, descriptor, *, pin=None, root=None, verificat
     return compatible[0]
 
 
-def apply_selection(source, selector, player_row, descriptor, options, verification=None):
+def apply_selection(source, selector, player_row, descriptor, options, verification=None, *,
+                    exclude_topics=()):
+    excluded = _requested_exclusions(selector, exclude_topics)
     root = options.get("_deployment_root")
     if selector == {"use": "original"}:
         if _config(player_row, root).get("time_source", "received") != "received":
@@ -268,12 +308,17 @@ def apply_selection(source, selector, player_row, descriptor, options, verificat
         return source
     try:
         binding = resolve(source, selector, player_row, descriptor,
-                          pin=options.get("_prepared_bag_proxy"), root=root, verification=verification)
+                          pin=options.get("_prepared_bag_proxy"), root=root, verification=verification,
+                          exclude_topics=excluded)
     except MissingProxy:
         if options.get("_export_inputs"):
+            policy = profile_for(descriptor, selector["profile"], player_row, root,
+                                 exclude_topics=excluded)["definition"]["policy"]
+            if policy.get("exclude_topics"):
+                return {**source, "bag_export_exclusions": policy["exclude_topics"]}
             return source
         raise
-    from .replay_sources import aggregate_bags, metadata
+    from .replay_sources import aggregate_bags
     path = Path(binding["path"]) / "bag"
     settings = binding["profile"]["definition"]["policy"]
     bag = dict(logger="bag-proxy", session=binding["export_id"], path=str(path),
@@ -281,28 +326,34 @@ def apply_selection(source, selector, player_row, descriptor, options, verificat
                files=[str(path / p) for p in load_yaml(path / "metadata.yaml")[
                    "rosbag2_bagfile_information"]["relative_file_paths"]], repair=False, requires_copy=False,
                proxy={"export_id": binding["export_id"], "time_source": settings["time_source"],
-                      "deduplication": settings["deduplication"]}, **metadata(path))
+                      "deduplication": settings["deduplication"]}, **_metadata(path, settings))
     return {**source, "original_bags": _originals(source), "bags": [bag], "bag": aggregate_bags([bag]),
             "bag_proxy": binding}
 
 
 def build(source, selector, player_row, descriptor, manifest, descriptors, *, dry_run=False,
-          force=False, verification=None, root=None):
+          force=False, verification=None, root=None, exclude_topics=()):
+    excluded = _requested_exclusions(selector, exclude_topics)
     if selector == {"use": "original"}:
         return None
     try:
-        previous = resolve(source, selector, player_row, descriptor, root=root, verification=verification)
+        previous = resolve(source, selector, player_row, descriptor, root=root, verification=verification,
+                           exclude_topics=excluded)
     except MissingProxy:
         previous = None
     if previous is not None and (not force or "proxy" in selector):
-        eprint(f"rig run export: reuse bag proxy {previous['export_id']}")
+        effective_excluded = previous["profile"]["definition"]["policy"].get("exclude_topics", ())
+        exclusion_note = "; excluding topics: " + ", ".join(effective_excluded) if effective_excluded else ""
+        eprint(f"rig run export: reuse bag proxy {previous['export_id']}{exclusion_note}")
         return previous
-    chosen = profile_for(descriptor, selector["profile"], player_row, root)
+    chosen = profile_for(descriptor, selector["profile"], player_row, root, exclude_topics=excluded)
     source_root = Path(source["root"]).resolve()
     inputs = _inputs(source, verification)
     parent = artifacts._inside(source_root, f"exports/inputs/bags/{chosen['id']}")
+    effective_excluded = chosen["definition"]["policy"].get("exclude_topics", ())
+    exclusion_note = "; excluding topics: " + ", ".join(effective_excluded) if effective_excluded else ""
     if dry_run:
-        eprint(f"rig run export: would build {chosen['id']} from {len(inputs)} bag sessions at {parent}")
+        eprint(f"rig run export: would build {chosen['id']} from {len(inputs)} bag sessions at {parent}{exclusion_note}")
         return None
     parent.mkdir(parents=True, exist_ok=True)
     request_sha = artifacts.digest(dict(inputs=inputs, profile=chosen))
@@ -316,7 +367,8 @@ def build(source, selector, player_row, descriptor, manifest, descriptors, *, dr
             raise RigError("bag proxy: this conversion is already running") from exc
         if not force:
             try:
-                return resolve(source, selector, player_row, descriptor, root=root, verification=verification)
+                return resolve(source, selector, player_row, descriptor, root=root, verification=verification,
+                               exclude_topics=excluded)
             except MissingProxy:
                 pass
         size = sum(f["size"] for b in inputs for f in b["files"])
@@ -331,7 +383,7 @@ def build(source, selector, player_row, descriptor, manifest, descriptors, *, dr
             request_path.write_text(json.dumps(request))
             implementation = Path(descriptor.repo) / "tools/bag_proxy.py"
             implementation_sha = artifacts.file_sha256(implementation) if implementation.is_file() else None
-            eprint(f"rig run export: building {chosen['id']} from {len(inputs)} bag sessions")
+            eprint(f"rig run export: building {chosen['id']} from {len(inputs)} bag sessions{exclusion_note}")
             command = [str(descriptor.repo / descriptor.launcher), str(player_row.config),
                        *descriptor.verb_args("replay-export-bags"), str(request_path)]
             completed = subprocess.run(command, cwd=descriptor.repo, env=env)
@@ -344,8 +396,7 @@ def build(source, selector, player_row, descriptor, manifest, descriptors, *, dr
             if implementation_sha and (result.get("producer", {}).get("implementation_sha256") != implementation_sha
                     or artifacts.file_sha256(implementation) != implementation_sha):
                 raise RigError("bag proxy: converter changed during export; retry with a stable provider")
-            from .replay_sources import metadata
-            metadata(stage / "bag")
+            _metadata(stage / "bag", chosen["definition"]["policy"])
             if _inputs(source, verification) != inputs:
                 raise RigError("bag proxy: original inputs changed during conversion")
             request_path.unlink()

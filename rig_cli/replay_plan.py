@@ -280,6 +280,7 @@ def build(manifest, catalog, descriptors, root, ref, recipe, options, *, host=Tr
             raise RigError("--export-calls cannot be combined with session/playback options")
     except RigError as exc:
         issue("error", "window", str(exc))
+    exclude_topics = replay_inputs.bag_export_exclusions(recipe)
     try:
         bag_config = dict(recipe["bag"]) if "bag" in recipe else None
         player_row = next((r for r in manifest.sensors if r.service == PLAYER_SERVICE), None)
@@ -288,13 +289,14 @@ def build(manifest, catalog, descriptors, root, ref, recipe, options, *, host=Tr
             from .common import load_yaml
             defaults = load_yaml(player_cfg).get("source") or {}
             bag_config = {**{k: defaults[k] for k in ("logger", "session") if defaults.get(k)}, **bag_config}
-        source = inspect_source(manifest, ref, bag_config, bags_config=recipe.get("bags"))
+        # Resolve a pinned or requested proxy before checking cross-bag topic compatibility.
+        # The original bags may disagree on a topic removed during conversion.
+        source = inspect_source(manifest, ref, bag_config, bags_config=recipe.get("bags"), aggregate=False)
         selector = replay_inputs.selection(recipe, "bags", use_proxies=bool(options.get("use_proxies")))
         from .bag_proxies import apply_selection
         source = apply_selection(source, selector, player_row,
                                  descriptors.get(player_row.service) if player_row else None,
-                                 options, verification=verification)
-        plan["source"] = source
+                                 options, verification=verification, exclude_topics=exclude_topics)
         runtime = options.get("_prepared_source")
         if runtime:
             source["runtime_root"] = runtime
@@ -303,12 +305,21 @@ def build(manifest, catalog, descriptors, root, ref, recipe, options, *, host=Tr
                     selected.update(metadata(bag_path(source, selected)))
                     selected["repair"] = False
                     selected["prepared_index"] = True
-            source["bag"] = aggregate_bags(selected_bags(source))
+        proxy = source.get("bag_proxy")
+        if proxy:
+            exclude_topics = proxy["profile"]["definition"]["policy"].get("exclude_topics", [])
+        else:
+            exclude_topics = source.get("bag_export_exclusions", exclude_topics)
+        source["bag"] = aggregate_bags(selected_bags(source), exclude_topics=exclude_topics)
         if not source["manifest"].get("ended"):
             issue("warning", "unsealed", "Source is unsealed; stability is checked again before use")
         if not (Path(source["root"]) / ".rig").exists():
             issue("warning", "historical_provenance", "No historical deployment capture; using the destination deployment")
         bag = source["bag"]
+        if (exclude_topics and bag and not bag["repair"]
+                and not any(topic["count"] for topic in bag["topics"].values())):
+            raise RigError("bag export exclusions leave no messages in the selected bags")
+        plan["source"] = source
         if bag and bag["repair"]:
             issue("warning", "reindex", "Bag metadata needs repair in a derived copy")
             issue("not_checked", "bag_metadata", "Run prepare to index this bag", "run")
@@ -433,7 +444,7 @@ def build(manifest, catalog, descriptors, root, ref, recipe, options, *, host=Tr
     data_topics = {t for t in available if t not in ("/clock", "/rosout", "/parameter_events")
                    and not t.endswith("/_service_event")}
     topics = data_topics if playback.get("topics", "all") == "all" else set(playback["topics"])
-    missing = (topics | set(playback.get("keep", [])) | set(playback.get("exclude", [])) |
+    missing = (topics | set(playback.get("keep", [])) | (set(playback.get("exclude", [])) - set(exclude_topics)) |
                set(playback.get("remap", {}))) - available
     if missing and bag and not bag["repair"]:
         issue("error", "missing_topics", f"Topics absent from selected bag: {', '.join(sorted(missing))}")
